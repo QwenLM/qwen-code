@@ -25,7 +25,7 @@ import { VectorStore } from './stores/vectorStore.js';
 import { SqliteGraphStore } from './stores/sqliteGraphStore.js';
 import { DEFAULT_INDEX_CONFIG } from './defaults.js';
 import { ChangeDetector } from './changeDetector.js';
-import { BranchHandler } from './branchHandler.js';
+import { BranchHandler, type BranchChangeResult } from './branchHandler.js';
 import { FileScanner } from './fileScanner.js';
 import { RetrievalService } from './retrievalService.js';
 import { EmbeddingLlmClient } from './embeddingLlmClient.js';
@@ -61,10 +61,7 @@ export interface IndexServiceEvents {
   /** Emitted when changes are detected during polling. */
   changes_detected: (changes: ChangeSet) => void;
   /** Emitted when branch change is detected. */
-  branch_changed: (
-    previousBranch: string | null,
-    currentBranch: string,
-  ) => void;
+  branch_changed: (result: BranchChangeResult) => void;
   /** Emitted when polling cycle starts. */
   poll_started: () => void;
   /** Emitted when polling cycle completes. */
@@ -127,6 +124,7 @@ export class IndexService extends EventEmitter {
 
   // Polling and change detection
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollingMetadataStore: MetadataStore | null = null;
   private changeDetector: ChangeDetector | null = null;
   private branchHandler: BranchHandler | null = null;
   private isPolling = false;
@@ -182,14 +180,33 @@ export class IndexService extends EventEmitter {
 
   /**
    * Gets the path to the worker script.
-   * Handles both development (TypeScript) and production (JavaScript) scenarios.
+   *
+   * Handles three runtime scenarios:
+   * 1. **Production bundle** (`dist/cli.js`): `import.meta.url` points to `dist/cli.js`,
+   *    so `currentDir = dist/` → resolves to `dist/worker/indexWorker.js`
+   *    (produced by the dedicated esbuild entry point).
+   * 2. **Development** (`npm start` → tsc-compiled): `import.meta.url` points to
+   *    `packages/core/dist/src/indexing/IndexService.js` → resolves to
+   *    `packages/core/dist/src/indexing/worker/indexWorker.js`.
+   * 3. **Tests** (vitest): `import.meta.url` points to the `.ts` source file →
+   *    falls back to `worker/indexWorker.ts` with `--experimental-strip-types`.
    */
   private getWorkerPath(): string {
-    // Get the directory of this file
     const currentDir = path.dirname(fileURLToPath(import.meta.url));
 
-    // Try compiled JS first, then fall back to TS
+    // Try compiled JS first (production + development)
     const jsPath = path.join(currentDir, 'worker', 'indexWorker.js');
+    if (fs.existsSync(jsPath)) {
+      return jsPath;
+    }
+
+    // Fall back to TypeScript source (test environment)
+    const tsPath = path.join(currentDir, 'worker', 'indexWorker.ts');
+    if (fs.existsSync(tsPath)) {
+      return tsPath;
+    }
+
+    // Return the JS path anyway — Worker constructor will throw a clear error
     return jsPath;
   }
 
@@ -199,13 +216,21 @@ export class IndexService extends EventEmitter {
   private createWorker(): Worker {
     const workerPath = this.getWorkerPath();
 
-    const worker = new Worker(workerPath, {
+    const workerOptions: import('node:worker_threads').WorkerOptions = {
       workerData: {
         projectRoot: this.projectRoot,
         config: this.config,
         llmClientConfig: this.llmClientConfig,
       },
-    });
+    };
+
+    // If the resolved path is a TypeScript file (test environment),
+    // use Node.js experimental strip-types to run it directly.
+    if (workerPath.endsWith('.ts')) {
+      workerOptions.execArgv = ['--experimental-strip-types'];
+    }
+
+    const worker = new Worker(workerPath, workerOptions);
 
     // Handle messages from worker
     worker.on('message', (response: WorkerResponse) => {
@@ -542,26 +567,17 @@ export class IndexService extends EventEmitter {
 
     // Initialize change detector if needed
     if (!this.changeDetector) {
-      const metadataStore = new MetadataStore(this.projectHash);
+      this.pollingMetadataStore = new MetadataStore(this.projectHash);
       const fileScanner = new FileScanner(this.projectRoot);
-      this.changeDetector = new ChangeDetector(fileScanner, metadataStore);
+      this.changeDetector = new ChangeDetector(
+        fileScanner,
+        this.pollingMetadataStore,
+      );
     }
 
     // Initialize branch handler if needed
     if (!this.branchHandler) {
       this.branchHandler = new BranchHandler(this.projectRoot);
-
-      // Register branch change callback
-      this.branchHandler.onBranchChange(
-        async (previousBranch: string | null, currentBranch: string) => {
-          this.emit('branch_changed', previousBranch, currentBranch);
-
-          // Trigger change detection on branch switch
-          if (this.enabled && !this.isBuilding) {
-            await this.pollForChanges();
-          }
-        },
-      );
     }
 
     // Start polling timer
@@ -626,6 +642,16 @@ export class IndexService extends EventEmitter {
 
   /**
    * Executes a single poll cycle: branch check + change detection.
+   *
+   * Flow:
+   * 1. Check for branch changes.
+   *    - If branch switched AND changedFiles available →
+   *      targeted `detectChangesForFiles()` (fast, no full scan).
+   *    - If branch switched but changedFiles is null →
+   *      fall back to full `pollForChanges()`.
+   * 2. If no branch change →
+   *    quick `hasUncommittedChanges()` pre-check (single git status).
+   *    Only run full detection if the working tree is dirty.
    */
   private async pollCycle(): Promise<void> {
     if (!this.enabled || this.isBuilding) {
@@ -633,13 +659,42 @@ export class IndexService extends EventEmitter {
     }
 
     try {
-      // First check for branch changes
+      // Step 1: Check for branch changes
       if (this.branchHandler) {
-        await this.branchHandler.checkBranchChange();
-        // If branch changed, callback will trigger change detection
+        const branchResult = await this.branchHandler.checkBranchChange();
+
+        if (branchResult.changed) {
+          this.emit('branch_changed', branchResult);
+
+          if (branchResult.changedFiles && this.changeDetector) {
+            // Targeted detection — only check files that differ between branches
+            this.emit('poll_started');
+            const changes = await this.changeDetector.detectChangesForFiles(
+              branchResult.changedFiles,
+            );
+            if (hasChanges(changes)) {
+              this.emit('changes_detected', changes);
+              await this.startIncrementalUpdate(changes);
+            } else {
+              this.emit('poll_complete');
+            }
+          } else {
+            // changedFiles unavailable — fall back to full scan
+            await this.pollForChanges();
+          }
+          return;
+        }
       }
 
-      // Then poll for file changes
+      // Step 2: No branch change — quick dirty check before full scan
+      if (this.branchHandler) {
+        const dirty = await this.branchHandler.hasUncommittedChanges();
+        if (!dirty) {
+          // Working tree clean — no need to scan
+          return;
+        }
+      }
+
       await this.pollForChanges();
     } catch (error) {
       this.emit(
@@ -708,6 +763,12 @@ export class IndexService extends EventEmitter {
   async terminate(): Promise<void> {
     // Stop polling
     this.stopPolling();
+
+    // Close MetadataStore used by polling ChangeDetector
+    if (this.pollingMetadataStore) {
+      this.pollingMetadataStore.close();
+      this.pollingMetadataStore = null;
+    }
 
     // Clean up change detector
     if (this.changeDetector) {

@@ -13,7 +13,7 @@ import {
   FileDiscoveryService,
   type FilterFilesOptions,
 } from '../services/fileDiscoveryService.js';
-import type { FileMetadata, IFileScanner } from './types.js';
+import type { FileMetadata, FileStatInfo, IFileScanner } from './types.js';
 
 /**
  * Concurrency limit for file hash computations.
@@ -136,6 +136,63 @@ export class FileScanner implements IFileScanner {
     const metadata = await this.computeFileMetadata(root, filteredFiles);
 
     return metadata;
+  }
+
+  /**
+   * Lightweight scan — returns only `stat()` info (mtime, size) for each file.
+   * Does NOT read file content or compute hashes.
+   * This is the first level of two-level change detection:
+   *   1. `scanFileStats()` — cheap, O(stat) per file
+   *   2. `scanSpecificFiles()` — expensive, O(read+hash) per file, only for candidates
+   *
+   * @param projectRoot - The root directory to scan (defaults to constructor value)
+   * @returns Array of FileStatInfo (no contentHash)
+   */
+  async scanFileStats(projectRoot?: string): Promise<FileStatInfo[]> {
+    const root = projectRoot ? path.resolve(projectRoot) : this.projectRoot;
+
+    const allFiles = await this.listFilesWithRipgrep(root);
+
+    const filteredFiles = this.discoveryService.filterFiles(allFiles, {
+      respectGitIgnore: this.options.respectGitIgnore,
+      respectQwenIgnore: this.options.respectQwenIgnore,
+    });
+
+    const results: FileStatInfo[] = [];
+
+    // stat() is very cheap — we can use higher concurrency than hash
+    const STAT_CONCURRENCY = 16;
+
+    for (let i = 0; i < filteredFiles.length; i += STAT_CONCURRENCY) {
+      if (this.options.signal?.aborted) {
+        throw new Error('File scan aborted');
+      }
+
+      const batch = filteredFiles.slice(i, i + STAT_CONCURRENCY);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (relPath) => {
+          const absPath = path.join(root, relPath);
+          const stat = await fs.stat(absPath);
+          if (!stat.isFile()) return null;
+          // Skip very large files (> 10MB) — same threshold as getFileMetadata
+          if (stat.size > 10 * 1024 * 1024) return null;
+          return {
+            path: relPath,
+            lastModified: stat.mtimeMs,
+            size: stat.size,
+            language: this.detectLanguage(relPath),
+          } satisfies FileStatInfo;
+        }),
+      );
+
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled' && result.value) {
+          results.push(result.value);
+        }
+      }
+    }
+
+    return results;
   }
 
   /**

@@ -758,12 +758,26 @@ export class IndexManager {
 
   /**
    * Process a set of files through the pipeline.
+   * Files exceeding 10 MB are skipped (matches FileScanner threshold).
    */
   private async processFiles(files: FileMetadata[]): Promise<void> {
-    // Store file metadata
-    this.metadataStore.insertFileMeta(files);
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-    for (const file of files) {
+    // Filter out oversized files
+    const eligible = files.filter((f) => {
+      if (f.size > MAX_FILE_SIZE) {
+        console.warn(
+          `Skipping oversized file (${(f.size / 1024 / 1024).toFixed(1)} MB): ${f.path}`,
+        );
+        return false;
+      }
+      return true;
+    });
+
+    // Store file metadata
+    this.metadataStore.insertFileMeta(eligible);
+
+    for (const file of eligible) {
       try {
         const content = await this.readFileContent(file.path);
 
@@ -796,21 +810,29 @@ export class IndexManager {
   }
 
   /**
-   * Handle file deletions.
+   * Handle file deletions in batch.
+   *
+   * SQLite operations (metadataStore, symbolGraphStore) are batched into
+   * single calls. VectorStore deletions remain per-file because the
+   * underlying zvec API only supports single-file delete.
    */
   private async handleDeletions(filePaths: string[]): Promise<void> {
-    for (const filePath of filePaths) {
-      // Delete from metadata store
-      this.metadataStore.deleteFileMeta([filePath]);
-      this.metadataStore.deleteChunksByFilePath([filePath]);
+    if (filePaths.length === 0) return;
 
-      // Delete from vector store
-      await this.vectorStore.deleteByFilePath(filePath);
+    // Batch delete from metadata store (already supports array)
+    this.metadataStore.deleteFileMeta(filePaths);
+    this.metadataStore.deleteChunksByFilePath(filePaths);
 
-      // Delete from symbol graph store
-      if (this.symbolGraphStore) {
+    // Batch delete from symbol graph store
+    if (this.symbolGraphStore) {
+      for (const filePath of filePaths) {
         this.symbolGraphStore.deleteByFilePath(filePath);
       }
+    }
+
+    // Delete from vector store (per-file, async)
+    for (const filePath of filePaths) {
+      await this.vectorStore.deleteByFilePath(filePath);
     }
   }
 

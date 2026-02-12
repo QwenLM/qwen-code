@@ -30,6 +30,11 @@ export interface IFileScanner {
   scanFiles(projectRoot?: string): Promise<FileMetadata[]>;
   countFiles(projectRoot?: string): Promise<number>;
   /**
+   * Lightweight scan — only `stat()` each file (mtime + size), no content hash.
+   * Used as the first level of two-level change detection.
+   */
+  scanFileStats?(projectRoot?: string): Promise<FileStatInfo[]>;
+  /**
    * Streaming file scan - yields batches of file metadata.
    * This is memory-efficient for very large repositories (100k+ files).
    */
@@ -186,6 +191,21 @@ export interface RetrievalConfig {
 }
 
 // ===== Data Types =====
+
+/**
+ * Lightweight file stat information (no content hash).
+ * Used by two-level change detection: stat first, hash only if mtime changed.
+ */
+export interface FileStatInfo {
+  /** Relative path from project root. */
+  path: string;
+  /** Last modified timestamp (ms since epoch). */
+  lastModified: number;
+  /** File size in bytes. */
+  size: number;
+  /** Detected programming language. */
+  language?: string;
+}
 
 /**
  * Metadata for a source file.

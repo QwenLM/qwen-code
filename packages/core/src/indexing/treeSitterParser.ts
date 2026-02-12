@@ -83,76 +83,30 @@ export async function initTreeSitter(): Promise<void> {
 
 /**
  * Resolves the path to a language wasm file.
+ *
+ * Walks up from the current file's directory looking for
+ * `node_modules/<package>/<file>.wasm`. This works regardless of how the
+ * code is loaded (main CLI bundle, worker bundle, transpiled, or source).
  */
 function resolveWasmPath(config: LanguageConfig): string {
-  // Try multiple locations to find the wasm file
-  const possiblePaths: string[] = [];
-
-  // 1. From source location: packages/core/src/indexing -> monorepo root
-  possiblePaths.push(
-    path.join(
-      __dirname,
-      '..',
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      config.wasmPackage,
-      config.wasmFile,
-    ),
+  const relTarget = path.join(
+    'node_modules',
+    config.wasmPackage,
+    config.wasmFile,
   );
 
-  // 2. From dist location: packages/core/dist/src/indexing -> monorepo root
-  possiblePaths.push(
-    path.join(
-      __dirname,
-      '..',
-      '..',
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      config.wasmPackage,
-      config.wasmFile,
-    ),
-  );
-
-  // 3. Local package node_modules (packages/core/node_modules)
-  possiblePaths.push(
-    path.join(
-      __dirname,
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      config.wasmPackage,
-      config.wasmFile,
-    ),
-  );
-
-  // 4. From dist: packages/core/dist/node_modules
-  possiblePaths.push(
-    path.join(
-      __dirname,
-      '..',
-      '..',
-      '..',
-      '..',
-      'node_modules',
-      config.wasmPackage,
-      config.wasmFile,
-    ),
-  );
-
-  // Find the first path that exists
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      return p;
+  let dir = __dirname;
+  const root = path.parse(dir).root;
+  while (dir !== root) {
+    const candidate = path.join(dir, relTarget);
+    if (fs.existsSync(candidate)) {
+      return candidate;
     }
+    dir = path.dirname(dir);
   }
 
-  // Fallback to monorepo path (will throw meaningful error if not found)
-  return possiblePaths[0];
+  // Fallback — return a best-guess path for a clear error message
+  return path.join(__dirname, relTarget);
 }
 
 /**

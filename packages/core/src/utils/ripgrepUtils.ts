@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 
@@ -89,7 +90,15 @@ function getArchitectureString(arch: string): Architecture | undefined {
 }
 
 /**
- * Returns the path to the bundled ripgrep binary for the current platform
+ * Returns the path to the bundled ripgrep binary for the current platform.
+ *
+ * Walks up from the current file's directory looking for `vendor/ripgrep/`.
+ * This works regardless of how the code is loaded:
+ * - Main CLI bundle: `dist/cli.js` → finds `dist/vendor/ripgrep/`
+ * - Worker bundle: `dist/worker/indexWorker.js` → finds `dist/vendor/ripgrep/`
+ * - Transpiled: `packages/core/dist/src/utils/` → finds `packages/core/vendor/ripgrep/`
+ * - Source (vitest): `packages/core/src/utils/` → finds `packages/core/vendor/ripgrep/`
+ *
  * @returns The path to the bundled ripgrep binary, or null if not available
  */
 export function getBuiltinRipgrep(): string | null {
@@ -100,38 +109,27 @@ export function getBuiltinRipgrep(): string | null {
     return null;
   }
 
-  // Binary name includes .exe on Windows
   const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
+  const relTarget = path.join(
+    'vendor',
+    'ripgrep',
+    `${arch}-${platform}`,
+    binaryName,
+  );
 
-  // Path resolution:
-  // When running from transpiled code: dist/src/utils/ripgrepUtils.js -> ../../../vendor/ripgrep/
-  // When running from bundle: dist/index.js -> vendor/ripgrep/
+  // Walk upward from __dirname until we find vendor/ripgrep/ or hit the root
+  let dir = __dirname;
+  const root = path.parse(dir).root;
+  while (dir !== root) {
+    const candidate = path.join(dir, relTarget);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    dir = path.dirname(dir);
+  }
 
-  // Detect if we're running from a bundle (single file)
-  // In bundle, __filename will be something like /path/to/dist/index.js
-  // In transpiled code, __filename will be /path/to/dist/src/utils/ripgrepUtils.js
-  const isBundled = !__filename.includes(path.join('src', 'utils'));
-
-  const vendorPath = isBundled
-    ? path.join(
-        __dirname,
-        'vendor',
-        'ripgrep',
-        `${arch}-${platform}`,
-        binaryName,
-      )
-    : path.join(
-        __dirname,
-        '..',
-        '..',
-        '..',
-        'vendor',
-        'ripgrep',
-        `${arch}-${platform}`,
-        binaryName,
-      );
-
-  return vendorPath;
+  // Not found — return best-guess path (will trigger a clear error downstream)
+  return path.join(__dirname, relTarget);
 }
 
 /**

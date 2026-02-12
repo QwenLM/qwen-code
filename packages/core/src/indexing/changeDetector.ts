@@ -7,6 +7,7 @@
 import type {
   ChangeSet,
   FileMetadata,
+  FileStatInfo,
   IFileScanner,
   IMetadataStore,
 } from './types.js';
@@ -64,23 +65,99 @@ export class ChangeDetector {
   }
 
   /**
-   * Detects file changes by comparing current files against indexed metadata.
+   * Detects file changes using two-level filtering for performance:
    *
-   * Algorithm:
-   * 1. Scan current files in the workspace
-   * 2. Load indexed file metadata from the database
-   * 3. Compare to identify added, modified, and deleted files
+   * Level 1 (cheap): `scanFileStats()` — only `stat()` each file for mtime/size.
+   *   Identifies candidates: new files, deleted files, and files whose mtime changed.
+   *   Files with unchanged mtime are assumed unchanged (skipped).
+   *
+   * Level 2 (expensive): `scanSpecificFiles()` — read + SHA-256 hash only the candidates.
+   *   Confirms which mtime-changed files actually have different content.
+   *
+   * Falls back to full `scanFiles()` when `scanFileStats` is not available.
    *
    * @returns ChangeSet containing added, modified, and deleted files.
    */
   async detectChanges(): Promise<ChangeSet> {
-    // 1. Scan current files
-    const currentFiles = await this.fileScanner.scanFiles();
+    // If scanner doesn't support stat-only scan, fall back to full scan
+    if (!this.fileScanner.scanFileStats) {
+      return this.detectChangesFull();
+    }
 
-    // 2. Load indexed files
+    // ---------- Level 1: stat-only pre-screen ----------
+    const statInfos = await this.fileScanner.scanFileStats();
     const indexedFiles = this.metadataStore.getAllFileMeta();
 
-    // 3. Compare and compute changes
+    const indexedMap = new Map<string, FileMetadata>();
+    for (const file of indexedFiles) {
+      indexedMap.set(file.path, file);
+    }
+
+    const currentPaths = new Set<string>();
+    const candidatePaths: string[] = []; // need hash confirmation
+    const addedStats: FileStatInfo[] = []; // definitely new
+
+    for (const stat of statInfos) {
+      currentPaths.add(stat.path);
+      const indexed = indexedMap.get(stat.path);
+
+      if (!indexed) {
+        // New file — needs hash for storage
+        addedStats.push(stat);
+        candidatePaths.push(stat.path);
+      } else if (
+        !this.options.alwaysComputeHash &&
+        stat.lastModified <= indexed.lastModified
+      ) {
+        // mtime unchanged — skip (likely not modified)
+      } else {
+        // mtime changed — needs hash to confirm real modification
+        candidatePaths.push(stat.path);
+      }
+    }
+
+    // Deleted files = in index but not on disk
+    const deleted: string[] = [];
+    for (const filePath of indexedMap.keys()) {
+      if (!currentPaths.has(filePath)) {
+        deleted.push(filePath);
+      }
+    }
+
+    // ---------- Level 2: hash only the candidates ----------
+    const result: ChangeSet = { added: [], modified: [], deleted };
+
+    if (candidatePaths.length === 0) {
+      return result;
+    }
+
+    const candidateMetadata =
+      await this.fileScanner.scanSpecificFiles(candidatePaths);
+
+    const addedPathSet = new Set(addedStats.map((s) => s.path));
+
+    for (const file of candidateMetadata) {
+      if (addedPathSet.has(file.path)) {
+        result.added.push(file);
+      } else {
+        // Was an mtime-changed candidate — check hash
+        const indexed = indexedMap.get(file.path);
+        if (indexed && file.contentHash !== indexed.contentHash) {
+          result.modified.push(file);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Full-scan fallback for when `scanFileStats` is not available.
+   * This is the original O(n·hash) approach.
+   */
+  private async detectChangesFull(): Promise<ChangeSet> {
+    const currentFiles = await this.fileScanner.scanFiles();
+    const indexedFiles = this.metadataStore.getAllFileMeta();
     return this.computeChanges(currentFiles, indexedFiles);
   }
 

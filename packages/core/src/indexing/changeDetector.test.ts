@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ChangeDetector } from './changeDetector.js';
 import type {
   FileMetadata,
+  FileStatInfo,
   IFileScanner,
   IMetadataStore,
   ChangeSet,
@@ -15,6 +16,7 @@ import type {
 
 /**
  * Mock FileScanner for testing.
+ * Supports both full scan and stat-only scan.
  */
 class MockFileScanner implements IFileScanner {
   private files: FileMetadata[] = [];
@@ -33,6 +35,18 @@ class MockFileScanner implements IFileScanner {
 
   async scanSpecificFiles(filePaths: string[]): Promise<FileMetadata[]> {
     return this.files.filter((f) => filePaths.includes(f.path));
+  }
+
+  /**
+   * Returns lightweight stat info (no contentHash) for two-level detection.
+   */
+  async scanFileStats(): Promise<FileStatInfo[]> {
+    return this.files.map((f) => ({
+      path: f.path,
+      lastModified: f.lastModified,
+      size: f.size,
+      language: f.language,
+    }));
   }
 }
 
@@ -353,6 +367,154 @@ describe('ChangeDetector', () => {
       // With alwaysComputeHash: true, this should be detected
       expect(changes.modified).toHaveLength(1);
       expect(changes.modified[0].path).toBe('src/file.ts');
+    });
+  });
+
+  describe('two-level detection (scanFileStats path)', () => {
+    it('should skip hash for files with unchanged mtime', async () => {
+      // File on disk: same mtime as indexed → should be skipped entirely
+      fileScanner.setFiles([
+        {
+          path: 'src/stable.ts',
+          contentHash: 'hash_not_used',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      metadataStore.setFiles([
+        {
+          path: 'src/stable.ts',
+          contentHash: 'oldhash',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      const changes = await changeDetector.detectChanges();
+
+      expect(changes.added).toHaveLength(0);
+      expect(changes.modified).toHaveLength(0);
+      expect(changes.deleted).toHaveLength(0);
+    });
+
+    it('should detect new files via stat then confirm with hash', async () => {
+      fileScanner.setFiles([
+        {
+          path: 'src/brand-new.ts',
+          contentHash: 'newhash',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      metadataStore.setFiles([]);
+
+      const changes = await changeDetector.detectChanges();
+
+      expect(changes.added).toHaveLength(1);
+      expect(changes.added[0].path).toBe('src/brand-new.ts');
+      expect(changes.added[0].contentHash).toBe('newhash');
+    });
+
+    it('should detect deleted files via stat', async () => {
+      fileScanner.setFiles([]);
+
+      metadataStore.setFiles([
+        {
+          path: 'src/gone.ts',
+          contentHash: 'hash1',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      const changes = await changeDetector.detectChanges();
+
+      expect(changes.deleted).toHaveLength(1);
+      expect(changes.deleted[0]).toBe('src/gone.ts');
+    });
+
+    it('should only hash mtime-changed files to confirm modification', async () => {
+      fileScanner.setFiles([
+        // mtime changed + hash changed → modified
+        {
+          path: 'src/changed.ts',
+          contentHash: 'newhash',
+          lastModified: 2000,
+          size: 150,
+        },
+        // mtime changed but hash same → NOT modified (false alarm)
+        {
+          path: 'src/touched.ts',
+          contentHash: 'samehash',
+          lastModified: 2000,
+          size: 100,
+        },
+        // mtime unchanged → skipped entirely
+        {
+          path: 'src/stable.ts',
+          contentHash: 'anyhash',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      metadataStore.setFiles([
+        {
+          path: 'src/changed.ts',
+          contentHash: 'oldhash',
+          lastModified: 1000,
+          size: 100,
+        },
+        {
+          path: 'src/touched.ts',
+          contentHash: 'samehash',
+          lastModified: 1000,
+          size: 100,
+        },
+        {
+          path: 'src/stable.ts',
+          contentHash: 'anyhash',
+          lastModified: 1000,
+          size: 100,
+        },
+      ]);
+
+      const changes = await changeDetector.detectChanges();
+
+      // Only src/changed.ts is truly modified
+      expect(changes.modified).toHaveLength(1);
+      expect(changes.modified[0].path).toBe('src/changed.ts');
+      expect(changes.added).toHaveLength(0);
+      expect(changes.deleted).toHaveLength(0);
+    });
+
+    it('should fall back to full scan when scanFileStats is not available', async () => {
+      // Create a scanner WITHOUT scanFileStats
+      const basicScanner: IFileScanner = {
+        scanFiles: async () => [
+          {
+            path: 'src/new.ts',
+            contentHash: 'hash1',
+            lastModified: 1000,
+            size: 100,
+          },
+        ],
+        countFiles: async () => 1,
+        scanSpecificFiles: async () => [],
+      };
+
+      const fallbackDetector = new ChangeDetector(
+        basicScanner,
+        metadataStore as unknown as IMetadataStore,
+      );
+
+      metadataStore.setFiles([]);
+
+      const changes = await fallbackDetector.detectChanges();
+      expect(changes.added).toHaveLength(1);
+      expect(changes.added[0].path).toBe('src/new.ts');
     });
   });
 });

@@ -35,16 +35,49 @@ const external = [
   '@lydell/node-pty-win32-x64',
 ];
 
-esbuild
-  .build({
+// Native C++ addons and WASM-loading packages that cannot be bundled.
+// These use `bindings` or filesystem APIs at runtime to locate binary files
+// (.node / .wasm), which breaks when inlined by esbuild because the runtime
+// path resolution starts from the wrong directory.
+const nativeExternals = [
+  'better-sqlite3',
+  'zvec',
+  'web-tree-sitter',
+  'tree-sitter-javascript',
+  'tree-sitter-typescript',
+  'tree-sitter-python',
+  'bindings',
+];
+
+// Shared build options
+const sharedOptions = {
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  external,
+  packages: 'bundle',
+  loader: { '.node': 'file' },
+  keepNames: true,
+  define: {
+    // Make global available for compatibility
+    global: 'globalThis',
+  },
+};
+
+// Build both the main CLI bundle and the indexWorker bundle in parallel.
+// The indexWorker must be a separate file because it runs in a Worker thread
+// (new Worker(path)) and cannot be inlined into the main bundle.
+Promise.all([
+  // 1. Main CLI bundle
+  // Native externals are needed here too because the main thread creates
+  // MetadataStore instances (better-sqlite3) to check index status before
+  // deciding whether to spawn the worker.
+  esbuild.build({
+    ...sharedOptions,
+    external: [...external, ...nativeExternals],
     entryPoints: ['packages/cli/index.ts'],
-    bundle: true,
     outfile: 'dist/cli.js',
-    platform: 'node',
-    format: 'esm',
-    target: 'node20',
-    external,
-    packages: 'bundle',
     inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
     banner: {
       js: `// Force strict mode and setup for ESM
@@ -57,18 +90,36 @@ esbuild
       ),
     },
     define: {
+      ...sharedOptions.define,
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-      // Make global available for compatibility
-      global: 'globalThis',
     },
-    loader: { '.node': 'file' },
     metafile: true,
     write: true,
-    keepNames: true,
-  })
-  .then(({ metafile }) => {
+  }),
+
+  // 2. Index Worker bundle — separate entry point for Worker thread.
+  // Native addons (better-sqlite3, zvec) and WASM loaders (web-tree-sitter)
+  // must be external so they resolve from node_modules at runtime.
+  esbuild.build({
+    ...sharedOptions,
+    external: [...external, ...nativeExternals],
+    entryPoints: ['packages/core/src/indexing/worker/indexWorker.ts'],
+    outfile: 'dist/worker/indexWorker.js',
+    inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+    banner: {
+      js: `// Index Worker — runs in a Worker thread
+"use strict";`,
+    },
+    metafile: true,
+    write: true,
+  }),
+])
+  .then(([cliResult]) => {
     if (process.env.DEV === 'true') {
-      writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
+      writeFileSync(
+        './dist/esbuild.json',
+        JSON.stringify(cliResult.metafile, null, 2),
+      );
     }
   })
   .catch((error) => {

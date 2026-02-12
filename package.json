@@ -65,7 +65,7 @@
     }
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen-test": "dist/cli.js"
   },
   "files": [
     "dist/",
