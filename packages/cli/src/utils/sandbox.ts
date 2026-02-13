@@ -263,8 +263,8 @@ export async function start_sandbox(
         ...finalArgv.map((arg) => quote([arg])),
       ].join(' '),
     );
-    // start and set up proxy if GEMINI_SANDBOX_PROXY_COMMAND is set
-    const proxyCommand = process.env['GEMINI_SANDBOX_PROXY_COMMAND'];
+    // start and set up proxy if QWEN_SANDBOX_PROXY_COMMAND is set
+    const proxyCommand = process.env['QWEN_SANDBOX_PROXY_COMMAND'];
     let proxyProcess: ChildProcess | undefined = undefined;
     let sandboxProcess: ChildProcess | undefined = undefined;
     const sandboxEnv = { ...process.env };
@@ -378,7 +378,7 @@ export async function start_sandbox(
           stdio: 'inherit',
           env: {
             ...process.env,
-            GEMINI_SANDBOX: config.command, // in case sandbox is enabled via flags (see config.ts under cli package)
+            QWEN_SANDBOX: config.command, // in case sandbox is enabled via flags (see config.ts under cli package)
           },
         },
       );
@@ -498,8 +498,8 @@ export async function start_sandbox(
 
   // copy proxy environment variables, replacing localhost with SANDBOX_PROXY_NAME
   // copy as both upper-case and lower-case as is required by some utilities
-  // GEMINI_SANDBOX_PROXY_COMMAND implies HTTPS_PROXY unless HTTP_PROXY is set
-  const proxyCommand = process.env['GEMINI_SANDBOX_PROXY_COMMAND'];
+  // QWEN_SANDBOX_PROXY_COMMAND implies HTTPS_PROXY unless HTTP_PROXY is set
+  const proxyCommand = process.env['QWEN_SANDBOX_PROXY_COMMAND'];
 
   if (proxyCommand) {
     let proxy =
@@ -541,10 +541,10 @@ export async function start_sandbox(
   // name container after image, plus random suffix to avoid conflicts
   const imageName = parseImageName(image);
   const isIntegrationTest =
-    process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true';
+    process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
   if (isIntegrationTest) {
-    containerName = `gemini-cli-integration-test-${randomBytes(4).toString(
+    containerName = `qwen-code-integration-test-${randomBytes(4).toString(
       'hex',
     )}`;
     writeStderrLine(`ContainerName: ${containerName}`);
@@ -563,11 +563,11 @@ export async function start_sandbox(
   }
   args.push('--name', containerName, '--hostname', containerName);
 
-  // copy GEMINI_CLI_TEST_VAR for integration tests
-  if (process.env['GEMINI_CLI_TEST_VAR']) {
+  // copy QWEN_CODE_TEST_VAR for integration tests
+  if (process.env['QWEN_CODE_TEST_VAR']) {
     args.push(
       '--env',
-      `GEMINI_CLI_TEST_VAR=${process.env['GEMINI_CLI_TEST_VAR']}`,
+      `QWEN_CODE_TEST_VAR=${process.env['QWEN_CODE_TEST_VAR']}`,
     );
   }
 
@@ -716,7 +716,7 @@ export async function start_sandbox(
   let userFlag = '';
   const finalEntrypoint = entrypoint(workdir, cliArgs);
 
-  if (process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true') {
+  if (process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true') {
     args.push('--user', 'root');
     userFlag = '--user root';
   } else if (await shouldUseCurrentUserInSandbox()) {
@@ -763,7 +763,7 @@ export async function start_sandbox(
   // push container entrypoint (including args)
   args.push(...finalEntrypoint);
 
-  // start and set up proxy if GEMINI_SANDBOX_PROXY_COMMAND is set
+  // start and set up proxy if QWEN_SANDBOX_PROXY_COMMAND is set
   let proxyProcess: ChildProcess | undefined = undefined;
   let sandboxProcess: ChildProcess | undefined = undefined;
 

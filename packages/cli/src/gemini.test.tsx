@@ -112,9 +112,9 @@ describe('gemini.tsx main function', () => {
 
   beforeEach(() => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
-    originalEnvGeminiSandbox = process.env['GEMINI_SANDBOX'];
+    originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
-    delete process.env['GEMINI_SANDBOX'];
+    delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
 
     initialUnhandledRejectionListeners =
@@ -124,9 +124,9 @@ describe('gemini.tsx main function', () => {
   afterEach(() => {
     // Restore original env variables
     if (originalEnvGeminiSandbox !== undefined) {
-      process.env['GEMINI_SANDBOX'] = originalEnvGeminiSandbox;
+      process.env['QWEN_SANDBOX'] = originalEnvGeminiSandbox;
     } else {
-      delete process.env['GEMINI_SANDBOX'];
+      delete process.env['QWEN_SANDBOX'];
     }
     if (originalEnvSandbox !== undefined) {
       process.env['SANDBOX'] = originalEnvSandbox;
