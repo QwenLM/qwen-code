@@ -230,6 +230,28 @@ export class ToolRegistry {
   }
 
   /**
+   * Disables an MCP server by removing its tools, prompts, and disconnecting the client.
+   * Also updates the config's exclusion list.
+   * @param serverName The name of the server to disable.
+   */
+  async disableMcpServer(serverName: string): Promise<void> {
+    // Remove tools from registry
+    this.removeMcpToolsByServer(serverName);
+
+    // Remove prompts
+    this.config.getPromptRegistry().removePromptsByServer(serverName);
+
+    // Disconnect the MCP client
+    await this.mcpClientManager.disconnectServer(serverName);
+
+    // Update config's exclusion list
+    const currentExcluded = this.config.getExcludedMcpServers() || [];
+    if (!currentExcluded.includes(serverName)) {
+      this.config.setExcludedMcpServers([...currentExcluded, serverName]);
+    }
+  }
+
+  /**
    * Discovers tools from project (if available and configured).
    * Can be called multiple times to update discovered tools.
    * This will discover tools from the command line and from MCP servers.

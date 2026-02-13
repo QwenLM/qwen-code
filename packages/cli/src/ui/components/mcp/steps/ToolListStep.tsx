@@ -130,7 +130,7 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
           <Text color={theme.text.secondary}>
             {scrollOffset > 0 ? '↑ ' : '  '}
             {t('{{current}}/{{total}}', {
-              current: (scrollOffset + 1).toString(),
+              current: (selectedIndex + 1).toString(),
               total: tools.length.toString(),
             })}
             {scrollOffset + VISIBLE_TOOLS_COUNT < tools.length ? ' ↓' : ''}

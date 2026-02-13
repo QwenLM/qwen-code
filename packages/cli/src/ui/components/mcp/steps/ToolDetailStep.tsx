@@ -10,6 +10,110 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
 import type { ToolDetailStepProps } from '../types.js';
 
+/**
+ * 截断过长的字符串
+ */
+const truncate = (str: string, maxLen: number = 50): string => {
+  if (str.length <= maxLen) return str;
+  return str.substring(0, maxLen - 3) + '...';
+};
+
+/**
+ * 渲染单个参数
+ */
+const renderParameter = (
+  name: string,
+  param: Record<string, unknown>,
+  isRequired: boolean,
+): React.ReactNode => {
+  const type = (param['type'] as string) || 'any';
+  const description = (param['description'] as string) || '';
+  const defaultValue = param['default'];
+  const enumValues = param['enum'] as string[] | undefined;
+
+  return (
+    <Box key={name} flexDirection="column" marginTop={1}>
+      <Box>
+        <Text color={theme.text.primary}>• {name}</Text>
+        {isRequired && (
+          <Text color={theme.status.error}> ({t('required')})</Text>
+        )}
+      </Box>
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>{t('Type')}: </Text>
+        <Text color={theme.status.success}>{type}</Text>
+      </Box>
+      {description && (
+        <Box marginLeft={2}>
+          <Text color={theme.text.secondary} wrap="wrap">
+            {truncate(description, 80)}
+          </Text>
+        </Box>
+      )}
+      {enumValues && enumValues.length > 0 && (
+        <Box marginLeft={2}>
+          <Text color={theme.text.secondary}>
+            {t('Enum')}: {enumValues.join(', ')}
+          </Text>
+        </Box>
+      )}
+      {defaultValue !== undefined && (
+        <Box marginLeft={2}>
+          <Text color={theme.text.secondary}>
+            {t('Default')}:{' '}
+            {typeof defaultValue === 'string'
+              ? `"${truncate(defaultValue, 30)}"`
+              : String(defaultValue)}
+          </Text>
+        </Box>
+      )}
+    </Box>
+  );
+};
+
+/**
+ * 渲染参数列表
+ */
+const ParametersList: React.FC<{
+  properties: Record<string, unknown>;
+  required: string[];
+}> = ({ properties, required }) => {
+  const requiredSet = new Set(required);
+
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.text.secondary}>{t('Parameters')}:</Text>
+      <Box marginLeft={2} flexDirection="column">
+        {Object.entries(properties).map(([name, param]) =>
+          renderParameter(
+            name,
+            param as Record<string, unknown>,
+            requiredSet.has(name),
+          ),
+        )}
+      </Box>
+    </Box>
+  );
+};
+
+/**
+ * 提取并展示schema的关键信息，使用类似示例的格式
+ */
+const SchemaSummary: React.FC<{ schema: object }> = ({ schema }) => {
+  const obj = schema as Record<string, unknown>;
+  const properties = obj['properties'] as Record<string, unknown> | undefined;
+  const required = (obj['required'] as string[]) || [];
+
+  return (
+    <Box flexDirection="column">
+      {/* 参数列表 */}
+      {properties && Object.keys(properties).length > 0 && (
+        <ParametersList properties={properties} required={required} />
+      )}
+    </Box>
+  );
+};
+
 export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
   tool,
   onBack,
@@ -31,22 +135,11 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
     );
   }
 
-  // 格式化schema显示
-  const formatSchema = (schema: object | undefined): string => {
-    if (!schema) return t('No schema available');
-    return JSON.stringify(schema, null, 2);
-  };
-
   return (
     <Box flexDirection="column" gap={1}>
-      {/* 工具名称 */}
-      <Box>
-        <Text bold>{tool.name}</Text>
-      </Box>
-
       {/* 工具描述 */}
       {tool.description && (
-        <Box marginTop={1}>
+        <Box>
           <Text wrap="wrap">{tool.description}</Text>
         </Box>
       )}
@@ -54,7 +147,7 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
       {/* 工具注解 */}
       {tool.annotations && (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={theme.text.primary}>{t('Annotations:')}</Text>
+          <Text color={theme.text.secondary}>{t('Annotations')}:</Text>
           <Box marginLeft={2} flexDirection="column">
             {tool.annotations.title && (
               <Text color={theme.text.secondary}>
@@ -90,20 +183,11 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
       )}
 
       {/* Schema */}
-      <Box flexDirection="column" marginTop={1}>
-        <Text color={theme.text.primary}>{t('Schema:')}</Text>
-        <Box
-          marginLeft={2}
-          marginTop={1}
-          padding={1}
-          borderStyle="single"
-          borderColor={theme.border.default}
-        >
-          <Text color={theme.text.secondary} wrap="wrap">
-            {formatSchema(tool.schema)}
-          </Text>
+      {tool.schema && (
+        <Box flexDirection="column" marginTop={1}>
+          <SchemaSummary schema={tool.schema} />
         </Box>
-      </Box>
+      )}
 
       {/* 所属服务器 */}
       <Box marginTop={1}>

@@ -17,11 +17,12 @@ import {
   formatServerCommand,
 } from '../utils.js';
 
-type ServerAction = 'view-tools' | 'reconnect' | 'disable';
+type ServerAction = 'view-tools' | 'view-logs' | 'reconnect' | 'toggle-disable';
 
 export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
+  onViewLogs,
   onReconnect,
   onDisable,
   onBack,
@@ -40,6 +41,13 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       value: 'view-tools' as const,
     },
     {
+      key: 'view-logs',
+      get label() {
+        return t('View logs');
+      },
+      value: 'view-logs' as const,
+    },
+    {
       key: 'reconnect',
       get label() {
         return t('Reconnect');
@@ -47,11 +55,11 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
       value: 'reconnect' as const,
     },
     {
-      key: 'disable',
+      key: 'toggle-disable',
       get label() {
-        return t('Disable');
+        return server?.isDisabled ? t('Enable') : t('Disable');
       },
-      value: 'disable' as const,
+      value: 'toggle-disable' as const,
     },
   ];
 
@@ -64,10 +72,13 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
           case 'view-tools':
             onViewTools();
             break;
+          case 'view-logs':
+            onViewLogs?.();
+            break;
           case 'reconnect':
             onReconnect?.();
             break;
-          case 'disable':
+          case 'toggle-disable':
             onDisable?.();
             break;
           default:
@@ -103,6 +114,22 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               }
             >
               {getStatusIcon(server.status)} {t(server.status)}
+              {server.isDisabled && (
+                <Text color={theme.status.warning}> (disabled)</Text>
+              )}
+            </Text>
+          </Box>
+        </Box>
+
+        <Box marginTop={1}>
+          <Text color={theme.text.primary}>{t('Source:')}</Text>
+          <Box marginLeft={2}>
+            <Text color={theme.text.secondary}>
+              {server.scope === 'user'
+                ? t('User Settings')
+                : server.scope === 'workspace'
+                  ? t('Workspace Settings')
+                  : t('Extension')}
             </Text>
           </Box>
         </Box>
@@ -166,10 +193,13 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
               case 'view-tools':
                 onViewTools();
                 break;
+              case 'view-logs':
+                onViewLogs?.();
+                break;
               case 'reconnect':
                 onReconnect?.();
                 break;
-              case 'disable':
+              case 'toggle-disable':
                 onDisable?.();
                 break;
               default:

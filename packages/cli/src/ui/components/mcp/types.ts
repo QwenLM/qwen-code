@@ -15,10 +15,12 @@ import type {
 export const MCP_MANAGEMENT_STEPS = {
   SERVER_LIST: 'server-list',
   SERVER_DETAIL: 'server-detail',
+  DISABLE_SCOPE_SELECT: 'disable-scope-select',
   TOOL_LIST: 'tool-list',
   TOOL_DETAIL: 'tool-detail',
   PROMPT_LIST: 'prompt-list',
   PROMPT_DETAIL: 'prompt-detail',
+  SERVER_LOGS: 'server-logs',
 } as const;
 
 export type MCPManagementStep =
@@ -32,8 +34,10 @@ export interface MCPServerDisplayInfo {
   name: string;
   /** 连接状态 */
   status: MCPServerStatus;
-  /** 来源 */
+  /** 来源类型 */
   source: 'user' | 'project' | 'extension';
+  /** 配置所在的 scope */
+  scope: 'user' | 'workspace' | 'extension';
   /** 配置文件路径 */
   configPath?: string;
   /** 服务器配置 */
@@ -44,6 +48,8 @@ export interface MCPServerDisplayInfo {
   promptCount: number;
   /** 错误信息 */
   errorMessage?: string;
+  /** 是否被禁用（在排除列表中） */
+  isDisabled: boolean;
 }
 
 /**
@@ -118,10 +124,24 @@ export interface ServerDetailStepProps {
   server: MCPServerDisplayInfo | null;
   /** 查看工具列表回调 */
   onViewTools: () => void;
+  /** 查看日志回调 */
+  onViewLogs?: () => void;
   /** 重新连接回调 */
   onReconnect?: () => void;
   /** 禁用服务器回调 */
   onDisable?: () => void;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * DisableScopeSelectStep组件属性
+ */
+export interface DisableScopeSelectStepProps {
+  /** 选中的服务器 */
+  server: MCPServerDisplayInfo | null;
+  /** 选择 scope 回调 */
+  onSelectScope: (scope: 'user' | 'workspace') => void;
   /** 返回回调 */
   onBack: () => void;
 }
@@ -170,6 +190,16 @@ export interface PromptListStepProps {
 export interface PromptDetailStepProps {
   /** Prompt信息 */
   prompt: MCPPromptDisplayInfo | null;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * ServerLogsStep组件属性
+ */
+export interface ServerLogsStepProps {
+  /** 服务器信息 */
+  server: MCPServerDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
 }
