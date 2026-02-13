@@ -9,6 +9,7 @@ import type {
   SlashCommandActionReturn,
   CommandContext,
   MessageActionReturn,
+  OpenDialogActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
 import type { DiscoveredMCPPrompt } from '@qwen-code/qwen-code-core';
@@ -352,6 +353,18 @@ const refreshCommand: SlashCommand = {
   },
 };
 
+const manageCommand: SlashCommand = {
+  name: 'manage',
+  get description() {
+    return t('Open MCP management dialog');
+  },
+  kind: CommandKind.BUILT_IN,
+  action: async (): Promise<OpenDialogActionReturn> => ({
+    type: 'dialog',
+    dialog: 'mcp',
+  }),
+};
+
 export const mcpCommand: SlashCommand = {
   name: 'mcp',
   get description() {
@@ -360,12 +373,10 @@ export const mcpCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [listCommand, authCommand, refreshCommand],
-  // Default action when no subcommand is provided
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<void | SlashCommandActionReturn> =>
-    // If no subcommand, run the list command
-    listCommand.action!(context, args),
+  subCommands: [manageCommand, listCommand, authCommand, refreshCommand],
+  // Default action when no subcommand is provided - open dialog
+  action: async (): Promise<OpenDialogActionReturn> => ({
+    type: 'dialog',
+    dialog: 'mcp',
+  }),
 };

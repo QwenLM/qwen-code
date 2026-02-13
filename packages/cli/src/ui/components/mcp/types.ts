@@ -1,0 +1,183 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type {
+  MCPServerConfig,
+  MCPServerStatus,
+} from '@qwen-code/qwen-code-core';
+
+/**
+ * MCP管理步骤定义
+ */
+export const MCP_MANAGEMENT_STEPS = {
+  SERVER_LIST: 'server-list',
+  SERVER_DETAIL: 'server-detail',
+  TOOL_LIST: 'tool-list',
+  TOOL_DETAIL: 'tool-detail',
+  PROMPT_LIST: 'prompt-list',
+  PROMPT_DETAIL: 'prompt-detail',
+} as const;
+
+export type MCPManagementStep =
+  (typeof MCP_MANAGEMENT_STEPS)[keyof typeof MCP_MANAGEMENT_STEPS];
+
+/**
+ * MCP服务器显示信息
+ */
+export interface MCPServerDisplayInfo {
+  /** 服务器名称 */
+  name: string;
+  /** 连接状态 */
+  status: MCPServerStatus;
+  /** 来源 */
+  source: 'user' | 'project' | 'extension';
+  /** 配置文件路径 */
+  configPath?: string;
+  /** 服务器配置 */
+  config: MCPServerConfig;
+  /** 工具数量 */
+  toolCount: number;
+  /** Prompt数量 */
+  promptCount: number;
+  /** 错误信息 */
+  errorMessage?: string;
+}
+
+/**
+ * MCP工具显示信息
+ */
+export interface MCPToolDisplayInfo {
+  /** 工具名称 */
+  name: string;
+  /** 工具描述 */
+  description?: string;
+  /** 所属服务器 */
+  serverName: string;
+  /** 工具schema */
+  schema?: object;
+  /** 工具注解 */
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+}
+
+/**
+ * MCP Prompt显示信息
+ */
+export interface MCPPromptDisplayInfo {
+  /** Prompt名称 */
+  name: string;
+  /** Prompt描述 */
+  description?: string;
+  /** 所属服务器 */
+  serverName: string;
+  /** 参数定义 */
+  arguments?: Array<{
+    name: string;
+    description?: string;
+    required?: boolean;
+  }>;
+}
+
+/**
+ * 分组后的服务器列表
+ */
+export interface GroupedServers {
+  /** 来源标识 */
+  source: string;
+  /** 来源显示名称 */
+  displayName: string;
+  /** 配置文件路径 */
+  configPath?: string;
+  /** 服务器列表 */
+  servers: MCPServerDisplayInfo[];
+}
+
+/**
+ * ServerListStep组件属性
+ */
+export interface ServerListStepProps {
+  /** 服务器列表 */
+  servers: MCPServerDisplayInfo[];
+  /** 选择回调 */
+  onSelect: (index: number) => void;
+}
+
+/**
+ * ServerDetailStep组件属性
+ */
+export interface ServerDetailStepProps {
+  /** 选中的服务器 */
+  server: MCPServerDisplayInfo | null;
+  /** 查看工具列表回调 */
+  onViewTools: () => void;
+  /** 重新连接回调 */
+  onReconnect?: () => void;
+  /** 禁用服务器回调 */
+  onDisable?: () => void;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * ToolListStep组件属性
+ */
+export interface ToolListStepProps {
+  /** 工具列表 */
+  tools: MCPToolDisplayInfo[];
+  /** 服务器名称 */
+  serverName: string;
+  /** 选择回调 */
+  onSelect: (tool: MCPToolDisplayInfo) => void;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * ToolDetailStep组件属性
+ */
+export interface ToolDetailStepProps {
+  /** 工具信息 */
+  tool: MCPToolDisplayInfo | null;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * PromptListStep组件属性
+ */
+export interface PromptListStepProps {
+  /** Prompt列表 */
+  prompts: MCPPromptDisplayInfo[];
+  /** 服务器名称 */
+  serverName: string;
+  /** 选择回调 */
+  onSelect: (prompt: MCPPromptDisplayInfo) => void;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * PromptDetailStep组件属性
+ */
+export interface PromptDetailStepProps {
+  /** Prompt信息 */
+  prompt: MCPPromptDisplayInfo | null;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * MCP管理对话框属性
+ */
+export interface MCPManagementDialogProps {
+  /** 关闭回调 */
+  onClose: () => void;
+}
