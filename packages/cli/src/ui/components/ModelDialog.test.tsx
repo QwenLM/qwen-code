@@ -67,7 +67,7 @@ const renderComponent = (
     switchModel: vi.fn().mockResolvedValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
     getAllConfiguredModels: vi.fn(() =>
-      AVAILABLE_MODELS_QWEN.map((m) => ({
+      getFilteredQwenModels(true).map((m) => ({
         id: m.id,
         label: m.label,
         description: m.description || '',
@@ -353,6 +353,14 @@ describe('<ModelDialog />', () => {
               getAuthType: mockGetAuthType,
               getAvailableModelsForAuthType:
                 createMockGetAvailableModelsForAuthType(),
+              getAllConfiguredModels: vi.fn(() =>
+                getFilteredQwenModels(true).map((m) => ({
+                  id: m.id,
+                  label: m.label,
+                  description: m.description || '',
+                  authType: AuthType.QWEN_OAUTH,
+                })),
+              ),
             } as unknown as Config
           }
         >
@@ -369,6 +377,14 @@ describe('<ModelDialog />', () => {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
       getAvailableModelsForAuthType: createMockGetAvailableModelsForAuthType(),
+      getAllConfiguredModels: vi.fn(() =>
+        getFilteredQwenModels(true).map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description || '',
+          authType: AuthType.QWEN_OAUTH,
+        })),
+      ),
     } as unknown as Config;
 
     rerender(
