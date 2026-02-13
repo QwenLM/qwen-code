@@ -21,11 +21,11 @@ import {
   decodeTagName,
 } from './logger.js';
 import { Storage } from '../config/storage.js';
+import { getProjectHash } from '../utils/paths.js';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { Content } from '@google/genai';
 
-import crypto from 'node:crypto';
 import os from 'node:os';
 
 const GEMINI_DIR_NAME = '.qwen';
@@ -34,7 +34,7 @@ const LOG_FILE_NAME = 'logs.json';
 const CHECKPOINT_FILE_NAME = 'checkpoint.json';
 
 const projectDir = process.cwd();
-const hash = crypto.createHash('sha256').update(projectDir).digest('hex');
+const hash = getProjectHash(projectDir);
 const TEST_HOME_DIR = path.join(os.tmpdir(), 'qwen-core-logger-home');
 
 let originalHome: string | undefined;
