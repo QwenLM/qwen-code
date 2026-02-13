@@ -524,6 +524,18 @@ export interface SessionEndInput extends HookInput {
 }
 
 /**
+ * SessionEnd hook output
+ * Note: Only supports simple exit codes, cannot block
+ */
+export interface SessionEndOutput {
+  suppressOutput?: boolean;
+  hookSpecificOutput?: {
+    hookEventName: 'SessionEnd';
+    additionalContext?: string;
+  };
+}
+
+/**
  * PreCompact trigger types
  */
 export enum PreCompactTrigger {
