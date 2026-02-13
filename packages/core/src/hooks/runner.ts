@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'child_process';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   HookConfig,
   HookInput,
@@ -13,6 +14,8 @@ import type {
   HookEventName,
 } from './types.js';
 import { createHookOutput, HookType } from './types.js';
+
+const debugLogger = createDebugLogger('HOOK_RUNNER');
 
 /**
  * Hook runner configuration
@@ -50,6 +53,12 @@ export class HookRunner {
     eventName: HookEventName,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
+    const hookName =
+      hookConfig.type === HookType.Command
+        ? hookConfig.command
+        : 'unknown-hook';
+
+    debugLogger.debug(`Executing hook: ${hookName} for event: ${eventName}`);
 
     try {
       if (hookConfig.type === HookType.Command) {
@@ -59,10 +68,24 @@ export class HookRunner {
         // Parse stdout as JSON if possible
         const output = this.parseHookOutput(result.stdout, eventName);
 
+        // Determine success based on exit code
+        // 0 = success, 2 = handled error (graceful), other = failure
+        const success = result.exitCode === 0 || result.exitCode === 2;
+
+        if (!success) {
+          debugLogger.warn(
+            `Hook ${hookName} failed with exit code: ${result.exitCode}`,
+          );
+        } else {
+          debugLogger.debug(
+            `Hook ${hookName} executed successfully in ${duration}ms`,
+          );
+        }
+
         return {
           hookConfig,
           eventName,
-          success: result.exitCode === 0,
+          success,
           output,
           stdout: result.stdout,
           stderr: result.stderr,
@@ -72,18 +95,23 @@ export class HookRunner {
       }
 
       // Future: Support JS plugin hooks
-      throw new Error(
-        `Unsupported hook type: ${(hookConfig as { type: string }).type}`,
-      );
+      const errorMessage = `Unsupported hook type: ${(hookConfig as { type: string }).type}`;
+      debugLogger.error(errorMessage);
+      throw new Error(errorMessage);
     } catch (error) {
       const duration = Date.now() - startTime;
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+
+      debugLogger.error(`Hook ${hookName} execution error:`, error);
+
       return {
         hookConfig,
         eventName,
         success: false,
         output: createHookOutput(eventName, {}),
         stdout: '',
-        stderr: error instanceof Error ? error.message : 'Unknown error',
+        stderr: errorMessage,
         exitCode: 1,
         duration,
         error: error instanceof Error ? error : new Error(String(error)),
@@ -100,6 +128,8 @@ export class HookRunner {
   ): Promise<CommandHookResult> {
     const timeout = hookConfig.timeout ?? this.config.defaultTimeout ?? 30000;
     const cwd = this.config.cwd ?? process.cwd();
+
+    debugLogger.debug(`Running command: ${hookConfig.command} in ${cwd}`);
 
     return new Promise((resolve, reject) => {
       const stdout: Buffer[] = [];
@@ -130,14 +160,20 @@ export class HookRunner {
       });
 
       child.on('error', (error) => {
+        debugLogger.error(
+          `Failed to spawn hook command: ${hookConfig.command}`,
+          error,
+        );
         reject(error);
       });
 
       child.on('close', (exitCode) => {
+        const finalExitCode = exitCode ?? 0;
+        debugLogger.debug(`Command exited with code: ${finalExitCode}`);
         resolve({
           stdout: Buffer.concat(stdout).toString('utf-8'),
           stderr: Buffer.concat(stderr).toString('utf-8'),
-          exitCode: exitCode ?? 0,
+          exitCode: finalExitCode,
         });
       });
 

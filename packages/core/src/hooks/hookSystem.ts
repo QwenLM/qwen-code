@@ -26,6 +26,8 @@ export interface HookSystemConfig {
   enabled?: boolean;
   /** Hook definitions */
   definitions?: Array<import('./types.js').HookDefinition>;
+  /** List of disabled hook names/commands */
+  disabled?: string[];
   /** Default timeout for hook execution (ms) */
   defaultTimeout?: number;
   /** Whether to enable telemetry */
@@ -46,6 +48,8 @@ export interface HookSystemState {
   definitionCount: number;
   /** Number of hook configs */
   hookConfigCount: number;
+  /** Number of disabled hooks */
+  disabledCount: number;
 }
 
 /**
@@ -66,6 +70,7 @@ export class HookSystem {
   private eventHandler?: MessageBusHookEventHandler;
   private config: HookSystemConfig;
   private initialized = false;
+  private disabledHooks: Set<string> = new Set();
 
   constructor(
     registry: HookRegistry,
@@ -98,6 +103,13 @@ export class HookSystem {
     // Update runner config
     if (this.config.defaultTimeout) {
       this.runner.updateConfig({ defaultTimeout: this.config.defaultTimeout });
+    }
+
+    // Load disabled hooks from config
+    if (this.config.disabled) {
+      for (const hookName of this.config.disabled) {
+        this.disabledHooks.add(hookName);
+      }
     }
 
     // Initialize message bus handler if message bus is provided
@@ -177,7 +189,44 @@ export class HookSystem {
       enabled: this.isEnabled(),
       definitionCount: this.registry.count,
       hookConfigCount: this.registry.getAllHookConfigs().length,
+      disabledCount: this.disabledHooks.size,
     };
+  }
+
+  /**
+   * Check if a specific hook is disabled
+   */
+  isHookDisabled(hookName: string): boolean {
+    return this.disabledHooks.has(hookName);
+  }
+
+  /**
+   * Get all disabled hook names
+   */
+  getDisabledHooks(): string[] {
+    return Array.from(this.disabledHooks);
+  }
+
+  /**
+   * Disable a hook by name
+   */
+  disableHook(hookName: string): boolean {
+    if (this.disabledHooks.has(hookName)) {
+      return false; // Already disabled
+    }
+    this.disabledHooks.add(hookName);
+    return true;
+  }
+
+  /**
+   * Enable a hook by name (remove from disabled list)
+   */
+  enableHook(hookName: string): boolean {
+    if (!this.disabledHooks.has(hookName)) {
+      return false; // Not disabled
+    }
+    this.disabledHooks.delete(hookName);
+    return true;
   }
 
   /**
@@ -197,12 +246,22 @@ export class HookSystem {
     }
 
     // Create execution plan
-    const plan = this.planner.createPlan({
+    let plan = this.planner.createPlan({
       eventName,
       toolName: options?.toolName ?? options?.displayName,
       hookDefinitions: this.registry.getAllDefinitions(),
       deduplicate: true,
     });
+
+    // Filter out disabled hooks
+    plan = {
+      ...plan,
+      hookConfigs: plan.hookConfigs.filter((config) => {
+        const hookName =
+          config.type === 'command' ? config.command : JSON.stringify(config);
+        return !this.disabledHooks.has(hookName);
+      }),
+    };
 
     if (plan.hookConfigs.length === 0) {
       return [];

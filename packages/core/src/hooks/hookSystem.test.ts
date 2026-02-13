@@ -6,11 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HookSystem, createHookSystem } from './hookSystem.js';
-import type { HookRegistry} from './registry.js';
+import type { HookRegistry } from './registry.js';
 import { createHookRegistry } from './registry.js';
-import type { HookRunner} from './runner.js';
+import type { HookRunner } from './runner.js';
 import { createHookRunner } from './runner.js';
-import type { HookPlanner} from './planner.js';
+import type { HookPlanner } from './planner.js';
 import { createHookPlanner } from './planner.js';
 import { HookEventName, HookType, DefaultHookOutput } from './types.js';
 import type { HookExecutionResult, HookDefinition } from './types.js';
@@ -87,6 +87,17 @@ describe('HookSystem', () => {
       });
     });
 
+    it('should load disabled hooks from config', async () => {
+      const systemWithDisabled = new HookSystem(registry, runner, planner, {
+        disabled: ['security-check', 'audit-log'],
+      });
+
+      await systemWithDisabled.initialize();
+      expect(systemWithDisabled.isHookDisabled('security-check')).toBe(true);
+      expect(systemWithDisabled.isHookDisabled('audit-log')).toBe(true);
+      expect(systemWithDisabled.getDisabledHooks()).toHaveLength(2);
+    });
+
     it('should initialize message bus handler if message bus provided', async () => {
       const mockMessageBus: HookMessageBus = {
         request: vi.fn(),
@@ -149,18 +160,151 @@ describe('HookSystem', () => {
       expect(state.enabled).toBe(true);
       expect(state.definitionCount).toBe(1);
       expect(state.hookConfigCount).toBe(2);
+      expect(state.disabledCount).toBe(0);
     });
   });
 
-  describe('executeHooks', () => {
-    const mockInput = {
-      session_id: 'test-session',
-      transcript_path: '/test/transcript',
-      cwd: '/test',
-      hook_event_name: 'PreToolUse' as const,
-      timestamp: '2024-01-01T00:00:00Z',
-    };
+  describe('disableHook', () => {
+    it('should disable a hook', async () => {
+      await system.initialize();
+      expect(system.isHookDisabled('security-check')).toBe(false);
 
+      const result = system.disableHook('security-check');
+      expect(result).toBe(true);
+      expect(system.isHookDisabled('security-check')).toBe(true);
+    });
+
+    it('should return false if hook already disabled', async () => {
+      await system.initialize();
+      system.disableHook('security-check');
+
+      const result = system.disableHook('security-check');
+      expect(result).toBe(false);
+    });
+
+    it('should filter out disabled hooks during execution', async () => {
+      registry.register({
+        matcher: 'WriteFile',
+        hooks: [
+          { type: HookType.Command, command: 'enabled-hook' },
+          { type: HookType.Command, command: 'disabled-hook' },
+        ],
+      });
+
+      await system.initialize();
+      system.disableHook('disabled-hook');
+
+      const mockResult: HookExecutionResult = {
+        hookConfig: { type: HookType.Command, command: 'enabled-hook' },
+        eventName: HookEventName.PreToolUse,
+        success: true,
+        output: new DefaultHookOutput({ decision: 'allow' }),
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+        duration: 100,
+      };
+
+      mockRun.mockResolvedValue(mockResult);
+
+      const results = await system.executeHooks(
+        HookEventName.PreToolUse,
+        mockInput,
+        { toolName: 'WriteFile' },
+      );
+
+      // Only enabled-hook should be executed
+      expect(results).toHaveLength(1);
+      expect(mockRun).toHaveBeenCalledTimes(1);
+      expect(mockRun).toHaveBeenCalledWith(
+        expect.objectContaining({ command: 'enabled-hook' }),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('enableHook', () => {
+    it('should enable a disabled hook', async () => {
+      await system.initialize();
+      system.disableHook('security-check');
+      expect(system.isHookDisabled('security-check')).toBe(true);
+
+      const result = system.enableHook('security-check');
+      expect(result).toBe(true);
+      expect(system.isHookDisabled('security-check')).toBe(false);
+    });
+
+    it('should return false if hook not disabled', async () => {
+      await system.initialize();
+      const result = system.enableHook('not-disabled');
+      expect(result).toBe(false);
+    });
+
+    it('should include re-enabled hooks in execution', async () => {
+      registry.register({
+        matcher: 'WriteFile',
+        hooks: [{ type: HookType.Command, command: 'test-hook' }],
+      });
+
+      await system.initialize();
+      system.disableHook('test-hook');
+
+      // Re-enable the hook
+      system.enableHook('test-hook');
+
+      const mockResult: HookExecutionResult = {
+        hookConfig: { type: HookType.Command, command: 'test-hook' },
+        eventName: HookEventName.PreToolUse,
+        success: true,
+        output: new DefaultHookOutput({ decision: 'allow' }),
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+        duration: 100,
+      };
+
+      mockRun.mockResolvedValue(mockResult);
+
+      const results = await system.executeHooks(
+        HookEventName.PreToolUse,
+        mockInput,
+        { toolName: 'WriteFile' },
+      );
+
+      expect(results).toHaveLength(1);
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('getDisabledHooks', () => {
+    it('should return all disabled hook names', async () => {
+      await system.initialize();
+      system.disableHook('hook1');
+      system.disableHook('hook2');
+
+      const disabled = system.getDisabledHooks();
+      expect(disabled).toContain('hook1');
+      expect(disabled).toContain('hook2');
+      expect(disabled).toHaveLength(2);
+    });
+
+    it('should return empty array when no disabled hooks', async () => {
+      await system.initialize();
+      const disabled = system.getDisabledHooks();
+      expect(disabled).toEqual([]);
+    });
+  });
+
+  const mockInput = {
+    session_id: 'test-session',
+    transcript_path: '/test/transcript',
+    cwd: '/test',
+    hook_event_name: 'PreToolUse' as const,
+    timestamp: '2024-01-01T00:00:00Z',
+  };
+
+  describe('executeHooks', () => {
     it('should return empty array when hooks not enabled', async () => {
       const results = await system.executeHooks(
         HookEventName.PreToolUse,
