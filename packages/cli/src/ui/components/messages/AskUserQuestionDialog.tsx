@@ -15,6 +15,7 @@ import {
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { TextInput } from '../shared/TextInput.js';
+import { t } from '../../../i18n/index.js';
 
 interface AskUserQuestionDialogProps {
   confirmationDetails: ToolAskUserQuestionConfirmationDetails;
@@ -352,14 +353,14 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
           })}
           <Box>
             <Text color={theme.text.link} bold>
-              ▸ Submit
+              ▸ {t('Submit')}
             </Text>
           </Box>
         </Box>
 
         {/* Show selected answers */}
         <Box flexDirection="column" marginBottom={1}>
-          <Text bold>Your answers:</Text>
+          <Text bold>{t('Your answers:')}</Text>
           {confirmationDetails.questions.map((q, idx) => {
             const answer = getAnswerForQuestion(idx);
             return (
@@ -369,7 +370,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                   {answer ? (
                     <Text color={theme.text.link}>{answer}</Text>
                   ) : (
-                    <Text dimColor>(not answered)</Text>
+                    <Text dimColor>{t('(not answered)')}</Text>
                   )}
                 </Text>
               </Box>
@@ -378,7 +379,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         </Box>
 
         <Box marginTop={1} marginBottom={1}>
-          <Text>Ready to submit your answers?</Text>
+          <Text>{t('Ready to submit your answers?')}</Text>
         </Box>
 
         {/* Submit/Cancel options */}
@@ -388,7 +389,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
               color={selectedIndex === 0 ? theme.text.link : theme.text.primary}
               bold={selectedIndex === 0}
             >
-              {selectedIndex === 0 ? '❯ ' : '  '}1. Submit answers
+              {selectedIndex === 0 ? '❯ ' : '  '}1. {t('Submit answers')}
             </Text>
           </Box>
           <Box>
@@ -396,13 +397,15 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
               color={selectedIndex === 1 ? theme.text.link : theme.text.primary}
               bold={selectedIndex === 1}
             >
-              {selectedIndex === 1 ? '❯ ' : '  '}2. Cancel
+              {selectedIndex === 1 ? '❯ ' : '  '}2. {t('Cancel')}
             </Text>
           </Box>
         </Box>
 
         <Box marginTop={1}>
-          <Text dimColor>↑/↓: Navigate | ←/→: Switch tabs | Enter: Select</Text>
+          <Text dimColor>
+            {t('↑/↓: Navigate | ←/→: Switch tabs | Enter: Select')}
+          </Text>
         </Box>
       </Box>
     );
@@ -435,7 +438,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
             );
           })}
           <Box>
-            <Text dimColor> Submit</Text>
+            <Text dimColor> {t('Submit')}</Text>
           </Box>
         </Box>
       )}
@@ -519,7 +522,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                   }));
                 }}
                 onSubmit={handleCustomInputSubmit}
-                placeholder="Type something..."
+                placeholder={t('Type something...')}
                 isActive={true}
                 inputWidth={50}
               />
@@ -553,7 +556,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                     : '[ ] '
                   : ''}
                 {currentQuestion!.options.length + 1}.{' '}
-                {currentCustomInputValue || 'Type something...'}
+                {currentCustomInputValue || t('Type something...')}
                 {isCustomInputAnswer ? ' ✓' : ''}
               </Text>
             </Box>
@@ -572,7 +575,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
               bold={selectedIndex === submitOptionIndex}
             >
               {selectedIndex === submitOptionIndex ? '❯ ' : '  '}
-              {submitOptionIndex + 1}. Submit
+              {submitOptionIndex + 1}. {t('Submit')}
             </Text>
           </Box>
         )}
@@ -582,9 +585,13 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       <Box flexDirection="column" marginTop={1}>
         <Box>
           <Text dimColor>
-            ↑/↓: Navigate {hasMultipleQuestions ? '| ←/→: Switch tabs ' : ''}|
-            {isMultiSelect ? ' Space/Enter: Toggle | ' : ' Enter: Select | '}
-            Esc: Cancel
+            {hasMultipleQuestions
+              ? t(
+                  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel',
+                )
+              : isMultiSelect
+                ? t('↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel')
+                : t('↑/↓: Navigate | Enter: Select | Esc: Cancel')}
           </Text>
         </Box>
       </Box>
