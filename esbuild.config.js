@@ -46,6 +46,14 @@ const nativeExternals = [
   'tree-sitter-javascript',
   'tree-sitter-typescript',
   'tree-sitter-python',
+  'tree-sitter-java',
+  'tree-sitter-go',
+  'tree-sitter-rust',
+  'tree-sitter-ruby',
+  'tree-sitter-cpp',
+  'tree-sitter-c',
+  'tree-sitter-c-sharp',
+  'tree-sitter-php',
   'bindings',
 ];
 

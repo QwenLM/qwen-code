@@ -44,6 +44,13 @@ import { TAG_QUERIES } from './tag-queries/index.js';
 /** Maximum length of signature extracted from a definition. */
 const MAX_SIGNATURE_LENGTH = 200;
 
+/**
+ * Helper: find first child node of a given type.
+ */
+function child_by_type(node: SyntaxNode, type: string): SyntaxNode | undefined {
+  return node.children.find((c) => c?.type === type) ?? undefined;
+}
+
 /** Built-in names to skip during symbol extraction. */
 const BUILTINS = new Set([
   // JS/TS built-ins
@@ -296,16 +303,34 @@ export class SymbolExtractor {
         if (kind === 'ref') {
           const parent = nameNode.parent;
           // JS/TS: member_expression, Python: attribute
+          // Go: selector_expression, Rust/C++: field_expression
+          // Ruby: call (method field), C#: member_access_expression
           if (
             parent?.type === 'member_expression' ||
-            parent?.type === 'attribute'
+            parent?.type === 'attribute' ||
+            parent?.type === 'selector_expression' ||
+            parent?.type === 'field_expression' ||
+            parent?.type === 'member_access_expression' ||
+            parent?.type === 'member_call_expression' ||
+            parent?.type === 'scoped_call_expression'
           ) {
-            const objectNode = parent.childForFieldName('object');
+            const objectNode =
+              parent.childForFieldName('object') ??
+              parent.childForFieldName('operand');
             if (objectNode) {
-              if (objectNode.type === 'this' || objectNode.type === 'super') {
-                // this.method() / super.method() → marker for same-file resolution
-                memberObject = objectNode.type;
-              } else if (objectNode.type === 'identifier') {
+              if (
+                objectNode.type === 'this' ||
+                objectNode.type === 'super' ||
+                objectNode.type === 'self'
+              ) {
+                // this.method() / super.method() / self.method() → marker for same-file resolution
+                memberObject =
+                  objectNode.type === 'self' ? 'this' : objectNode.type;
+              } else if (
+                objectNode.type === 'identifier' ||
+                objectNode.type === 'constant' ||
+                objectNode.type === 'package_identifier'
+              ) {
                 // Could be an import or a local variable — recorded as-is.
                 // buildEdges will check the import table to decide.
                 memberObject = objectNode.text;
@@ -406,7 +431,21 @@ export class SymbolExtractor {
       this.extractJsTsImports(rootNode, filePath, imports);
     } else if (language === 'python') {
       this.extractPythonImports(rootNode, filePath, imports);
+    } else if (language === 'java') {
+      this.extractJavaImports(rootNode, filePath, imports);
+    } else if (language === 'go') {
+      this.extractGoImports(rootNode, filePath, imports);
+    } else if (language === 'rust') {
+      this.extractRustImports(rootNode, filePath, imports);
+    } else if (language === 'ruby') {
+      this.extractRubyImports(rootNode, filePath, imports);
+    } else if (language === 'csharp') {
+      this.extractCSharpImports(rootNode, filePath, imports);
+    } else if (language === 'php') {
+      this.extractPhpImports(rootNode, filePath, imports);
     }
+    // C and C++ use #include which is handled by the preprocessor,
+    // not meaningful for symbol-level import tracking.
 
     return imports;
   }
@@ -613,6 +652,260 @@ export class SymbolExtractor {
     }
   }
 
+  /**
+   * Extract Java imports.
+   * Handles: import com.example.Foo;
+   *          import com.example.*;
+   */
+  private extractJavaImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    for (const child of rootNode.children) {
+      if (!child || child.type !== 'import_declaration') continue;
+
+      // Get the full import path text
+      const scopedId = child.children.find(
+        (c) => c?.type === 'scoped_identifier',
+      );
+      if (!scopedId) continue;
+
+      const fullPath = scopedId.text;
+      const parts = fullPath.split('.');
+      const lastName = parts[parts.length - 1] ?? fullPath;
+
+      imports.push({
+        filePath,
+        localName: lastName === '*' ? fullPath : lastName,
+        sourceModule: fullPath,
+        originalName: lastName,
+      });
+    }
+  }
+
+  /**
+   * Extract Go imports.
+   * Handles: import "fmt"
+   *          import ( "fmt" )
+   *          import alias "package/path"
+   */
+  private extractGoImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    this.traverseNode(rootNode, (node) => {
+      if (node.type !== 'import_spec') return;
+
+      const pathNode = child_by_type(node, 'interpreted_string_literal');
+      if (!pathNode) return;
+
+      const importPath = pathNode.text.replace(/"/g, '');
+      const parts = importPath.split('/');
+      const defaultName = parts[parts.length - 1] ?? importPath;
+
+      // Check for alias: import alias "path"
+      const nameNode = child_by_type(node, 'package_identifier');
+      const localName = nameNode?.text ?? defaultName;
+
+      imports.push({
+        filePath,
+        localName,
+        sourceModule: importPath,
+        originalName: '*',
+      });
+    });
+  }
+
+  /**
+   * Extract Rust use imports.
+   * Handles: use std::collections::HashMap;
+   *          use crate::module::Type;
+   *          use super::foo;
+   */
+  private extractRustImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    this.traverseNode(rootNode, (node) => {
+      if (node.type !== 'use_declaration') return;
+
+      // Extract use path text and get last segment as local name
+      const pathText = node.text
+        .replace(/^(pub\s+)?use\s+/, '')
+        .replace(/;$/, '')
+        .trim();
+
+      // Handle simple path: use crate::foo::Bar;
+      const parts = pathText.split('::');
+      const lastName = parts[parts.length - 1] ?? pathText;
+
+      // Handle "as" alias
+      if (lastName.includes(' as ')) {
+        const [original, alias] = lastName.split(' as ').map((s) => s.trim());
+        if (original && alias) {
+          imports.push({
+            filePath,
+            localName: alias,
+            sourceModule: pathText.replace(/ as .*$/, ''),
+            originalName: original,
+          });
+        }
+      } else if (!lastName.includes('{') && !lastName.includes('*')) {
+        // Simple use: use foo::Bar;
+        imports.push({
+          filePath,
+          localName: lastName,
+          sourceModule: pathText,
+          originalName: lastName,
+        });
+      }
+      // Grouped uses { A, B } and glob * are complex — skip for now
+    });
+  }
+
+  /**
+   * Extract Ruby require imports.
+   * Handles: require 'foo'
+   *          require_relative 'foo'
+   */
+  private extractRubyImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    this.traverseNode(rootNode, (node) => {
+      if (node.type !== 'call') return;
+
+      const method = child_by_type(node, 'identifier');
+      if (
+        !method ||
+        (method.text !== 'require' && method.text !== 'require_relative')
+      )
+        return;
+
+      const args = child_by_type(node, 'argument_list');
+      if (!args) return;
+
+      const strNode = args.children.find(
+        (c) => c?.type === 'string' || c?.type === 'string_content',
+      );
+      if (!strNode) return;
+
+      // Strip quotes and string wrappers
+      const sourceModule = strNode.text.replace(/['"]/g, '');
+      const parts = sourceModule.split('/');
+      const localName = parts[parts.length - 1] ?? sourceModule;
+
+      imports.push({
+        filePath,
+        localName,
+        sourceModule,
+        originalName: '*',
+        resolvedPath:
+          method.text === 'require_relative'
+            ? this.resolveRubyRelativeRequire(sourceModule, filePath)
+            : undefined,
+      });
+    });
+  }
+
+  /**
+   * Extract C# using imports.
+   * Handles: using System.Collections.Generic;
+   */
+  private extractCSharpImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    for (const child of rootNode.children) {
+      if (!child || child.type !== 'using_directive') continue;
+
+      const nameNode = child.children.find(
+        (c) =>
+          c?.type === 'qualified_name' ||
+          c?.type === 'identifier' ||
+          c?.type === 'name',
+      );
+      if (!nameNode) continue;
+
+      const fullPath = nameNode.text;
+      const parts = fullPath.split('.');
+      const lastName = parts[parts.length - 1] ?? fullPath;
+
+      imports.push({
+        filePath,
+        localName: lastName,
+        sourceModule: fullPath,
+        originalName: '*',
+      });
+    }
+  }
+
+  /**
+   * Extract PHP use imports.
+   * Handles: use App\Models\User;
+   *          use App\Models\User as AppUser;
+   */
+  private extractPhpImports(
+    rootNode: SyntaxNode,
+    filePath: string,
+    imports: ImportMapping[],
+  ): void {
+    this.traverseNode(rootNode, (node) => {
+      if (node.type !== 'use_declaration') return;
+
+      for (const clause of node.children) {
+        if (!clause || clause.type !== 'use_clause') continue;
+
+        const nameNode = clause.children.find(
+          (c) => c?.type === 'qualified_name' || c?.type === 'name',
+        );
+        if (!nameNode) continue;
+
+        const fullPath = nameNode.text;
+        const parts = fullPath.split('\\');
+        const lastName = parts[parts.length - 1] ?? fullPath;
+
+        // Check for alias: use Foo as Bar
+        const aliasNode = clause.children.find(
+          (c) => c?.type === 'name' && c !== nameNode,
+        );
+
+        imports.push({
+          filePath,
+          localName: aliasNode?.text ?? lastName,
+          sourceModule: fullPath,
+          originalName: lastName,
+        });
+      }
+    });
+  }
+
+  /**
+   * Resolve a Ruby require_relative path.
+   */
+  private resolveRubyRelativeRequire(
+    sourceModule: string,
+    fromFilePath: string,
+  ): string | undefined {
+    const dir = path.dirname(fromFilePath);
+    const basePath = path.normalize(path.join(dir, sourceModule));
+    const candidate = basePath + '.rb';
+    const absolutePath = path.join(this.projectRoot, candidate);
+    try {
+      if (fs.existsSync(absolutePath)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore
+    }
+    return basePath + '.rb';
+  }
+
   // ===== Step 3: Build Symbols =====
 
   /**
@@ -753,6 +1046,65 @@ export class SymbolExtractor {
             if (innerDef && innerDef.startPosition.row + 1 === sym.startLine) {
               sym.exported = true;
             }
+          }
+        }
+      }
+    } else if (language === 'go') {
+      // Go: exported names start with an uppercase letter
+      for (const sym of symbols) {
+        if (sym.name.length > 0 && sym.name[0]! >= 'A' && sym.name[0]! <= 'Z') {
+          sym.exported = true;
+        }
+      }
+    } else if (language === 'rust') {
+      // Rust: items preceded by `pub` keyword are exported
+      this.traverseNode(rootNode, (node) => {
+        if (
+          node.type === 'visibility_modifier' &&
+          node.text.startsWith('pub')
+        ) {
+          const parent = node.parent;
+          if (parent) {
+            const parentLine = parent.startPosition.row + 1;
+            for (const sym of symbols) {
+              if (sym.startLine === parentLine) {
+                sym.exported = true;
+              }
+            }
+          }
+        }
+      });
+    } else if (language === 'java' || language === 'csharp') {
+      // Java/C#: items with public/protected modifiers are exported
+      for (const sym of symbols) {
+        // Find the AST node at the symbol's start line and check modifiers
+        for (const child of rootNode.children) {
+          if (!child) continue;
+          this.traverseNode(child, (node) => {
+            const nodeLine = node.startPosition.row + 1;
+            if (nodeLine !== sym.startLine) return;
+            // Check for public modifier in the node text
+            const text = node.text.substring(0, 100);
+            if (text.startsWith('public ') || text.includes(' public ')) {
+              sym.exported = true;
+            }
+          });
+        }
+      }
+    } else if (
+      language === 'ruby' ||
+      language === 'php' ||
+      language === 'c' ||
+      language === 'cpp'
+    ) {
+      // Ruby/PHP: all top-level definitions are considered exported
+      // C/C++: header declarations are effectively exported (heuristic)
+      for (const sym of symbols) {
+        for (const child of rootNode.children) {
+          if (!child) continue;
+          const childLine = child.startPosition.row + 1;
+          if (childLine === sym.startLine) {
+            sym.exported = true;
           }
         }
       }
@@ -1137,6 +1489,246 @@ export class SymbolExtractor {
                   type: 'EXTENDS',
                   filePath,
                   line: arg.startPosition.row + 1,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Java: class Foo extends Bar implements Baz
+      if (node.type === 'class_declaration' && language === 'java') {
+        const className = node.childForFieldName('name')?.text;
+        if (!className) return;
+        const classSymbol = symbols.find(
+          (s) =>
+            s.name === className &&
+            (s.type === 'class' || s.type === 'interface'),
+        );
+        if (!classSymbol) return;
+
+        // superclass: extends clause
+        const superclass = child_by_type(node, 'superclass');
+        if (superclass) {
+          const typeName = child_by_type(superclass, 'type_identifier')?.text;
+          if (typeName) {
+            const targetId = this.resolveDirectName(
+              typeName,
+              filePath,
+              importsByLocalName,
+              sameFileSymbolsByName,
+            );
+            if (targetId) {
+              edges.push({
+                sourceId: classSymbol.id,
+                targetId,
+                type: 'EXTENDS',
+                filePath,
+                line: superclass.startPosition.row + 1,
+              });
+            }
+          }
+        }
+
+        // interfaces: implements clause
+        const interfaces = child_by_type(node, 'super_interfaces');
+        if (interfaces) {
+          const typeList = child_by_type(interfaces, 'type_list');
+          if (typeList) {
+            for (const typeNode of typeList.children) {
+              if (!typeNode || typeNode.type !== 'type_identifier') continue;
+              const targetId = this.resolveDirectName(
+                typeNode.text,
+                filePath,
+                importsByLocalName,
+                sameFileSymbolsByName,
+              );
+              if (targetId) {
+                edges.push({
+                  sourceId: classSymbol.id,
+                  targetId,
+                  type: 'IMPLEMENTS',
+                  filePath,
+                  line: typeNode.startPosition.row + 1,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // C#: class Foo : Bar, IBaz
+      if (node.type === 'class_declaration' && language === 'csharp') {
+        const className = node.childForFieldName('name')?.text;
+        if (!className) return;
+        const classSymbol = symbols.find(
+          (s) =>
+            s.name === className &&
+            (s.type === 'class' || s.type === 'interface'),
+        );
+        if (!classSymbol) return;
+
+        const baseList = child_by_type(node, 'base_list');
+        if (baseList) {
+          for (const baseType of baseList.children) {
+            if (!baseType) continue;
+            const typeName =
+              baseType.type === 'identifier'
+                ? baseType.text
+                : child_by_type(baseType, 'identifier')?.text;
+            if (typeName) {
+              const isInterface =
+                typeName.startsWith('I') &&
+                typeName.length > 1 &&
+                typeName[1]! >= 'A' &&
+                typeName[1]! <= 'Z';
+              const targetId = this.resolveDirectName(
+                typeName,
+                filePath,
+                importsByLocalName,
+                sameFileSymbolsByName,
+              );
+              if (targetId) {
+                edges.push({
+                  sourceId: classSymbol.id,
+                  targetId,
+                  type: isInterface ? 'IMPLEMENTS' : 'EXTENDS',
+                  filePath,
+                  line: baseType.startPosition.row + 1,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // C++: class Foo : public Bar
+      if (node.type === 'class_specifier' && language === 'cpp') {
+        const className = child_by_type(node, 'type_identifier')?.text;
+        if (!className) return;
+        const classSymbol = symbols.find(
+          (s) => s.name === className && s.type === 'class',
+        );
+        if (!classSymbol) return;
+
+        const baseList = child_by_type(node, 'base_class_clause');
+        if (baseList) {
+          for (const base of baseList.children) {
+            if (!base) continue;
+            const typeName =
+              base.type === 'type_identifier'
+                ? base.text
+                : child_by_type(base, 'type_identifier')?.text;
+            if (typeName) {
+              const targetId = this.resolveDirectName(
+                typeName,
+                filePath,
+                importsByLocalName,
+                sameFileSymbolsByName,
+              );
+              if (targetId) {
+                edges.push({
+                  sourceId: classSymbol.id,
+                  targetId,
+                  type: 'EXTENDS',
+                  filePath,
+                  line: base.startPosition.row + 1,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Ruby: class Foo < Bar
+      if (node.type === 'class' && language === 'ruby') {
+        const className = child_by_type(node, 'constant')?.text;
+        if (!className) return;
+        const classSymbol = symbols.find(
+          (s) => s.name === className && s.type === 'class',
+        );
+        if (!classSymbol) return;
+
+        const superclass = child_by_type(node, 'superclass');
+        if (superclass) {
+          const baseName = child_by_type(superclass, 'constant')?.text;
+          if (baseName) {
+            const targetId = this.resolveDirectName(
+              baseName,
+              filePath,
+              importsByLocalName,
+              sameFileSymbolsByName,
+            );
+            if (targetId) {
+              edges.push({
+                sourceId: classSymbol.id,
+                targetId,
+                type: 'EXTENDS',
+                filePath,
+                line: superclass.startPosition.row + 1,
+              });
+            }
+          }
+        }
+      }
+
+      // PHP: class Foo extends Bar implements Baz
+      if (node.type === 'class_declaration' && language === 'php') {
+        const className = child_by_type(node, 'name')?.text;
+        if (!className) return;
+        const classSymbol = symbols.find(
+          (s) => s.name === className && s.type === 'class',
+        );
+        if (!classSymbol) return;
+
+        const baseClause = child_by_type(node, 'base_clause');
+        if (baseClause) {
+          const baseName =
+            child_by_type(baseClause, 'name')?.text ??
+            child_by_type(baseClause, 'qualified_name')?.text;
+          if (baseName) {
+            const parts = baseName.split('\\');
+            const targetId = this.resolveDirectName(
+              parts[parts.length - 1]!,
+              filePath,
+              importsByLocalName,
+              sameFileSymbolsByName,
+            );
+            if (targetId) {
+              edges.push({
+                sourceId: classSymbol.id,
+                targetId,
+                type: 'EXTENDS',
+                filePath,
+                line: baseClause.startPosition.row + 1,
+              });
+            }
+          }
+        }
+
+        const interfaceClause = child_by_type(node, 'class_interface_clause');
+        if (interfaceClause) {
+          for (const iface of interfaceClause.children) {
+            if (!iface) continue;
+            const ifaceName =
+              iface.type === 'name' || iface.type === 'qualified_name'
+                ? iface.text
+                : null;
+            if (ifaceName) {
+              const parts = ifaceName.split('\\');
+              const targetId = this.resolveDirectName(
+                parts[parts.length - 1]!,
+                filePath,
+                importsByLocalName,
+                sameFileSymbolsByName,
+              );
+              if (targetId) {
+                edges.push({
+                  sourceId: classSymbol.id,
+                  targetId,
+                  type: 'IMPLEMENTS',
+                  filePath,
+                  line: iface.startPosition.row + 1,
                 });
               }
             }

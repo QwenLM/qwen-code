@@ -24,7 +24,15 @@ export type SupportedLanguage =
   | 'tsx'
   | 'javascript'
   | 'jsx'
-  | 'python';
+  | 'python'
+  | 'java'
+  | 'go'
+  | 'rust'
+  | 'ruby'
+  | 'cpp'
+  | 'c'
+  | 'csharp'
+  | 'php';
 
 /**
  * Language configuration for tree-sitter.
@@ -57,6 +65,38 @@ const LANGUAGE_CONFIG: Record<SupportedLanguage, LanguageConfig> = {
   python: {
     wasmPackage: 'tree-sitter-python',
     wasmFile: 'tree-sitter-python.wasm',
+  },
+  java: {
+    wasmPackage: 'tree-sitter-java',
+    wasmFile: 'tree-sitter-java.wasm',
+  },
+  go: {
+    wasmPackage: 'tree-sitter-go',
+    wasmFile: 'tree-sitter-go.wasm',
+  },
+  rust: {
+    wasmPackage: 'tree-sitter-rust',
+    wasmFile: 'tree-sitter-rust.wasm',
+  },
+  ruby: {
+    wasmPackage: 'tree-sitter-ruby',
+    wasmFile: 'tree-sitter-ruby.wasm',
+  },
+  cpp: {
+    wasmPackage: 'tree-sitter-cpp',
+    wasmFile: 'tree-sitter-cpp.wasm',
+  },
+  c: {
+    wasmPackage: 'tree-sitter-c',
+    wasmFile: 'tree-sitter-c.wasm',
+  },
+  csharp: {
+    wasmPackage: 'tree-sitter-c-sharp',
+    wasmFile: 'tree-sitter-c_sharp.wasm',
+  },
+  php: {
+    wasmPackage: 'tree-sitter-php',
+    wasmFile: 'tree-sitter-php.wasm',
   },
 };
 
@@ -187,6 +227,30 @@ export function detectTreeSitterLanguage(
     case '.pyi':
     case '.pyw':
       return 'python';
+    case '.java':
+      return 'java';
+    case '.go':
+      return 'go';
+    case '.rs':
+      return 'rust';
+    case '.rb':
+    case '.rake':
+    case '.gemspec':
+      return 'ruby';
+    case '.cpp':
+    case '.cc':
+    case '.cxx':
+    case '.hpp':
+    case '.hxx':
+    case '.hh':
+      return 'cpp';
+    case '.c':
+    case '.h':
+      return 'c';
+    case '.cs':
+      return 'csharp';
+    case '.php':
+      return 'php';
     default:
       return null;
   }
