@@ -850,8 +850,14 @@ export class CoreToolScheduler {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
           } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
+            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
+              doesToolInvocationMatch(
+                toolCall.tool,
+                invocation,
+                allowedTools,
+              )) &&
+            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
+            confirmationDetails.type !== 'ask_user_question'
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
