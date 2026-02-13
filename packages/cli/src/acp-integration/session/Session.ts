@@ -1015,6 +1015,19 @@ function toPermissionOptions(
           kind: 'reject_once',
         },
       ];
+    case 'ask_user_question':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
+          kind: 'reject_once',
+        },
+      ];
     default: {
       const unreachable: never = confirmation;
       throw new Error(`Unexpected: ${unreachable}`);
