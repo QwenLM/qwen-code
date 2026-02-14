@@ -24,6 +24,7 @@ import {
   convertToFunctionResponse,
   createDebugLogger,
   DiscoveredMCPTool,
+  getPlanModeSystemReminder,
   StreamEventType,
   ToolConfirmationOutcome,
   logToolCall,
@@ -515,6 +516,17 @@ export class Session implements SessionContext {
         this.config.getApprovalMode() !== ApprovalMode.YOLO
           ? await invocation.shouldConfirmExecute(abortSignal)
           : false;
+
+      // Plan mode enforcement: block non-read-only tools (except exit_plan_mode)
+      // This mirrors the logic in coreToolScheduler.ts for interactive mode
+      const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
+      if (isPlanMode && !isExitPlanModeTool && confirmationDetails) {
+        return convertToFunctionResponse(
+          fc.name,
+          callId,
+          getPlanModeSystemReminder(),
+        );
+      }
 
       if (confirmationDetails) {
         const content: acp.ToolCallContent[] = [];
