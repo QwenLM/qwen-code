@@ -18,5 +18,6 @@ export { UpdatedPlanToolCall } from './UpdatedPlanToolCall.js';
 export { ShellToolCall } from './ShellToolCall.js';
 export { ReadToolCall } from './ReadToolCall.js';
 export { WebFetchToolCall } from './WebFetchToolCall.js';
+export { ChromeToolCall } from './ChromeToolCall.js';
 export { CheckboxDisplay } from './CheckboxDisplay.js';
 export type { CheckboxDisplayProps } from './CheckboxDisplay.js';

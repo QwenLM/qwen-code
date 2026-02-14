@@ -1,0 +1,200 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import {
+  CallToolRequestSchema,
+  CallToolResult,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import nativeMessagingHostInstance from '../native-messaging-host.js';
+import { NativeMessageType, TOOL_SCHEMAS } from '../shared/index.js';
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+
+interface FlowResponse {
+  status?: string;
+  items?: Array<{
+    slug: string;
+    id: string;
+    description?: string;
+    meta?: { tool?: { description?: string } };
+    variables?: Array<{
+      key: string;
+      label?: string;
+      type?: string;
+      default?: unknown;
+      rules?: { required?: boolean; enum?: string[] };
+    }>;
+  }>;
+}
+
+async function listDynamicFlowTools(): Promise<Tool[]> {
+  try {
+    const response =
+      (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+        {},
+        'rr_list_published_flows',
+        20000,
+      )) as FlowResponse;
+    if (
+      response &&
+      response.status === 'success' &&
+      Array.isArray(response.items)
+    ) {
+      const tools: Tool[] = [];
+      for (const item of response.items) {
+        const name = `flow.${item.slug}`;
+        const description =
+          (item.meta && item.meta.tool && item.meta.tool.description) ||
+          item.description ||
+          'Recorded flow';
+        const properties: Record<string, { [key: string]: unknown }> = {};
+        const required: string[] = [];
+        for (const v of item.variables || []) {
+          const desc = v.label || v.key;
+          const typ = (v.type || 'string').toLowerCase();
+          const prop: { [key: string]: unknown } = { description: desc };
+          if (typ === 'boolean') prop.type = 'boolean';
+          else if (typ === 'number') prop.type = 'number';
+          else if (typ === 'enum') {
+            prop.type = 'string';
+            if (v.rules && Array.isArray(v.rules.enum))
+              prop.enum = v.rules.enum;
+          } else if (typ === 'array') {
+            // default array of strings; can extend with itemType later
+            prop.type = 'array';
+            prop.items = { type: 'string' };
+          } else {
+            prop.type = 'string';
+          }
+          if (v.default !== undefined) prop.default = v.default;
+          if (v.rules && v.rules.required) required.push(v.key);
+          properties[v.key] = prop;
+        }
+        // Run options
+        properties['tabTarget'] = {
+          type: 'string',
+          enum: ['current', 'new'],
+          default: 'current',
+        };
+        properties['refresh'] = { type: 'boolean', default: false };
+        properties['captureNetwork'] = { type: 'boolean', default: false };
+        properties['returnLogs'] = { type: 'boolean', default: false };
+        properties['timeoutMs'] = { type: 'number', minimum: 0 };
+        const tool: Tool = {
+          name,
+          description,
+          inputSchema: { type: 'object', properties, required },
+        };
+        tools.push(tool);
+      }
+      return tools;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export const setupTools = (server: Server) => {
+  // List tools handler
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const dynamicTools = await listDynamicFlowTools();
+    return { tools: [...TOOL_SCHEMAS, ...dynamicTools] };
+  });
+
+  // Call tool handler
+  server.setRequestHandler(CallToolRequestSchema, async (request) =>
+    handleToolCall(request.params.name, request.params.arguments || {}),
+  );
+};
+
+const handleToolCall = async (
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> => {
+  try {
+    // If calling a dynamic flow tool (name starts with flow.), proxy to common flow-run tool
+    if (name && name.startsWith('flow.')) {
+      // We need to resolve flow by slug to ID
+      try {
+        const resp =
+          (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+            {},
+            'rr_list_published_flows',
+            20000,
+          )) as FlowResponse;
+        const items = (resp && resp.items) || [];
+        const slug = name.slice('flow.'.length);
+        const match = items.find(
+          (it: { slug: string; id: string }) => it.slug === slug,
+        );
+        if (!match) throw new Error(`Flow not found for tool ${name}`);
+        const flowArgs = { flowId: match.id, args };
+        const proxyRes =
+          (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+            { name: 'record_replay_flow_run', args: flowArgs },
+            NativeMessageType.CALL_TOOL,
+            120000,
+          )) as { status?: string; data?: CallToolResult; error?: string };
+        if (proxyRes.status === 'success')
+          return proxyRes.data as CallToolResult;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error calling dynamic flow tool: ${proxyRes.error || 'unknown error'}`,
+            },
+          ],
+          isError: true,
+        } as CallToolResult;
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error resolving dynamic flow tool: ${(err as Error)?.message || String(err)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+    // 发送请求到Chrome扩展并等待响应
+    const response =
+      (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+        {
+          name,
+          args,
+        },
+        NativeMessageType.CALL_TOOL,
+        120000, // 延长到 120 秒，避免性能分析等长任务超时
+      )) as { status?: string; data?: CallToolResult; error?: string };
+    if (response.status === 'success') {
+      return response.data as CallToolResult;
+    } else {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error calling tool: ${response.error || 'unknown error'}`,
+          },
+        ],
+        isError: true,
+      } as CallToolResult;
+    }
+  } catch (error) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Error calling tool: ${(error as Error).message || String(error)}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+};
