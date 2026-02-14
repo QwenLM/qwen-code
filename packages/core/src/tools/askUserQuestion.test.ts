@@ -20,6 +20,8 @@ describe('AskUserQuestionTool', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getTargetDir: vi.fn().mockReturnValue('/mock/dir'),
       getChatRecordingService: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     tool = new AskUserQuestionTool(mockConfig);

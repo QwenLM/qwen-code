@@ -7,6 +7,7 @@ import type {
   AcpPermissionRequest,
   ModelInfo,
   AvailableCommand,
+  AskUserQuestionRequest,
 } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
@@ -52,6 +53,9 @@ export interface QwenAgentCallbacks {
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
   onPermissionRequest?: (request: AcpPermissionRequest) => Promise<string>;
+  onAskUserQuestion?: (
+    request: AskUserQuestionRequest,
+  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;

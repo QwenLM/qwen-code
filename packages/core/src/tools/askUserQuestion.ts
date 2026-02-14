@@ -19,6 +19,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { InputFormat } from '../output/types.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
@@ -167,8 +168,14 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   override async shouldConfirmExecute(
     _abortSignal: AbortSignal,
   ): Promise<ToolAskUserQuestionConfirmationDetails | false> {
-    if (!this._config.isInteractive()) {
-      // In non-interactive mode, we cannot collect user input
+    // Check if we're in a mode that supports user interaction
+    // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
+    const isAcpMode =
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() === InputFormat.STREAM_JSON;
+
+    if (!this._config.isInteractive() && !isAcpMode) {
+      // In non-interactive mode without ACP support, we cannot collect user input
       return false;
     }
 
@@ -203,10 +210,16 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     try {
-      // In non-interactive mode, we cannot collect user input
-      if (!this._config.isInteractive()) {
+      // Check if we're in a mode that supports user interaction
+      // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
+      const isAcpMode =
+        this._config.getExperimentalZedIntegration() ||
+        this._config.getInputFormat() === InputFormat.STREAM_JSON;
+
+      // In non-interactive mode without ACP support, we cannot collect user input
+      if (!this._config.isInteractive() && !isAcpMode) {
         const errorMessage =
-          'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.';
+          'Cannot ask user questions in non-interactive mode without ACP support. Please run in interactive mode or enable ACP mode to use this tool.';
         return {
           llmContent: errorMessage,
           returnDisplay: errorMessage,
