@@ -345,16 +345,12 @@ describe('OpenAIContentConverter', () => {
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
-        file?: { filename: string; file_data: string };
       }>;
       expect(contentArray).toHaveLength(2);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'data:application/pdf;base64,base64pdfdata',
-      );
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('PDF file: document.pdf');
 
       // No separate user message should be created
       const userMessage = messages.find((message) => message.role === 'user');
@@ -534,16 +530,12 @@ describe('OpenAIContentConverter', () => {
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
-        file?: { filename: string; file_data: string };
       }>;
       expect(contentArray).toHaveLength(2);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
-      );
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('PDF file: document.pdf');
     });
 
     it('should convert video inlineData to tool message with embedded video_url', () => {
