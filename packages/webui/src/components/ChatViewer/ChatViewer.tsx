@@ -25,6 +25,7 @@ import {
   ShellToolCall,
   ReadToolCall,
   WebFetchToolCall,
+  TaskToolCall,
   shouldShowToolCall,
 } from '../toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from '../toolcalls/index.js';
@@ -184,6 +185,8 @@ function getToolCallComponent(kind: string) {
     case 'web_search':
     case 'websearch':
       return WebFetchToolCall;
+    case 'task':
+      return TaskToolCall;
     default:
       return GenericToolCall;
   }
