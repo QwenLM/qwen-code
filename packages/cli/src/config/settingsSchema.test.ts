@@ -282,6 +282,21 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should have dedicatedTerminal setting in ide schema', () => {
+      const dedicatedTerminal =
+        getSettingsSchema().ide?.properties.dedicatedTerminal;
+      expect(dedicatedTerminal).toBeDefined();
+      expect(dedicatedTerminal.type).toBe('boolean');
+      expect(dedicatedTerminal.label).toBe('Dedicated Terminal');
+      expect(dedicatedTerminal.category).toBe('IDE');
+      expect(dedicatedTerminal.requiresRestart).toBe(false);
+      expect(dedicatedTerminal.default).toBe(true);
+      expect(dedicatedTerminal.showInDialog).toBe(true);
+      expect(dedicatedTerminal.description).toBe(
+        'Enable dedicated terminal for displaying shell command execution in the IDE.',
+      );
+    });
+
     it('should have debugKeystrokeLogging setting in schema', () => {
       expect(
         getSettingsSchema().general.properties.debugKeystrokeLogging,

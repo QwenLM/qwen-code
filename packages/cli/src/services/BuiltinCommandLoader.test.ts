@@ -75,6 +75,13 @@ vi.mock('../ui/commands/quitCommand.js', () => ({
 vi.mock('../ui/commands/statsCommand.js', () => ({ statsCommand: {} }));
 vi.mock('../ui/commands/themeCommand.js', () => ({ themeCommand: {} }));
 vi.mock('../ui/commands/toolsCommand.js', () => ({ toolsCommand: {} }));
+vi.mock('../ui/commands/terminalCommand.js', () => ({
+  terminalCommand: {
+    name: 'terminal',
+    description: 'Terminal command',
+    kind: 'built-in',
+  },
+}));
 vi.mock('../ui/commands/mcpCommand.js', () => ({
   mcpCommand: {
     name: 'mcp',
