@@ -1,0 +1,101 @@
+# Copyright 2025 Qwen Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: 'Generate SDK Release Notes'
+description: 'Generate release notes for an SDK release based on git history.'
+
+inputs:
+  release-tag:
+    description: 'The release tag (e.g., v0.1.11)'
+    required: true
+  previous-release-tag:
+    description: 'The previous release tag for changelog diff'
+    required: true
+  ref:
+    description: 'The git ref being released'
+    required: true
+  cli-version:
+    description: 'The bundled CLI version'
+    required: true
+  cli-source-mode:
+    description: 'CLI source mode (npm_latest or build_from_source)'
+    required: true
+  tag-prefix:
+    description: 'Git tag prefix for SDK releases'
+    required: false
+    default: 'sdk-typescript-'
+  path-filter:
+    description: 'Git path filter for changelog generation'
+    required: false
+    default: 'packages/sdk-typescript'
+
+outputs:
+  notes-file:
+    description: 'Path to the generated release notes file'
+    value: '${{ steps.generate.outputs.NOTES_FILE }}'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Generate release notes'
+      id: 'generate'
+      shell: 'bash'
+      env:
+        RELEASE_TAG: '${{ inputs.release-tag }}'
+        PREVIOUS_RELEASE_TAG: '${{ inputs.previous-release-tag }}'
+        REF: '${{ inputs.ref }}'
+        CLI_VERSION: '${{ inputs.cli-version }}'
+        CLI_SOURCE_MODE: '${{ inputs.cli-source-mode }}'
+        TAG_PREFIX: '${{ inputs.tag-prefix }}'
+        PATH_FILTER: '${{ inputs.path-filter }}'
+      run: |
+        set -euo pipefail
+        NOTES_FILE="${RUNNER_TEMP}/sdk-release-notes.md"
+
+        if [[ "${CLI_SOURCE_MODE}" == "npm_latest" ]]; then
+          CLI_SOURCE_DESC="latest stable CLI from npm"
+        else
+          CLI_SOURCE_DESC="CLI built from source (same branch/ref as SDK)"
+        fi
+
+        {
+          echo "## Bundled CLI Version"
+          echo ""
+          echo "This SDK release bundles CLI version: \`${CLI_VERSION}\`"
+          echo ""
+          echo "Source: ${CLI_SOURCE_DESC}"
+          echo ""
+          echo "---"
+          echo ""
+          echo "## SDK Changes"
+          echo ""
+        } > "${NOTES_FILE}"
+
+        START_TAG="${TAG_PREFIX}${PREVIOUS_RELEASE_TAG}"
+        if git rev-parse -q --verify "refs/tags/${START_TAG}" >/dev/null; then
+          RANGE="${START_TAG}..${REF}"
+          CHANGES=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --reverse -- "${PATH_FILTER}")
+        else
+          echo "_Previous SDK tag not found; listing recent SDK changes from ${REF}_." >> "${NOTES_FILE}"
+          echo "" >> "${NOTES_FILE}"
+          CHANGES=$(git log "${REF}" --pretty=format:"- %s (%h)" --reverse --max-count=100 -- "${PATH_FILTER}")
+        fi
+
+        if [[ -z "${CHANGES}" ]]; then
+          echo "No SDK changes detected." >> "${NOTES_FILE}"
+        else
+          echo "${CHANGES}" >> "${NOTES_FILE}"
+        fi
+
+        echo "NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_OUTPUT}"
