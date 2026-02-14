@@ -94,10 +94,25 @@ export class OpenAIContentConverter {
   private schemaCompliance: SchemaComplianceMode;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
+  private supportsFileInput: boolean;
+  private supportsImageUrl: boolean;
+  private supportsAudioInput: boolean;
+  private supportsVideoInput: boolean;
 
-  constructor(model: string, schemaCompliance: SchemaComplianceMode = 'auto') {
+  constructor(
+    model: string,
+    schemaCompliance: SchemaComplianceMode = 'auto',
+    supportsFileInput: boolean = false,
+    supportsImageUrl: boolean = true, // Default to true for backward compatibility
+    supportsAudioInput: boolean = false,
+    supportsVideoInput: boolean = false,
+  ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
+    this.supportsFileInput = supportsFileInput;
+    this.supportsImageUrl = supportsImageUrl;
+    this.supportsAudioInput = supportsAudioInput;
+    this.supportsVideoInput = supportsVideoInput;
   }
 
   /**
@@ -592,6 +607,14 @@ export class OpenAIContentConverter {
       const mimeType = part.inlineData.mimeType;
       const mediaType = this.getMediaType(mimeType);
       if (mediaType === 'image') {
+        // Check if model supports image_url content type
+        if (!this.supportsImageUrl) {
+          const displayName = part.inlineData.displayName || 'image';
+          return {
+            type: 'text' as const,
+            text: `[Image: ${displayName} - Image content cannot be displayed in this API. Please use a vision-capable model to view images.]`,
+          };
+        }
         const dataUrl = `data:${mimeType};base64,${part.inlineData.data}`;
         return {
           type: 'image_url' as const,
@@ -600,17 +623,35 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        // PDF files require the 'file' content type which is not universally supported.
+        // Only use 'file' type if the model explicitly supports it.
+        if (this.supportsFileInput) {
+          const filename = part.inlineData.displayName || 'document.pdf';
+          return {
+            type: 'file' as const,
+            file: {
+              filename,
+              file_data: `data:${mimeType};base64,${part.inlineData.data}`,
+            },
+          };
+        }
+        // Fall back to text message for models that don't support file input
         const filename = part.inlineData.displayName || 'document.pdf';
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: `data:${mimeType};base64,${part.inlineData.data}`,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${filename} - PDF content cannot be displayed in this API. Please use a vision-capable model with file input support to view PDF files.]`,
         };
       }
 
       if (mediaType === 'audio') {
+        // Check if model supports input_audio content type
+        if (!this.supportsAudioInput) {
+          const displayName = part.inlineData.displayName || 'audio';
+          return {
+            type: 'text' as const,
+            text: `[Audio: ${displayName} - Audio content cannot be displayed in this API. Please use a model with audio input support.]`,
+          };
+        }
         const format = this.getAudioFormat(mimeType);
         if (format) {
           return {
@@ -624,6 +665,14 @@ export class OpenAIContentConverter {
       }
 
       if (mediaType === 'video') {
+        // Check if model supports video_url content type
+        if (!this.supportsVideoInput) {
+          const displayName = part.inlineData.displayName || 'video';
+          return {
+            type: 'text' as const,
+            text: `[Video: ${displayName} - Video content cannot be displayed in this API. Please use a model with video input support.]`,
+          };
+        }
         return {
           type: 'video_url' as const,
           video_url: {
@@ -648,6 +697,13 @@ export class OpenAIContentConverter {
       const mediaType = this.getMediaType(mimeType);
 
       if (mediaType === 'image') {
+        // Check if model supports image_url content type
+        if (!this.supportsImageUrl) {
+          return {
+            type: 'text' as const,
+            text: `[Image: ${filename} - Image content cannot be displayed in this API. Please use a vision-capable model to view images.]`,
+          };
+        }
         return {
           type: 'image_url' as const,
           image_url: { url: fileUri },
@@ -655,16 +711,32 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        // PDF files require the 'file' content type which is not universally supported.
+        // Only use 'file' type if the model explicitly supports it.
+        if (this.supportsFileInput) {
+          return {
+            type: 'file' as const,
+            file: {
+              filename,
+              file_data: fileUri,
+            },
+          };
+        }
+        // Fall back to text message for models that don't support file input
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: fileUri,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${filename} - PDF content cannot be displayed in this API. Please use a vision-capable model with file input support to view PDF files.]`,
         };
       }
 
       if (mediaType === 'video') {
+        // Check if model supports video_url content type
+        if (!this.supportsVideoInput) {
+          return {
+            type: 'text' as const,
+            text: `[Video: ${filename} - Video content cannot be displayed in this API. Please use a model with video input support.]`,
+          };
+        }
         return {
           type: 'video_url' as const,
           video_url: {

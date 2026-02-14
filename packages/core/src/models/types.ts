@@ -16,6 +16,14 @@ import type { ConfigSources } from '../utils/configResolver.js';
 export interface ModelCapabilities {
   /** Supports image/vision inputs */
   vision?: boolean;
+  /** Supports file input type (e.g., PDF files via OpenAI 'file' content type) */
+  fileInput?: boolean;
+  /** Supports image_url content type for images */
+  imageUrl?: boolean;
+  /** Supports input_audio content type for audio */
+  audioInput?: boolean;
+  /** Supports video_url content type for videos */
+  videoInput?: boolean;
 }
 
 /**
