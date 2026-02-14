@@ -833,7 +833,13 @@ export class CoreToolScheduler {
             this.config.getApprovalMode() === ApprovalMode.PLAN;
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
 
-          if (isPlanMode && !isExitPlanModeTool) {
+          // ask_user_question needs the confirmation flow even in plan mode
+          // so the user can actually answer the questions
+          const isAskUserQuestionTool =
+            confirmationDetails &&
+            confirmationDetails.type === 'ask_user_question';
+
+          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
             if (confirmationDetails) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
