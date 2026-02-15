@@ -98,6 +98,17 @@ export type ContentGeneratorConfig = {
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body
   extra_body?: Record<string, unknown>;
+  // Model capabilities
+  capabilities?: {
+    /** Supports file input type (e.g., PDF files via OpenAI 'file' content type) */
+    fileInput?: boolean;
+    /** Supports image_url content type for images */
+    imageUrl?: boolean;
+    /** Supports input_audio content type for audio */
+    audioInput?: boolean;
+    /** Supports video_url content type for videos */
+    videoInput?: boolean;
+  };
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

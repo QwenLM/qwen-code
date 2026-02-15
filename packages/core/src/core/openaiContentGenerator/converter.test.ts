@@ -296,7 +296,7 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
-    it('should convert PDF inlineData to tool message with embedded input_file', () => {
+    it('should convert PDF inlineData to text message when file input is not supported', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -338,6 +338,75 @@ describe('OpenAIContentConverter', () => {
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
 
+      // Should have tool message with text content (PDF converted to text)
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const contentArray = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe('PDF content');
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('PDF file: document.pdf');
+      expect(contentArray[1].text).toContain('cannot be displayed');
+
+      // No separate user message should be created
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeUndefined();
+    });
+
+    it('should convert PDF inlineData to file type when file input is supported', () => {
+      const converterWithFileSupport = new OpenAIContentConverter(
+        'models/test',
+        'auto',
+        true, // supportsFileInput = true
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'PDF content' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'application/pdf',
+                        data: 'base64pdfdata',
+                        displayName: 'document.pdf',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages =
+        converterWithFileSupport.convertGeminiRequestToOpenAI(request);
+
       // Should have tool message with both text and file content
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -361,7 +430,7 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
-    it('should convert audio parts to tool message with embedded input_audio', () => {
+    it('should convert audio parts to text message when audio input is not supported', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -401,6 +470,77 @@ describe('OpenAIContentConverter', () => {
       };
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      // Should have tool message with text content (audio converted to text)
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const contentArray = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe('Audio recorded');
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('Audio:');
+      expect(contentArray[1].text).toContain('cannot be displayed');
+
+      // No separate user message should be created
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeUndefined();
+    });
+
+    it('should convert audio parts to input_audio when audio input is supported', () => {
+      const converterWithAudioSupport = new OpenAIContentConverter(
+        'models/test',
+        'auto',
+        false, // supportsFileInput
+        true, // supportsImageUrl
+        true, // supportsAudioInput
+        false, // supportsVideoInput
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Record',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Record',
+                  response: { output: 'Audio recorded' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'audio/wav',
+                        data: 'audiobase64data',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages =
+        converterWithAudioSupport.convertGeminiRequestToOpenAI(request);
 
       // Should have tool message with both text and audio content
       const toolMessage = messages.find((message) => message.role === 'tool');
@@ -485,7 +625,7 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
-    it('should convert PDF fileData URL to tool message with embedded file', () => {
+    it('should convert PDF fileData URL to text message when file input is not supported', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -534,6 +674,71 @@ describe('OpenAIContentConverter', () => {
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe('PDF content');
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('PDF file: document.pdf');
+      expect(contentArray[1].text).toContain('cannot be displayed');
+    });
+
+    it('should convert PDF fileData URL to file type when file input is supported', () => {
+      const converterWithFileSupport = new OpenAIContentConverter(
+        'models/test',
+        'auto',
+        true, // supportsFileInput = true
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'PDF content' },
+                  parts: [
+                    {
+                      fileData: {
+                        mimeType: 'application/pdf',
+                        fileUri:
+                          'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
+                        displayName: 'document.pdf',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages =
+        converterWithFileSupport.convertGeminiRequestToOpenAI(request);
+
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const contentArray = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
         file?: { filename: string; file_data: string };
       }>;
       expect(contentArray).toHaveLength(2);
@@ -546,7 +751,7 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
-    it('should convert video inlineData to tool message with embedded video_url', () => {
+    it('should convert video inlineData to text message when video input is not supported', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -588,6 +793,78 @@ describe('OpenAIContentConverter', () => {
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
 
+      // Should have tool message with text content (video converted to text)
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const contentArray = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe('Video content');
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('Video:');
+      expect(contentArray[1].text).toContain('cannot be displayed');
+
+      // No separate user message should be created
+      const userMessage = messages.find((message) => message.role === 'user');
+      expect(userMessage).toBeUndefined();
+    });
+
+    it('should convert video inlineData to video_url when video input is supported', () => {
+      const converterWithVideoSupport = new OpenAIContentConverter(
+        'models/test',
+        'auto',
+        false, // supportsFileInput
+        true, // supportsImageUrl
+        false, // supportsAudioInput
+        true, // supportsVideoInput
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Video content' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'video/mp4',
+                        data: 'videobase64data',
+                        displayName: 'recording.mp4',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages =
+        converterWithVideoSupport.convertGeminiRequestToOpenAI(request);
+
       // Should have tool message with both text and video content
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
@@ -610,7 +887,7 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
-    it('should convert video fileData URL to tool message with embedded video_url', () => {
+    it('should convert video fileData URL to text message when video input is not supported', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -651,6 +928,73 @@ describe('OpenAIContentConverter', () => {
       };
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      const toolMessage = messages.find((message) => message.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect(Array.isArray(toolMessage?.content)).toBe(true);
+      const contentArray = toolMessage?.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toBe('Video content');
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toContain('Video:');
+      expect(contentArray[1].text).toContain('cannot be displayed');
+    });
+
+    it('should convert video fileData URL to video_url when video input is supported', () => {
+      const converterWithVideoSupport = new OpenAIContentConverter(
+        'models/test',
+        'auto',
+        false, // supportsFileInput
+        true, // supportsImageUrl
+        false, // supportsAudioInput
+        true, // supportsVideoInput
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Video content' },
+                  parts: [
+                    {
+                      fileData: {
+                        mimeType: 'video/mp4',
+                        fileUri: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+                        displayName: 'recording.mp4',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages =
+        converterWithVideoSupport.convertGeminiRequestToOpenAI(request);
 
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
