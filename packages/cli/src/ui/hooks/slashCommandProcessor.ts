@@ -181,6 +181,11 @@ export const useSlashCommandProcessor = (
           type: 'summary',
           summary: message.summary,
         };
+      } else if (message.type === MessageType.INSIGHT_PROGRESS) {
+        historyItemContent = {
+          type: 'insight_progress',
+          progress: message.progress,
+        };
       } else {
         historyItemContent = {
           type: message.type,
