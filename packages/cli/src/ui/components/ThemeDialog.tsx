@@ -258,7 +258,7 @@ def fibonacci(n):
 + print(f"Hello, {name}!")
 `}
                     availableTerminalHeight={diffHeight}
-                    contentWidth={colorizeCodeWidth}
+                    terminalWidth={colorizeCodeWidth}
                     theme={previewTheme}
                     settings={settings}
                   />

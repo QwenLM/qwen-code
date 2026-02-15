@@ -235,14 +235,14 @@ const DiffResultRenderer: React.FC<{
     diffContent={data.fileDiff}
     filename={data.fileName}
     availableTerminalHeight={availableHeight}
-    contentWidth={childWidth}
+    terminalWidth={childWidth}
     settings={settings}
   />
 );
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
-  contentWidth: number;
+  terminalWidth: number;
   emphasis?: TextEmphasis;
   renderOutputAsMarkdown?: boolean;
   activeShellPtyId?: number | null;
@@ -256,7 +256,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   resultDisplay,
   status,
   availableTerminalHeight,
-  contentWidth,
+  terminalWidth,
   emphasis = 'medium',
   renderOutputAsMarkdown = true,
   activeShellPtyId,
@@ -313,7 +313,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
-  const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
+  const innerWidth = terminalWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
   // we're forcing it to not render as markdown when the response is too long, it will fallback

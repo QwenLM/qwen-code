@@ -83,7 +83,7 @@ describe('<ToolGroupMessage />', () => {
 
   const baseProps = {
     groupId: 1,
-    contentWidth: 80,
+    terminalWidth: 80,
     isFocused: true,
   };
 
@@ -244,7 +244,7 @@ describe('<ToolGroupMessage />', () => {
         <ToolGroupMessage
           {...baseProps}
           toolCalls={toolCalls}
-          contentWidth={40}
+          terminalWidth={40}
         />,
       );
       expect(lastFrame()).toMatchSnapshot();
