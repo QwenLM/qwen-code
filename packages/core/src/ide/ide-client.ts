@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as dns from 'node:dns';
 import * as fs from 'node:fs';
 import { isSubpath } from '../utils/paths.js';
 import { detectIde, type IdeInfo } from '../ide/detect-ide.js';
@@ -787,8 +788,9 @@ export class IdeClient {
         version: '1.0.0',
       });
 
+      const ideHost = await getIdeServerHost();
       transport = new StreamableHTTPClientTransport(
-        new URL(`http://${getIdeServerHost()}:${port}/mcp`),
+        new URL(`http://${ideHost}:${port}/mcp`),
         {
           fetch: this.createProxyAwareFetch(),
           requestInit: {
@@ -853,8 +855,67 @@ export class IdeClient {
   }
 }
 
-function getIdeServerHost() {
+/**
+ * Cached IDE server host result to avoid repeated DNS lookups.
+ */
+let cachedIdeServerHost: string | undefined;
+
+/**
+ * Reset the cached IDE server host. Exported for testing only.
+ * @internal
+ */
+export function _resetCachedIdeServerHost(): void {
+  cachedIdeServerHost = undefined;
+}
+
+/**
+ * Check if a hostname is resolvable via DNS lookup.
+ */
+function checkHostReachable(hostname: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    dns.lookup(hostname, (err) => {
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Determine the IDE server host to connect to.
+ *
+ * In container environments (Docker, Podman, etc.), the CLI needs to reach the
+ * host machine where the IDE extension is running. The conventional hostname
+ * `host.docker.internal` is typically available in Docker Desktop but may not
+ * exist in Linux Docker or other container runtimes (e.g. code-server remote).
+ *
+ * This function:
+ * 1. Detects if we are inside a container (via `/.dockerenv` or `/run/.containerenv`).
+ * 2. If so, performs an async DNS check to verify `host.docker.internal` is resolvable.
+ * 3. Falls back to `127.0.0.1` if the hostname is not reachable.
+ */
+export async function getIdeServerHost(): Promise<string> {
+  if (cachedIdeServerHost !== undefined) {
+    return cachedIdeServerHost;
+  }
+
   const isInContainer =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
-  return isInContainer ? 'host.docker.internal' : '127.0.0.1';
+
+  if (isInContainer) {
+    const reachable = await checkHostReachable('host.docker.internal');
+    if (reachable) {
+      debugLogger.debug(
+        'Container detected, host.docker.internal is reachable',
+      );
+      cachedIdeServerHost = 'host.docker.internal';
+    } else {
+      debugLogger.debug(
+        'Container detected, but host.docker.internal is NOT reachable, falling back to 127.0.0.1',
+      );
+      cachedIdeServerHost = '127.0.0.1';
+    }
+  } else {
+    cachedIdeServerHost = '127.0.0.1';
+  }
+
+  return cachedIdeServerHost;
 }
