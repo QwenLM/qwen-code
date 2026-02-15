@@ -377,8 +377,8 @@ describe('Session ID Support (E2E)', () => {
 
   describe('Session ID Duplicate Detection', () => {
     it('should reject duplicate sessionId with error', async () => {
-      // Valid UUID v4
-      const customSessionId = 'dddddddd-eeee-4fff-aaaa-bbbbbbbbbbbb';
+      // Generate a unique UUID for this test
+      const customSessionId = crypto.randomUUID();
 
       // First query: create a session with the custom session ID
       const q1 = query({
@@ -387,7 +387,9 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
+          env: {
+            SANDBOX_SET_UID_GID: 'true',
+          },
         },
       });
 
@@ -409,7 +411,9 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
+          env: {
+            SANDBOX_SET_UID_GID: 'true',
+          },
         },
       });
 
@@ -426,8 +430,8 @@ describe('Session ID Support (E2E)', () => {
     });
 
     it('should throw error when CLI exits with non-zero code', async () => {
-      // Valid UUID v4
-      const customSessionId = 'eeeeeeee-ffff-4aaa-bbbb-cccccccccccc';
+      // Generate a unique UUID for this test
+      const customSessionId = crypto.randomUUID();
 
       // First query: create a session and properly close it after completion
       const q1 = query({
@@ -436,7 +440,9 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
+          env: {
+            SANDBOX_SET_UID_GID: 'true',
+          },
         },
       });
 
@@ -456,7 +462,9 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
+          env: {
+            SANDBOX_SET_UID_GID: 'true',
+          },
         },
       });
 
