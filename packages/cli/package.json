@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.10.2-dev",
+  "version": "0.10.2",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
