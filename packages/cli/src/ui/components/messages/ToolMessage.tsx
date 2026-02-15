@@ -326,7 +326,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
 
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
+    <Box paddingY={0} flexDirection="column" width={terminalWidth}>
       <Box minHeight={1}>
         <ToolStatusIndicator status={status} name={name} />
         <ToolInfo
@@ -377,6 +377,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <AnsiOutputText
                 data={displayRenderer.data}
                 availableTerminalHeight={availableHeight}
+                width={innerWidth}
               />
             )}
             {displayRenderer.type === 'string' && (
