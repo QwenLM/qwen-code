@@ -1,0 +1,574 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Qwen Code settings configuration",
+  "properties": {
+    "mcpServers": {
+      "description": "Configuration for MCP servers.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "modelProviders": {
+      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "codingPlan": {
+      "description": "Coding Plan template version tracking and configuration.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "description": "SHA256 hash of the Coding Plan template. Used to detect template updates.",
+          "type": "string"
+        }
+      }
+    },
+    "env": {
+      "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "general": {
+      "description": "General application settings.",
+      "type": "object",
+      "properties": {
+        "preferredEditor": {
+          "description": "The preferred editor to open files in.",
+          "type": "string"
+        },
+        "vimMode": {
+          "description": "Enable Vim keybindings",
+          "type": "boolean",
+          "default": false
+        },
+        "enableAutoUpdate": {
+          "description": "Enable automatic update checks and installations on startup.",
+          "type": "boolean",
+          "default": true
+        },
+        "gitCoAuthor": {
+          "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
+          "type": "boolean",
+          "default": true
+        },
+        "checkpointing": {
+          "description": "Session checkpointing settings.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable session checkpointing for recovery",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "debugKeystrokeLogging": {
+          "description": "Enable debug logging of keystrokes to the console.",
+          "type": "boolean",
+          "default": false
+        },
+        "language": {
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh, ru, de, ja, pt",
+          "enum": ["auto", "en", "zh", "ru", "de", "ja", "pt"],
+          "default": "auto"
+        },
+        "outputLanguage": {
+          "description": "The language for LLM output. Use \"auto\" to detect from system settings, or set a specific language.",
+          "type": "string",
+          "default": "auto"
+        },
+        "terminalBell": {
+          "description": "Play terminal bell sound when response completes or needs approval.",
+          "type": "boolean",
+          "default": true
+        },
+        "chatRecording": {
+          "description": "Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.",
+          "type": "boolean",
+          "default": true
+        },
+        "defaultFileEncoding": {
+          "description": "Default encoding for new files. Use \"utf-8\" (default) for UTF-8 without BOM, or \"utf-8-bom\" for UTF-8 with BOM. Only change this if your project specifically requires BOM. Options: utf-8, utf-8-bom",
+          "enum": ["utf-8", "utf-8-bom"],
+          "default": "utf-8"
+        }
+      }
+    },
+    "output": {
+      "description": "Settings for the CLI output.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "description": "The format of the CLI output. Options: text, json",
+          "enum": ["text", "json"],
+          "default": "text"
+        }
+      }
+    },
+    "ui": {
+      "description": "User interface settings.",
+      "type": "object",
+      "properties": {
+        "theme": {
+          "description": "The color theme for the UI.",
+          "type": "string",
+          "default": "Qwen Dark"
+        },
+        "customThemes": {
+          "description": "Custom theme definitions.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "hideWindowTitle": {
+          "description": "Hide the window title bar",
+          "type": "boolean",
+          "default": false
+        },
+        "showStatusInTitle": {
+          "description": "Show Qwen Code status and thoughts in the terminal window title",
+          "type": "boolean",
+          "default": false
+        },
+        "hideTips": {
+          "description": "Hide helpful tips in the UI",
+          "type": "boolean",
+          "default": false
+        },
+        "showLineNumbers": {
+          "description": "Show line numbers in the code output.",
+          "type": "boolean",
+          "default": false
+        },
+        "showCitations": {
+          "description": "Show citations for generated text in the chat.",
+          "type": "boolean",
+          "default": false
+        },
+        "customWittyPhrases": {
+          "description": "Custom witty phrases to display during loading.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enableWelcomeBack": {
+          "description": "Show welcome back dialog when returning to a project with conversation history.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableUserFeedback": {
+          "description": "Show optional feedback dialog after conversations to help improve Qwen performance.",
+          "type": "boolean",
+          "default": true
+        },
+        "accessibility": {
+          "description": "Accessibility settings.",
+          "type": "object",
+          "properties": {
+            "enableLoadingPhrases": {
+              "description": "Enable loading phrases (disable for accessibility)",
+              "type": "boolean",
+              "default": true
+            },
+            "screenReader": {
+              "description": "Render output in plain-text to be more screen reader accessible",
+              "type": "boolean"
+            }
+          }
+        },
+        "feedbackLastShownTimestamp": {
+          "description": "The last time the feedback dialog was shown.",
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "ide": {
+      "description": "IDE integration settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable IDE integration mode",
+          "type": "boolean",
+          "default": false
+        },
+        "hasSeenNudge": {
+          "description": "Whether the user has seen the IDE integration nudge.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "privacy": {
+      "description": "Privacy-related settings.",
+      "type": "object",
+      "properties": {
+        "usageStatisticsEnabled": {
+          "description": "Enable collection of usage statistics",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "telemetry": {
+      "description": "Telemetry configuration.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "model": {
+      "description": "Settings related to the generative model.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The model to use for conversations.",
+          "type": "string"
+        },
+        "maxSessionTurns": {
+          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
+          "type": "number",
+          "default": -1
+        },
+        "summarizeToolOutput": {
+          "description": "Settings for summarizing tool output.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "chatCompression": {
+          "description": "Chat compression settings.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "sessionTokenLimit": {
+          "description": "The maximum number of tokens allowed in a session.",
+          "type": "number"
+        },
+        "skipNextSpeakerCheck": {
+          "description": "Skip the next speaker check.",
+          "type": "boolean",
+          "default": true
+        },
+        "skipLoopDetection": {
+          "description": "Disable all loop detection checks (streaming and LLM).",
+          "type": "boolean",
+          "default": false
+        },
+        "skipStartupContext": {
+          "description": "Avoid sending the workspace startup context at the beginning of each session.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableOpenAILogging": {
+          "description": "Enable OpenAI logging.",
+          "type": "boolean",
+          "default": false
+        },
+        "openAILoggingDir": {
+          "description": "Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.",
+          "type": "string"
+        },
+        "generationConfig": {
+          "description": "Generation configuration settings.",
+          "type": "object",
+          "properties": {
+            "timeout": {
+              "description": "Request timeout in milliseconds.",
+              "type": "number"
+            },
+            "maxRetries": {
+              "description": "Maximum number of retries for failed requests.",
+              "type": "number"
+            },
+            "enableCacheControl": {
+              "description": "Enable cache control for DashScope providers.",
+              "type": "boolean",
+              "default": true
+            },
+            "schemaCompliance": {
+              "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
+              "enum": ["auto", "openapi_30"],
+              "default": "auto"
+            },
+            "contextWindowSize": {
+              "description": "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "context": {
+      "description": "Settings for managing context provided to the model.",
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "description": "The name of the context file.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "importFormat": {
+          "description": "The format to use when importing memory.",
+          "type": "string"
+        },
+        "includeDirectories": {
+          "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "loadFromIncludeDirectories": {
+          "description": "Whether to load memory files from include directories.",
+          "type": "boolean",
+          "default": false
+        },
+        "fileFiltering": {
+          "description": "Settings for git-aware file filtering.",
+          "type": "object",
+          "properties": {
+            "respectGitIgnore": {
+              "description": "Respect .gitignore files when searching",
+              "type": "boolean",
+              "default": true
+            },
+            "respectQwenIgnore": {
+              "description": "Respect .qwenignore files when searching",
+              "type": "boolean",
+              "default": true
+            },
+            "enableRecursiveFileSearch": {
+              "description": "Enable recursive file search functionality",
+              "type": "boolean",
+              "default": true
+            },
+            "enableFuzzySearch": {
+              "description": "Enable fuzzy search when searching for files.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "description": "Settings for built-in and custom tools.",
+      "type": "object",
+      "properties": {
+        "sandbox": {
+          "description": "Sandbox execution environment (can be a boolean or a path string).",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "shell": {
+          "description": "Settings for shell execution.",
+          "type": "object",
+          "properties": {
+            "enableInteractiveShell": {
+              "description": "Use node-pty for an interactive shell experience. Fallback to child_process still applies.",
+              "type": "boolean",
+              "default": false
+            },
+            "pager": {
+              "description": "The pager command to use for shell output. Defaults to `cat`.",
+              "type": "string",
+              "default": "cat"
+            },
+            "showColor": {
+              "description": "Show color in shell output.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "core": {
+          "description": "Paths to core tool definitions.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed": {
+          "description": "A list of tool names that will bypass the confirmation dialog.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "description": "Tool names to exclude from discovery.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approvalMode": {
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "enum": ["plan", "default", "auto-edit", "yolo"],
+          "default": "default"
+        },
+        "autoAccept": {
+          "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
+          "type": "boolean",
+          "default": false
+        },
+        "discoveryCommand": {
+          "description": "Command to run for tool discovery.",
+          "type": "string"
+        },
+        "callCommand": {
+          "description": "Command to run for tool calls.",
+          "type": "string"
+        },
+        "useRipgrep": {
+          "description": "Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.",
+          "type": "boolean",
+          "default": true
+        },
+        "useBuiltinRipgrep": {
+          "description": "Use the bundled ripgrep binary. When set to false, the system-level \"rg\" command will be used instead. This setting is only effective when useRipgrep is true.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableToolOutputTruncation": {
+          "description": "Enable truncation of large tool outputs.",
+          "type": "boolean",
+          "default": true
+        },
+        "truncateToolOutputThreshold": {
+          "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
+          "type": "number",
+          "default": 25000
+        },
+        "truncateToolOutputLines": {
+          "description": "The number of lines to keep when truncating tool output.",
+          "type": "number",
+          "default": 1000
+        }
+      }
+    },
+    "mcp": {
+      "description": "Settings for Model Context Protocol (MCP) servers.",
+      "type": "object",
+      "properties": {
+        "serverCommand": {
+          "description": "Command to start an MCP server.",
+          "type": "string"
+        },
+        "allowed": {
+          "description": "A list of MCP servers to allow.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded": {
+          "description": "A list of MCP servers to exclude.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "security": {
+      "description": "Security-related settings.",
+      "type": "object",
+      "properties": {
+        "folderTrust": {
+          "description": "Settings for folder trust.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Setting to track whether Folder trust is enabled.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "auth": {
+          "description": "Authentication settings.",
+          "type": "object",
+          "properties": {
+            "selectedType": {
+              "description": "The currently selected authentication type.",
+              "type": "string"
+            },
+            "enforcedType": {
+              "description": "The required auth type. If this does not match the selected auth type, the user will be prompted to re-authenticate.",
+              "type": "string"
+            },
+            "useExternal": {
+              "description": "Whether to use an external authentication flow.",
+              "type": "boolean"
+            },
+            "apiKey": {
+              "description": "API key for OpenAI compatible authentication.",
+              "type": "string"
+            },
+            "baseUrl": {
+              "description": "Base URL for OpenAI compatible API.",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "advanced": {
+      "description": "Advanced settings for power users.",
+      "type": "object",
+      "properties": {
+        "autoConfigureMemory": {
+          "description": "Automatically configure Node.js memory limits",
+          "type": "boolean",
+          "default": false
+        },
+        "dnsResolutionOrder": {
+          "description": "The DNS resolution order.",
+          "type": "string"
+        },
+        "excludedEnvVars": {
+          "description": "Environment variables to exclude from project context.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["DEBUG", "DEBUG_MODE"]
+        },
+        "bugCommand": {
+          "description": "Configuration for the bug report command.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "tavilyApiKey": {
+          "description": "⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.",
+          "type": "string"
+        }
+      }
+    },
+    "webSearch": {
+      "description": "Configuration for web search providers.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "experimental": {
+      "description": "Setting to enable experimental features",
+      "type": "object",
+      "properties": {
+        "visionModelPreview": {
+          "description": "Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.",
+          "type": "boolean",
+          "default": true
+        },
+        "vlmSwitchMode": {
+          "description": "Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.",
+          "type": "string"
+        }
+      }
+    },
+    "$version": {
+      "type": "number",
+      "description": "Settings schema version for migration tracking.",
+      "default": 3
+    }
+  },
+  "additionalProperties": true
+}
