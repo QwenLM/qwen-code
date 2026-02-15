@@ -23,6 +23,7 @@ const defaultProps = {
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
   getDebugMode: vi.fn(() => false),
+  getTargetDir: vi.fn(() => '/test/dir'),
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
