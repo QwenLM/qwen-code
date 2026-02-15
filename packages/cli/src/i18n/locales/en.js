@@ -1427,4 +1427,32 @@ export default {
   '(Press Escape to go back)': '(Press Escape to go back)',
   '(Press Enter to submit, Escape to cancel)':
     '(Press Enter to submit, Escape to cancel)',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Please answer the following question(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.',
+  'User declined to answer the questions.':
+    'User declined to answer the questions.',
+  'User has provided the following answers:':
+    'User has provided the following answers:',
+  'Failed to process user answers:': 'Failed to process user answers:',
+  'Type something...': 'Type something...',
+  Submit: 'Submit',
+  'Submit answers': 'Submit answers',
+  Cancel: 'Cancel',
+  'Your answers:': 'Your answers:',
+  '(not answered)': '(not answered)',
+  'Ready to submit your answers?': 'Ready to submit your answers?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigate | Enter: Select | Esc: Cancel',
 };

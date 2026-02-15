@@ -7,9 +7,15 @@
 import * as vscode from 'vscode';
 import { QwenAgentManager } from '../services/qwenAgentManager.js';
 import { ConversationStore } from '../services/conversationStore.js';
-import type { AcpPermissionRequest } from '../types/acpTypes.js';
-import type { ModelInfo } from '../types/acpTypes.js';
-import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
+import type {
+  ModelInfo,
+  AcpPermissionRequest,
+  AskUserQuestionRequest,
+} from '../types/acpTypes.js';
+import type {
+  PermissionResponseMessage,
+  AskUserQuestionResponseMessage,
+} from '../types/webviewMessageTypes.js';
 import { PanelManager } from '../webview/PanelManager.js';
 import { MessageHandler } from '../webview/MessageHandler.js';
 import { WebViewContent } from '../webview/WebViewContent.js';
@@ -29,6 +35,11 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: AcpPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
+  // Track a pending ask user question request and its resolver
+  private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
+  private pendingAskUserQuestionResolve:
+    | ((result: { optionId: string; answers?: Record<string, string> }) => void)
+    | null = null;
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
@@ -404,6 +415,60 @@ export class WebViewProvider {
           };
           // Store handler in message handler
           this.messageHandler.setPermissionHandler(handler);
+        });
+      },
+    );
+
+    this.agentManager.onAskUserQuestion(
+      async (request: AskUserQuestionRequest) => {
+        // Send ask user question request to WebView
+        this.sendMessageToWebView({
+          type: 'askUserQuestion',
+          data: request,
+        });
+
+        // Wait for user response
+        return new Promise<{
+          optionId: string;
+          answers?: Record<string, string>;
+        }>((resolve) => {
+          // Cache the pending request and its resolver
+          this.pendingAskUserQuestionRequest = request;
+          this.pendingAskUserQuestionResolve = (result) => {
+            try {
+              resolve(result);
+            } finally {
+              // Always clear pending state
+              this.pendingAskUserQuestionRequest = null;
+              this.pendingAskUserQuestionResolve = null;
+              // Instruct the webview UI to close the dialog
+              this.sendMessageToWebView({
+                type: 'askUserQuestionResolved',
+                data: { optionId: result.optionId },
+              });
+            }
+          };
+          const handler = (message: AskUserQuestionResponseMessage) => {
+            if (message.type !== 'askUserQuestionResponse') {
+              return;
+            }
+
+            const { optionId, answers, cancelled } = message.data;
+
+            // Resolve with the result
+            if (cancelled) {
+              this.pendingAskUserQuestionResolve?.({
+                optionId: 'cancel',
+              });
+            } else {
+              this.pendingAskUserQuestionResolve?.({
+                optionId: optionId || 'proceed_once',
+                answers,
+              });
+            }
+          };
+          // Store handler in message handler
+          this.messageHandler.setAskUserQuestionHandler(handler);
         });
       },
     );
@@ -1147,6 +1212,25 @@ export class WebViewProvider {
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
             panelRef.title = title || 'Qwen Code';
+          }
+          return;
+        }
+        // Handle ask user question response
+        if (message.type === 'askUserQuestionResponse') {
+          const askUserQuestionMsg = message as AskUserQuestionResponseMessage;
+          const answers = askUserQuestionMsg.data.answers || {};
+          const cancelled = askUserQuestionMsg.data.cancelled || false;
+
+          // Resolve the pending ask user question promise
+          if (cancelled) {
+            this.pendingAskUserQuestionResolve?.({
+              optionId: 'cancel',
+            });
+          } else {
+            this.pendingAskUserQuestionResolve?.({
+              optionId: 'proceed_once',
+              answers,
+            });
           }
           return;
         }

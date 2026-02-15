@@ -1431,4 +1431,33 @@ export default {
   '(Press Enter to submit, Escape to cancel)':
     '(Нажмите Enter для отправки, Escape для отмены)',
   'More instructions please check:': 'Дополнительные инструкции см.:',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Пожалуйста, ответьте на следующий(ие) вопрос(ы):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Невозможно задавать вопросы пользователю в неинтерактивном режиме. Пожалуйста, запустите в интерактивном режиме для использования этого инструмента.',
+  'User declined to answer the questions.':
+    'Пользователь отказался отвечать на вопросы.',
+  'User has provided the following answers:':
+    'Пользователь предоставил следующие ответы:',
+  'Failed to process user answers:':
+    'Не удалось обработать ответы пользователя:',
+  'Type something...': 'Введите что-то...',
+  Submit: 'Отправить',
+  'Submit answers': 'Отправить ответы',
+  Cancel: 'Отмена',
+  'Your answers:': 'Ваши ответы:',
+  '(not answered)': '(не отвечено)',
+  'Ready to submit your answers?': 'Готовы отправить свои ответы?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Enter: Выбор',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
 };

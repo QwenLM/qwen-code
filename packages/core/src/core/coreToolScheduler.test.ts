@@ -2341,3 +2341,305 @@ describe('truncateAndSaveToFile', () => {
     );
   });
 });
+
+describe('CoreToolScheduler plan mode with ask_user_question', () => {
+  function createAskUserQuestionMockTool() {
+    let wasAnswered = false;
+    let userAnswers: Record<string, string> = {};
+
+    return new MockTool({
+      name: 'ask_user_question',
+      shouldConfirmExecute: async () => ({
+        type: 'ask_user_question' as const,
+        title: 'Please answer the following question(s):',
+        questions: [
+          {
+            question: 'Which approach do you prefer?',
+            header: 'Approach',
+            options: [
+              { label: 'Option A', description: 'First approach' },
+              { label: 'Option B', description: 'Second approach' },
+            ],
+            multiSelect: false,
+          },
+        ],
+        onConfirm: async (
+          outcome: ToolConfirmationOutcome,
+          payload?: ToolConfirmationPayload,
+        ) => {
+          if (
+            outcome === ToolConfirmationOutcome.ProceedOnce ||
+            outcome === ToolConfirmationOutcome.ProceedAlways
+          ) {
+            wasAnswered = true;
+            userAnswers = payload?.answers ?? {};
+          } else {
+            wasAnswered = false;
+          }
+        },
+      }),
+      execute: async () => {
+        if (!wasAnswered) {
+          return {
+            llmContent: 'User declined to answer the questions.',
+            returnDisplay: 'User declined to answer the questions.',
+          };
+        }
+        const answersContent = Object.entries(userAnswers)
+          .map(([key, value]) => `**Question ${key}**: ${value}`)
+          .join('\n');
+        return {
+          llmContent: `User has provided the following answers:\n\n${answersContent}`,
+          returnDisplay: `User has provided the following answers:\n\n${answersContent}`,
+        };
+      },
+    });
+  }
+
+  function createPlanModeScheduler(
+    tool: MockTool,
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    onToolCallsUpdate: ReturnType<typeof vi.fn>,
+  ) {
+    const mockToolRegistry = {
+      getTool: () => tool,
+      getToolByName: () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.PLAN,
+      getAllowedTools: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
+
+    return new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+  }
+
+  it('should enter awaiting_approval for ask_user_question in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    // Should enter awaiting_approval, NOT be directly scheduled
+    const awaitingCall = await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    );
+    expect(awaitingCall).toBeDefined();
+    expect(awaitingCall.status).toBe('awaiting_approval');
+  });
+
+  it('should execute successfully when user answers in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask-answer',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    // Simulate user answering the question
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+      { answers: { '0': 'Option A' } },
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+    if (completedCalls[0].status === 'success') {
+      expect(completedCalls[0].response.resultDisplay).toContain(
+        'User has provided the following answers',
+      );
+    }
+  });
+
+  it('should block non-ask_user_question tools that need confirmation in plan mode', async () => {
+    const editTool = new MockTool({
+      name: 'write_file',
+      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      editTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'write_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-blocked',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    if (completedCalls[0].status === 'error') {
+      expect(completedCalls[0].response.resultDisplay).toBe(
+        'Plan mode blocked a non-read-only tool call.',
+      );
+    }
+  });
+
+  it('should handle user cancellation of ask_user_question in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask-cancel',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    // Simulate user cancelling
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('cancelled');
+  });
+});

@@ -257,10 +257,46 @@ export interface AcpPermissionRequest {
     rawInput?: {
       command?: string;
       description?: string;
+      questions?: Question[];
+      metadata?: {
+        source?: string;
+      };
       [key: string]: unknown;
     };
     title?: string;
     kind?: string;
+  };
+}
+
+// Ask User Question types
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface Question {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+}
+
+export interface AskUserQuestionRequest {
+  sessionId: string;
+  questions: Question[];
+  metadata?: {
+    source?: string;
+  };
+}
+
+// Ask User Question update (sent by agent when asking questions)
+export interface AskUserQuestionUpdate extends BaseSessionUpdate {
+  update: {
+    sessionUpdate: 'ask_user_question';
+    questions: Question[];
+    metadata?: {
+      source?: string;
+    };
   };
 }
 

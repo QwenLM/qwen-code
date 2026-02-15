@@ -9,6 +9,7 @@ import type {
   AcpSessionUpdate,
   AcpPermissionRequest,
   AuthenticateUpdateNotification,
+  AskUserQuestionRequest,
 } from './acpTypes.js';
 
 export interface PendingRequest<T = unknown> {
@@ -25,6 +26,10 @@ export interface AcpConnectionCallbacks {
   }>;
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void;
   onEndTurn: (reason?: string) => void;
+  onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
+    optionId: string;
+    answers?: Record<string, string>;
+  }>;
 }
 
 export interface AcpConnectionState {

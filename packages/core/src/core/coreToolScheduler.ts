@@ -833,7 +833,13 @@ export class CoreToolScheduler {
             this.config.getApprovalMode() === ApprovalMode.PLAN;
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
 
-          if (isPlanMode && !isExitPlanModeTool) {
+          // ask_user_question needs the confirmation flow even in plan mode
+          // so the user can actually answer the questions
+          const isAskUserQuestionTool =
+            confirmationDetails &&
+            confirmationDetails.type === 'ask_user_question';
+
+          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
             if (confirmationDetails) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
@@ -850,8 +856,14 @@ export class CoreToolScheduler {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
           } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
+            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
+              doesToolInvocationMatch(
+                toolCall.tool,
+                invocation,
+                allowedTools,
+              )) &&
+            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
+            confirmationDetails.type !== 'ask_user_question'
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,

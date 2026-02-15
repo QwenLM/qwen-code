@@ -14,7 +14,11 @@ import type {
 } from '../../types/chatTypes.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
-import type { ModelInfo, AvailableCommand } from '../../types/acpTypes.js';
+import type {
+  ModelInfo,
+  AvailableCommand,
+  Question,
+} from '../../types/acpTypes.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -114,6 +118,17 @@ interface UseWebViewMessagesProps {
     } | null,
   ) => void;
 
+  // Ask User Question
+  handleAskUserQuestion: (
+    request: {
+      questions: Question[];
+      sessionId: string;
+      metadata?: {
+        source?: string;
+      };
+    } | null,
+  ) => void;
+
   // Input
   inputFieldRef: React.RefObject<HTMLDivElement>;
   setInputText: (text: string) => void;
@@ -143,6 +158,7 @@ export const useWebViewMessages = ({
   clearToolCalls,
   setPlanEntries,
   handlePermissionRequest,
+  handleAskUserQuestion,
   inputFieldRef,
   setInputText,
   setEditMode,
@@ -167,6 +183,7 @@ export const useWebViewMessages = ({
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest,
+    handleAskUserQuestion,
     setIsAuthenticated,
     setUsageStats,
     setModelInfo,
@@ -216,6 +233,7 @@ export const useWebViewMessages = ({
       clearToolCalls,
       setPlanEntries,
       handlePermissionRequest,
+      handleAskUserQuestion,
       setIsAuthenticated,
       setUsageStats,
       setModelInfo,
@@ -626,6 +644,19 @@ export const useWebViewMessages = ({
               _error,
             );
           }
+          break;
+        }
+
+        case 'askUserQuestion': {
+          // Handle ask user question request from extension
+          const questionsData = message.data as {
+            questions: Question[];
+            sessionId: string;
+            metadata?: {
+              source?: string;
+            };
+          };
+          handlers.handleAskUserQuestion(questionsData);
           break;
         }
 

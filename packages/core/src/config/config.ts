@@ -42,6 +42,7 @@ import {
 import { GitService } from '../services/gitService.js';
 
 // Tools
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { EditTool } from '../tools/edit.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { GlobTool } from '../tools/glob.js';
@@ -1713,6 +1714,7 @@ export class Config {
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
+    registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured

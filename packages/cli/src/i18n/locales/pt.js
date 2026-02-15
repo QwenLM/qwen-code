@@ -1442,4 +1442,33 @@ export default {
   '(Press Enter to submit, Escape to cancel)':
     '(Pressione Enter para enviar, Escape para cancelar)',
   'More instructions please check:': 'Mais instruções, consulte:',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Por favor, responda à(s) seguinte(s) pergunta(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Não é possível fazer perguntas ao usuário no modo não interativo. Por favor, execute no modo interativo para usar esta ferramenta.',
+  'User declined to answer the questions.':
+    'O usuário recusou responder às perguntas.',
+  'User has provided the following answers:':
+    'O usuário forneceu as seguintes respostas:',
+  'Failed to process user answers:':
+    'Falha ao processar as respostas do usuário:',
+  'Type something...': 'Digite algo...',
+  Submit: 'Enviar',
+  'Submit answers': 'Enviar respostas',
+  Cancel: 'Cancelar',
+  'Your answers:': 'Suas respostas:',
+  '(not answered)': '(não respondido)',
+  'Ready to submit your answers?': 'Pronto para enviar suas respostas?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navegar | ←/→: Alternar abas | Enter: Selecionar',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | ←/→: Alternar abas | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
 };
