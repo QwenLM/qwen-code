@@ -1335,6 +1335,40 @@ describe('KeypressContext - Kitty Protocol', () => {
     );
   });
 
+  describe('Printable CSI-u keys', () => {
+    it('parses kitty CSI-u space as a space key with literal sequence', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[32u`));
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'space',
+          sequence: ' ',
+          kittyProtocol: true,
+        }),
+      );
+    });
+
+    it('parses kitty CSI-u printable letters as literal input', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[100u`)); // 'd'
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'd',
+          sequence: 'd',
+          kittyProtocol: true,
+        }),
+      );
+    });
+  });
+
   describe('Shift+Tab forms', () => {
     it.each([
       { sequence: `\x1b[Z`, description: 'legacy reverse Tab' },
