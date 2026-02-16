@@ -370,9 +370,9 @@ describe('Server Config (config.ts)', () => {
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
 
-      await config.switchModel(AuthType.QWEN_OAUTH, 'qwen3.5-plus');
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
-      expect(config.getModel()).toBe('qwen3.5-plus');
+      expect(config.getModel()).toBe('coder-model');
       expect(refreshSpy).not.toHaveBeenCalled();
       // Called once during initial refreshAuth + once during handleModelChange diffing.
       expect(

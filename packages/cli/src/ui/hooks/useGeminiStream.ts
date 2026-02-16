@@ -35,6 +35,8 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  isSupportedImageMimeType,
+  getUnsupportedImageFormatWarning,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -46,7 +48,6 @@ import type {
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
 import { isAtCommand, isSlashCommand } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { useVisionAutoSwitch } from './useVisionAutoSwitch.js';
 import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
@@ -67,6 +68,60 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Checks if image parts have supported formats and returns unsupported ones
+ */
+function checkImageFormatsSupport(parts: PartListUnion): {
+  hasImages: boolean;
+  hasUnsupportedFormats: boolean;
+  unsupportedMimeTypes: string[];
+} {
+  const unsupportedMimeTypes: string[] = [];
+  let hasImages = false;
+
+  if (typeof parts === 'string') {
+    return {
+      hasImages: false,
+      hasUnsupportedFormats: false,
+      unsupportedMimeTypes: [],
+    };
+  }
+
+  const partsArray = Array.isArray(parts) ? parts : [parts];
+
+  for (const part of partsArray) {
+    if (typeof part === 'string') continue;
+
+    let mimeType: string | undefined;
+
+    // Check inlineData
+    if (
+      'inlineData' in part &&
+      part.inlineData?.mimeType?.startsWith('image/')
+    ) {
+      hasImages = true;
+      mimeType = part.inlineData.mimeType;
+    }
+
+    // Check fileData
+    if ('fileData' in part && part.fileData?.mimeType?.startsWith('image/')) {
+      hasImages = true;
+      mimeType = part.fileData.mimeType;
+    }
+
+    // Check if the mime type is supported
+    if (mimeType && !isSupportedImageMimeType(mimeType)) {
+      unsupportedMimeTypes.push(mimeType);
+    }
+  }
+
+  return {
+    hasImages,
+    hasUnsupportedFormats: unsupportedMimeTypes.length > 0,
+    unsupportedMimeTypes,
+  };
+}
 
 enum StreamProcessingStatus {
   Completed,
@@ -106,15 +161,9 @@ export const useGeminiStream = (
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
   onCancelSubmit: () => void,
-  visionModelPreviewEnabled: boolean,
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  onVisionSwitchRequired?: (query: PartListUnion) => Promise<{
-    modelOverride?: string;
-    persistSessionModel?: string;
-    showGuidance?: boolean;
-  }>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -278,12 +327,6 @@ export const useGeminiStream = (
     terminalHeight,
   );
 
-  const { handleVisionSwitch, restoreOriginalModel } = useVisionAutoSwitch(
-    config,
-    addItem,
-    visionModelPreviewEnabled,
-    onVisionSwitchRequired,
-  );
   const activePtyId = activeShellPtyId || activeToolPtyId;
 
   useEffect(() => {
@@ -1028,16 +1071,18 @@ export const useGeminiStream = (
           return;
         }
 
-        // Handle vision switch requirement
-        const visionSwitchResult = await handleVisionSwitch(
-          queryToSend,
-          userMessageTimestamp,
-          options?.isContinuation || false,
-        );
-
-        if (!visionSwitchResult.shouldProceed) {
-          isSubmittingQueryRef.current = false;
-          return;
+        // Check image format support for non-continuations
+        if (!options?.isContinuation) {
+          const formatCheck = checkImageFormatsSupport(queryToSend);
+          if (formatCheck.hasUnsupportedFormats) {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              userMessageTimestamp,
+            );
+          }
         }
 
         const finalQueryToSend = queryToSend;
@@ -1081,10 +1126,6 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
-            // Restore original model if it was temporarily overridden
-            restoreOriginalModel().catch((error) => {
-              debugLogger.error('Failed to restore original model:', error);
-            });
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1097,17 +1138,7 @@ export const useGeminiStream = (
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
-
-          // Restore original model if it was temporarily overridden
-          restoreOriginalModel().catch((error) => {
-            debugLogger.error('Failed to restore original model:', error);
-          });
         } catch (error: unknown) {
-          // Restore original model if it was temporarily overridden
-          restoreOriginalModel().catch((error) => {
-            debugLogger.error('Failed to restore original model:', error);
-          });
-
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -1143,8 +1174,6 @@ export const useGeminiStream = (
       startNewPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
-      handleVisionSwitch,
-      restoreOriginalModel,
     ],
   );
 

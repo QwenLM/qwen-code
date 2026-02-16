@@ -483,7 +483,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       googleSearchEngineId: undefined,
       webSearchDefault: undefined,
       screenReader: undefined,
-      vlmSwitchMode: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
       includePartialMessages: undefined,

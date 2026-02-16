@@ -115,7 +115,6 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Commercial Qwen3-Coder-Plus: 1M token context
   [/^qwen3-coder-plus(-.*)?$/, LIMITS['1m']], // catches "qwen3-coder-plus" and date variants
-  [/^qwen3.5-plus(-.*)?$/, LIMITS['1m']], // catches "qwen3.5-plus" and date variants
 
   // Commercial Qwen3-Coder-Flash: 1M token context
   [/^qwen3-coder-flash(-.*)?$/, LIMITS['1m']], // catches "qwen3-coder-flash" and date variants

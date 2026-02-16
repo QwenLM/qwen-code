@@ -884,9 +884,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
-    it('should set high resolution flag for the qwen3.5-plus model', () => {
+    it('should set high resolution flag for the coder-model model', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3.5-plus',
+        model: 'coder-model',
         messages: [
           {
             role: 'user',

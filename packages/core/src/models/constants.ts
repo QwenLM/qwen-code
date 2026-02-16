@@ -88,7 +88,7 @@ export const AUTH_ENV_MAPPINGS = {
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
-  openai: 'qwen3.5-plus',
+  openai: DEFAULT_QWEN_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
 } as Partial<Record<AuthType, string>>;
 
@@ -97,13 +97,6 @@ export const DEFAULT_MODELS = {
  * These cannot be overridden by user configuration.
  */
 export const QWEN_OAUTH_MODELS: ModelConfig[] = [
-  {
-    id: 'qwen3.5-plus',
-    name: 'qwen3.5-plus',
-    description:
-      'The Qwen3.5 native vision-language series Plus models deliver outstanding performance comparable to the very latest state-of-the-art models, with significant leaps in both pure-text and multimodal capabilities compared to the 3 series.',
-    capabilities: { vision: true },
-  },
   {
     id: 'coder-model',
     name: 'coder-model',

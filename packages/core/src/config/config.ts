@@ -364,7 +364,6 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
-  vlmSwitchMode?: string;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
   enableToolOutputTruncation?: boolean;
@@ -508,7 +507,6 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
-  private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
@@ -632,7 +630,6 @@ export class Config {
     this.channel = params.channel;
     this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
     this.storage = new Storage(this.targetDir);
-    this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
@@ -1560,10 +1557,6 @@ export class Config {
 
   getSkipStartupContext(): boolean {
     return this.skipStartupContext;
-  }
-
-  getVlmSwitchMode(): string | undefined {
-    return this.vlmSwitchMode;
   }
 
   getEnableToolOutputTruncation(): boolean {

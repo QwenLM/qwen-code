@@ -122,7 +122,6 @@ const MIGRATION_MAP: Record<string, string> = {
   skipStartupContext: 'model.skipStartupContext',
   enableOpenAILogging: 'model.enableOpenAILogging',
   tavilyApiKey: 'advanced.tavilyApiKey',
-  vlmSwitchMode: 'experimental.vlmSwitchMode',
   visionModelPreview: 'experimental.visionModelPreview',
 };
 

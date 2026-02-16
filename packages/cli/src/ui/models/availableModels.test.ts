@@ -11,45 +11,34 @@ import {
   getOpenAIAvailableModelFromEnv,
   isVisionModel,
   getDefaultVisionModel,
-  MAINLINE_VLM,
-  MAINLINE_CODER,
 } from './availableModels.js';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  type Config,
+  DEFAULT_QWEN_MODEL,
+} from '@qwen-code/qwen-code-core';
 
 describe('availableModels', () => {
   describe('Qwen models', () => {
-    const qwenModels = getFilteredQwenModels(true);
+    const qwenModels = getFilteredQwenModels();
 
-    it('should include default model (qwen3.5-plus)', () => {
-      const defaultModel = qwenModels.find((m) => m.id === MAINLINE_CODER);
-      expect(defaultModel).toBeDefined();
-      expect(defaultModel?.id).toBe('qwen3.5-plus');
+    it('should include only coder-model', () => {
+      expect(qwenModels.length).toBe(1);
+      expect(qwenModels[0].id).toBe('coder-model');
     });
 
-    it('should include coder-model as non-vision alternative', () => {
-      const coderModel = qwenModels.find((m) => m.id === 'coder-model');
-      expect(coderModel).toBeDefined();
-      expect(coderModel?.isVision).toBeFalsy();
-    });
-
-    it('should include vision model (qwen3.5-plus with vision capability)', () => {
-      const visionModel = qwenModels.find((m) => m.id === MAINLINE_VLM);
-      expect(visionModel).toBeDefined();
-      expect(visionModel?.isVision).toBe(true);
-      expect(visionModel?.id).toBe('qwen3.5-plus');
+    it('should have coder-model with vision capability', () => {
+      const coderModel = qwenModels[0];
+      expect(coderModel.isVision).toBe(true);
     });
   });
 
   describe('getFilteredQwenModels', () => {
-    it('should return all models when vision preview is enabled', () => {
-      const models = getFilteredQwenModels(true);
-      const expected = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(models.length).toBe(expected.length);
-    });
-
-    it('should filter out vision models when preview is disabled', () => {
-      const models = getFilteredQwenModels(false);
-      expect(models.every((m) => !m.isVision)).toBe(true);
+    it('should return coder-model with vision capability', () => {
+      const models = getFilteredQwenModels();
+      expect(models.length).toBe(1);
+      expect(models[0].id).toBe('coder-model');
+      expect(models[0].isVision).toBe(true);
     });
   });
 
@@ -96,7 +85,9 @@ describe('availableModels', () => {
 
     it('should return hard-coded qwen models for qwen-oauth', () => {
       const models = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(models).toEqual(getFilteredQwenModels(true));
+      expect(models.length).toBe(1);
+      expect(models[0].id).toBe('coder-model');
+      expect(models[0].isVision).toBe(true);
     });
 
     it('should use config models for qwen-oauth when config is provided', () => {
@@ -200,12 +191,8 @@ describe('availableModels', () => {
   });
 
   describe('isVisionModel', () => {
-    it('should return true for vision model', () => {
-      expect(isVisionModel(MAINLINE_VLM)).toBe(true);
-    });
-
-    it('should return false for coder-model (non-vision)', () => {
-      expect(isVisionModel('coder-model')).toBe(false);
+    it('should return true for coder-model with vision capability', () => {
+      expect(isVisionModel('coder-model')).toBe(true);
     });
 
     it('should return false for unknown model', () => {
@@ -214,8 +201,8 @@ describe('availableModels', () => {
   });
 
   describe('getDefaultVisionModel', () => {
-    it('should return the vision model ID', () => {
-      expect(getDefaultVisionModel()).toBe(MAINLINE_VLM);
+    it('should return the default model ID', () => {
+      expect(getDefaultVisionModel()).toBe(DEFAULT_QWEN_MODEL);
     });
   });
 });
