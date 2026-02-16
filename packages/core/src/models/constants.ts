@@ -88,20 +88,22 @@ export const AUTH_ENV_MAPPINGS = {
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
-  openai: 'qwen3-coder-plus',
+  openai: 'qwen3.5-plus',
   'qwen-oauth': DEFAULT_QWEN_MODEL,
 } as Partial<Record<AuthType, string>>;
-
-export const QWEN_OAUTH_ALLOWED_MODELS = [
-  DEFAULT_QWEN_MODEL,
-  'vision-model',
-] as const;
 
 /**
  * Hard-coded Qwen OAuth models that are always available.
  * These cannot be overridden by user configuration.
  */
 export const QWEN_OAUTH_MODELS: ModelConfig[] = [
+  {
+    id: 'qwen3.5-plus',
+    name: 'qwen3.5-plus',
+    description:
+      'The Qwen3.5 native vision-language series Plus models deliver outstanding performance comparable to the very latest state-of-the-art models, with significant leaps in both pure-text and multimodal capabilities compared to the 3 series.',
+    capabilities: { vision: false },
+  },
   {
     id: 'coder-model',
     name: 'coder-model',
@@ -116,3 +118,11 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     capabilities: { vision: true },
   },
 ];
+
+/**
+ * Derive allowed models from QWEN_OAUTH_MODELS for authorization.
+ * This ensures single source of truth (SSOT).
+ */
+export const QWEN_OAUTH_ALLOWED_MODELS = QWEN_OAUTH_MODELS.map(
+  (model) => model.id,
+) as readonly string[];

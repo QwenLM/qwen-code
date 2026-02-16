@@ -9,6 +9,7 @@ import {
   DEFAULT_QWEN_MODEL,
   type Config,
   type AvailableModel as CoreAvailableModel,
+  QWEN_OAUTH_MODELS,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -22,27 +23,18 @@ export type AvailableModel = {
 export const MAINLINE_VLM = 'vision-model';
 export const MAINLINE_CODER = DEFAULT_QWEN_MODEL;
 
-export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
-  {
-    id: MAINLINE_CODER,
-    label: MAINLINE_CODER,
-    get description() {
-      return t(
-        'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
-      );
-    },
-  },
-  {
-    id: MAINLINE_VLM,
-    label: MAINLINE_VLM,
-    get description() {
-      return t(
-        'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
-      );
-    },
-    isVision: true,
-  },
-];
+const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(
+  (model) => ({
+    id: model.id,
+    label: model.name ?? model.id,
+    description: model.description,
+    isVision: model.capabilities?.vision ?? false,
+  }),
+);
+
+function getQwenOAuthModels(): readonly AvailableModel[] {
+  return CACHED_QWEN_OAUTH_MODELS;
+}
 
 /**
  * Get available Qwen models filtered by vision model preview setting
@@ -50,10 +42,11 @@ export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
 export function getFilteredQwenModels(
   visionModelPreviewEnabled: boolean,
 ): AvailableModel[] {
+  const qwenModels = getQwenOAuthModels();
   if (visionModelPreviewEnabled) {
-    return AVAILABLE_MODELS_QWEN;
+    return [...qwenModels];
   }
-  return AVAILABLE_MODELS_QWEN.filter((model) => !model.isVision);
+  return qwenModels.filter((model) => !model.isVision);
 }
 
 /**
@@ -104,18 +97,12 @@ function convertCoreModelToCliModel(
  * Get available models for the given authType.
  *
  * If a Config object is provided, uses config.getAvailableModelsForAuthType().
- * For qwen-oauth, always returns the hard-coded models.
  * Falls back to environment variables only when no config is provided.
  */
 export function getAvailableModelsForAuthType(
   authType: AuthType,
   config?: Config,
 ): AvailableModel[] {
-  // For qwen-oauth, always use hard-coded models, this aligns with the API gateway.
-  if (authType === AuthType.QWEN_OAUTH) {
-    return AVAILABLE_MODELS_QWEN;
-  }
-
   // Use config's model registry when available
   if (config) {
     try {
@@ -134,6 +121,9 @@ export function getAvailableModelsForAuthType(
 
   // Fall back to environment variables for specific auth types (no config provided)
   switch (authType) {
+    case AuthType.QWEN_OAUTH: {
+      return [...getQwenOAuthModels()];
+    }
     case AuthType.USE_OPENAI: {
       const openAIModel = getOpenAIAvailableModelFromEnv();
       return openAIModel ? [openAIModel] : [];
@@ -156,7 +146,7 @@ export function getDefaultVisionModel(): string {
 }
 
 export function isVisionModel(modelId: string): boolean {
-  return AVAILABLE_MODELS_QWEN.some(
+  return getQwenOAuthModels().some(
     (model) => model.id === modelId && model.isVision,
   );
 }
