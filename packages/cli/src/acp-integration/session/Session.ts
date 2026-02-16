@@ -552,6 +552,7 @@ export class Session implements SessionContext {
             content,
             locations: invocation.toolLocations(),
             kind: mappedKind,
+            rawInput: args,
           },
         };
 
@@ -563,7 +564,9 @@ export class Session implements SessionContext {
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
 
-        await confirmationDetails.onConfirm(outcome);
+        await confirmationDetails.onConfirm(outcome, {
+          answers: output.answers,
+        });
 
         // After exit_plan_mode confirmation, send current_mode_update notification
         if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
@@ -1012,6 +1015,19 @@ function toPermissionOptions(
         {
           optionId: ToolConfirmationOutcome.Cancel,
           name: `No, keep planning (esc)`,
+          kind: 'reject_once',
+        },
+      ];
+    case 'ask_user_question':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
           kind: 'reject_once',
         },
       ];

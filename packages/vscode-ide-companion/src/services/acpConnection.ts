@@ -12,6 +12,7 @@ import type {
   AcpResponse,
   AcpSessionUpdate,
   AuthenticateUpdateNotification,
+  AskUserQuestionRequest,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
@@ -47,6 +48,10 @@ export class AcpConnection {
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onEndTurn: () => void = () => {};
+  onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
+    optionId: string;
+    answers?: Record<string, string>;
+  }> = () => Promise.resolve({ optionId: 'proceed_once' });
   // Called after successful initialize() with the initialize result
   onInitialized: (init: unknown) => void = () => {};
 
@@ -215,6 +220,7 @@ export class AcpConnection {
       onPermissionRequest: this.onPermissionRequest,
       onAuthenticateUpdate: this.onAuthenticateUpdate,
       onEndTurn: this.onEndTurn,
+      onAskUserQuestion: this.onAskUserQuestion,
     };
 
     // Handle message
