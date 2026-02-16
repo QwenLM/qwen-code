@@ -102,7 +102,7 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     name: 'qwen3.5-plus',
     description:
       'The Qwen3.5 native vision-language series Plus models deliver outstanding performance comparable to the very latest state-of-the-art models, with significant leaps in both pure-text and multimodal capabilities compared to the 3 series.',
-    capabilities: { vision: false },
+    capabilities: { vision: true },
   },
   {
     id: 'coder-model',
@@ -110,12 +110,6 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     description:
       'The stable qwen3-coder-plus model from Alibaba Cloud ModelStudio',
     capabilities: { vision: false },
-  },
-  {
-    id: 'vision-model',
-    name: 'vision-model',
-    description: 'The latest Qwen Vision model from Alibaba Cloud ModelStudio',
-    capabilities: { vision: true },
   },
 ];
 

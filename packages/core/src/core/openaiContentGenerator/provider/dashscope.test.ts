@@ -884,9 +884,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
-    it('should set high resolution flag for the vision-model alias', () => {
+    it('should set high resolution flag for the qwen3.5-plus model', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'vision-model',
+        model: 'qwen3.5-plus',
         messages: [
           {
             role: 'user',

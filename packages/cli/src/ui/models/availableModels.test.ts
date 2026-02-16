@@ -20,16 +20,23 @@ describe('availableModels', () => {
   describe('Qwen models', () => {
     const qwenModels = getFilteredQwenModels(true);
 
-    it('should include coder model', () => {
-      const coderModel = qwenModels.find((m) => m.id === MAINLINE_CODER);
+    it('should include default model (qwen3.5-plus)', () => {
+      const defaultModel = qwenModels.find((m) => m.id === MAINLINE_CODER);
+      expect(defaultModel).toBeDefined();
+      expect(defaultModel?.id).toBe('qwen3.5-plus');
+    });
+
+    it('should include coder-model as non-vision alternative', () => {
+      const coderModel = qwenModels.find((m) => m.id === 'coder-model');
       expect(coderModel).toBeDefined();
       expect(coderModel?.isVision).toBeFalsy();
     });
 
-    it('should include vision model', () => {
+    it('should include vision model (qwen3.5-plus with vision capability)', () => {
       const visionModel = qwenModels.find((m) => m.id === MAINLINE_VLM);
       expect(visionModel).toBeDefined();
       expect(visionModel?.isVision).toBe(true);
+      expect(visionModel?.id).toBe('qwen3.5-plus');
     });
   });
 
@@ -197,8 +204,8 @@ describe('availableModels', () => {
       expect(isVisionModel(MAINLINE_VLM)).toBe(true);
     });
 
-    it('should return false for non-vision model', () => {
-      expect(isVisionModel(MAINLINE_CODER)).toBe(false);
+    it('should return false for coder-model (non-vision)', () => {
+      expect(isVisionModel('coder-model')).toBe(false);
     });
 
     it('should return false for unknown model', () => {

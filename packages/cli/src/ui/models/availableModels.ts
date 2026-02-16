@@ -20,7 +20,7 @@ export type AvailableModel = {
   isVision?: boolean;
 };
 
-export const MAINLINE_VLM = 'vision-model';
+export const MAINLINE_VLM = 'qwen3.5-plus';
 export const MAINLINE_CODER = DEFAULT_QWEN_MODEL;
 
 const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(

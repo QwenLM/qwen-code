@@ -157,17 +157,17 @@ describe('modelConfigResolver', () => {
         expect(result.sources['apiKey'].kind).toBe('computed');
       });
 
-      it('allows vision-model for Qwen OAuth', () => {
+      it('allows qwen3.5-plus for Qwen OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {
-            model: 'vision-model',
+            model: 'qwen3.5-plus',
           },
           settings: {},
           env: {},
         });
 
-        expect(result.config.model).toBe('vision-model');
+        expect(result.config.model).toBe('qwen3.5-plus');
         expect(result.sources['model'].kind).toBe('cli');
       });
 
