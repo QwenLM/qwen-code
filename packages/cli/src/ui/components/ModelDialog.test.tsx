@@ -16,7 +16,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import {
-  AVAILABLE_MODELS_QWEN,
+  getFilteredQwenModels,
   MAINLINE_CODER,
   MAINLINE_VLM,
 } from '../models/availableModels.js';
@@ -29,6 +29,19 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
   DescriptiveRadioButtonSelect: vi.fn(() => null),
 }));
+
+// Helper to create getAvailableModelsForAuthType mock
+const createMockGetAvailableModelsForAuthType = () =>
+  vi.fn((t: AuthType) => {
+    if (t === AuthType.QWEN_OAUTH) {
+      return getFilteredQwenModels(true).map((m) => ({
+        id: m.id,
+        label: m.label,
+        authType: AuthType.QWEN_OAUTH,
+      }));
+    }
+    return [];
+  });
 const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 
 const renderComponent = (
@@ -54,7 +67,7 @@ const renderComponent = (
     switchModel: vi.fn().mockResolvedValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
     getAllConfiguredModels: vi.fn(() =>
-      AVAILABLE_MODELS_QWEN.map((m) => ({
+      getFilteredQwenModels(true).map((m) => ({
         id: m.id,
         label: m.label,
         description: m.description || '',
@@ -116,24 +129,38 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
 
     const props = mockedSelect.mock.calls[0][0];
-    expect(props.items).toHaveLength(AVAILABLE_MODELS_QWEN.length);
+    expect(props.items).toHaveLength(getFilteredQwenModels(true).length);
     expect(props.items[0].value).toBe(
       `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
     );
-    expect(props.items[1].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
+    // Find vision model in the list (it's not necessarily at index 1 anymore)
+    const visionModelItem = props.items.find(
+      (item) =>
+        typeof item.value === 'string' &&
+        item.value.endsWith(`::${MAINLINE_VLM}`),
     );
+    expect(visionModelItem).toBeDefined();
     expect(props.showNumbers).toBe(true);
   });
 
   it('initializes with the model from ConfigContext', () => {
     const mockGetModel = vi.fn(() => MAINLINE_VLM);
-    renderComponent({}, { getModel: mockGetModel });
+    renderComponent(
+      {},
+      {
+        getModel: mockGetModel,
+        getAvailableModelsForAuthType:
+          createMockGetAvailableModelsForAuthType(),
+      },
+    );
 
     expect(mockGetModel).toHaveBeenCalled();
+    // Calculate expected index dynamically based on model list
+    const qwenModels = getFilteredQwenModels(true);
+    const expectedIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialIndex: 1,
+        initialIndex: expectedIndex,
       }),
       undefined,
     );
@@ -151,10 +178,15 @@ describe('<ModelDialog />', () => {
   });
 
   it('initializes with default coder model if getModel returns undefined', () => {
-    const mockGetModel = vi.fn(() => undefined);
-    // @ts-expect-error This test validates component robustness when getModel
-    // returns an unexpected undefined value.
-    renderComponent({}, { getModel: mockGetModel });
+    const mockGetModel = vi.fn(() => undefined as unknown as string);
+    renderComponent(
+      {},
+      {
+        getModel: mockGetModel,
+        getAvailableModelsForAuthType:
+          createMockGetAvailableModelsForAuthType(),
+      },
+    );
 
     expect(mockGetModel).toHaveBeenCalled();
 
@@ -170,7 +202,21 @@ describe('<ModelDialog />', () => {
   });
 
   it('calls config.switchModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', async () => {
-    const { props, mockConfig, mockSettings } = renderComponent({}, {}); // Pass empty object for contextValue
+    const { props, mockConfig, mockSettings } = renderComponent(
+      {},
+      {
+        getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+          if (t === AuthType.QWEN_OAUTH) {
+            return getFilteredQwenModels(true).map((m) => ({
+              id: m.id,
+              label: m.label,
+              authType: AuthType.QWEN_OAUTH,
+            }));
+          }
+          return [];
+        }),
+      },
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
@@ -203,7 +249,7 @@ describe('<ModelDialog />', () => {
         return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
       }
       if (t === AuthType.QWEN_OAUTH) {
-        return AVAILABLE_MODELS_QWEN.map((m) => ({
+        return getFilteredQwenModels(true).map((m) => ({
           id: m.id,
           label: m.label,
           authType: AuthType.QWEN_OAUTH,
@@ -305,8 +351,10 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getAvailableModelsForAuthType:
+                createMockGetAvailableModelsForAuthType(),
               getAllConfiguredModels: vi.fn(() =>
-                AVAILABLE_MODELS_QWEN.map((m) => ({
+                getFilteredQwenModels(true).map((m) => ({
                   id: m.id,
                   label: m.label,
                   description: m.description || '',
@@ -321,14 +369,16 @@ describe('<ModelDialog />', () => {
       </SettingsContext.Provider>,
     );
 
+    // MAINLINE_CODER (qwen3.5-plus) is at index 0
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
 
     mockGetModel.mockReturnValue(MAINLINE_VLM);
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getAvailableModelsForAuthType: createMockGetAvailableModelsForAuthType(),
       getAllConfiguredModels: vi.fn(() =>
-        AVAILABLE_MODELS_QWEN.map((m) => ({
+        getFilteredQwenModels(true).map((m) => ({
           id: m.id,
           label: m.label,
           description: m.description || '',
@@ -347,6 +397,9 @@ describe('<ModelDialog />', () => {
 
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
-    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(1);
+    // Calculate expected index for MAINLINE_VLM dynamically
+    const qwenModels = getFilteredQwenModels(true);
+    const expectedVlmIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
+    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedVlmIndex);
   });
 });

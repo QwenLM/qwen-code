@@ -213,7 +213,7 @@ qwen --model "qwen3-coder-plus"
 
 # In another terminal
 
-qwen --model "qwen3-coder-next"
+qwen --model "qwen3.5-plus"
 ```
 
 ## Security notes

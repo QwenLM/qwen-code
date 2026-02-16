@@ -95,7 +95,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.model).toBe('qwen3-coder-plus');
+        expect(result.config.model).toBe('qwen3.5-plus');
         expect(result.sources['model'].kind).toBe('default');
       });
 
