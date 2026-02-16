@@ -62,7 +62,7 @@ describe('useVisionAutoSwitch helpers', () => {
       const result = shouldOfferVisionSwitch(
         parts,
         AuthType.QWEN_OAUTH,
-        'vision-model',
+        'qwen3.5-plus',
         true,
       );
       expect(result).toBe(false);
@@ -161,7 +161,7 @@ describe('useVisionAutoSwitch helpers', () => {
       const result = shouldOfferVisionSwitch(
         parts,
         AuthType.QWEN_OAUTH,
-        'vision-model',
+        'qwen3.5-plus',
         true,
       );
       expect(result).toBe(false);
@@ -526,7 +526,7 @@ describe('useVisionAutoSwitch hook', () => {
     it('does not switch in YOLO mode when already using vision model', async () => {
       const config = createMockConfig(
         AuthType.QWEN_OAUTH,
-        'vision-model',
+        'qwen3.5-plus',
         ApprovalMode.YOLO,
       );
       const onVisionSwitchRequired = vi.fn();
@@ -728,7 +728,7 @@ describe('useVisionAutoSwitch hook', () => {
 
       expect(switchResult.shouldProceed).toBe(true);
       expect(switchResult.originalModel).toBe('qwen3-coder-plus');
-      expect(config.setModel).toHaveBeenCalledWith('vision-model', {
+      expect(config.setModel).toHaveBeenCalledWith('qwen3.5-plus', {
         reason: 'vision_auto_switch',
         context: 'Default VLM switch mode: once (one-time override)',
       });
@@ -764,7 +764,7 @@ describe('useVisionAutoSwitch hook', () => {
 
       expect(switchResult.shouldProceed).toBe(true);
       expect(switchResult.originalModel).toBeUndefined(); // No original model for session switch
-      expect(config.setModel).toHaveBeenCalledWith('vision-model', {
+      expect(config.setModel).toHaveBeenCalledWith('qwen3.5-plus', {
         reason: 'vision_auto_switch',
         context: 'Default VLM switch mode: session (session persistent)',
       });
@@ -813,7 +813,7 @@ describe('useVisionAutoSwitch hook', () => {
       );
       const onVisionSwitchRequired = vi
         .fn()
-        .mockResolvedValue({ modelOverride: 'vision-model' });
+        .mockResolvedValue({ modelOverride: 'qwen3.5-plus' });
       const { result } = renderHook(() =>
         useVisionAutoSwitch(
           config,

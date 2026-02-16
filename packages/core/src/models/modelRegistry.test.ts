@@ -18,7 +18,6 @@ describe('ModelRegistry', () => {
       expect(qwenModels.length).toBe(QWEN_OAUTH_MODELS.length);
       expect(qwenModels[0].id).toBe('qwen3.5-plus');
       expect(qwenModels[1].id).toBe('coder-model');
-      expect(qwenModels[2].id).toBe('vision-model');
     });
 
     it('should initialize with empty config', () => {
