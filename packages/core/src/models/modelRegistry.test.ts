@@ -16,8 +16,7 @@ describe('ModelRegistry', () => {
 
       const qwenModels = registry.getModelsForAuthType(AuthType.QWEN_OAUTH);
       expect(qwenModels.length).toBe(QWEN_OAUTH_MODELS.length);
-      expect(qwenModels[0].id).toBe('qwen3.5-plus');
-      expect(qwenModels[1].id).toBe('coder-model');
+      expect(qwenModels[0].id).toBe('coder-model');
     });
 
     it('should initialize with empty config', () => {
@@ -188,12 +187,12 @@ describe('ModelRegistry', () => {
   });
 
   describe('getDefaultModelForAuthType', () => {
-    it('should return qwen3.5-plus for qwen-oauth', () => {
+    it('should return coder-model for qwen-oauth', () => {
       const registry = new ModelRegistry();
       const defaultModel = registry.getDefaultModelForAuthType(
         AuthType.QWEN_OAUTH,
       );
-      expect(defaultModel?.id).toBe('qwen3.5-plus');
+      expect(defaultModel?.id).toBe('coder-model');
     });
 
     it('should return first model for other authTypes', () => {

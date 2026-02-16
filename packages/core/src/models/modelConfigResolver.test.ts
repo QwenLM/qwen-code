@@ -95,7 +95,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.model).toBe('qwen3.5-plus');
+        expect(result.config.model).toBe('coder-model');
         expect(result.sources['model'].kind).toBe('default');
       });
 
@@ -157,17 +157,17 @@ describe('modelConfigResolver', () => {
         expect(result.sources['apiKey'].kind).toBe('computed');
       });
 
-      it('allows qwen3.5-plus for Qwen OAuth', () => {
+      it('allows coder-model for Qwen OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {
-            model: 'qwen3.5-plus',
+            model: 'coder-model',
           },
           settings: {},
           env: {},
         });
 
-        expect(result.config.model).toBe('qwen3.5-plus');
+        expect(result.config.model).toBe('coder-model');
         expect(result.sources['model'].kind).toBe('cli');
       });
 

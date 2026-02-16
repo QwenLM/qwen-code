@@ -34,7 +34,7 @@ vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
 const createMockGetAvailableModelsForAuthType = () =>
   vi.fn((t: AuthType) => {
     if (t === AuthType.QWEN_OAUTH) {
-      return getFilteredQwenModels(true).map((m) => ({
+      return getFilteredQwenModels().map((m) => ({
         id: m.id,
         label: m.label,
         authType: AuthType.QWEN_OAUTH,
@@ -67,7 +67,7 @@ const renderComponent = (
     switchModel: vi.fn().mockResolvedValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
     getAllConfiguredModels: vi.fn(() =>
-      getFilteredQwenModels(true).map((m) => ({
+      getFilteredQwenModels().map((m) => ({
         id: m.id,
         label: m.label,
         description: m.description || '',
@@ -129,17 +129,14 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
 
     const props = mockedSelect.mock.calls[0][0];
-    expect(props.items).toHaveLength(getFilteredQwenModels(true).length);
+    expect(props.items).toHaveLength(getFilteredQwenModels().length);
+    // coder-model is the only model and it has vision capability
     expect(props.items[0].value).toBe(
       `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
     );
-    // Find vision model in the list (it's not necessarily at index 1 anymore)
-    const visionModelItem = props.items.find(
-      (item) =>
-        typeof item.value === 'string' &&
-        item.value.endsWith(`::${MAINLINE_VLM}`),
+    expect(props.items[0].value).toBe(
+      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
     );
-    expect(visionModelItem).toBeDefined();
     expect(props.showNumbers).toBe(true);
   });
 
@@ -156,7 +153,7 @@ describe('<ModelDialog />', () => {
 
     expect(mockGetModel).toHaveBeenCalled();
     // Calculate expected index dynamically based on model list
-    const qwenModels = getFilteredQwenModels(true);
+    const qwenModels = getFilteredQwenModels();
     const expectedIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -207,7 +204,7 @@ describe('<ModelDialog />', () => {
       {
         getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
           if (t === AuthType.QWEN_OAUTH) {
-            return getFilteredQwenModels(true).map((m) => ({
+            return getFilteredQwenModels().map((m) => ({
               id: m.id,
               label: m.label,
               authType: AuthType.QWEN_OAUTH,
@@ -249,7 +246,7 @@ describe('<ModelDialog />', () => {
         return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
       }
       if (t === AuthType.QWEN_OAUTH) {
-        return getFilteredQwenModels(true).map((m) => ({
+        return getFilteredQwenModels().map((m) => ({
           id: m.id,
           label: m.label,
           authType: AuthType.QWEN_OAUTH,
@@ -354,7 +351,7 @@ describe('<ModelDialog />', () => {
               getAvailableModelsForAuthType:
                 createMockGetAvailableModelsForAuthType(),
               getAllConfiguredModels: vi.fn(() =>
-                getFilteredQwenModels(true).map((m) => ({
+                getFilteredQwenModels().map((m) => ({
                   id: m.id,
                   label: m.label,
                   description: m.description || '',
@@ -378,7 +375,7 @@ describe('<ModelDialog />', () => {
       getAuthType: mockGetAuthType,
       getAvailableModelsForAuthType: createMockGetAvailableModelsForAuthType(),
       getAllConfiguredModels: vi.fn(() =>
-        getFilteredQwenModels(true).map((m) => ({
+        getFilteredQwenModels().map((m) => ({
           id: m.id,
           label: m.label,
           description: m.description || '',
@@ -398,7 +395,7 @@ describe('<ModelDialog />', () => {
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
     // Calculate expected index for MAINLINE_VLM dynamically
-    const qwenModels = getFilteredQwenModels(true);
+    const qwenModels = getFilteredQwenModels();
     const expectedVlmIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedVlmIndex);
   });

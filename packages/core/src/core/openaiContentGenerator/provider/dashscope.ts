@@ -286,7 +286,7 @@ export class DashScopeOpenAICompatibleProvider
 
     const normalized = model.toLowerCase();
 
-    if (normalized === 'qwen3.5-plus') {
+    if (normalized === 'coder-model') {
       return true;
     }
 

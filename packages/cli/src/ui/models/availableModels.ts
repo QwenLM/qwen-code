@@ -20,8 +20,11 @@ export type AvailableModel = {
   isVision?: boolean;
 };
 
-export const MAINLINE_VLM = 'qwen3.5-plus';
-export const MAINLINE_CODER = DEFAULT_QWEN_MODEL;
+// Re-export constants from core for backwards compatibility
+export {
+  DEFAULT_QWEN_MODEL as MAINLINE_CODER,
+  DEFAULT_QWEN_MODEL as MAINLINE_VLM,
+};
 
 const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(
   (model) => ({
@@ -37,16 +40,11 @@ function getQwenOAuthModels(): readonly AvailableModel[] {
 }
 
 /**
- * Get available Qwen models filtered by vision model preview setting
+ * Get available Qwen models
+ * coder-model now has vision capabilities by default.
  */
-export function getFilteredQwenModels(
-  visionModelPreviewEnabled: boolean,
-): AvailableModel[] {
-  const qwenModels = getQwenOAuthModels();
-  if (visionModelPreviewEnabled) {
-    return [...qwenModels];
-  }
-  return qwenModels.filter((model) => !model.isVision);
+export function getFilteredQwenModels(): AvailableModel[] {
+  return [...getQwenOAuthModels()];
 }
 
 /**
@@ -138,13 +136,17 @@ export function getAvailableModelsForAuthType(
 }
 
 /**
- * Hard code the default vision model as a string literal,
- * until our coding model supports multimodal.
+ * coder-model now has vision capabilities by default.
+ * This function is kept for backwards compatibility but always returns the current model.
  */
 export function getDefaultVisionModel(): string {
-  return MAINLINE_VLM;
+  return DEFAULT_QWEN_MODEL;
 }
 
+/**
+ * coder-model now has vision capabilities by default.
+ * This function is kept for backwards compatibility but always returns true for the default model.
+ */
 export function isVisionModel(modelId: string): boolean {
   return getQwenOAuthModels().some(
     (model) => model.id === modelId && model.isVision,

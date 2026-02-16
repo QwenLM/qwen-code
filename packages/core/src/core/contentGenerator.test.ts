@@ -90,11 +90,11 @@ describe('createContentGeneratorConfig', () => {
 
   it('should preserve provided fields and set authType for QWEN_OAUTH', () => {
     const cfg = createContentGeneratorConfig(mockConfig, AuthType.QWEN_OAUTH, {
-      model: 'qwen3.5-plus',
+      model: 'coder-model',
       apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
     });
     expect(cfg.authType).toBe(AuthType.QWEN_OAUTH);
-    expect(cfg.model).toBe('qwen3.5-plus');
+    expect(cfg.model).toBe('coder-model');
     expect(cfg.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
   });
 

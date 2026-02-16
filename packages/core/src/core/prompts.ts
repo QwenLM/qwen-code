@@ -801,10 +801,6 @@ function getToolCallExamples(model?: string): string {
     if (/coder-model/i.test(model)) {
       return qwenCoderToolCallExamples;
     }
-    // Match qwen3.5-plus pattern (uses same tool call examples as coder)
-    if (/qwen3\.5-plus/i.test(model)) {
-      return qwenCoderToolCallExamples;
-    }
   }
 
   return generalToolCallExamples;
