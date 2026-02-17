@@ -24,6 +24,14 @@ const mockFork = vi.mocked(childProcess.fork);
 const mockPrepareSpawnInfo = vi.mocked(cliPath.prepareSpawnInfo);
 const mockParseJsonLinesStream = vi.mocked(jsonLines.parseJsonLinesStream);
 
+let createdTransports: ProcessTransport[] = [];
+
+function createTransport(options: TransportOptions): ProcessTransport {
+  const transport = new ProcessTransport(options);
+  createdTransports.push(transport);
+  return transport;
+}
+
 // Helper function to create a mock child process with optional overrides
 function createMockChildProcess(
   overrides: Partial<ChildProcess> = {},
@@ -75,6 +83,7 @@ describe('ProcessTransport', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    createdTransports = [];
 
     // Clean up environment variables for FORK_MODE tests
     delete process.env.FORK_MODE;
@@ -115,8 +124,18 @@ describe('ProcessTransport', () => {
     }) as unknown as ChildProcess & EventEmitter;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await Promise.all(
+      createdTransports.map(async (transport) => {
+        try {
+          await transport.close();
+        } catch {
+          // Ignore errors during cleanup
+        }
+      }),
+    );
+    createdTransports = [];
   });
 
   describe('Construction and Initialization', () => {
@@ -133,7 +152,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport).toBeDefined();
       expect(transport.isReady).toBe(true);
@@ -170,7 +189,7 @@ describe('ProcessTransport', () => {
         authType: 'api-key',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -210,7 +229,7 @@ describe('ProcessTransport', () => {
         resume: '123e4567-e89b-12d3-a456-426614174000',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -236,7 +255,7 @@ describe('ProcessTransport', () => {
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -264,10 +283,8 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      expect(() => new ProcessTransport(options)).toThrow(AbortError);
-      expect(() => new ProcessTransport(options)).toThrow(
-        'Transport start aborted',
-      );
+      expect(() => createTransport(options)).toThrow(AbortError);
+      expect(() => createTransport(options)).toThrow('Transport start aborted');
     });
 
     it('should use provided AbortController', () => {
@@ -285,7 +302,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -309,7 +326,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -335,7 +352,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledTimes(1);
     });
@@ -353,7 +370,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.isReady).toBe(true);
     });
@@ -371,7 +388,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('error', new Error('Spawn failed'));
 
@@ -392,7 +409,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
 
@@ -414,7 +431,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
 
@@ -438,7 +455,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
       await transport.close();
@@ -460,7 +477,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const waitPromise = transport.waitForExit();
 
@@ -482,7 +499,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const waitPromise = transport.waitForExit();
 
@@ -506,7 +523,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const waitPromise = transport.waitForExit();
 
@@ -532,7 +549,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const waitPromise = transport.waitForExit();
 
@@ -568,7 +585,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const messages: unknown[] = [];
       const readPromise = (async () => {
@@ -602,7 +619,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const generator = transport.readMessages();
 
@@ -626,7 +643,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const message = '{"type":"test","data":"hello"}\n';
       transport.write(message);
@@ -647,7 +664,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('error', new Error('Process error'));
 
@@ -669,7 +686,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
 
@@ -694,7 +711,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       abortController.abort();
 
@@ -717,7 +734,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockStdin.end();
 
@@ -739,7 +756,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(() => transport.write('test')).toThrow(
         'Cannot write to terminated process',
@@ -759,7 +776,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('close', 1, null);
 
@@ -784,7 +801,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const error = new Error('Process error');
       mockChildProcess.emit('error', error);
@@ -806,7 +823,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('close', 1, null);
 
@@ -829,7 +846,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('close', null, 'SIGKILL');
 
@@ -854,7 +871,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       abortController.abort();
       mockChildProcess.emit('error', new Error('Aborted'));
@@ -876,7 +893,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       mockChildProcess.emit('close', 0, null);
 
@@ -900,7 +917,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(processOnSpy).toHaveBeenCalledWith('exit', expect.any(Function));
 
@@ -922,7 +939,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
 
@@ -951,7 +968,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(addEventListenerSpy).toHaveBeenCalledWith(
         'abort',
@@ -981,7 +998,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await transport.close();
 
@@ -1006,7 +1023,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const endSpy = vi.spyOn(mockStdin, 'end');
 
@@ -1031,7 +1048,7 @@ describe('ProcessTransport', () => {
         cwd: '/custom/path',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1055,7 +1072,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1084,7 +1101,7 @@ describe('ProcessTransport', () => {
         },
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1110,7 +1127,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1137,7 +1154,7 @@ describe('ProcessTransport', () => {
         },
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1167,7 +1184,7 @@ describe('ProcessTransport', () => {
         debug: true,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1193,7 +1210,7 @@ describe('ProcessTransport', () => {
         stderr: stderrCallback,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1218,7 +1235,7 @@ describe('ProcessTransport', () => {
         debug: false,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledWith(
         'qwen',
@@ -1245,7 +1262,7 @@ describe('ProcessTransport', () => {
         debug: true, // Enable debug to ensure stderr data is logged
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // Clear previous calls from logger.info during initialization
       stderrCallback.mockClear();
@@ -1273,7 +1290,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.getInputStream()).toBe(mockStdin);
     });
@@ -1291,7 +1308,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.getOutputStream()).toBe(mockStdout);
     });
@@ -1309,7 +1326,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       const endSpy = vi.spyOn(mockStdin, 'end');
 
@@ -1335,7 +1352,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.isReady).toBe(true);
     });
@@ -1355,7 +1372,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await expect(transport.waitForExit()).resolves.toBeUndefined();
     });
@@ -1375,7 +1392,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       await expect(transport.close()).resolves.toBeUndefined();
     });
@@ -1395,7 +1412,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(() => transport.endInput()).not.toThrow();
     });
@@ -1415,7 +1432,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.getInputStream()).toBeUndefined();
     });
@@ -1435,7 +1452,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      const transport = new ProcessTransport(options);
+      const transport = createTransport(options);
 
       expect(transport.getOutputStream()).toBeUndefined();
     });
@@ -1456,7 +1473,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledTimes(1);
       expect(mockSpawn).not.toHaveBeenCalled();
@@ -1476,7 +1493,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockSpawn).toHaveBeenCalledTimes(1);
       expect(mockFork).not.toHaveBeenCalled();
@@ -1496,7 +1513,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // In non-Electron environment, JS file is used as modulePath
       // and execPath is set to the runtime (node)
@@ -1523,7 +1540,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledWith(
         expect.any(String),
@@ -1549,7 +1566,7 @@ describe('ProcessTransport', () => {
         debug: true,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledWith(
         expect.any(String),
@@ -1576,7 +1593,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // In Electron environment, should extract cli.js as modulePath
       expect(mockFork).toHaveBeenCalledWith(
@@ -1602,7 +1619,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // In normal Node.js, JS file is used as modulePath
       // and execPath is set to the runtime (node)
@@ -1630,7 +1647,7 @@ describe('ProcessTransport', () => {
         env: { CUSTOM_VAR: 'value' },
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledWith(
         expect.any(String),
@@ -1659,7 +1676,7 @@ describe('ProcessTransport', () => {
         cwd: '/custom/workdir',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledWith(
         expect.any(String),
@@ -1686,7 +1703,7 @@ describe('ProcessTransport', () => {
         abortController,
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       expect(mockFork).toHaveBeenCalledWith(
         expect.any(String),
@@ -1711,7 +1728,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // Native type should fallback to spawn, not fork
       expect(mockFork).not.toHaveBeenCalled();
@@ -1738,7 +1755,7 @@ describe('ProcessTransport', () => {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      createTransport(options);
 
       // Bun type should use fork with execPath set to bun
       expect(mockSpawn).not.toHaveBeenCalled();
