@@ -59,7 +59,7 @@ RUN apt-get update && apt-get install -y \
 #### 4、Create the first sandbox image under the root directory of your project
 
 ```bash
-GEMINI_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
+QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
 # Observe whether the sandbox version of the tool you launched is consistent with the version of your custom image. If they are consistent, the startup will be successful
 ```
 
