@@ -101,6 +101,11 @@ export class SDKTestHelper {
           // Default to disabling chat recording unless explicitly enabled
           ...(options.chatRecording !== true ? { chatRecording: false } : {}),
         },
+        security: {
+          auth: {
+            selectedType: 'openai',
+          },
+        },
       };
 
       await writeFile(
@@ -1007,6 +1012,7 @@ export function createSharedTestOptions(
 
   return {
     pathToQwenExecutable: TEST_CLI_PATH,
+    authType: 'openai',
     ...overrides,
   };
 }
