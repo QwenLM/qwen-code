@@ -111,7 +111,9 @@ describe('relaunchAppInChildProcess', () => {
 
     process.execArgv = [...originalExecArgv];
     process.argv = [...originalArgv];
-    process.execPath = '/usr/bin/node';
+    // Use actual execPath to avoid spawn errors on Windows
+    // but override for tests that specifically test path handling
+    process.execPath = originalExecPath;
 
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('PROCESS_EXIT_CALLED');
@@ -276,7 +278,7 @@ describe('relaunchAppInChildProcess', () => {
     // limitations with ES modules. The core logic is tested in relaunchOnExitCode tests.
 
     it('should handle null exit code from child process', async () => {
-      process.argv = ['/usr/bin/node', '/app/cli.js'];
+      process.argv = [process.execPath, '/app/cli.js'];
 
       const mockChild = createMockChildProcess(0, false); // Don't auto-close
       mockedSpawn.mockImplementation(() => {

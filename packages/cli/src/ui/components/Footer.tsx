@@ -24,11 +24,13 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
 
-  const { promptTokenCount, showAutoAcceptIndicator } = {
+  const { promptTokenCount, showAutoAcceptIndicator, branchName } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
+    branchName: uiState.branchName,
   };
 
+  const targetDir = config.getTargetDir();
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
 
@@ -77,6 +79,16 @@ export const Footer: React.FC = () => {
     rightItems.push({
       key: 'debug',
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
+    });
+  }
+  if (branchName) {
+    rightItems.push({
+      key: 'branch',
+      node: (
+        <Text color={theme.text.secondary}>
+          {targetDir} ({branchName}*)
+        </Text>
+      ),
     });
   }
   if (promptTokenCount > 0 && contextWindowSize) {
