@@ -21,7 +21,6 @@ import {
   type ConversationRecord,
   type DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
-import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
@@ -81,7 +80,7 @@ class GeminiAgent {
 
     // Build available modes from shared APPROVAL_MODE_INFO
     const availableModes = APPROVAL_MODES.map((mode) => ({
-      id: mode as ApprovalModeValue,
+      id: mode as acp.ApprovalModeValue,
       name: APPROVAL_MODE_INFO[mode].name,
       description: APPROVAL_MODE_INFO[mode].description,
     }));
@@ -97,7 +96,7 @@ class GeminiAgent {
       },
       authMethods,
       modes: {
-        currentModeId: currentApprovalMode as ApprovalModeValue,
+        currentModeId: currentApprovalMode as acp.ApprovalModeValue,
         availableModes,
       },
       agentCapabilities: {

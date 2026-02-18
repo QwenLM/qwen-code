@@ -21,6 +21,8 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type { ArenaManager } from '../agents-collab/arena/ArenaManager.js';
+import { ArenaAgentClient } from '../agents-collab/arena/ArenaAgentClient.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -280,6 +282,22 @@ export interface SandboxConfig {
   image: string;
 }
 
+/**
+ * Settings shared across multi-agent collaboration features
+ * (Arena, Team, Swarm).
+ */
+export interface AgentsCollabSettings {
+  /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
+  displayMode?: string;
+  /** Arena-specific settings */
+  arena?: {
+    /** Custom base directory for Arena worktrees (default: ~/.qwen/arena) */
+    worktreeBaseDir?: string;
+    /** Preserve worktrees and state files after session ends */
+    preserveArtifacts?: boolean;
+  };
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -378,6 +396,8 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  agents?: AgentsCollabSettings;
 }
 
 function normalizeConfigOutputFormat(
@@ -506,6 +526,9 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
+  private arenaManager: ArenaManager | null = null;
+  private readonly arenaAgentClient: ArenaAgentClient | null;
+  private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
@@ -636,6 +659,8 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.arenaAgentClient = ArenaAgentClient.create();
+    this.agentsSettings = params.agents ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -1087,6 +1112,8 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -1221,6 +1248,39 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  getArenaManager(): ArenaManager | null {
+    return this.arenaManager;
+  }
+
+  setArenaManager(manager: ArenaManager | null): void {
+    this.arenaManager = manager;
+  }
+
+  getArenaAgentClient(): ArenaAgentClient | null {
+    return this.arenaAgentClient;
+  }
+
+  getAgentsSettings(): AgentsCollabSettings {
+    return this.agentsSettings;
+  }
+
+  /**
+   * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
+   * always removes worktrees regardless of preserveArtifacts.
+   */
+  async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    const manager = this.arenaManager;
+    if (!manager) {
+      return;
+    }
+    if (!force && this.agentsSettings.arena?.preserveArtifacts) {
+      await manager.cleanupRuntime();
+    } else {
+      await manager.cleanup();
+    }
+    this.arenaManager = null;
   }
 
   getApprovalMode(): ApprovalMode {

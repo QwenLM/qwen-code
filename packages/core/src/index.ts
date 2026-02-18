@@ -130,6 +130,9 @@ export * from './tools/tool-registry.js';
 // Export subagents (Phase 1)
 export * from './subagents/index.js';
 
+// Export shared multi-agent infrastructure
+export * from './agents-collab/index.js';
+
 // Export skills
 export * from './skills/index.js';
 
@@ -177,6 +180,7 @@ export * from './services/chatRecordingService.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
+export * from './services/gitWorktreeService.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 

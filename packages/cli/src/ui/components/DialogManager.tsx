@@ -20,6 +20,10 @@ import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ArenaStartDialog } from './ArenaStartDialog.js';
+import { ArenaSelectDialog } from './ArenaSelectDialog.js';
+import { ArenaStopDialog } from './ArenaStopDialog.js';
+import { ArenaStatusDialog } from './ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -235,6 +239,48 @@ export const DialogManager = ({
   }
   if (uiState.isModelDialogOpen) {
     return <ModelDialog onClose={uiActions.closeModelDialog} />;
+  }
+  if (uiState.activeArenaDialog === 'start') {
+    return (
+      <ArenaStartDialog
+        onClose={() => uiActions.closeArenaDialog()}
+        onConfirm={(models) => uiActions.handleArenaModelsSelected?.(models)}
+      />
+    );
+  }
+  if (uiState.activeArenaDialog === 'status') {
+    const arenaManager = config.getArenaManager();
+    if (arenaManager) {
+      return (
+        <ArenaStatusDialog
+          manager={arenaManager}
+          closeArenaDialog={uiActions.closeArenaDialog}
+          width={mainAreaWidth}
+        />
+      );
+    }
+  }
+  if (uiState.activeArenaDialog === 'stop') {
+    return (
+      <ArenaStopDialog
+        config={config}
+        addItem={addItem}
+        closeArenaDialog={uiActions.closeArenaDialog}
+      />
+    );
+  }
+  if (uiState.activeArenaDialog === 'select') {
+    const arenaManager = config.getArenaManager();
+    if (arenaManager) {
+      return (
+        <ArenaSelectDialog
+          manager={arenaManager}
+          config={config}
+          addItem={addItem}
+          closeArenaDialog={uiActions.closeArenaDialog}
+        />
+      );
+    }
   }
   if (uiState.isVisionSwitchDialogOpen) {
     return <ModelSwitchDialog onSelect={uiActions.handleVisionSwitchSelect} />;

@@ -5,6 +5,39 @@
  */
 
 import { theme } from '../semantic-colors.js';
+import { ArenaAgentStatus } from '@qwen-code/qwen-code-core';
+
+// --- Status Labels ---
+
+export interface StatusLabel {
+  icon: string;
+  text: string;
+  color: string;
+}
+
+export function getArenaStatusLabel(
+  status: ArenaAgentStatus | string,
+): StatusLabel {
+  switch (status) {
+    case ArenaAgentStatus.COMPLETED:
+    case 'completed':
+      return { icon: '✓', text: 'Done', color: theme.status.success };
+    case ArenaAgentStatus.CANCELLED:
+    case 'cancelled':
+      return { icon: '⊘', text: 'Cancelled', color: theme.status.warning };
+    case ArenaAgentStatus.TERMINATED:
+    case 'terminated':
+      return { icon: '✗', text: 'Terminated', color: theme.status.error };
+    case ArenaAgentStatus.RUNNING:
+    case 'running':
+      return { icon: '○', text: 'Running', color: theme.text.secondary };
+    case ArenaAgentStatus.INITIALIZING:
+    case 'initializing':
+      return { icon: '○', text: 'Initializing', color: theme.text.secondary };
+    default:
+      return { icon: '○', text: status, color: theme.text.secondary };
+  }
+}
 
 // --- Thresholds ---
 export const TOOL_SUCCESS_RATE_HIGH = 95;

@@ -18,6 +18,7 @@ import { type SettingScope } from '../../config/settings.js';
 import { type CodingPlanRegion } from '../../constants/codingPlan.js';
 import type { AuthState } from '../types.js';
 import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
+import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
 export interface OpenAICredentials {
   apiKey: string;
@@ -55,6 +56,9 @@ export interface UIActions {
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
   closeModelDialog: () => void;
+  openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
+  closeArenaDialog: () => void;
+  handleArenaModelsSelected?: (models: string[]) => void;
   dismissCodingPlanUpdate: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;

@@ -137,6 +137,10 @@ export interface OpenDialogActionReturn {
 
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'

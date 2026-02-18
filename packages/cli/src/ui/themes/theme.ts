@@ -40,6 +40,7 @@ export interface CustomTheme {
     secondary?: string;
     link?: string;
     accent?: string;
+    code?: string;
   };
   background?: {
     primary?: string;
@@ -174,6 +175,7 @@ export class Theme {
         secondary: this.colors.Gray,
         link: this.colors.AccentBlue,
         accent: this.colors.AccentPurple,
+        code: this.colors.LightBlue,
       },
       background: {
         primary: this.colors.Background,
@@ -269,7 +271,7 @@ export function createCustomTheme(customTheme: CustomTheme): Theme {
     type: 'custom',
     Background: customTheme.background?.primary ?? customTheme.Background ?? '',
     Foreground: customTheme.text?.primary ?? customTheme.Foreground ?? '',
-    LightBlue: customTheme.text?.link ?? customTheme.LightBlue ?? '',
+    LightBlue: customTheme.text?.code ?? customTheme.LightBlue ?? '',
     AccentBlue: customTheme.text?.link ?? customTheme.AccentBlue ?? '',
     AccentPurple: customTheme.text?.accent ?? customTheme.AccentPurple ?? '',
     AccentCyan: customTheme.text?.link ?? customTheme.AccentCyan ?? '',
@@ -433,6 +435,7 @@ export function createCustomTheme(customTheme: CustomTheme): Theme {
       secondary: customTheme.text?.secondary ?? colors.Gray,
       link: customTheme.text?.link ?? colors.AccentBlue,
       accent: customTheme.text?.accent ?? colors.AccentPurple,
+      code: customTheme.text?.code ?? colors.LightBlue,
     },
     background: {
       primary: customTheme.background?.primary ?? colors.Background,

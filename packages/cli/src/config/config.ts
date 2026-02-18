@@ -1036,6 +1036,18 @@ export async function loadCliConfig(
     lsp: {
       enabled: lspEnabled,
     },
+    agents: settings.agents
+      ? {
+          displayMode: settings.agents.displayMode,
+          arena: settings.agents.arena
+            ? {
+                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
+                preserveArtifacts:
+                  settings.agents.arena.preserveArtifacts ?? false,
+              }
+            : undefined,
+        }
+      : undefined,
   });
 
   if (lspEnabled) {

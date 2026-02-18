@@ -128,6 +128,11 @@ export type HistoryItemWarning = HistoryItemBase & {
   text: string;
 };
 
+export type HistoryItemSuccess = HistoryItemBase & {
+  type: 'success';
+  text: string;
+};
+
 export type HistoryItemRetryCountdown = HistoryItemBase & {
   type: 'retry_countdown';
   text: string;
@@ -256,6 +261,37 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+/**
+ * Arena agent completion card data.
+ */
+export interface ArenaAgentCardData {
+  label: string;
+  status: 'completed' | 'cancelled' | 'terminated';
+  durationMs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  toolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  rounds: number;
+  error?: string;
+  diff?: string;
+}
+
+export type HistoryItemArenaAgentComplete = HistoryItemBase & {
+  type: 'arena_agent_complete';
+  agent: ArenaAgentCardData;
+};
+
+export type HistoryItemArenaSessionComplete = HistoryItemBase & {
+  type: 'arena_session_complete';
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -270,6 +306,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemSuccess
   | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
@@ -284,13 +321,16 @@ export type HistoryItemWithoutId =
   | HistoryItemExtensionsList
   | HistoryItemToolsList
   | HistoryItemSkillsList
-  | HistoryItemMcpStatus;
+  | HistoryItemMcpStatus
+  | HistoryItemArenaAgentComplete
+  | HistoryItemArenaSessionComplete;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',
+  SUCCESS = 'success',
   ERROR = 'error',
   WARNING = 'warning',
   USER = 'user',
@@ -307,6 +347,8 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  ARENA_AGENT_COMPLETE = 'arena_agent_complete',
+  ARENA_SESSION_COMPLETE = 'arena_session_complete',
 }
 
 // Simplified message structure for internal feedback
