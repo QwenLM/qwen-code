@@ -272,11 +272,19 @@ describe('ArenaManager', () => {
   });
 
   describe('backend initialization', () => {
-    it('should emit SESSION_WARNING when backend detection returns warning', async () => {
+    it('should emit SESSION_UPDATE with type warning when backend detection returns warning', async () => {
       const manager = new ArenaManager(mockConfig as never);
-      const warnings: Array<{ message: string; sessionId: string }> = [];
-      manager.getEventEmitter().on(ArenaEventType.SESSION_WARNING, (event) => {
-        warnings.push({ message: event.message, sessionId: event.sessionId });
+      const updates: Array<{
+        type: string;
+        message: string;
+        sessionId: string;
+      }> = [];
+      manager.getEventEmitter().on(ArenaEventType.SESSION_UPDATE, (event) => {
+        updates.push({
+          type: event.type,
+          message: event.message,
+          sessionId: event.sessionId,
+        });
       });
 
       hoistedMockDetectBackend.mockResolvedValueOnce({
@@ -287,9 +295,10 @@ describe('ArenaManager', () => {
       await manager.start(createValidStartOptions());
 
       expect(hoistedMockDetectBackend).toHaveBeenCalledWith(undefined);
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]?.message).toContain('fallback to tmux backend');
-      expect(warnings[0]?.sessionId).toMatch(/^arena-/);
+      const warningUpdate = updates.find((u) => u.type === 'warning');
+      expect(warningUpdate).toBeDefined();
+      expect(warningUpdate?.message).toContain('fallback to tmux backend');
+      expect(warningUpdate?.sessionId).toMatch(/^arena-/);
     });
 
     it('should emit SESSION_ERROR and mark FAILED when backend init fails', async () => {

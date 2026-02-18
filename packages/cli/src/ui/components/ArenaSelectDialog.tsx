@@ -14,7 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { MessageType } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
@@ -36,18 +36,25 @@ export function ArenaSelectDialog({
 }: ArenaSelectDialogProps): React.JSX.Element {
   const pushMessage = useCallback(
     (result: { messageType: 'info' | 'error'; content: string }) => {
-      addItem(
-        {
-          type:
-            result.messageType === 'info'
-              ? MessageType.INFO
-              : MessageType.ERROR,
-          text: result.content,
-        },
-        Date.now(),
-      );
+      const item: HistoryItemWithoutId = {
+        type:
+          result.messageType === 'info' ? MessageType.INFO : MessageType.ERROR,
+        text: result.content,
+      };
+      addItem(item, Date.now());
+
+      try {
+        const chatRecorder = config.getChatRecordingService();
+        chatRecorder?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: '/arena select',
+          outputHistoryItems: [{ ...item } as Record<string, unknown>],
+        });
+      } catch {
+        // Best-effort recording
+      }
     },
-    [addItem],
+    [addItem, config],
   );
 
   const onSelect = useCallback(

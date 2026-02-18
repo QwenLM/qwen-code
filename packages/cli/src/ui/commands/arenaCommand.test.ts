@@ -257,7 +257,7 @@ describe('arenaCommand select subcommand', () => {
       messageType: 'error',
       content:
         'No successful agent results to select from. All agents failed or were cancelled.\n' +
-        'Use /arena select --discard to clean up worktrees, or /arena stop to end the session.',
+        'Use /arena stop to end the session.',
     });
   });
 

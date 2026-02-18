@@ -28,7 +28,7 @@ import {
   type ArenaSessionCompleteEvent,
   type ArenaSessionErrorEvent,
   type ArenaSessionStartEvent,
-  type ArenaSessionWarningEvent,
+  type ArenaSessionUpdateEvent,
 } from '@qwen-code/qwen-code-core';
 import {
   MessageType,
@@ -147,6 +147,26 @@ function buildArenaExecutionInput(
   };
 }
 
+/**
+ * Persists a single arena history item to the session JSONL file.
+ *
+ * Arena events fire asynchronously (after the slash command's recording
+ * window has closed), so each item must be recorded individually.
+ */
+function recordArenaItem(config: Config, item: HistoryItemWithoutId): void {
+  try {
+    const chatRecorder = config.getChatRecordingService();
+    if (!chatRecorder) return;
+    chatRecorder.recordSlashCommand({
+      phase: 'result',
+      rawCommand: '/arena',
+      outputHistoryItems: [{ ...item } as Record<string, unknown>],
+    });
+  } catch {
+    debugLogger.error('Failed to record arena history item');
+  }
+}
+
 function executeArenaCommand(
   config: Config,
   ui: CommandContext['ui'],
@@ -164,6 +184,15 @@ function executeArenaCommand(
     ui.addItem({ type, text }, Date.now());
   };
 
+  const addAndRecordArenaMessage = (
+    type: 'info' | 'warning' | 'error' | 'success',
+    text: string,
+  ) => {
+    const item: HistoryItemWithoutId = { type, text };
+    ui.addItem(item, Date.now());
+    recordArenaItem(config, item);
+  };
+
   const handleSessionStart = (event: ArenaSessionStartEvent) => {
     const modelList = event.models
       .map(
@@ -171,6 +200,9 @@ function executeArenaCommand(
           `  ${index + 1}. ${model.displayName || model.modelId}`,
       )
       .join('\n');
+    // SESSION_START fires synchronously before the first await in
+    // ArenaManager.start(), so the slash command processor's finally
+    // block already captures this item — no extra recording needed.
     addArenaMessage(
       MessageType.INFO,
       `Arena started with ${event.models.length} agents on task: "${event.task}"\nModels:\n${modelList}`,
@@ -183,22 +215,33 @@ function executeArenaCommand(
     debugLogger.debug(`Arena agent started: ${label} (${event.agentId})`);
   };
 
-  const handleSessionWarning = (event: ArenaSessionWarningEvent) => {
+  const handleSessionUpdate = (event: ArenaSessionUpdateEvent) => {
     const attachHintPrefix = 'To view agent panes, run: ';
     if (event.message.startsWith(attachHintPrefix)) {
       const command = event.message.slice(attachHintPrefix.length).trim();
-      addArenaMessage(
+      addAndRecordArenaMessage(
         MessageType.INFO,
         `Arena panes are running in tmux. Attach with: \`${command}\``,
       );
       return;
     }
-    addArenaMessage(MessageType.WARNING, `Arena warning: ${event.message}`);
+
+    if (event.type === 'info') {
+      addAndRecordArenaMessage(MessageType.INFO, event.message);
+    } else {
+      addAndRecordArenaMessage(
+        MessageType.WARNING,
+        `Arena warning: ${event.message}`,
+      );
+    }
   };
 
   const handleAgentError = (event: ArenaAgentErrorEvent) => {
     const label = agentLabels.get(event.agentId) || event.agentId;
-    addArenaMessage(MessageType.ERROR, `[${label}] failed: ${event.error}`);
+    addAndRecordArenaMessage(
+      MessageType.ERROR,
+      `[${label}] failed: ${event.error}`,
+    );
   };
 
   const buildAgentCardData = (
@@ -233,7 +276,6 @@ function executeArenaCommand(
   };
 
   const handleAgentComplete = (event: ArenaAgentCompleteEvent) => {
-    // Show message for completed (success), cancelled, and terminated (error) agents
     if (
       event.result.status !== ArenaAgentStatus.COMPLETED &&
       event.result.status !== ArenaAgentStatus.CANCELLED &&
@@ -243,30 +285,28 @@ function executeArenaCommand(
     }
 
     const agent = buildAgentCardData(event.result);
-    ui.addItem(
-      {
-        type: 'arena_agent_complete',
-        agent,
-      } as HistoryItemWithoutId,
-      Date.now(),
-    );
+    const item = {
+      type: 'arena_agent_complete',
+      agent,
+    } as HistoryItemWithoutId;
+    ui.addItem(item, Date.now());
+    recordArenaItem(config, item);
   };
 
   const handleSessionError = (event: ArenaSessionErrorEvent) => {
-    addArenaMessage(MessageType.ERROR, `Arena failed: ${event.error}`);
+    addAndRecordArenaMessage(MessageType.ERROR, `Arena failed: ${event.error}`);
   };
 
   const handleSessionComplete = (event: ArenaSessionCompleteEvent) => {
-    ui.addItem(
-      {
-        type: 'arena_session_complete',
-        sessionStatus: event.result.status,
-        task: event.result.task,
-        totalDurationMs: event.result.totalDurationMs ?? 0,
-        agents: event.result.agents.map(buildAgentCardData),
-      } as HistoryItemWithoutId,
-      Date.now(),
-    );
+    const item = {
+      type: 'arena_session_complete',
+      sessionStatus: event.result.status,
+      task: event.result.task,
+      totalDurationMs: event.result.totalDurationMs ?? 0,
+      agents: event.result.agents.map(buildAgentCardData),
+    } as HistoryItemWithoutId;
+    ui.addItem(item, Date.now());
+    recordArenaItem(config, item);
   };
 
   emitter.on(ArenaEventType.SESSION_START, handleSessionStart);
@@ -277,9 +317,9 @@ function executeArenaCommand(
   detachListeners.push(() =>
     emitter.off(ArenaEventType.AGENT_START, handleAgentStart),
   );
-  emitter.on(ArenaEventType.SESSION_WARNING, handleSessionWarning);
+  emitter.on(ArenaEventType.SESSION_UPDATE, handleSessionUpdate);
   detachListeners.push(() =>
-    emitter.off(ArenaEventType.SESSION_WARNING, handleSessionWarning),
+    emitter.off(ArenaEventType.SESSION_UPDATE, handleSessionUpdate),
   );
   emitter.on(ArenaEventType.AGENT_ERROR, handleAgentError);
   detachListeners.push(() =>
@@ -317,7 +357,7 @@ function executeArenaCommand(
       },
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
-        addArenaMessage(MessageType.ERROR, `Arena failed: ${message}`);
+        addAndRecordArenaMessage(MessageType.ERROR, `Arena failed: ${message}`);
         debugLogger.error('Arena session failed:', error);
 
         // Clear the stored manager so subsequent /arena start calls
@@ -567,7 +607,7 @@ export const arenaCommand: SlashCommand = {
             messageType: 'error',
             content:
               'No successful agent results to select from. All agents failed or were cancelled.\n' +
-              'Use /arena select --discard to clean up worktrees, or /arena stop to end the session.',
+              'Use /arena stop to end the session.',
           };
         }
 

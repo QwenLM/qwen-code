@@ -35,7 +35,7 @@ export const ArenaAgentCard: React.FC<ArenaAgentCardProps> = ({
       {/* Line 1: Status icon + text + label + duration */}
       <Box>
         <Text color={color}>
-          {icon} {text}: {agent.label} · {duration}
+          {icon} {agent.label} · {text} · {duration}
         </Text>
       </Box>
 

@@ -302,6 +302,7 @@ export class ArenaManager {
       }
 
       // Set up worktrees for all agents
+      this.emitProgress(`Setting up environment for agents…`);
       await this.setupWorktrees();
 
       // If cancelled during worktree setup, bail out early
@@ -311,6 +312,7 @@ export class ArenaManager {
       }
 
       // Start all agents in parallel via PTY
+      this.emitProgress('Environment ready. Launching agents…');
       this.sessionStatus = ArenaSessionStatus.RUNNING;
       await this.runAgents();
 
@@ -474,6 +476,22 @@ export class ArenaManager {
     return this.worktreeService.getWorktreeDiff(agent.worktree.path);
   }
 
+  // ─── Private: Progress ─────────────────────────────────────────
+
+  /**
+   * Emit a progress message via SESSION_UPDATE so the UI can display
+   * setup status.
+   */
+  private emitProgress(message: string): void {
+    if (!this.sessionId) return;
+    this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
+      sessionId: this.sessionId,
+      type: 'info',
+      message,
+      timestamp: Date.now(),
+    });
+  }
+
   // ─── Private: Validation ───────────────────────────────────────
 
   private validateStartOptions(options: ArenaStartOptions): void {
@@ -524,8 +542,9 @@ export class ArenaManager {
     this.backend = backend;
 
     if (warning && this.sessionId) {
-      this.eventEmitter.emit(ArenaEventType.SESSION_WARNING, {
+      this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
         sessionId: this.sessionId,
+        type: 'warning',
         message: warning,
         timestamp: Date.now(),
       });
@@ -534,8 +553,9 @@ export class ArenaManager {
     // Surface attach hint for external tmux sessions
     const attachHint = backend.getAttachHint();
     if (attachHint && this.sessionId) {
-      this.eventEmitter.emit(ArenaEventType.SESSION_WARNING, {
+      this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
         sessionId: this.sessionId,
+        type: 'info',
         message: `To view agent panes, run: ${attachHint}`,
         timestamp: Date.now(),
       });
@@ -1044,14 +1064,6 @@ export class ArenaManager {
           // Agent received new input and is working again
           this.updateAgentStatus(agent.agentId, ArenaAgentStatus.RUNNING);
         }
-
-        // Emit stats update event
-        this.eventEmitter.emit(ArenaEventType.AGENT_STATS_UPDATE, {
-          sessionId: this.requireConfig().sessionId,
-          agentId: agent.agentId,
-          stats: statusFile.stats,
-          timestamp: Date.now(),
-        });
 
         this.callbacks.onAgentStatsUpdate?.(agent.agentId, statusFile.stats);
       } catch (error: unknown) {
