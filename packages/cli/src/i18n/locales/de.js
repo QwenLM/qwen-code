@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ Anhänge verwalten',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → auswählen, Entf zum Löschen, ↓ beenden',
+  'Attachments: ': 'Anhänge: ',
+
   'Basics:': 'Grundlagen:',
   'Add context': 'Kontext hinzufügen',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
