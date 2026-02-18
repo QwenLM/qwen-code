@@ -1145,6 +1145,92 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
+  describe('model version metadata', () => {
+    it('should prefer provider model version for non-streaming responses', () => {
+      const response = converter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-model-version',
+        created: 123,
+        model: 'qwen3.5-plus',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'ok',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      expect(response.modelVersion).toBe('qwen3.5-plus');
+    });
+
+    it('should fall back to configured model for non-streaming responses', () => {
+      const response = converter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-model-version-fallback',
+        created: 123,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'ok',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      expect(response.modelVersion).toBe('test-model');
+    });
+
+    it('should prefer provider model version for streaming responses', () => {
+      const chunk = converter.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-model-version',
+        created: 456,
+        model: 'qwen3.5-plus',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: 'ok',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+      expect(chunk.modelVersion).toBe('qwen3.5-plus');
+    });
+
+    it('should fall back to configured model for streaming responses', () => {
+      const chunk = converter.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-model-version-fallback',
+        created: 456,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: 'ok',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+      expect(chunk.modelVersion).toBe('test-model');
+    });
+  });
+
   describe('convertGeminiToolsToOpenAI', () => {
     it('should convert Gemini tools with parameters field', async () => {
       const geminiTools = [

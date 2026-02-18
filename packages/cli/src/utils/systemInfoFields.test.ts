@@ -19,6 +19,7 @@ describe('getAboutSystemInfoFields', () => {
       npmVersion: '10.0.0',
       sandboxEnv: 'no sandbox',
       modelVersion: 'test-model',
+      observedModelVersions: undefined,
       selectedAuthType: 'test-auth',
       ideClient: 'test-ide',
       sessionId: 'test-session-id',
@@ -37,7 +38,7 @@ describe('getAboutSystemInfoFields', () => {
       'IDE Client',
       'OS',
       'Auth',
-      'Model',
+      'Model (Configured)',
       'Session ID',
       'Sandbox',
       'Proxy',
@@ -63,6 +64,7 @@ describe('getAboutSystemInfoFields', () => {
       npmVersion: '10.0.0',
       sandboxEnv: 'no sandbox',
       modelVersion: 'test-model',
+      observedModelVersions: undefined,
       selectedAuthType: 'test-auth',
       ideClient: 'test-ide',
       sessionId: 'test-session-id',
@@ -75,5 +77,30 @@ describe('getAboutSystemInfoFields', () => {
     const fields = getSystemInfoFields(info);
     const proxyField = fields.find((f) => f.label === 'Proxy');
     expect(proxyField?.value).toBe('no proxy');
+  });
+
+  it('includes observed model field when available', () => {
+    const info: ExtendedSystemInfo = {
+      cliVersion: '1.0.0',
+      osPlatform: 'darwin',
+      osArch: 'arm64',
+      osRelease: '23.0.0',
+      nodeVersion: 'v20.0.0',
+      npmVersion: '10.0.0',
+      sandboxEnv: 'no sandbox',
+      modelVersion: 'coder-model',
+      observedModelVersions: 'qwen3.5-plus',
+      selectedAuthType: 'qwen-oauth',
+      ideClient: 'test-ide',
+      sessionId: 'test-session-id',
+      memoryUsage: '100 MB',
+      baseUrl: undefined,
+      gitCommit: undefined,
+      proxy: undefined,
+    };
+
+    const fields = getSystemInfoFields(info);
+    const observedField = fields.find((f) => f.label === 'Model (Observed)');
+    expect(observedField?.value).toBe('qwen3.5-plus');
   });
 });

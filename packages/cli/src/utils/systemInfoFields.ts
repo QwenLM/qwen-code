@@ -30,7 +30,8 @@ export function getSystemInfoFields(
   addField(fields, t('IDE Client'), info.ideClient);
   addField(fields, t('OS'), formatOs(info));
   addField(fields, t('Auth'), formatAuth(info));
-  addField(fields, t('Model'), info.modelVersion);
+  addField(fields, t('Model (Configured)'), info.modelVersion);
+  addField(fields, t('Model (Observed)'), info.observedModelVersions || '');
   addField(fields, t('Session ID'), info.sessionId);
   addField(fields, t('Sandbox'), info.sandboxEnv);
   addField(fields, t('Proxy'), formatProxy(info.proxy));

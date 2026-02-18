@@ -111,6 +111,15 @@ describe('<ModelDialog />', () => {
     expect(getByText('(Press Esc to close)')).toBeDefined();
   });
 
+  it('shows Qwen OAuth alias hint for the configured model', () => {
+    const { getByText } = renderComponent();
+    expect(
+      getByText(
+        'Qwen OAuth uses model aliases. Run `/status` after a request to see the observed backend model.',
+      ),
+    ).toBeDefined();
+  });
+
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
     renderComponent();
     expect(mockedSelect).toHaveBeenCalledTimes(1);

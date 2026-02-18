@@ -302,6 +302,10 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     : authType
       ? `${authType}::${preferredModelId}`
       : '';
+  const displayedModel = effectiveConfig?.model ?? config?.getModel?.() ?? '';
+  const isQwenOAuthAliasModel =
+    authType === AuthType.QWEN_OAUTH &&
+    (displayedModel === 'coder-model' || displayedModel === 'vision-model');
 
   useKeypress(
     (key) => {
@@ -421,9 +425,18 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
           <ConfigRow label="AuthType" value={authType} />
           <ConfigRow
             label="Model"
-            value={effectiveConfig?.model ?? config?.getModel?.() ?? ''}
+            value={displayedModel}
             badge={formatSourceBadge(sources['model'])}
           />
+          {isQwenOAuthAliasModel && (
+            <Box marginLeft={12}>
+              <Text color={theme.text.secondary}>
+                {t(
+                  'Qwen OAuth uses model aliases. Run `/status` after a request to see the observed backend model.',
+                )}
+              </Text>
+            </Box>
+          )}
 
           {authType !== AuthType.QWEN_OAUTH && (
             <>
