@@ -30,6 +30,7 @@ import * as fs from 'node:fs';
  * This class implements the client side of the ACP (Agent Communication Protocol).
  */
 export class AcpConnection {
+  private static readonly PROCESS_STARTUP_TIMEOUT_MS = 1000;
   private child: ChildProcess | null = null;
   private pendingRequests = new Map<number, PendingRequest<unknown>>();
   private nextRequestId = { value: 0 };
@@ -127,7 +128,7 @@ export class AcpConnection {
   private async setupChildProcessHandlers(): Promise<void> {
     let spawnError: Error | null = null;
 
-    this.child!.stderr?.on('data', (data) => {
+    this.child?.stderr?.on('data', (data) => {
       const message = data.toString();
       if (
         message.toLowerCase().includes('error') &&
@@ -139,11 +140,11 @@ export class AcpConnection {
       }
     });
 
-    this.child!.on('error', (error) => {
+    this.child?.on('error', (error) => {
       spawnError = error;
     });
 
-    this.child!.on('exit', (code, signal) => {
+    this.child?.on('exit', (code, signal) => {
       console.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
@@ -152,7 +153,7 @@ export class AcpConnection {
     });
 
     // Wait for process to start
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, AcpConnection.PROCESS_STARTUP_TIMEOUT_MS));
 
     if (spawnError) {
       throw spawnError;
@@ -164,7 +165,7 @@ export class AcpConnection {
 
     // Handle messages from ACP server
     let buffer = '';
-    this.child.stdout?.on('data', (data) => {
+    this.child?.stdout?.on('data', (data) => {
       buffer += data.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
