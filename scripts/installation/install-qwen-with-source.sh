@@ -7,9 +7,9 @@
 #        install-qwen-with-source.sh -s [github|npm|internal|local-build]
 
 # Check if running with sh (which doesn't support pipefail)
-if [ -z "$BASH_VERSION" ]; then
+if [[ -z "${BASH_VERSION}" ]]; then
     # Re-execute with bash
-    exec bash "$0" "$@"
+    exec bash "${0}" "${@}"
 fi
 
 
@@ -63,20 +63,17 @@ command_exists() {
 
 # Global variable for download command
 DOWNLOAD_CMD="curl -f -s -S -L"
-WGET_CMD="wget -q -O -"
 
 # Function to ensure curl or wget is available
 ensure_curl_or_wget() {
     if command_exists curl; then
         DOWNLOAD_CMD="curl -f -s -S -L"
-        WGET_CMD="wget -q -O -"
         return 0
     fi
 
     if command_exists wget; then
         echo "curl not found, using wget for downloads."
         DOWNLOAD_CMD="wget -q -O -"
-        WGET_CMD="wget -q -O -"
         return 0
     fi
 
@@ -98,25 +95,25 @@ ensure_curl_or_wget() {
     # Try to install curl based on OS
     if command_exists apt-get; then
         echo "Installing curl via apt-get..."
-        ${SUDO_CMD} apt-get update && ${SUDO_CMD} apt-get install -y curl
+        ${SUDO_CMD} apt-get update && ${SUDO_CMD} apt-get install -y curl || true
     elif command_exists dnf; then
         echo "Installing curl via dnf..."
-        ${SUDO_CMD} dnf install -y curl
+        ${SUDO_CMD} dnf install -y curl || true
     elif command_exists pacman; then
         echo "Installing curl via pacman..."
-        ${SUDO_CMD} pacman -Syu --noconfirm curl
+        ${SUDO_CMD} pacman -Syu --noconfirm curl || true
     elif command_exists zypper; then
         echo "Installing curl via zypper..."
-        ${SUDO_CMD} zypper install -y curl
+        ${SUDO_CMD} zypper install -y curl || true
     elif command_exists yum; then
         echo "Installing curl via yum..."
-        ${SUDO_CMD} yum install -y curl
+        ${SUDO_CMD} yum install -y curl || true
     elif command_exists brew; then
         echo "Installing curl via Homebrew..."
-        ${SUDO_CMD} brew install curl
+        ${SUDO_CMD} brew install curl || true
     elif command_exists /opt/homebrew/bin/brew; then
         echo "Installing curl via Homebrew (ARM)..."
-        ${SUDO_CMD} /opt/homebrew/bin/brew install curl
+        ${SUDO_CMD} /opt/homebrew/bin/brew install curl || true
     else
         echo "Error: Cannot install curl - no supported package manager found."
         echo "Please install curl or wget manually and run this script again."
@@ -187,6 +184,9 @@ fix_npm_permissions() {
             echo "  mkdir -p ~/.npm-global"
             echo "  npm config set prefix ~/.npm-global"
             return 0
+            ;;
+        *)
+            # Safe to proceed with non-system directory
             ;;
     esac
 
