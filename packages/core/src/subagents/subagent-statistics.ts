@@ -138,7 +138,7 @@ export class SubagentStatistics {
         `out ${stats.outputTokens ?? 0}`,
       ];
       lines.push(
-        `🔢 Tokens: ${stats.totalTokens.toLocaleString()}${parts.length ? ` (${parts.join(', ')})` : ''}`,
+        `🔢 Tokens: ${stats.totalTokens.toLocaleString('en-US')}${parts.length ? ` (${parts.join(', ')})` : ''}`,
       );
     }
     return lines.join('\n');

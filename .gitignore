@@ -52,6 +52,7 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 .qwen/
+.qwen-code/
 logs/
 # GHA credentials
 gha-creds-*.json
@@ -67,9 +68,17 @@ docs-site/content
 # python cache
 __pycache__/
 
+# SuperClaude Framework (isolated)
+.superclaude/venv/
+.superclaude/__pycache__/
+
 integration-tests/concurrent-runner/output/
 integration-tests/concurrent-runner/task-*
 
 # storybook
 *storybook.log
 storybook-static
+
+# Development documentation folder
+# Keep .md files but ignore generated scripts
+docs-dev/qwen-dev.sh

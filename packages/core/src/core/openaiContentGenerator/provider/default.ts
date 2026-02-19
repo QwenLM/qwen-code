@@ -50,6 +50,8 @@ export class DefaultOpenAICompatibleProvider
       'openai',
       this.cliConfig.getProxy(),
     );
+    // Type assertion needed because Bun-specific timeout: false is not in OpenAI ClientOptions
+    // but is handled correctly at runtime
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
@@ -57,7 +59,8 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-    });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
   }
 
   buildRequest(

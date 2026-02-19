@@ -806,14 +806,18 @@ export function execCommand(
             reject(error);
           } else {
             resolve({
-              stdout: stdout ?? '',
-              stderr: stderr ?? '',
+              stdout: String(stdout ?? ''),
+              stderr: String(stderr ?? ''),
               code: typeof error.code === 'number' ? error.code : 1,
             });
           }
           return;
         }
-        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: 0 });
+        resolve({
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+          code: 0,
+        });
       },
     );
     child.on('error', reject);

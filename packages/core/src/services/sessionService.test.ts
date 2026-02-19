@@ -139,7 +139,8 @@ describe('SessionService', () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
         `${sessionIdB}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
 
       statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
         const path = filePath.toString();
@@ -171,7 +172,8 @@ describe('SessionService', () => {
 
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
 
       statSyncSpy.mockReturnValue({
         mtimeMs: now,
@@ -195,7 +197,8 @@ describe('SessionService', () => {
 
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
       statSyncSpy.mockReturnValue({
         mtimeMs: Date.now(),
         isFile: () => true,
@@ -215,7 +218,8 @@ describe('SessionService', () => {
         `${sessionIdA}.jsonl`,
         `${sessionIdB}.jsonl`,
         `${sessionIdC}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
 
       statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
         const path = filePath.toString();
@@ -258,7 +262,8 @@ describe('SessionService', () => {
         `${sessionIdA}.jsonl`,
         `${sessionIdB}.jsonl`,
         `${sessionIdC}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
 
       statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
         const path = filePath.toString();
@@ -284,7 +289,8 @@ describe('SessionService', () => {
     it('should skip files from different projects', async () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
       statSyncSpy.mockReturnValue({
         mtimeMs: Date.now(),
         isFile: () => true,
@@ -313,7 +319,8 @@ describe('SessionService', () => {
         'not-a-uuid.jsonl', // invalid pattern
         'readme.txt', // not jsonl
         '.hidden.jsonl', // hidden file
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
       statSyncSpy.mockReturnValue({
         mtimeMs: Date.now(),
         isFile: () => true,
@@ -559,7 +566,8 @@ describe('SessionService', () => {
       readdirSyncSpy.mockReturnValue([
         `${sessionIdA}.jsonl`,
         `${sessionIdB}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
 
       statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
         const path = filePath.toString();
