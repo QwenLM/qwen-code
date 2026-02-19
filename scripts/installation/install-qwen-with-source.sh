@@ -80,13 +80,18 @@ ensure_curl_or_wget() {
     echo "Neither curl nor wget found. Attempting to install..."
 
     # Check if we're root or have sudo
-    if [[ "$(id -u)" -eq 0 ]]; then
+    CURRENT_UID=$(id -u) || true
+    if [[ "${CURRENT_UID}" -eq 0 ]]; then
         # Running as root, no sudo needed
         SUDO_CMD=""
-    elif command_exists sudo && sudo -n true 2>/dev/null; then
-        # Have sudo without password
-        SUDO_CMD="sudo"
-    else
+    elif command_exists sudo; then
+        if sudo -n true 2>/dev/null || true; then
+            # Have sudo without password
+            SUDO_CMD="sudo"
+        fi
+    fi
+
+    if [[ -z "${SUDO_CMD}" ]] && [[ "${CURRENT_UID}" -ne 0 ]]; then
         echo "Error: Cannot install curl - sudo is not available and not running as root."
         echo "Please install curl or wget manually and run this script again."
         exit 1
@@ -143,7 +148,8 @@ check_sudo_available() {
     fi
 
     # No sudo found - check if we're running as root
-    if [[ "$(id -u)" -eq 0 ]]; then
+    CHECK_UID=$(id -u) || true
+    if [[ "${CHECK_UID}" -eq 0 ]]; then
         return 0
     fi
 
@@ -491,7 +497,7 @@ install_nodejs_via_nvm() {
     NVM_NODE_PATH=""
     if [[ -d "${NVM_DIR}/versions/node" ]]; then
         # Find the v20.x.x directory
-        NVM_NODE_PATH=$(ls -d "${NVM_DIR}"/versions/node/v20.* 2>/dev/null | head -1)/bin
+        NVM_NODE_PATH=$(find "${NVM_DIR}/versions/node" -maxdepth 1 -type d -name 'v20.*' 2>/dev/null | head -1)/bin
     fi
 
     if [[ -n "${NVM_NODE_PATH}" ]] && [[ -d "${NVM_NODE_PATH}" ]]; then
@@ -655,11 +661,14 @@ main() {
     # Validate HOME variable
     if [[ -z "${HOME}" ]]; then
         echo "Warning: HOME environment variable is not set."
-        if [[ "$(id -u)" -eq 0 ]]; then
+        MAIN_UID=$(id -u) || true
+        if [[ "${MAIN_UID}" -eq 0 ]]; then
             export HOME="/root"
             echo "Using HOME=/root for root user."
         else
-            export HOME=$(eval echo ~$(whoami))
+            CURRENT_USER=$(whoami) || true
+            DEFAULT_HOME="$(eval echo "~${CURRENT_USER}")" || true
+            export HOME="${DEFAULT_HOME}"
             echo "Using HOME=${HOME}."
         fi
     fi
@@ -695,7 +704,7 @@ main() {
         # shellcheck source=/dev/null
         \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
     fi
-    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    NPM_GLOBAL_BIN="$(npm bin -g 2>/dev/null)" || true
     if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
         export PATH="${NPM_GLOBAL_BIN}:${PATH}"
     fi
