@@ -373,7 +373,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   logger.emit(logRecord);
   recordApiErrorMetrics(config, event.duration_ms, {
     model: event.model,
-    status_code: event.status_code,
+    status_code: event.status_code ?? undefined,
     error_type: event.error_type,
   });
 }
@@ -437,7 +437,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   logger.emit(logRecord);
   recordApiResponseMetrics(config, event.duration_ms, {
     model: event.model,
-    status_code: event.status_code,
+    status_code: event.status_code ?? undefined,
   });
   recordTokenUsageMetrics(config, event.input_token_count, {
     model: event.model,
