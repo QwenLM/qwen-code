@@ -267,7 +267,7 @@ describe('AppContainer State Management', () => {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createSubagent: vi.fn(),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,

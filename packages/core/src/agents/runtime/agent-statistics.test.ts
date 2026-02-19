@@ -5,14 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SubagentStatistics } from './subagent-statistics.js';
+import { AgentStatistics } from './agent-statistics.js';
 
-describe('SubagentStatistics', () => {
-  let stats: SubagentStatistics;
+describe('AgentStatistics', () => {
+  let stats: AgentStatistics;
   const baseTime = 1000000000000; // Fixed timestamp for consistent testing
 
   beforeEach(() => {
-    stats = new SubagentStatistics();
+    stats = new AgentStatistics();
   });
 
   describe('basic statistics tracking', () => {

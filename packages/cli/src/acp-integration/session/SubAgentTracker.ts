@@ -5,18 +5,18 @@
  */
 
 import type {
-  SubAgentEventEmitter,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentApprovalRequestEvent,
-  SubAgentUsageEvent,
-  SubAgentStreamTextEvent,
+  AgentEventEmitter,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentUsageEvent,
+  AgentStreamTextEvent,
   ToolCallConfirmationDetails,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
-  SubAgentEventType,
+  AgentEventType,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -101,12 +101,12 @@ export class SubAgentTracker {
   /**
    * Sets up event listeners for a sub-agent's tool events.
    *
-   * @param eventEmitter - The SubAgentEventEmitter from TaskTool
+   * @param eventEmitter - The AgentEventEmitter from TaskTool
    * @param abortSignal - Signal to abort tracking if parent is cancelled
    * @returns Array of cleanup functions to remove listeners
    */
   setup(
-    eventEmitter: SubAgentEventEmitter,
+    eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
     const onToolCall = this.createToolCallHandler(abortSignal);
@@ -115,19 +115,19 @@ export class SubAgentTracker {
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
     const onStreamText = this.createStreamTextHandler(abortSignal);
 
-    eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
-    eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
-    eventEmitter.on(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-    eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
-    eventEmitter.on(SubAgentEventType.STREAM_TEXT, onStreamText);
+    eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
+    eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+    eventEmitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+    eventEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+    eventEmitter.on(AgentEventType.STREAM_TEXT, onStreamText);
 
     return [
       () => {
-        eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
-        eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
-        eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-        eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
-        eventEmitter.off(SubAgentEventType.STREAM_TEXT, onStreamText);
+        eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+        eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+        eventEmitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+        eventEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        eventEmitter.off(AgentEventType.STREAM_TEXT, onStreamText);
         // Clean up any remaining states
         this.toolStates.clear();
       },
@@ -141,7 +141,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolCallEvent;
+      const event = args[0] as AgentToolCallEvent;
       if (abortSignal.aborted) return;
 
       // Look up tool and build invocation for metadata
@@ -182,7 +182,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolResultEvent;
+      const event = args[0] as AgentToolResultEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
@@ -210,7 +210,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => Promise<void> {
     return async (...args: unknown[]) => {
-      const event = args[0] as SubAgentApprovalRequestEvent;
+      const event = args[0] as AgentApprovalRequestEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
@@ -287,7 +287,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentUsageEvent;
+      const event = args[0] as AgentUsageEvent;
       if (abortSignal.aborted) return;
 
       this.messageEmitter.emitUsageMetadata(
@@ -307,7 +307,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentStreamTextEvent;
+      const event = args[0] as AgentStreamTextEvent;
       if (abortSignal.aborted) return;
 
       // Emit streamed text as agent message or thought based on the flag

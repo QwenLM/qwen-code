@@ -14,7 +14,7 @@ export interface ToolUsageStats {
   averageDurationMs: number;
 }
 
-export interface SubagentStatsSummary {
+export interface AgentStatsSummary {
   rounds: number;
   totalDurationMs: number;
   totalToolCalls: number;
@@ -30,7 +30,7 @@ export interface SubagentStatsSummary {
   toolUsage: ToolUsageStats[];
 }
 
-export class SubagentStatistics {
+export class AgentStatistics {
   private startTimeMs = 0;
   private rounds = 0;
   private totalToolCalls = 0;
@@ -90,7 +90,7 @@ export class SubagentStatistics {
     this.cachedTokens += Math.max(0, cached || 0);
   }
 
-  getSummary(now = Date.now()): SubagentStatsSummary {
+  getSummary(now = Date.now()): AgentStatsSummary {
     const totalDurationMs = this.startTimeMs ? now - this.startTimeMs : 0;
     const totalToolCalls = this.totalToolCalls;
     const successRate =
@@ -217,7 +217,7 @@ export class SubagentStatistics {
     return `${h}h ${m}m`;
   }
 
-  private generatePerformanceTips(stats: SubagentStatsSummary): string[] {
+  private generatePerformanceTips(stats: AgentStatsSummary): string[] {
     const tips: string[] = [];
     const totalCalls = stats.totalToolCalls;
     const sr =

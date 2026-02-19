@@ -131,7 +131,7 @@ export * from './tools/tool-registry.js';
 export * from './subagents/index.js';
 
 // Export shared multi-agent infrastructure
-export * from './agents-collab/index.js';
+export * from './agents/index.js';
 
 // Export skills
 export * from './skills/index.js';

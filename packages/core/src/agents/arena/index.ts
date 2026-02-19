@@ -11,4 +11,4 @@ export * from './ArenaManager.js';
 export * from './ArenaAgentClient.js';
 
 // Re-export shared agent infrastructure for backwards compatibility
-export * from '../index.js';
+export * from '../backends/index.js';

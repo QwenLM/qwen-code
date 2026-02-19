@@ -18,7 +18,7 @@ export interface PostToolUsePayload extends PreToolUsePayload {
   errorMessage?: string;
 }
 
-export interface SubagentStopPayload {
+export interface AgentStopPayload {
   subagentId: string;
   name: string; // subagent name
   terminateReason: string;
@@ -26,8 +26,8 @@ export interface SubagentStopPayload {
   timestamp: number;
 }
 
-export interface SubagentHooks {
+export interface AgentHooks {
   preToolUse?(payload: PreToolUsePayload): Promise<void> | void;
   postToolUse?(payload: PostToolUsePayload): Promise<void> | void;
-  onStop?(payload: SubagentStopPayload): Promise<void> | void;
+  onStop?(payload: AgentStopPayload): Promise<void> | void;
 }

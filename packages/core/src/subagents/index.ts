@@ -8,7 +8,7 @@
  * @fileoverview Subagents Phase 1 implementation - File-based configuration layer
  *
  * This module provides the foundation for the subagents feature by implementing
- * a file-based configuration system that builds on the existing SubAgentScope
+ * a file-based configuration system that builds on the AgentHeadless
  * runtime system. It includes:
  *
  * - Type definitions for file-based subagent configurations
@@ -50,26 +50,29 @@ export type {
   SubagentTerminateMode,
 } from './types.js';
 
-export { SubAgentScope } from './subagent.js';
+export { AgentHeadless } from '../agents/runtime/agent-headless.js';
 
 // Event system for UI integration
 export type {
-  SubAgentEvent,
-  SubAgentStartEvent,
-  SubAgentRoundEvent,
-  SubAgentStreamTextEvent,
-  SubAgentUsageEvent,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentFinishEvent,
-  SubAgentErrorEvent,
-  SubAgentApprovalRequestEvent,
-} from './subagent-events.js';
+  AgentEvent,
+  AgentStartEvent,
+  AgentRoundEvent,
+  AgentStreamTextEvent,
+  AgentUsageEvent,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentFinishEvent,
+  AgentErrorEvent,
+  AgentApprovalRequestEvent,
+} from '../agents/runtime/agent-events.js';
 
-export { SubAgentEventEmitter, SubAgentEventType } from './subagent-events.js';
+export {
+  AgentEventEmitter,
+  AgentEventType,
+} from '../agents/runtime/agent-events.js';
 
 // Statistics and formatting
 export type {
-  SubagentStatsSummary,
+  AgentStatsSummary,
   ToolUsageStats,
-} from './subagent-statistics.js';
+} from '../agents/runtime/agent-statistics.js';

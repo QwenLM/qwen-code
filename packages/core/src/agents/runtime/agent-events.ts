@@ -9,10 +9,10 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
-} from '../tools/tools.js';
+} from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 
-export type SubAgentEvent =
+export type AgentEvent =
   | 'start'
   | 'round_start'
   | 'round_end'
@@ -24,7 +24,7 @@ export type SubAgentEvent =
   | 'finish'
   | 'error';
 
-export enum SubAgentEventType {
+export enum AgentEventType {
   START = 'start',
   ROUND_START = 'round_start',
   ROUND_END = 'round_end',
@@ -37,7 +37,7 @@ export enum SubAgentEventType {
   ERROR = 'error',
 }
 
-export interface SubAgentStartEvent {
+export interface AgentStartEvent {
   subagentId: string;
   name: string;
   model?: string;
@@ -45,14 +45,14 @@ export interface SubAgentStartEvent {
   timestamp: number;
 }
 
-export interface SubAgentRoundEvent {
+export interface AgentRoundEvent {
   subagentId: string;
   round: number;
   promptId: string;
   timestamp: number;
 }
 
-export interface SubAgentStreamTextEvent {
+export interface AgentStreamTextEvent {
   subagentId: string;
   round: number;
   text: string;
@@ -61,7 +61,7 @@ export interface SubAgentStreamTextEvent {
   timestamp: number;
 }
 
-export interface SubAgentUsageEvent {
+export interface AgentUsageEvent {
   subagentId: string;
   round: number;
   usage: GenerateContentResponseUsageMetadata;
@@ -69,7 +69,7 @@ export interface SubAgentUsageEvent {
   timestamp: number;
 }
 
-export interface SubAgentToolCallEvent {
+export interface AgentToolCallEvent {
   subagentId: string;
   round: number;
   callId: string;
@@ -79,7 +79,7 @@ export interface SubAgentToolCallEvent {
   timestamp: number;
 }
 
-export interface SubAgentToolResultEvent {
+export interface AgentToolResultEvent {
   subagentId: string;
   round: number;
   callId: string;
@@ -92,7 +92,7 @@ export interface SubAgentToolResultEvent {
   timestamp: number;
 }
 
-export interface SubAgentApprovalRequestEvent {
+export interface AgentApprovalRequestEvent {
   subagentId: string;
   round: number;
   callId: string;
@@ -108,7 +108,7 @@ export interface SubAgentApprovalRequestEvent {
   timestamp: number;
 }
 
-export interface SubAgentFinishEvent {
+export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
   timestamp: number;
@@ -122,24 +122,24 @@ export interface SubAgentFinishEvent {
   totalTokens?: number;
 }
 
-export interface SubAgentErrorEvent {
+export interface AgentErrorEvent {
   subagentId: string;
   error: string;
   timestamp: number;
 }
 
-export class SubAgentEventEmitter {
+export class AgentEventEmitter {
   private ee = new EventEmitter();
 
-  on(event: SubAgentEvent, listener: (...args: unknown[]) => void) {
+  on(event: AgentEvent, listener: (...args: unknown[]) => void) {
     this.ee.on(event, listener);
   }
 
-  off(event: SubAgentEvent, listener: (...args: unknown[]) => void) {
+  off(event: AgentEvent, listener: (...args: unknown[]) => void) {
     this.ee.off(event, listener);
   }
 
-  emit(event: SubAgentEvent, payload: unknown) {
+  emit(event: AgentEvent, payload: unknown) {
     this.ee.emit(event, payload);
   }
 }

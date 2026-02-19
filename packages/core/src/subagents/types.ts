@@ -24,7 +24,7 @@ export type SubagentLevel =
 /**
  * Core configuration for a subagent as stored in Markdown files.
  * This interface represents the file-based configuration that gets
- * converted to runtime configuration for SubAgentScope.
+ * converted to runtime configuration for AgentHeadless.
  */
 export interface SubagentConfig {
   /** Unique name identifier for the subagent */
@@ -82,20 +82,20 @@ export interface SubagentConfig {
 }
 
 /**
- * Runtime configuration that converts file-based config to existing SubAgentScope.
+ * Runtime configuration that converts file-based config to AgentHeadless.
  * This interface maps SubagentConfig to the existing runtime interfaces.
  */
 export interface SubagentRuntimeConfig {
-  /** Prompt configuration for SubAgentScope */
+  /** Prompt configuration for AgentHeadless */
   promptConfig: PromptConfig;
 
-  /** Model configuration for SubAgentScope */
+  /** Model configuration for AgentHeadless */
   modelConfig: ModelConfig;
 
-  /** Runtime execution configuration for SubAgentScope */
+  /** Runtime execution configuration for AgentHeadless */
   runConfig: RunConfig;
 
-  /** Optional tool configuration for SubAgentScope */
+  /** Optional tool configuration for AgentHeadless */
   toolConfig?: ToolConfig;
 }
 
@@ -202,6 +202,10 @@ export enum SubagentTerminateMode {
    * Indicates that the subagent's execution was cancelled via an abort signal.
    */
   CANCELLED = 'CANCELLED',
+  /**
+   * Indicates that the subagent was gracefully shut down (e.g., arena/team session ended).
+   */
+  SHUTDOWN = 'SHUTDOWN',
 }
 
 /**

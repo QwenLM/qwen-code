@@ -11,7 +11,7 @@ import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
-import type { ArenaConfigFile } from '../agents-collab/arena/types.js';
+import type { ArenaConfigFile } from '../agents/arena/types.js';
 
 /**
  * Commit message used for the baseline snapshot in arena worktrees.
