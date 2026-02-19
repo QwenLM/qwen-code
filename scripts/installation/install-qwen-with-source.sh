@@ -6,6 +6,13 @@
 # Usage: install-qwen-with-source.sh --source [github|npm|internal|local-build]
 #        install-qwen-with-source.sh -s [github|npm|internal|local-build]
 
+# Check if running with sh (which doesn't support pipefail)
+if [ -z "$BASH_VERSION" ]; then
+    # Re-execute with bash
+    exec bash "$0" "$@"
+fi
+
+
 # Disable pagers to prevent interactive prompts
 export GIT_PAGER=cat
 export PAGER=cat
@@ -344,6 +351,37 @@ install_npm_only() {
 install_nodejs_via_nvm() {
     export NVM_DIR="${HOME}/.nvm"
 
+    # Check glibc version before attempting installation
+    # Node.js 20+ requires glibc 2.27+
+    GLIBC_VERSION=$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    
+    # Handle empty version
+    if [[ -z "${GLIBC_VERSION}" ]]; then
+        # Try alternative method
+        GLIBC_VERSION=$(ldd -v 2>&1 | grep -oP 'Version\s+\K[0-9.]+' | head -1 || echo "0")
+    fi
+    
+    # Ensure GLIBC_VERSION is a clean value (remove any newlines)
+    GLIBC_VERSION=$(echo "${GLIBC_VERSION}" | tr -d '\n\r' | sed 's/[[:space:]]//g')
+    
+    # Extract major and minor version
+    GLIBC_MAJOR=$(echo "${GLIBC_VERSION}" | cut -d. -f1)
+    GLIBC_MINOR=$(echo "${GLIBC_VERSION}" | cut -d. -f2)
+    GLIBC_MAJOR=${GLIBC_MAJOR:-0}
+    GLIBC_MINOR=${GLIBC_MINOR:-0}
+
+    if [[ "${GLIBC_MAJOR}" -lt 2 ]] || \
+       [[ "${GLIBC_MAJOR}" -eq 2 && "${GLIBC_MINOR}" -lt 27 ]]; then
+        echo "✗ Error: Detected glibc ${GLIBC_VERSION}"
+        echo ""
+        echo "Qwen Code requires Node.js 20+, which needs glibc 2.27+."
+        echo "Your system (CentOS 7 with glibc 2.17) is not compatible."
+        echo ""
+        echo "Please upgrade your OS or use Docker."
+        echo ""
+        exit 1
+    fi
+
     # Check NVM completeness
     if [[ -d "${NVM_DIR}" ]]; then
         if ! check_nvm_complete; then
@@ -441,13 +479,25 @@ install_nodejs_via_nvm() {
     # Install Node.js 20
     echo "Installing Node.js 20..."
     if nvm install 20 >/dev/null 2>&1; then
-        nvm use 20 >/dev/null 2>&1
-        nvm alias default 20 >/dev/null 2>&1
+        nvm use 20 >/dev/null 2>&1 || true
+        nvm alias default 20 >/dev/null 2>&1 || true
     else
         echo "✗ Failed to install Node.js 20"
         exit 1
     fi
-    
+
+    # Add NVM node to PATH for this script execution
+    # Find the actual installed Node.js version directory
+    NVM_NODE_PATH=""
+    if [[ -d "${NVM_DIR}/versions/node" ]]; then
+        # Find the v20.x.x directory
+        NVM_NODE_PATH=$(ls -d "${NVM_DIR}"/versions/node/v20.* 2>/dev/null | head -1)/bin
+    fi
+
+    if [[ -n "${NVM_NODE_PATH}" ]] && [[ -d "${NVM_NODE_PATH}" ]]; then
+        export PATH="${NVM_NODE_PATH}:${PATH}"
+    fi
+
     # Verify Node.js
     if ! command_exists node; then
         echo "✗ Node.js installation verification failed"
@@ -492,6 +542,19 @@ install_nodejs_via_nvm() {
 
 # Function to check and install Qwen Code
 install_qwen_code() {
+    # Ensure NVM node is in PATH
+    export NVM_DIR="${HOME}/.nvm"
+    if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+        # shellcheck source=/dev/null
+        \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
+    fi
+
+    # Also add npm global bin to PATH
+    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
+    fi
+
     if command_exists qwen; then
         QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
         echo "✓ Qwen Code is already installed: ${QWEN_VERSION}"
@@ -558,16 +621,6 @@ install_qwen_code() {
         create_source_json
     else
         echo "  (Skipping source.json creation - no source specified)"
-    fi
-
-    # Verify installation
-    if command_exists qwen; then
-        QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
-        echo "✓ Qwen Code is available as 'qwen' command"
-        echo "  Installed version: ${QWEN_VERSION}"
-    else
-        echo "⚠ Qwen Code installed but not in PATH"
-        echo "  You may need to restart your terminal"
     fi
 }
 
@@ -636,6 +689,17 @@ main() {
     echo "==========================================="
     echo ""
 
+    # Ensure NVM and npm global bin are in PATH before final check
+    export NVM_DIR="${HOME}/.nvm"
+    if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+        # shellcheck source=/dev/null
+        \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
+    fi
+    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
+    fi
+
     # Check if qwen is immediately available
     if command_exists qwen; then
         echo "✓ Qwen Code is ready to use!"
@@ -665,6 +729,56 @@ main() {
 
         echo ""
         echo "Or simply restart your terminal, then run: qwen"
+    fi
+
+    # Auto-configure PATH in shell config files
+    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    NVM_DIR="${HOME}/.nvm"
+
+    # Determine which config file to use
+    SHELL_CONFIG=""
+    if [[ -f "${HOME}/.bashrc" ]]; then
+        SHELL_CONFIG="${HOME}/.bashrc"
+    elif [[ -f "${HOME}/.bash_profile" ]]; then
+        SHELL_CONFIG="${HOME}/.bash_profile"
+    elif [[ -f "${HOME}/.profile" ]]; then
+        SHELL_CONFIG="${HOME}/.profile"
+    fi
+
+    if [[ -n "${SHELL_CONFIG}" ]]; then
+        # Check if already configured
+        NEEDS_CONFIG=false
+        if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+            if ! grep -q "npm bin -g" "${SHELL_CONFIG}" 2>/dev/null && \
+               ! grep -q "${NPM_GLOBAL_BIN}" "${SHELL_CONFIG}" 2>/dev/null; then
+                NEEDS_CONFIG=true
+            fi
+        fi
+
+        if [[ "${NEEDS_CONFIG}" == "true" ]]; then
+            echo ""
+            echo "Adding Qwen Code to PATH in ${SHELL_CONFIG}..."
+
+            # Append NVM configuration
+            if [[ -d "${NVM_DIR}" ]]; then
+                echo "" >> "${SHELL_CONFIG}"
+                echo "# NVM configuration (added by Qwen Code installer)" >> "${SHELL_CONFIG}"
+                echo "export NVM_DIR=\"${NVM_DIR}\"" >> "${SHELL_CONFIG}"
+                echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && \\. \"\$NVM_DIR/nvm.sh\"" >> "${SHELL_CONFIG}"
+                echo "[ -s \"\$NVM_DIR/bash_completion\" ] && \\. \"\$NVM_DIR/bash_completion\"" >> "${SHELL_CONFIG}"
+            fi
+
+            # Append npm global bin to PATH
+            if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+                echo "" >> "${SHELL_CONFIG}"
+                echo "# NPM global bin (added by Qwen Code installer)" >> "${SHELL_CONFIG}"
+                echo "export PATH=\"${NPM_GLOBAL_BIN}:\$PATH\"" >> "${SHELL_CONFIG}"
+            fi
+
+            echo "✓ Configuration added to ${SHELL_CONFIG}"
+            echo ""
+            echo "Please run: source ${SHELL_CONFIG}"
+        fi
     fi
 }
 
