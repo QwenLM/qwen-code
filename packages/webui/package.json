@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/webui",
-  "version": "0.10.4",
+  "version": "0.10.4-nightly.20260220.c6a723ef",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
   "main": "./dist/index.cjs",
