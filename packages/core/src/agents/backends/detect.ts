@@ -5,7 +5,9 @@
  */
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { Config } from '../../config/config.js';
 import { TmuxBackend } from './TmuxBackend.js';
+import { InProcessBackend } from './InProcessBackend.js';
 import { type Backend, DISPLAY_MODE, type DisplayMode } from './types.js';
 import { isTmuxAvailable } from './tmux-commands.js';
 
@@ -19,30 +21,29 @@ export interface DetectBackendResult {
 /**
  * Detect and create the appropriate Backend.
  *
- * Design principle for current Arena flow:
- * - Keep all display mode values in the API surface
- * - Only tmux is runnable for now
- * - in-process / iTerm2 preferences fail fast as "not implemented yet"
- *
  * Detection priority:
  * 1. User explicit preference (--display=in-process|tmux|iterm2)
  * 2. Auto-detect:
  *    - inside tmux: TmuxBackend
  *    - other terminals: tmux external session mode when tmux is available
+ *    - fallback to InProcessBackend
+ *
+ * @param preference - Optional display mode preference
+ * @param runtimeContext - Runtime config for in-process fallback
  */
 export async function detectBackend(
-  preference?: DisplayMode,
+  preference: DisplayMode | undefined,
+  runtimeContext: Config,
 ): Promise<DetectBackendResult> {
   // 1. User explicit preference
   if (preference === DISPLAY_MODE.IN_PROCESS) {
-    throw new Error(
-      `Arena display mode "${DISPLAY_MODE.IN_PROCESS}" is not implemented yet. Please use "${DISPLAY_MODE.TMUX}".`,
-    );
+    debugLogger.info('Using InProcessBackend (user preference)');
+    return { backend: new InProcessBackend(runtimeContext) };
   }
 
   if (preference === DISPLAY_MODE.ITERM2) {
     throw new Error(
-      `Arena display mode "${DISPLAY_MODE.ITERM2}" is not implemented yet. Please use "${DISPLAY_MODE.TMUX}".`,
+      `Arena display mode "${DISPLAY_MODE.ITERM2}" is not implemented yet. Please use "${DISPLAY_MODE.TMUX}" or "${DISPLAY_MODE.IN_PROCESS}".`,
     );
   }
 
@@ -65,10 +66,13 @@ export async function detectBackend(
     return { backend: new TmuxBackend() };
   }
 
-  // No supported backend available.
-  const tmuxEnv = process.env['TMUX'];
-  const termProgram = process.env['TERM_PROGRAM'];
-  throw new Error(
-    `No supported Arena backend detected. $TMUX=${tmuxEnv ? `"${tmuxEnv}"` : '(unset)'}, $TERM_PROGRAM=${termProgram ? `"${termProgram}"` : '(unset)'}. Install tmux to use Arena split-pane mode.`,
+  // Fallback: use InProcessBackend
+  debugLogger.info(
+    'No PTY backend available — falling back to InProcessBackend',
   );
+  return {
+    backend: new InProcessBackend(runtimeContext),
+    warning:
+      'tmux is not available. Using in-process mode (no split-pane terminal view).',
+  };
 }

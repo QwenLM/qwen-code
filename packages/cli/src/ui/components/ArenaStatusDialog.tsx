@@ -10,7 +10,7 @@ import { Box, Text } from 'ink';
 import {
   type ArenaManager,
   type ArenaAgentState,
-  ArenaAgentStatus,
+  isTerminalStatus,
   ArenaSessionStatus,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
@@ -42,11 +42,7 @@ function pad(
 }
 
 function getElapsedMs(agent: ArenaAgentState): number {
-  if (
-    agent.status === ArenaAgentStatus.COMPLETED ||
-    agent.status === ArenaAgentStatus.TERMINATED ||
-    agent.status === ArenaAgentStatus.CANCELLED
-  ) {
+  if (isTerminalStatus(agent.status)) {
     return agent.stats.durationMs;
   }
   return Date.now() - agent.startedAt;

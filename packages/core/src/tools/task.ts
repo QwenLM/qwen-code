@@ -18,10 +18,8 @@ import type {
 } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
-import {
-  type SubagentConfig,
-  SubagentTerminateMode,
-} from '../subagents/types.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import { ContextState } from '../agents/runtime/agent-headless.js';
 import {
   AgentEventEmitter,
@@ -54,6 +52,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
 
   private subagentManager: SubagentManager;
   private availableSubagents: SubagentConfig[] = [];
+  private readonly removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -89,12 +88,16 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     );
 
     this.subagentManager = config.getSubagentManager();
-    this.subagentManager.addChangeListener(() => {
+    this.removeChangeListener = this.subagentManager.addChangeListener(() => {
       void this.refreshSubagents();
     });
 
     // Initialize the tool asynchronously
     this.refreshSubagents();
+  }
+
+  dispose(): void {
+    this.removeChangeListener();
   }
 
   /**
@@ -514,7 +517,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       // Get the results
       const finalText = subagent.getFinalText();
       const terminateMode = subagent.getTerminateMode();
-      const success = terminateMode === SubagentTerminateMode.GOAL;
+      const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
 
       if (signal?.aborted) {

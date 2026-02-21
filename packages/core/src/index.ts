@@ -248,7 +248,6 @@ export {
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
-export * from './subagents/index.js';
 
 // ============================================================================
 // Utilities

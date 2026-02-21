@@ -492,9 +492,7 @@ export class GeminiClient {
         debugLogger.info(
           `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
         );
-        await arenaAgentClient.reportCompleted(
-          `Stopped by control signal: ${controlSignal.reason}`,
-        );
+        await arenaAgentClient.reportCancelled();
         return new Turn(this.getChat(), prompt_id);
       }
     }

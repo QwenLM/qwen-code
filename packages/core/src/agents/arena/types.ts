@@ -6,40 +6,12 @@
 
 import type { WorktreeInfo } from '../../services/gitWorktreeService.js';
 import type { DisplayMode } from '../backends/types.js';
+import type { AgentStatus } from '../runtime/agent-types.js';
 
 /**
  * Maximum number of concurrent agents allowed in an Arena session.
  */
 export const ARENA_MAX_AGENTS = 5;
-
-/**
- * Represents the status of an Arena agent in interactive mode.
- *
- * Agents run as interactive CLI subprocesses (--prompt-interactive), so
- * they never truly "complete" or "exit" on their own. Instead:
- *
- *   INITIALIZING → RUNNING ⇄ COMPLETED → TERMINATED
- *                        ↘ CANCELLED
- *
- * - INITIALIZING: Worktree created, PTY not yet spawned.
- * - RUNNING:      Agent is actively processing a turn (model thinking / tool execution).
- * - COMPLETED:    Agent finished the current task successfully.
- *                 This is the "selectable" state for /arena select.
- * - CANCELLED:    Agent's current request was cancelled by the user.
- * - TERMINATED:   PTY process has exited (killed, crashed, or shut down).
- */
-export enum ArenaAgentStatus {
-  /** Worktree created, PTY not yet spawned */
-  INITIALIZING = 'initializing',
-  /** Agent is actively processing a turn */
-  RUNNING = 'running',
-  /** Agent finished current task successfully */
-  COMPLETED = 'completed',
-  /** Agent's current request was cancelled by the user */
-  CANCELLED = 'cancelled',
-  /** PTY process has exited */
-  TERMINATED = 'terminated',
-}
 
 /**
  * Represents the status of an Arena session.
@@ -124,7 +96,7 @@ export interface ArenaAgentResult {
   /** Model configuration used */
   model: ArenaModelConfig;
   /** Final status */
-  status: ArenaAgentStatus;
+  status: AgentStatus;
   /** Worktree information */
   worktree: WorktreeInfo;
   /** Final text output from the agent */
@@ -215,7 +187,7 @@ export interface ArenaCallbacks {
  */
 export interface ArenaStatusFile {
   agentId: string;
-  status: 'running' | 'completed' | 'error' | 'cancelled';
+  status: AgentStatus;
   updatedAt: number;
   rounds: number;
   currentActivity?: string;
@@ -275,7 +247,7 @@ export interface ArenaAgentState {
   /** Model configuration */
   model: ArenaModelConfig;
   /** Current status */
-  status: ArenaAgentStatus;
+  status: AgentStatus;
   /** Worktree information */
   worktree: WorktreeInfo;
   /** Abort controller for cancellation */

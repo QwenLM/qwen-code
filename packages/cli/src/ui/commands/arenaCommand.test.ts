@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   type ArenaManager,
-  ArenaAgentStatus,
+  AgentStatus,
   ArenaSessionStatus,
 } from '@qwen-code/qwen-code-core';
 import { arenaCommand } from './arenaCommand.js';
@@ -242,7 +242,7 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.TERMINATED,
+          status: AgentStatus.FAILED,
           model: { modelId: 'model-1' },
         },
       ]),
@@ -267,12 +267,12 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'model-1' },
         },
         {
           agentId: 'agent-2',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'model-2' },
         },
       ]),
@@ -294,12 +294,12 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'gpt-4o', displayName: 'gpt-4o' },
         },
         {
           agentId: 'agent-2',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'claude-sonnet', displayName: 'claude-sonnet' },
         },
       ]),
@@ -327,7 +327,7 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'gpt-4o', displayName: 'gpt-4o' },
         },
       ]),
@@ -350,7 +350,7 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'gpt-4o' },
         },
       ]),
@@ -373,7 +373,7 @@ describe('arenaCommand select subcommand', () => {
       getAgentStates: vi.fn(() => [
         {
           agentId: 'agent-1',
-          status: ArenaAgentStatus.COMPLETED,
+          status: AgentStatus.COMPLETED,
           model: { modelId: 'gpt-4o' },
         },
       ]),

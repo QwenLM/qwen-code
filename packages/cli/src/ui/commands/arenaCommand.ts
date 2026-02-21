@@ -16,7 +16,8 @@ import { CommandKind } from './types.js';
 import {
   ArenaManager,
   ArenaEventType,
-  ArenaAgentStatus,
+  AgentStatus,
+  isTerminalStatus,
   ArenaSessionStatus,
   AuthType,
   createDebugLogger,
@@ -246,41 +247,23 @@ function executeArenaCommand(
 
   const buildAgentCardData = (
     result: ArenaAgentCompleteEvent['result'],
-  ): ArenaAgentCardData => {
-    let status: ArenaAgentCardData['status'];
-    switch (result.status) {
-      case ArenaAgentStatus.COMPLETED:
-        status = 'completed';
-        break;
-      case ArenaAgentStatus.CANCELLED:
-        status = 'cancelled';
-        break;
-      default:
-        status = 'terminated';
-        break;
-    }
-    return {
-      label: result.model.displayName || result.model.modelId,
-      status,
-      durationMs: result.stats.durationMs,
-      totalTokens: result.stats.totalTokens,
-      inputTokens: result.stats.inputTokens,
-      outputTokens: result.stats.outputTokens,
-      toolCalls: result.stats.toolCalls,
-      successfulToolCalls: result.stats.successfulToolCalls,
-      failedToolCalls: result.stats.failedToolCalls,
-      rounds: result.stats.rounds,
-      error: result.error,
-      diff: result.diff,
-    };
-  };
+  ): ArenaAgentCardData => ({
+    label: result.model.displayName || result.model.modelId,
+    status: result.status,
+    durationMs: result.stats.durationMs,
+    totalTokens: result.stats.totalTokens,
+    inputTokens: result.stats.inputTokens,
+    outputTokens: result.stats.outputTokens,
+    toolCalls: result.stats.toolCalls,
+    successfulToolCalls: result.stats.successfulToolCalls,
+    failedToolCalls: result.stats.failedToolCalls,
+    rounds: result.stats.rounds,
+    error: result.error,
+    diff: result.diff,
+  });
 
   const handleAgentComplete = (event: ArenaAgentCompleteEvent) => {
-    if (
-      event.result.status !== ArenaAgentStatus.COMPLETED &&
-      event.result.status !== ArenaAgentStatus.CANCELLED &&
-      event.result.status !== ArenaAgentStatus.TERMINATED
-    ) {
+    if (!isTerminalStatus(event.result.status)) {
       return;
     }
 
@@ -598,7 +581,7 @@ export const arenaCommand: SlashCommand = {
 
         const agents = manager.getAgentStates();
         const hasSuccessful = agents.some(
-          (a) => a.status === ArenaAgentStatus.COMPLETED,
+          (a) => a.status === AgentStatus.COMPLETED,
         );
 
         if (!hasSuccessful) {
@@ -616,7 +599,7 @@ export const arenaCommand: SlashCommand = {
           const matchingAgent = agents.find((a) => {
             const label = a.model.displayName || a.model.modelId;
             return (
-              a.status === ArenaAgentStatus.COMPLETED &&
+              a.status === AgentStatus.COMPLETED &&
               (label.toLowerCase() === trimmedArgs.toLowerCase() ||
                 a.model.modelId.toLowerCase() === trimmedArgs.toLowerCase())
             );

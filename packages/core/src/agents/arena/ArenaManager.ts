@@ -9,12 +9,18 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import type { Config } from '../../config/config.js';
+import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
 import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
-import { detectBackend } from '../index.js';
+import { detectBackend, DISPLAY_MODE } from '../index.js';
+import type { InProcessBackend } from '../backends/InProcessBackend.js';
+import {
+  AgentEventType,
+  type AgentStatusChangeEvent,
+} from '../runtime/agent-events.js';
 import {
   type ArenaConfig,
   type ArenaConfigFile,
@@ -25,11 +31,11 @@ import {
   type ArenaAgentState,
   type ArenaCallbacks,
   type ArenaStatusFile,
-  ArenaAgentStatus,
   ArenaSessionStatus,
   ARENA_MAX_AGENTS,
   safeAgentId,
 } from './types.js';
+import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 
 const debugLogger = createDebugLogger('ARENA');
 
@@ -73,6 +79,8 @@ export class ArenaManager {
   private terminalRows: number;
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private lifecyclePromise: Promise<void> | null = null;
+  /** Cleanup functions for in-process event bridge listeners. */
+  private eventBridgeCleanups: Array<() => void> = [];
 
   constructor(config: Config, callbacks: ArenaCallbacks = {}) {
     this.config = config;
@@ -260,13 +268,15 @@ export class ArenaManager {
     this.masterAbortController = new AbortController();
 
     const sourceRepoPath = this.config.getWorkingDir();
+    const arenaSettings = this.config.getAgentsSettings().arena;
 
     this.arenaConfig = {
       sessionId: this.sessionId,
       task: options.task,
       models: options.models,
-      maxRoundsPerAgent: options.maxRoundsPerAgent ?? 50,
-      timeoutSeconds: options.timeoutSeconds ?? 600,
+      maxRoundsPerAgent:
+        options.maxRoundsPerAgent ?? arenaSettings?.maxRoundsPerAgent,
+      timeoutSeconds: options.timeoutSeconds ?? arenaSettings?.timeoutSeconds,
       approvalMode: options.approvalMode,
       sourceRepoPath,
     };
@@ -372,17 +382,15 @@ export class ArenaManager {
     // Abort the master controller
     this.masterAbortController?.abort();
 
-    const isTerminal = (s: ArenaAgentStatus) =>
-      s === ArenaAgentStatus.TERMINATED || s === ArenaAgentStatus.CANCELLED;
-
     // Force stop all PTY processes (sends Ctrl-C)
     this.backend?.stopAll();
 
-    // Update agent statuses
+    // Update agent statuses — skip agents already in a terminal state
+    // (COMPLETED, FAILED, CANCELLED) so we don't overwrite a successful result.
     for (const agent of this.agents.values()) {
-      if (!isTerminal(agent.status)) {
+      if (!isTerminalStatus(agent.status)) {
         agent.abortController.abort();
-        this.updateAgentStatus(agent.agentId, ArenaAgentStatus.TERMINATED);
+        this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
       }
     }
 
@@ -401,6 +409,9 @@ export class ArenaManager {
 
     // Stop polling in case cleanup is called without cancel
     this.stopPolling();
+
+    // Remove in-process event bridge listeners
+    this.teardownEventBridge();
 
     // Clean up backend resources
     if (this.backend) {
@@ -432,6 +443,9 @@ export class ArenaManager {
 
     this.stopPolling();
 
+    // Remove in-process event bridge listeners
+    this.teardownEventBridge();
+
     if (this.backend) {
       await this.backend.cleanup();
     }
@@ -454,7 +468,7 @@ export class ArenaManager {
       return { success: false, error: `Agent ${agentId} not found` };
     }
 
-    if (agent.status !== ArenaAgentStatus.COMPLETED) {
+    if (agent.status !== AgentStatus.COMPLETED) {
       return {
         success: false,
         error: `Agent ${agentId} has not completed (current status: ${agent.status})`,
@@ -537,7 +551,7 @@ export class ArenaManager {
    * Initialize the backend.
    */
   private async initializeBackend(displayMode?: DisplayMode): Promise<void> {
-    const { backend, warning } = await detectBackend(displayMode);
+    const { backend, warning } = await detectBackend(displayMode, this.config);
     await backend.init();
     this.backend = backend;
 
@@ -607,7 +621,7 @@ export class ArenaManager {
       const agentState: ArenaAgentState = {
         agentId,
         model,
-        status: ArenaAgentStatus.INITIALIZING,
+        status: AgentStatus.INITIALIZING,
         worktree,
         abortController: new AbortController(),
         stats: {
@@ -646,25 +660,36 @@ export class ArenaManager {
       this.handleAgentExit(agentId, exitCode, signal);
     });
 
+    const isInProcess = backend.type === DISPLAY_MODE.IN_PROCESS;
+
     // Spawn agents sequentially — each spawn completes before starting the next.
     // This creates a visual effect where panes appear one by one.
     for (const agent of this.agents.values()) {
       await this.spawnAgentPty(agent);
     }
 
-    // Start polling agent status files
-    this.startPolling();
+    // For in-process mode, set up event bridges instead of file-based polling.
+    // For PTY mode, start polling agent status files.
+    if (isInProcess) {
+      this.setupInProcessEventBridge(backend as InProcessBackend);
+    } else {
+      this.startPolling();
+    }
 
     // Set up timeout
-    const timeoutMs = (this.arenaConfig.timeoutSeconds ?? 600) * 1000;
+    const timeoutSeconds = this.arenaConfig.timeoutSeconds;
 
     // Wait for all agents to reach IDLE or TERMINATED, or timeout.
     // Unlike waitForAll (which waits for PTY exit), this resolves as soon
     // as every agent has finished its first task in interactive mode.
-    const allSettled = await this.waitForAllAgentsSettled(timeoutMs);
+    const allSettled = await this.waitForAllAgentsSettled(
+      timeoutSeconds ? timeoutSeconds * 1000 : undefined,
+    );
 
-    // Stop polling when all agents are done
-    this.stopPolling();
+    // Stop polling when all agents are done (no-op for in-process mode)
+    if (!isInProcess) {
+      this.stopPolling();
+    }
 
     if (!allSettled) {
       debugLogger.info('Arena session timed out, stopping remaining agents');
@@ -672,14 +697,11 @@ export class ArenaManager {
 
       // Terminate remaining active agents
       for (const agent of this.agents.values()) {
-        if (
-          agent.status !== ArenaAgentStatus.COMPLETED &&
-          agent.status !== ArenaAgentStatus.CANCELLED &&
-          agent.status !== ArenaAgentStatus.TERMINATED
-        ) {
+        if (!isTerminalStatus(agent.status)) {
           backend.stopAgent(agent.agentId);
           agent.abortController.abort();
-          this.updateAgentStatus(agent.agentId, ArenaAgentStatus.TERMINATED);
+          agent.stats.durationMs = Date.now() - agent.startedAt;
+          this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
         }
       }
     }
@@ -699,7 +721,7 @@ export class ArenaManager {
     debugLogger.info(`Spawning agent PTY: ${agentId}`);
 
     agent.startedAt = Date.now();
-    this.updateAgentStatus(agentId, ArenaAgentStatus.RUNNING);
+    this.updateAgentStatus(agentId, AgentStatus.RUNNING);
 
     // Emit agent start event
     this.eventEmitter.emit(ArenaEventType.AGENT_START, {
@@ -721,7 +743,7 @@ export class ArenaManager {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       agent.error = errorMessage;
-      this.updateAgentStatus(agentId, ArenaAgentStatus.TERMINATED);
+      this.updateAgentStatus(agentId, AgentStatus.FAILED);
 
       this.eventEmitter.emit(ArenaEventType.AGENT_ERROR, {
         sessionId: this.requireConfig().sessionId,
@@ -758,8 +780,8 @@ export class ArenaManager {
       return;
     }
 
-    // Already terminated (e.g. via cancel)
-    if (agent.status === ArenaAgentStatus.TERMINATED) {
+    // Already failed/cancelled (e.g. via cancel)
+    if (isTerminalStatus(agent.status)) {
       return;
     }
 
@@ -779,8 +801,13 @@ export class ArenaManager {
       });
     }
 
-    this.updateAgentStatus(agentId, ArenaAgentStatus.TERMINATED);
-    debugLogger.info(`Agent terminated: ${agentId} (exit code: ${exitCode})`);
+    this.updateAgentStatus(
+      agentId,
+      agent.abortController.signal.aborted
+        ? AgentStatus.CANCELLED
+        : AgentStatus.FAILED,
+    );
+    debugLogger.info(`Agent exited: ${agentId} (exit code: ${exitCode})`);
   }
 
   /**
@@ -832,7 +859,7 @@ export class ArenaManager {
       env['QWEN_BASE_URL'] = model.baseUrl;
     }
 
-    const spawnConfig = {
+    const spawnConfig: AgentSpawnConfig = {
       agentId,
       command: process.execPath, // Use the same Node.js binary
       args: [path.resolve(process.argv[1]!), ...args], // Re-launch the CLI entry point (must be absolute path since cwd changes)
@@ -840,6 +867,30 @@ export class ArenaManager {
       env,
       cols: this.terminalCols,
       rows: this.terminalRows,
+      inProcess: {
+        agentName: model.displayName || model.modelId,
+        initialTask: this.arenaConfig?.task,
+        runtimeConfig: {
+          promptConfig: {
+            systemPrompt: getCoreSystemPrompt(
+              this.config.getUserMemory(),
+              model.modelId,
+            ),
+          },
+          modelConfig: { model: model.modelId },
+          runConfig: {
+            max_turns: this.arenaConfig?.maxRoundsPerAgent,
+            max_time_minutes: this.arenaConfig?.timeoutSeconds
+              ? Math.ceil(this.arenaConfig.timeoutSeconds / 60)
+              : undefined,
+          },
+        },
+        authOverrides: {
+          authType: model.authType,
+          apiKey: model.apiKey,
+          baseUrl: model.baseUrl,
+        },
+      },
     };
 
     debugLogger.info(
@@ -857,10 +908,26 @@ export class ArenaManager {
 
   // ─── Private: Status & Results ─────────────────────────────────
 
-  private updateAgentStatus(
-    agentId: string,
-    newStatus: ArenaAgentStatus,
-  ): void {
+  /** Decide whether a status transition is valid. Returns the new status or null. */
+  private resolveTransition(
+    current: AgentStatus,
+    incoming: AgentStatus,
+  ): AgentStatus | null {
+    if (current === incoming) return null;
+    if (isTerminalStatus(current)) {
+      // Allow revival: COMPLETED → RUNNING (agent received new input)
+      if (
+        current === AgentStatus.COMPLETED &&
+        incoming === AgentStatus.RUNNING
+      ) {
+        return incoming;
+      }
+      return null;
+    }
+    return incoming;
+  }
+
+  private updateAgentStatus(agentId: string, newStatus: AgentStatus): void {
     const agent = this.agents.get(agentId);
     if (!agent) {
       return;
@@ -877,12 +944,8 @@ export class ArenaManager {
       timestamp: Date.now(),
     });
 
-    // Emit AGENT_COMPLETE when agent reaches COMPLETED, CANCELLED, or TERMINATED
-    if (
-      newStatus === ArenaAgentStatus.COMPLETED ||
-      newStatus === ArenaAgentStatus.CANCELLED ||
-      newStatus === ArenaAgentStatus.TERMINATED
-    ) {
+    // Emit AGENT_COMPLETE when agent reaches a terminal status
+    if (isTerminalStatus(newStatus)) {
       const result = this.buildAgentResult(agent);
 
       this.eventEmitter.emit(ArenaEventType.AGENT_COMPLETE, {
@@ -932,15 +995,11 @@ export class ArenaManager {
    * Wait for all agents to reach IDLE or TERMINATED state.
    * Returns true if all agents settled, false if timeout was reached.
    */
-  private waitForAllAgentsSettled(timeoutMs: number): Promise<boolean> {
+  private waitForAllAgentsSettled(timeoutMs?: number): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       const checkSettled = () => {
         for (const agent of this.agents.values()) {
-          if (
-            agent.status !== ArenaAgentStatus.COMPLETED &&
-            agent.status !== ArenaAgentStatus.CANCELLED &&
-            agent.status !== ArenaAgentStatus.TERMINATED
-          ) {
+          if (!isTerminalStatus(agent.status)) {
             return false;
           }
         }
@@ -952,16 +1011,19 @@ export class ArenaManager {
         return;
       }
 
-      const timeoutHandle = setTimeout(() => {
-        clearInterval(pollHandle);
-        resolve(false);
-      }, timeoutMs);
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs !== undefined) {
+        timeoutHandle = setTimeout(() => {
+          clearInterval(pollHandle);
+          resolve(false);
+        }, timeoutMs);
+      }
 
       // Re-check periodically (piggybacks on the same polling interval)
       const pollHandle = setInterval(() => {
         if (checkSettled()) {
           clearInterval(pollHandle);
-          clearTimeout(timeoutHandle);
+          if (timeoutHandle) clearTimeout(timeoutHandle);
           resolve(true);
         }
       }, ARENA_POLL_INTERVAL_MS);
@@ -994,6 +1056,80 @@ export class ArenaManager {
   }
 
   /**
+   * Set up event bridges for in-process agents.
+   * Subscribes to each AgentInteractive's events to update ArenaManager state.
+   * Listeners are tracked in `eventBridgeCleanups` for teardown.
+   */
+  private setupInProcessEventBridge(backend: InProcessBackend): void {
+    for (const agent of this.agents.values()) {
+      const interactive = backend.getAgent(agent.agentId);
+      if (!interactive) continue;
+
+      const emitter = interactive.getEventEmitter();
+      if (!emitter) continue;
+
+      // AgentInteractive emits canonical AgentStatus values — no mapping needed.
+
+      const syncStats = () => {
+        const { totalToolCalls, totalDurationMs, ...rest } =
+          interactive.getStats();
+        Object.assign(agent.stats, rest, {
+          toolCalls: totalToolCalls,
+          durationMs: totalDurationMs,
+        });
+      };
+
+      const applyStatus = (incoming: AgentStatus) => {
+        const resolved = this.resolveTransition(agent.status, incoming);
+        if (!resolved) return;
+        if (resolved === AgentStatus.FAILED) {
+          agent.error =
+            interactive.getLastRoundError() || interactive.getError();
+        }
+        if (isTerminalStatus(resolved)) {
+          agent.stats.durationMs = Date.now() - agent.startedAt;
+        }
+        this.updateAgentStatus(agent.agentId, resolved);
+      };
+
+      // Sync stats before mapping so counters are up-to-date even when
+      // the provider omits usage_metadata events.
+      const onStatusChange = (event: AgentStatusChangeEvent) => {
+        syncStats();
+        applyStatus(event.newStatus);
+      };
+
+      const onUsageMetadata = () => syncStats();
+
+      emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
+      emitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+
+      // Store cleanup functions so listeners can be removed during teardown
+      this.eventBridgeCleanups.push(() => {
+        emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
+        emitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+      });
+
+      // Reconcile: if the agent already transitioned before the bridge was
+      // attached (e.g. fast completion or createChat failure during spawn),
+      // backfill stats and apply its current status now so
+      // waitForAllAgentsSettled sees it.
+      syncStats();
+      applyStatus(interactive.getStatus());
+    }
+  }
+
+  /**
+   * Remove all event bridge listeners registered by setupInProcessEventBridge.
+   */
+  private teardownEventBridge(): void {
+    for (const cleanup of this.eventBridgeCleanups) {
+      cleanup();
+    }
+    this.eventBridgeCleanups.length = 0;
+  }
+
+  /**
    * Read per-agent status files from `<arenaSessionDir>/agents/` directory.
    * Updates agent stats, emits AGENT_STATS_UPDATE events, and writes a
    * consolidated `status.json` at the arena session root.
@@ -1004,11 +1140,10 @@ export class ArenaManager {
     const consolidatedAgents: Record<string, ArenaStatusFile> = {};
 
     for (const agent of this.agents.values()) {
-      // Only poll agents that are still alive (RUNNING or IDLE)
+      // Only poll agents that are still alive (RUNNING)
       if (
-        agent.status === ArenaAgentStatus.TERMINATED ||
-        agent.status === ArenaAgentStatus.CANCELLED ||
-        agent.status === ArenaAgentStatus.INITIALIZING
+        isTerminalStatus(agent.status) ||
+        agent.status === AgentStatus.INITIALIZING
       ) {
         continue;
       }
@@ -1024,45 +1159,22 @@ export class ArenaManager {
         // Collect for consolidated file
         consolidatedAgents[agent.agentId] = statusFile;
 
-        // Update agent stats from the status file, but preserve locally
-        // calculated durationMs (the child process doesn't track it).
-        const { durationMs: _childDuration, ...fileStats } = statusFile.stats;
+        // Update agent stats from the status file.
         agent.stats = {
           ...agent.stats,
-          ...fileStats,
+          ...statusFile.stats,
         };
 
         // Detect state transitions from the sideband status file
-        if (
-          statusFile.status === 'completed' &&
-          agent.status === ArenaAgentStatus.RUNNING
-        ) {
-          // Agent finished its task successfully
-          agent.stats.durationMs = Date.now() - agent.startedAt;
-          this.updateAgentStatus(agent.agentId, ArenaAgentStatus.COMPLETED);
-        } else if (
-          statusFile.status === 'cancelled' &&
-          agent.status === ArenaAgentStatus.RUNNING
-        ) {
-          // Agent was cancelled by user
-          agent.stats.durationMs = Date.now() - agent.startedAt;
-          this.updateAgentStatus(agent.agentId, ArenaAgentStatus.CANCELLED);
-        } else if (
-          statusFile.status === 'error' &&
-          agent.status === ArenaAgentStatus.RUNNING
-        ) {
-          // Agent hit an error
-          agent.stats.durationMs = Date.now() - agent.startedAt;
-          if (statusFile.error) {
+        const resolved = this.resolveTransition(
+          agent.status,
+          statusFile.status,
+        );
+        if (resolved) {
+          if (resolved === AgentStatus.FAILED && statusFile.error) {
             agent.error = statusFile.error;
           }
-          this.updateAgentStatus(agent.agentId, ArenaAgentStatus.TERMINATED);
-        } else if (
-          statusFile.status === 'running' &&
-          agent.status === ArenaAgentStatus.COMPLETED
-        ) {
-          // Agent received new input and is working again
-          this.updateAgentStatus(agent.agentId, ArenaAgentStatus.RUNNING);
+          this.updateAgentStatus(agent.agentId, resolved);
         }
 
         this.callbacks.onAgentStatsUpdate?.(agent.agentId, statusFile.stats);
@@ -1195,7 +1307,7 @@ export class ArenaManager {
       const result = this.buildAgentResult(agent);
 
       // Get diff for completed agents (they finished their task)
-      if (agent.status === ArenaAgentStatus.COMPLETED) {
+      if (agent.status === AgentStatus.COMPLETED) {
         try {
           result.diff = await this.worktreeService.getWorktreeDiff(
             agent.worktree.path,

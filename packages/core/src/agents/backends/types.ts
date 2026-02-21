@@ -12,6 +12,12 @@
  */
 
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
+import type {
+  PromptConfig,
+  ModelConfig,
+  RunConfig,
+  ToolConfig,
+} from '../runtime/agent-types.js';
 
 /**
  * Canonical display mode values shared across core and CLI.
@@ -51,6 +57,41 @@ export interface AgentSpawnConfig {
    */
   backend?: {
     tmux?: TmuxBackendOptions;
+  };
+
+  /**
+   * In-process spawn configuration (optional).
+   * When provided, InProcessBackend uses this to create an AgentInteractive
+   * instead of launching a PTY subprocess.
+   */
+  inProcess?: InProcessSpawnConfig;
+}
+
+/**
+ * Configuration for spawning an in-process agent (no PTY subprocess).
+ */
+export interface InProcessSpawnConfig {
+  /** Human-readable agent name for display. */
+  agentName: string;
+  /** Optional initial task to start working on immediately. */
+  initialTask?: string;
+  /** Runtime configuration for the AgentCore. */
+  runtimeConfig: {
+    promptConfig: PromptConfig;
+    modelConfig: ModelConfig;
+    runConfig: RunConfig;
+    toolConfig?: ToolConfig;
+  };
+  /**
+   * Per-agent auth/provider overrides. When present, a dedicated
+   * ContentGenerator is created for this agent instead of inheriting
+   * the parent process's. This enables Arena agents to target different
+   * model providers (OpenAI, Anthropic, Gemini, etc.) in the same session.
+   */
+  authOverrides?: {
+    authType: string;
+    apiKey?: string;
+    baseUrl?: string;
   };
 }
 

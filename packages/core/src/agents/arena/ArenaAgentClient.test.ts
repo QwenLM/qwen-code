@@ -444,9 +444,9 @@ describe('ArenaAgentClient', () => {
     });
   });
 
-  describe('buildStatsFromMetrics()', () => {
-    it('should aggregate stats across multiple models', () => {
-      const metrics: SessionMetrics = {
+  describe('stats aggregation and wall-clock durationMs', () => {
+    it('should aggregate multi-model stats and use wall-clock durationMs', async () => {
+      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue({
         models: {
           'model-a': {
             api: {
@@ -493,32 +493,58 @@ describe('ArenaAgentClient', () => {
           byName: {},
         },
         files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
-      };
+      });
 
-      const stats = ArenaAgentClient.buildStatsFromMetrics(metrics);
+      const reporter = new ArenaAgentClient('model-a', tempDir);
+      await reporter.init();
+      await reporter.updateStatus();
 
-      expect(stats.rounds).toBe(5);
-      expect(stats.totalTokens).toBe(450);
-      expect(stats.inputTokens).toBe(300);
-      expect(stats.outputTokens).toBe(150);
-      expect(stats.durationMs).toBe(1500);
-      expect(stats.toolCalls).toBe(10);
-      expect(stats.successfulToolCalls).toBe(8);
-      expect(stats.failedToolCalls).toBe(2);
+      const statusPath = path.join(
+        tempDir,
+        'agents',
+        `${safeAgentId('model-a')}.json`,
+      );
+      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
+
+      expect(content.stats.rounds).toBe(5);
+      expect(content.stats.totalTokens).toBe(450);
+      expect(content.stats.inputTokens).toBe(300);
+      expect(content.stats.outputTokens).toBe(150);
+      expect(content.stats.toolCalls).toBe(10);
+      expect(content.stats.successfulToolCalls).toBe(8);
+      expect(content.stats.failedToolCalls).toBe(2);
+      // durationMs should be wall-clock time, not API latency sum (1500)
+      expect(content.stats.durationMs).toBeGreaterThanOrEqual(0);
+      expect(content.stats.durationMs).toBeLessThan(5000);
     });
 
-    it('should return zeros when no models exist', () => {
-      const metrics = createMockMetrics();
+    it('should return zeros when no models exist', async () => {
+      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(
+        createMockMetrics(),
+      );
       // Override with empty models
-      metrics.models = {};
+      vi.mocked(uiTelemetryService.getMetrics).mockReturnValue({
+        ...createMockMetrics(),
+        models: {},
+      });
 
-      const stats = ArenaAgentClient.buildStatsFromMetrics(metrics);
+      const reporter = new ArenaAgentClient('model-a', tempDir);
+      await reporter.init();
+      await reporter.updateStatus();
 
-      expect(stats.rounds).toBe(0);
-      expect(stats.totalTokens).toBe(0);
-      expect(stats.inputTokens).toBe(0);
-      expect(stats.outputTokens).toBe(0);
-      expect(stats.durationMs).toBe(0);
+      const statusPath = path.join(
+        tempDir,
+        'agents',
+        `${safeAgentId('model-a')}.json`,
+      );
+      const content = JSON.parse(await fs.readFile(statusPath, 'utf-8'));
+
+      expect(content.stats.rounds).toBe(0);
+      expect(content.stats.totalTokens).toBe(0);
+      expect(content.stats.inputTokens).toBe(0);
+      expect(content.stats.outputTokens).toBe(0);
+      // durationMs is wall-clock, so still non-negative even with no models
+      expect(content.stats.durationMs).toBeGreaterThanOrEqual(0);
     });
   });
 

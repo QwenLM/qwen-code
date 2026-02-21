@@ -295,6 +295,10 @@ export interface AgentsCollabSettings {
     worktreeBaseDir?: string;
     /** Preserve worktrees and state files after session ends */
     preserveArtifacts?: boolean;
+    /** Maximum rounds (turns) per agent. No limit if unset. */
+    maxRoundsPerAgent?: number;
+    /** Total timeout in seconds for the Arena session. No limit if unset. */
+    timeoutSeconds?: number;
   };
 }
 
@@ -1698,6 +1702,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
+    options?: { skipDiscovery?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -1786,7 +1791,9 @@ export class Config {
       registerCoreTool(LspTool, this);
     }
 
-    await registry.discoverAllTools();
+    if (!options?.skipDiscovery) {
+      await registry.discoverAllTools();
+    }
     this.debugLogger.debug(
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );

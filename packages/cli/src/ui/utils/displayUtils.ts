@@ -5,7 +5,7 @@
  */
 
 import { theme } from '../semantic-colors.js';
-import { ArenaAgentStatus } from '@qwen-code/qwen-code-core';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // --- Status Labels ---
 
@@ -15,24 +15,17 @@ export interface StatusLabel {
   color: string;
 }
 
-export function getArenaStatusLabel(
-  status: ArenaAgentStatus | string,
-): StatusLabel {
+export function getArenaStatusLabel(status: AgentStatus): StatusLabel {
   switch (status) {
-    case ArenaAgentStatus.COMPLETED:
-    case 'completed':
+    case AgentStatus.COMPLETED:
       return { icon: '✓', text: 'Done', color: theme.status.success };
-    case ArenaAgentStatus.CANCELLED:
-    case 'cancelled':
+    case AgentStatus.CANCELLED:
       return { icon: '⊘', text: 'Cancelled', color: theme.status.warning };
-    case ArenaAgentStatus.TERMINATED:
-    case 'terminated':
-      return { icon: '✗', text: 'Terminated', color: theme.status.error };
-    case ArenaAgentStatus.RUNNING:
-    case 'running':
+    case AgentStatus.FAILED:
+      return { icon: '✗', text: 'Failed', color: theme.status.error };
+    case AgentStatus.RUNNING:
       return { icon: '○', text: 'Running', color: theme.text.secondary };
-    case ArenaAgentStatus.INITIALIZING:
-    case 'initializing':
+    case AgentStatus.INITIALIZING:
       return { icon: '○', text: 'Initializing', color: theme.text.secondary };
     default:
       return { icon: '○', text: status, color: theme.text.secondary };

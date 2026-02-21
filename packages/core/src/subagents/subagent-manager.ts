@@ -19,16 +19,20 @@ import type {
   SubagentLevel,
   ListSubagentsOptions,
   CreateSubagentOptions,
+} from './types.js';
+import type {
   PromptConfig,
   ModelConfig,
   RunConfig,
   ToolConfig,
-} from './types.js';
+} from '../agents/runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from './types.js';
 import { SubagentValidator } from './validation.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
-import type { AgentEventEmitter } from '../agents/runtime/agent-events.js';
-import type { AgentHooks } from '../agents/runtime/agent-hooks.js';
+import type {
+  AgentEventEmitter,
+  AgentHooks,
+} from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 

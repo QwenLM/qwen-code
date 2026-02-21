@@ -16,22 +16,22 @@
 
 import type { Config } from '../../config/config.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { AgentEventEmitter } from './agent-events.js';
-import { AgentEventType } from './agent-events.js';
 import type {
+  AgentEventEmitter,
   AgentStartEvent,
   AgentErrorEvent,
   AgentFinishEvent,
+  AgentHooks,
 } from './agent-events.js';
+import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
-import type { AgentHooks } from './agent-hooks.js';
 import type {
   PromptConfig,
   ModelConfig,
   RunConfig,
   ToolConfig,
-} from '../../subagents/types.js';
-import { SubagentTerminateMode } from '../../subagents/types.js';
+} from './agent-types.js';
+import { AgentTerminateMode } from './agent-types.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../../telemetry/types.js';
 import { AgentCore } from './agent-core.js';
@@ -135,7 +135,7 @@ export function templateString(
 export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
-  private terminateMode: SubagentTerminateMode = SubagentTerminateMode.ERROR;
+  private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
 
   private constructor(core: AgentCore) {
     this.core = core;
@@ -196,7 +196,7 @@ export class AgentHeadless {
     const chat = await this.core.createChat(context);
 
     if (!chat) {
-      this.terminateMode = SubagentTerminateMode.ERROR;
+      this.terminateMode = AgentTerminateMode.ERROR;
       return;
     }
 
@@ -258,10 +258,10 @@ export class AgentHeadless {
       );
 
       this.finalText = result.text;
-      this.terminateMode = result.terminateMode ?? SubagentTerminateMode.GOAL;
+      this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
     } catch (error) {
       debugLogger.error('Error during subagent execution:', error);
-      this.terminateMode = SubagentTerminateMode.ERROR;
+      this.terminateMode = AgentTerminateMode.ERROR;
       this.core.eventEmitter?.emit(AgentEventType.ERROR, {
         subagentId: this.core.subagentId,
         error: error instanceof Error ? error.message : String(error),
@@ -291,9 +291,7 @@ export class AgentHeadless {
 
       const completionEvent = new SubagentExecutionEvent(
         this.core.name,
-        this.terminateMode === SubagentTerminateMode.GOAL
-          ? 'completed'
-          : 'failed',
+        this.terminateMode === AgentTerminateMode.GOAL ? 'completed' : 'failed',
         {
           terminate_reason: this.terminateMode,
           result: this.finalText,
@@ -348,7 +346,7 @@ export class AgentHeadless {
     return this.finalText;
   }
 
-  getTerminateMode(): SubagentTerminateMode {
+  getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
   }
 

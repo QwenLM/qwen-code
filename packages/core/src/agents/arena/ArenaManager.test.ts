@@ -18,9 +18,13 @@ const hoistedMockGetWorktreeDiff = vi.hoisted(() => vi.fn());
 const hoistedMockApplyWorktreeChanges = vi.hoisted(() => vi.fn());
 const hoistedMockDetectBackend = vi.hoisted(() => vi.fn());
 
-vi.mock('../index.js', () => ({
-  detectBackend: hoistedMockDetectBackend,
-}));
+vi.mock('../index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../index.js')>();
+  return {
+    ...actual,
+    detectBackend: hoistedMockDetectBackend,
+  };
+});
 
 // Mock GitWorktreeService to avoid real git operations.
 // The class mock includes static methods used by ArenaManager.
@@ -48,6 +52,7 @@ const createMockConfig = (workingDir: string) => ({
   getWorkingDir: () => workingDir,
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
+  getUserMemory: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
     getFunctionDeclarationsFiltered: () => [],
@@ -294,7 +299,10 @@ describe('ArenaManager', () => {
 
       await manager.start(createValidStartOptions());
 
-      expect(hoistedMockDetectBackend).toHaveBeenCalledWith(undefined);
+      expect(hoistedMockDetectBackend).toHaveBeenCalledWith(
+        undefined,
+        expect.anything(),
+      );
       const warningUpdate = updates.find((u) => u.type === 'warning');
       expect(warningUpdate).toBeDefined();
       expect(warningUpdate?.message).toContain('fallback to tmux backend');

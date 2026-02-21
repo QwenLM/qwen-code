@@ -10,10 +10,8 @@ import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, TaskResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
-import {
-  type SubagentConfig,
-  SubagentTerminateMode,
-} from '../subagents/types.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import {
   type AgentHeadless,
   ContextState,
@@ -303,7 +301,7 @@ describe('TaskTool', () => {
       mockSubagentScope = {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
-        terminateMode: SubagentTerminateMode.GOAL,
+        terminateMode: AgentTerminateMode.GOAL,
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi
           .fn()
@@ -347,7 +345,7 @@ describe('TaskTool', () => {
           successfulToolCalls: 3,
           failedToolCalls: 0,
         }),
-        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
       } as unknown as AgentHeadless;
 
       mockContextState = {

@@ -6,11 +6,11 @@
 
 import { EventEmitter } from 'events';
 import type {
-  ArenaAgentStatus,
   ArenaModelConfig,
   ArenaAgentResult,
   ArenaSessionResult,
 } from './types.js';
+import type { AgentStatus } from '../runtime/agent-types.js';
 
 /**
  * Arena event types.
@@ -109,8 +109,8 @@ export interface ArenaAgentCompleteEvent {
 export interface ArenaAgentStatusChangeEvent {
   sessionId: string;
   agentId: string;
-  previousStatus: ArenaAgentStatus;
-  newStatus: ArenaAgentStatus;
+  previousStatus: AgentStatus;
+  newStatus: AgentStatus;
   timestamp: number;
 }
 

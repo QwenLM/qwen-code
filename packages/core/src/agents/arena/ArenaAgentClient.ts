@@ -9,16 +9,14 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
-import {
-  uiTelemetryService,
-  type SessionMetrics,
-} from '../../telemetry/uiTelemetry.js';
+import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
 import type {
   ArenaAgentStats,
   ArenaControlSignal,
   ArenaStatusFile,
 } from './types.js';
 import { safeAgentId } from './types.js';
+import { AgentStatus } from '../runtime/agent-types.js';
 
 const debugLogger = createDebugLogger('ARENA_AGENT_CLIENT');
 
@@ -44,6 +42,7 @@ export class ArenaAgentClient {
   private readonly controlDir: string;
   private readonly statusFilePath: string;
   private readonly controlFilePath: string;
+  private readonly startTimeMs: number;
   private initialized = false;
 
   /**
@@ -71,6 +70,7 @@ export class ArenaAgentClient {
     this.controlDir = path.join(arenaSessionDir, CONTROL_SUBDIR);
     this.statusFilePath = path.join(this.agentsDir, `${safe}.json`);
     this.controlFilePath = path.join(this.controlDir, `${safe}.json`);
+    this.startTimeMs = Date.now();
   }
 
   /**
@@ -100,7 +100,7 @@ export class ArenaAgentClient {
 
     const statusFile: ArenaStatusFile = {
       agentId: this.agentId,
-      status: 'running',
+      status: AgentStatus.RUNNING,
       updatedAt: Date.now(),
       rounds: stats.rounds,
       currentActivity,
@@ -150,7 +150,7 @@ export class ArenaAgentClient {
 
     const statusFile: ArenaStatusFile = {
       agentId: this.agentId,
-      status: 'completed',
+      status: AgentStatus.COMPLETED,
       updatedAt: Date.now(),
       rounds: stats.rounds,
       stats,
@@ -171,7 +171,7 @@ export class ArenaAgentClient {
 
     const statusFile: ArenaStatusFile = {
       agentId: this.agentId,
-      status: 'error',
+      status: AgentStatus.FAILED,
       updatedAt: Date.now(),
       rounds: stats.rounds,
       stats,
@@ -192,7 +192,7 @@ export class ArenaAgentClient {
 
     const statusFile: ArenaStatusFile = {
       agentId: this.agentId,
-      status: 'cancelled',
+      status: AgentStatus.CANCELLED,
       updatedAt: Date.now(),
       rounds: stats.rounds,
       stats,
@@ -204,31 +204,21 @@ export class ArenaAgentClient {
   }
 
   /**
-   * Build ArenaAgentStats from the current uiTelemetryService metrics.
+   * Build ArenaAgentStats from uiTelemetryService metrics
    */
   private getStatsFromTelemetry(): ArenaAgentStats {
-    return ArenaAgentClient.buildStatsFromMetrics(
-      uiTelemetryService.getMetrics(),
-    );
-  }
+    const metrics = uiTelemetryService.getMetrics();
 
-  /**
-   * Convert SessionMetrics into ArenaAgentStats by aggregating across
-   * all models. Exposed as a static method for testability.
-   */
-  static buildStatsFromMetrics(metrics: SessionMetrics): ArenaAgentStats {
     let rounds = 0;
     let totalTokens = 0;
     let inputTokens = 0;
     let outputTokens = 0;
-    let durationMs = 0;
 
     for (const model of Object.values(metrics.models)) {
       rounds += model.api.totalRequests;
       totalTokens += model.tokens.total;
       inputTokens += model.tokens.prompt;
       outputTokens += model.tokens.candidates;
-      durationMs += model.api.totalLatencyMs;
     }
 
     return {
@@ -236,7 +226,7 @@ export class ArenaAgentClient {
       totalTokens,
       inputTokens,
       outputTokens,
-      durationMs,
+      durationMs: Date.now() - this.startTimeMs,
       toolCalls: metrics.tools.totalCalls,
       successfulToolCalls: metrics.tools.totalSuccess,
       failedToolCalls: metrics.tools.totalFail,

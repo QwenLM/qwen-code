@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
+  AgentStatus,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -266,7 +267,7 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
  */
 export interface ArenaAgentCardData {
   label: string;
-  status: 'completed' | 'cancelled' | 'terminated';
+  status: AgentStatus;
   durationMs: number;
   totalTokens: number;
   inputTokens: number;

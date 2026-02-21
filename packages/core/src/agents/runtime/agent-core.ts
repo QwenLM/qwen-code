@@ -43,17 +43,17 @@ import type {
   ModelConfig,
   RunConfig,
   ToolConfig,
-} from '../../subagents/types.js';
-import { SubagentTerminateMode } from '../../subagents/types.js';
+} from './agent-types.js';
+import { AgentTerminateMode } from './agent-types.js';
 import type {
   AgentRoundEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentUsageEvent,
+  AgentHooks,
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import type { AgentHooks } from './agent-hooks.js';
 import { TaskTool } from '../../tools/task.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -65,7 +65,7 @@ export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
   text: string;
   /** Why the loop ended. null = normal text completion (no tool calls). */
-  terminateMode: SubagentTerminateMode | null;
+  terminateMode: AgentTerminateMode | null;
   /** Number of model round-trips completed. */
   turnsUsed: number;
 }
@@ -324,18 +324,18 @@ export class AgentCore {
     let currentMessages = initialMessages;
     let turnCounter = 0;
     let finalText = '';
-    let terminateMode: SubagentTerminateMode | null = null;
+    let terminateMode: AgentTerminateMode | null = null;
 
     while (true) {
       // Check termination conditions.
       if (options?.maxTurns && turnCounter >= options.maxTurns) {
-        terminateMode = SubagentTerminateMode.MAX_TURNS;
+        terminateMode = AgentTerminateMode.MAX_TURNS;
         break;
       }
 
       let durationMin = (Date.now() - startTime) / (1000 * 60);
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
-        terminateMode = SubagentTerminateMode.TIMEOUT;
+        terminateMode = AgentTerminateMode.TIMEOUT;
         break;
       }
 
@@ -384,7 +384,7 @@ export class AgentCore {
           abortController.signal.removeEventListener('abort', onParentAbort);
           return {
             text: finalText,
-            terminateMode: SubagentTerminateMode.CANCELLED,
+            terminateMode: AgentTerminateMode.CANCELLED,
             turnsUsed: turnCounter,
           };
         }
@@ -427,7 +427,7 @@ export class AgentCore {
       durationMin = (Date.now() - startTime) / (1000 * 60);
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
         abortController.signal.removeEventListener('abort', onParentAbort);
-        terminateMode = SubagentTerminateMode.TIMEOUT;
+        terminateMode = AgentTerminateMode.TIMEOUT;
         break;
       }
 
