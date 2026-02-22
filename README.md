@@ -47,7 +47,9 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
 ```
 
-> **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
+> **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect. The installation script adds `qwen` to your PATH automatically.
+
+> **Security**: The quick install script downloads and executes a shell script. For production environments or security-sensitive setups, please use the manual installation method below to review the code before execution.
 
 ### Manual Installation
 
