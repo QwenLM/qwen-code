@@ -28,7 +28,6 @@ import type {
 } from './types.js';
 import type { EventEmitter } from 'events';
 import { LspConfigLoader } from './LspConfigLoader.js';
-import { LspLanguageDetector } from './LspLanguageDetector.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './LspServerManager.js';
 import type {
@@ -94,7 +93,6 @@ export class NativeLspService {
   private workspaceRoot: string;
   private configLoader: LspConfigLoader;
   private serverManager: LspServerManager;
-  private languageDetector: LspLanguageDetector;
   private normalizer: LspResponseNormalizer;
   private openedDocuments = new Map<string, Set<string>>();
   private lastConnections = new Map<string, LspConnectionInterface>();
@@ -115,10 +113,6 @@ export class NativeLspService {
       options.workspaceRoot ??
       (config as { getProjectRoot: () => string }).getProjectRoot();
     this.configLoader = new LspConfigLoader(this.workspaceRoot);
-    this.languageDetector = new LspLanguageDetector(
-      this.workspaceContext,
-      this.fileDiscoveryService,
-    );
     this.normalizer = new LspResponseNormalizer();
     this.serverManager = new LspServerManager(
       this.config,
@@ -146,22 +140,14 @@ export class NativeLspService {
       return;
     }
 
-    // Detect languages in workspace
+    // Load LSP configs
     const userConfigs = await this.configLoader.loadUserConfigs();
     const extensionConfigs = await this.configLoader.loadExtensionConfigs(
       this.getActiveExtensions(),
     );
-    const extensionOverrides =
-      this.configLoader.collectExtensionToLanguageOverrides([
-        ...extensionConfigs,
-        ...userConfigs,
-      ]);
-    const detectedLanguages =
-      await this.languageDetector.detectLanguages(extensionOverrides);
-
-    // Merge configs: built-in presets + extension LSP configs + user .lsp.json
+    // Merge configs: extension LSP configs + user .lsp.json
     const serverConfigs = this.configLoader.mergeConfigs(
-      detectedLanguages,
+      [],
       extensionConfigs,
       userConfigs,
     );
@@ -325,7 +311,9 @@ export class NativeLspService {
     return true;
   }
 
-  private findWorkspaceFileForServer(handle: LspServerHandle): string | undefined {
+  private findWorkspaceFileForServer(
+    handle: LspServerHandle,
+  ): string | undefined {
     const extensions = this.getWorkspaceSymbolExtensions(handle);
     if (extensions.length === 0) {
       return undefined;

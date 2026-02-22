@@ -114,19 +114,32 @@ describe('NativeLspService', () => {
     expect(lspService).toBeDefined();
   });
 
-  test('should detect languages from workspace files', async () => {
-    // 这个测试需要修改，因为我们无法直接访问私有方法
-    await lspService.discoverAndPrepare();
-    const status = lspService.getStatus();
+  test('discoverAndPrepare should not invoke language detection', async () => {
+    const service = new NativeLspService(
+      mockConfig as unknown as CoreConfig,
+      mockWorkspace as unknown as WorkspaceContext,
+      eventEmitter,
+      mockFileDiscovery as unknown as FileDiscoveryService,
+      mockIdeStore as unknown as IdeContextStore,
+    );
 
-    // 检查服务是否已准备就绪
-    expect(status).toBeDefined();
+    const detectLanguages = vi.fn(async () => {
+      throw new Error('detectLanguages should not be called');
+    });
+    (
+      service as unknown as {
+        languageDetector: { detectLanguages: () => Promise<string[]> };
+      }
+    ).languageDetector = { detectLanguages };
+
+    await expect(service.discoverAndPrepare()).resolves.toBeUndefined();
+    expect(detectLanguages).not.toHaveBeenCalled();
   });
 
-  test('should merge built-in presets with user configs', async () => {
+  test('should prepare configs without language detection', async () => {
     await lspService.discoverAndPrepare();
-
     const status = lspService.getStatus();
+
     // 检查服务是否已准备就绪
     expect(status).toBeDefined();
   });

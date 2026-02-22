@@ -188,7 +188,6 @@ export * from './services/shellExecutionService.js';
 export * from './lsp/constants.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
-export * from './lsp/LspLanguageDetector.js';
 export * from './lsp/LspResponseNormalizer.js';
 export * from './lsp/LspServerManager.js';
 export * from './lsp/NativeLspClient.js';
