@@ -94,6 +94,18 @@ type McpContentBlock =
   | McpResourceBlock
   | McpResourceLinkBlock;
 
+/**
+ * MCP Tool Annotations as defined in the MCP specification.
+ * These provide hints about a tool's behavior to help clients make decisions
+ * about tool approval and safety.
+ */
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
@@ -110,6 +122,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly annotations?: McpToolAnnotations,
   ) {
     super(params);
   }
@@ -122,6 +135,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
     if (this.cliConfig?.isTrustedFolder() && this.trust) {
       return false; // server is trusted, no confirmation needed
+    }
+
+    // MCP tools annotated with readOnlyHint: true are safe to execute
+    // without confirmation, especially important for plan mode support
+    if (this.annotations?.readOnlyHint === true) {
+      return false;
     }
 
     if (
@@ -341,13 +360,14 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
+    private readonly annotations?: McpToolAnnotations,
   ) {
     super(
       nameOverride ??
         generateValidName(`mcp__${serverName}__${serverToolName}`),
       `${serverToolName} (${serverName} MCP Server)`,
       description,
-      Kind.Other,
+      annotations?.readOnlyHint === true ? Kind.Read : Kind.Other,
       parameterSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput — enables streaming progress for MCP tools
@@ -366,6 +386,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.annotations,
     );
   }
 
@@ -382,6 +403,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.cliConfig,
       this.mcpClient,
       this.mcpTimeout,
+      this.annotations,
     );
   }
 }
