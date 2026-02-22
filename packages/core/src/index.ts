@@ -59,9 +59,6 @@ export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';
-export * from './core/geminiRequest.js';
-export * from './core/coreToolScheduler.js';
-export * from './core/nonInteractiveToolExecutor.js';
 export * from './tools/tool-names.js';
 
 // ============================================================================
@@ -140,17 +137,12 @@ export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 
 // Export specific tool logic
-export * from './tools/read-file.js';
-export * from './tools/ls.js';
-export * from './tools/grep.js';
-export * from './tools/ripGrep.js';
-export * from './tools/glob.js';
 export * from './tools/edit.js';
 export * from './tools/exitPlanMode.js';
 export * from './tools/glob.js';
 export * from './tools/grep.js';
-export * from './tools/ls.js';
 export * from './tools/lsp.js';
+export * from './tools/ls.js';
 export * from './tools/memoryTool.js';
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
@@ -173,11 +165,11 @@ export * from './tools/write-file.js';
 // Services
 // ============================================================================
 
-export * from './services/chatRecordingService.js';
 export * from './services/fileDiscoveryService.js';
-export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
+export * from './services/chatRecordingService.js';
 export * from './services/sessionService.js';
+export * from './services/fileSystemService.js';
 export * from './services/shellExecutionService.js';
 
 // ============================================================================
@@ -285,16 +277,3 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
-
-// ============================================================================
-// OAuth & Authentication
-// ============================================================================
-
-export * from './qwen/qwenOAuth2.js';
-
-// ============================================================================
-// Testing Utilities
-// ============================================================================
-
-export { makeFakeConfig } from './test-utils/config.js';
-export * from './test-utils/index.js';
