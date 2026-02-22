@@ -38,11 +38,53 @@ import type {
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
+const WORKSPACE_SYMBOL_WARMUP_DELAY_MS = 1500;
+const DEFAULT_WORKSPACE_SYMBOL_EXTENSIONS = [
+  'cpp',
+  'cc',
+  'cxx',
+  'c',
+  'h',
+  'hpp',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'py',
+  'go',
+  'rs',
+  'java',
+  'cs',
+  'php',
+  'rb',
+];
+const LANGUAGE_EXTENSION_MAP: Record<string, string[]> = {
+  cpp: ['cpp', 'cc', 'cxx', 'h', 'hpp'],
+  c: ['c', 'h'],
+  typescript: ['ts', 'tsx'],
+  typescriptreact: ['tsx'],
+  javascript: ['js', 'jsx'],
+  javascriptreact: ['jsx'],
+  python: ['py'],
+  go: ['go'],
+  rust: ['rs'],
+  java: ['java'],
+  csharp: ['cs'],
+  php: ['php'],
+  ruby: ['rb'],
+};
+const DEFAULT_EXCLUDE_PATTERNS = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/dist/**',
+  '**/build/**',
+];
 
 export class NativeLspService {
   private config: CoreConfig;
@@ -54,6 +96,8 @@ export class NativeLspService {
   private serverManager: LspServerManager;
   private languageDetector: LspLanguageDetector;
   private normalizer: LspResponseNormalizer;
+  private openedDocuments = new Map<string, Set<string>>();
+  private lastConnections = new Map<string, LspConnectionInterface>();
 
   constructor(
     config: CoreConfig,
@@ -177,6 +221,179 @@ export class NativeLspService {
     );
   }
 
+  private ensureDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): boolean {
+    const lastConnection = this.lastConnections.get(serverName);
+    if (lastConnection && lastConnection !== handle.connection) {
+      this.openedDocuments.delete(serverName);
+    }
+    this.lastConnections.set(serverName, handle.connection);
+
+    if (!uri.startsWith('file://')) {
+      return false;
+    }
+    const openedForServer = this.openedDocuments.get(serverName);
+    if (openedForServer?.has(uri)) {
+      return false;
+    }
+
+    let filePath: string;
+    try {
+      filePath = fileURLToPath(uri);
+    } catch (error) {
+      debugLogger.warn(`Failed to resolve file path for ${uri}:`, error);
+      return false;
+    }
+
+    let text: string;
+    try {
+      text = fs.readFileSync(filePath, 'utf-8');
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to read file for LSP didOpen: ${filePath}`,
+        error,
+      );
+      return false;
+    }
+
+    const languageId = this.resolveLanguageId(filePath, handle) ?? 'plaintext';
+
+    handle.connection.send({
+      jsonrpc: '2.0',
+      method: 'textDocument/didOpen',
+      params: {
+        textDocument: {
+          uri,
+          languageId,
+          version: 1,
+          text,
+        },
+      },
+    });
+
+    const nextOpened = openedForServer ?? new Set<string>();
+    nextOpened.add(uri);
+    this.openedDocuments.set(serverName, nextOpened);
+    return true;
+  }
+
+  private resolveLanguageId(
+    filePath: string,
+    handle: LspServerHandle,
+  ): string | undefined {
+    const ext = path.extname(filePath).slice(1).toLowerCase();
+    if (ext && handle.config.extensionToLanguage) {
+      const mapping = handle.config.extensionToLanguage;
+      return mapping[ext] ?? mapping['.' + ext];
+    }
+    if (handle.config.languages && handle.config.languages.length > 0) {
+      return handle.config.languages[0];
+    }
+    return ext || undefined;
+  }
+
+  private async warmupWorkspaceSymbols(
+    serverName: string,
+    handle: LspServerHandle,
+  ): Promise<boolean> {
+    if (!handle.connection) {
+      return false;
+    }
+    const openedForServer = this.openedDocuments.get(serverName);
+    if (openedForServer && openedForServer.size > 0) {
+      return true;
+    }
+
+    const filePath = this.findWorkspaceFileForServer(handle);
+    if (!filePath) {
+      return false;
+    }
+
+    const uri = pathToFileURL(filePath).toString();
+    const didOpen = this.ensureDocumentOpen(
+      serverName,
+      handle as LspServerHandle & { connection: LspConnectionInterface },
+      uri,
+    );
+    if (!didOpen) {
+      return false;
+    }
+    await this.delay(WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+    return true;
+  }
+
+  private findWorkspaceFileForServer(handle: LspServerHandle): string | undefined {
+    const extensions = this.getWorkspaceSymbolExtensions(handle);
+    if (extensions.length === 0) {
+      return undefined;
+    }
+    const patterns = [`**/*.{${extensions.join(',')}}`];
+    const roots = this.workspaceContext.getDirectories();
+
+    for (const root of roots) {
+      for (const pattern of patterns) {
+        try {
+          const matches = globSync(pattern, {
+            cwd: root,
+            ignore: DEFAULT_EXCLUDE_PATTERNS,
+            absolute: true,
+            nodir: true,
+          });
+          for (const match of matches) {
+            if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
+              continue;
+            }
+            return match;
+          }
+        } catch (_error) {
+          // ignore glob errors
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private getWorkspaceSymbolExtensions(handle: LspServerHandle): string[] {
+    const extensions = new Set<string>();
+    const extMapping = handle.config.extensionToLanguage;
+
+    if (extMapping) {
+      for (const key of Object.keys(extMapping)) {
+        const normalized = key.startsWith('.') ? key.slice(1) : key;
+        if (normalized) {
+          extensions.add(normalized.toLowerCase());
+        }
+      }
+    }
+
+    if (extensions.size === 0 && handle.config.languages) {
+      for (const language of handle.config.languages) {
+        const mapped = LANGUAGE_EXTENSION_MAP[language];
+        if (mapped) {
+          for (const ext of mapped) {
+            extensions.add(ext);
+          }
+        }
+      }
+    }
+
+    if (extensions.size === 0) {
+      for (const ext of DEFAULT_WORKSPACE_SYMBOL_EXTENSIONS) {
+        extensions.add(ext);
+      }
+    }
+
+    return Array.from(extensions);
+  }
+
+  private async delay(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   /**
    * Workspace symbol search across all ready LSP servers.
    */
@@ -194,9 +411,23 @@ export class NativeLspService {
       }
       try {
         await this.serverManager.warmupTypescriptServer(handle);
+        const warmedUp = this.serverManager.isTypescriptServer(handle)
+          ? false
+          : await this.warmupWorkspaceSymbols(serverName, handle);
         let response = await handle.connection.request('workspace/symbol', {
           query,
         });
+        if (
+          !this.serverManager.isTypescriptServer(handle) &&
+          Array.isArray(response) &&
+          response.length === 0 &&
+          warmedUp
+        ) {
+          await this.delay(WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+          response = await handle.connection.request('workspace/symbol', {
+            query,
+          });
+        }
         if (
           this.serverManager.isTypescriptServer(handle) &&
           this.isNoProjectErrorResponse(response)
@@ -244,6 +475,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, location.uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request(
           'textDocument/definition',
@@ -294,6 +526,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, location.uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request(
           'textDocument/references',
@@ -341,6 +574,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, location.uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request('textDocument/hover', {
           textDocument: { uri: location.uri },
@@ -370,6 +604,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request(
           'textDocument/documentSymbol',
@@ -433,6 +668,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, location.uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request(
           'textDocument/implementation',
@@ -485,6 +721,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, location.uri);
         await this.serverManager.warmupTypescriptServer(handle);
         const response = await handle.connection.request(
           'textDocument/prepareCallHierarchy',
@@ -631,6 +868,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, uri);
         await this.serverManager.warmupTypescriptServer(handle);
 
         // Request pull diagnostics if the server supports it
@@ -735,6 +973,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
+        this.ensureDocumentOpen(name, handle, uri);
         await this.serverManager.warmupTypescriptServer(handle);
 
         // Convert context diagnostics to LSP format

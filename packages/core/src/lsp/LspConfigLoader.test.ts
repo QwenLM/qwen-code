@@ -9,6 +9,100 @@ import mock from 'mock-fs';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import type { Extension } from '../extension/extensionManager.js';
 
+describe('LspConfigLoader config-driven behavior', () => {
+  const workspaceRoot = '/workspace';
+
+  it('does not generate any presets when no user or extension config provided', () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    // Even if languages are detected, no built-in presets should be generated
+    const configs = loader.mergeConfigs(['java', 'cpp', 'typescript'], [], []);
+
+    expect(configs).toHaveLength(0);
+  });
+
+  it('respects user-provided configs via .lsp.json', () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    const userConfigs = [
+      {
+        name: 'jdtls',
+        languages: ['java'],
+        command: 'jdtls',
+        args: [],
+        transport: 'stdio' as const,
+        initializationOptions: {},
+        rootUri: 'file:///workspace',
+        workspaceFolder: workspaceRoot,
+        trustRequired: true,
+      },
+    ];
+
+    const configs = loader.mergeConfigs(['java'], [], userConfigs);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.name).toBe('jdtls');
+    expect(configs[0]?.languages).toEqual(['java']);
+  });
+
+  it('respects extension-provided configs', () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extensionConfigs = [
+      {
+        name: 'clangd',
+        languages: ['cpp', 'c'],
+        command: 'clangd',
+        args: ['--background-index'],
+        transport: 'stdio' as const,
+        initializationOptions: {},
+        rootUri: 'file:///workspace',
+        workspaceFolder: workspaceRoot,
+        trustRequired: true,
+      },
+    ];
+
+    const configs = loader.mergeConfigs(['cpp'], extensionConfigs, []);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.name).toBe('clangd');
+    expect(configs[0]?.command).toBe('clangd');
+  });
+
+  it('user configs override extension configs with same name', () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extensionConfigs = [
+      {
+        name: 'jdtls',
+        languages: ['java'],
+        command: 'jdtls',
+        args: [],
+        transport: 'stdio' as const,
+        initializationOptions: {},
+        rootUri: 'file:///workspace',
+        workspaceFolder: workspaceRoot,
+        trustRequired: true,
+      },
+    ];
+    const userConfigs = [
+      {
+        name: 'jdtls',
+        languages: ['java'],
+        command: '/custom/path/jdtls',
+        args: ['--custom-flag'],
+        transport: 'stdio' as const,
+        initializationOptions: {},
+        rootUri: 'file:///workspace',
+        workspaceFolder: workspaceRoot,
+        trustRequired: true,
+      },
+    ];
+
+    const configs = loader.mergeConfigs(['java'], extensionConfigs, userConfigs);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.command).toBe('/custom/path/jdtls');
+    expect(configs[0]?.args).toEqual(['--custom-flag']);
+  });
+});
+
 describe('LspConfigLoader extension configs', () => {
   const workspaceRoot = '/workspace';
   const extensionPath = '/extensions/ts-plugin';

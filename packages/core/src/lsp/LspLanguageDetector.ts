@@ -59,6 +59,9 @@ const MARKER_TO_LANGUAGE: Record<string, string> = {
   '*.sln': 'csharp',
   'mix.exs': 'elixir',
   'deno.json': 'deno',
+  'CMakeLists.txt': 'cpp',
+  Makefile: 'cpp',
+  'configure.ac': 'cpp',
 };
 
 /**
@@ -76,6 +79,9 @@ const COMMON_MARKERS = [
   'Gemfile',
   'mix.exs',
   'deno.json',
+  'CMakeLists.txt',
+  'Makefile',
+  'configure.ac',
 ];
 
 /**

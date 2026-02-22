@@ -106,18 +106,17 @@ export class LspConfigLoader {
   }
 
   /**
-   * Merge configs: built-in presets + extension configs + user configs
+   * Merge configs: extension configs + user configs
+   * Note: Built-in presets are disabled. LSP servers must be explicitly configured
+   * by the user via .lsp.json or through extensions.
    */
   mergeConfigs(
-    detectedLanguages: string[],
+    _detectedLanguages: string[],
     extensionConfigs: LspServerConfig[],
     userConfigs: LspServerConfig[],
   ): LspServerConfig[] {
-    // Built-in preset configurations
-    const presets = this.getBuiltInPresets(detectedLanguages);
-
     // Merge configs, user configs take priority
-    const mergedConfigs = [...presets];
+    const mergedConfigs: LspServerConfig[] = [];
 
     const applyConfigs = (configs: LspServerConfig[]) => {
       for (const config of configs) {
@@ -159,71 +158,6 @@ export class LspConfigLoader {
       }
     }
     return overrides;
-  }
-
-  /**
-   * Get built-in preset configurations
-   */
-  private getBuiltInPresets(detectedLanguages: string[]): LspServerConfig[] {
-    const presets: LspServerConfig[] = [];
-
-    // Convert directory path to file URI format
-    const rootUri = pathToFileURL(this.workspaceRoot).toString();
-
-    // Generate corresponding LSP server config based on detected languages
-    if (
-      detectedLanguages.includes('typescript') ||
-      detectedLanguages.includes('javascript')
-    ) {
-      presets.push({
-        name: 'typescript-language-server',
-        languages: [
-          'typescript',
-          'javascript',
-          'typescriptreact',
-          'javascriptreact',
-        ],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('python')) {
-      presets.push({
-        name: 'pylsp',
-        languages: ['python'],
-        command: 'pylsp',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('go')) {
-      presets.push({
-        name: 'gopls',
-        languages: ['go'],
-        command: 'gopls',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    // Additional language presets can be added as needed
-
-    return presets;
   }
 
   /**
