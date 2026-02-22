@@ -91,7 +91,7 @@ export async function fireStopHook(
         input: {
           prompt: promptText,
           prompt_response: responseText,
-          stop_hook_active: false,
+          stop_hook_active: true,
         },
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
