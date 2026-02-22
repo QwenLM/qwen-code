@@ -649,6 +649,15 @@ export class SubagentManager {
         tools: toolNames,
       };
     }
+    if (config.skills && config.tools.length > 0){
+      if(toolConfig){
+        toolConfig.skills = config.skills
+      }else{
+        toolConfig = {
+          skills: config.skills
+        }
+      }
+    }
 
     return {
       promptConfig,
