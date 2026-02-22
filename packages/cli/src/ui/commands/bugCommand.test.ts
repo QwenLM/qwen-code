@@ -64,7 +64,7 @@ describe('bugCommand', () => {
 Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
-Model: qwen3-coder-plus
+Model (Configured): qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
@@ -98,7 +98,7 @@ Memory Usage: 100 MB`;
 Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
-Model: qwen3-coder-plus
+Model (Configured): qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
@@ -151,7 +151,7 @@ Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
 Auth: ${AuthType.USE_OPENAI} (https://api.openai.com/v1)
-Model: qwen3-coder-plus
+Model (Configured): qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy

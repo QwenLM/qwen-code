@@ -816,7 +816,7 @@ export class OpenAIContentConverter {
       },
     ];
 
-    response.modelVersion = this.model;
+    response.modelVersion = openaiResponse.model || this.model;
     response.promptFeedback = { safetyRatings: [] };
 
     // Add usage metadata if available
@@ -957,7 +957,7 @@ export class OpenAIContentConverter {
       ? chunk.created.toString()
       : new Date().getTime().toString();
 
-    response.modelVersion = this.model;
+    response.modelVersion = chunk.model || this.model;
     response.promptFeedback = { safetyRatings: [] };
 
     // Add usage metadata if available in the chunk

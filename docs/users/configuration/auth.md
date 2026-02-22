@@ -27,6 +27,19 @@ qwen
 > In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.  
 > In these cases, please use the API-KEY authentication method.
 
+### Qwen OAuth model aliases
+
+When you use Qwen OAuth, the `/model` selector uses stable alias IDs:
+
+- `coder-model`
+- `vision-model`
+
+These aliases are intentional and may map to updated backend model versions over time.  
+To see what was actually used in your current session, run `/status` after at least one request and check:
+
+- `Model (Configured)` for the alias you selected
+- `Model (Observed)` for the provider-reported backend model ID
+
 ## 🚀 Option 2: API-KEY (flexible)
 
 Use this if you want more flexibility over which provider and model to use. Supports multiple protocols and providers, including OpenAI, Anthropic, Google GenAI, Alibaba Cloud Bailian, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted compatible endpoint.

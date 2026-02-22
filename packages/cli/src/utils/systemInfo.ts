@@ -26,6 +26,7 @@ export interface SystemInfo {
   npmVersion: string;
   sandboxEnv: string;
   modelVersion: string;
+  observedModelVersions?: string;
   selectedAuthType: string;
   ideClient: string;
   sessionId: string;
@@ -116,6 +117,11 @@ export async function getSystemInfo(
   const npmVersion = await getNpmVersion();
   const sandboxEnv = getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
+  const observedModels = Object.keys(
+    context.session?.stats?.metrics?.models ?? {},
+  ).sort();
+  const observedModelVersions =
+    observedModels.length > 0 ? observedModels.join(', ') : undefined;
   const cliVersion = await getCliVersion();
   const selectedAuthType = context.services.config?.getAuthType() || '';
   const ideClient = await getIdeClientName(context);
@@ -131,6 +137,7 @@ export async function getSystemInfo(
     npmVersion,
     sandboxEnv,
     modelVersion,
+    observedModelVersions,
     selectedAuthType,
     ideClient,
     sessionId,

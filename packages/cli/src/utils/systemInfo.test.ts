@@ -233,11 +233,45 @@ describe('systemInfo', () => {
         npmVersion: '10.0.0',
         sandboxEnv: 'no sandbox',
         modelVersion: 'test-model',
+        observedModelVersions: undefined,
         selectedAuthType: 'test-auth',
         ideClient: 'test-ide',
         sessionId: 'test-session-id',
         proxy: undefined,
       });
+    });
+
+    it('should include observed model versions from session telemetry', async () => {
+      mockContext.session.stats.metrics.models = {
+        'qwen3.5-plus': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 10 },
+          tokens: {
+            prompt: 1,
+            candidates: 1,
+            total: 2,
+            cached: 0,
+            thoughts: 0,
+            tool: 0,
+          },
+        },
+        'qwen3-max-2026-01-23': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 20 },
+          tokens: {
+            prompt: 2,
+            candidates: 2,
+            total: 4,
+            cached: 0,
+            thoughts: 0,
+            tool: 0,
+          },
+        },
+      };
+
+      const systemInfo = await getSystemInfo(mockContext);
+
+      expect(systemInfo.observedModelVersions).toBe(
+        'qwen3-max-2026-01-23, qwen3.5-plus',
+      );
     });
 
     it('should handle missing config gracefully', async () => {
