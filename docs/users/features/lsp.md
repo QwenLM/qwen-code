@@ -4,7 +4,7 @@ Qwen Code provides native Language Server Protocol (LSP) support, enabling advan
 
 ## Overview
 
-LSP support in Qwen Code works by connecting to language servers that understand your code. When you work with TypeScript, Python, Go, or other supported languages, Qwen Code can automatically start the appropriate language server and use it to:
+LSP support in Qwen Code works by connecting to language servers that understand your code. Once you configure servers via `.lsp.json` (or extensions), Qwen Code can start them and use them to:
 
 - Navigate to symbol definitions
 - Find all references to a symbol
@@ -21,7 +21,7 @@ LSP is an experimental feature in Qwen Code. To enable it, use the `--experiment
 qwen --experimental-lsp
 ```
 
-For most common languages, Qwen Code will automatically detect and start the appropriate language server if it's installed on your system.
+LSP servers are configuration-driven. You must define them in `.lsp.json` (or via extensions) for Qwen Code to start them.
 
 ### Prerequisites
 
@@ -33,6 +33,8 @@ You need to have the language server for your programming language installed:
 | Python                | pylsp                      | `pip install python-lsp-server`                                                |
 | Go                    | gopls                      | `go install golang.org/x/tools/gopls@latest`                                   |
 | Rust                  | rust-analyzer              | [Installation guide](https://rust-analyzer.github.io/manual.html#installation) |
+| C/C++                 | clangd                     | Install LLVM/clangd via your package manager                                   |
+| Java                  | jdtls                      | Install JDTLS and a JDK                                                        |
 
 ## Configuration
 
@@ -57,30 +59,71 @@ You can configure language servers using a `.lsp.json` file in your project root
 }
 ```
 
+### C/C++ (clangd) configuration
+
+Dependencies:
+
+- clangd (LLVM) must be installed and available in PATH.
+- A compile database (`compile_commands.json`) or `compile_flags.txt` is required for accurate results.
+
+Example:
+
+```json
+{
+  "cpp": {
+    "command": "clangd",
+    "args": [
+      "--background-index",
+      "--clang-tidy",
+      "--header-insertion=iwyu",
+      "--completion-style=detailed"
+    ]
+  }
+}
+```
+
+### Java (jdtls) configuration
+
+Dependencies:
+
+- JDK installed and available in PATH (`java`).
+- JDTLS installed and available in PATH (`jdtls`).
+
+Example:
+
+```json
+{
+  "java": {
+    "command": "jdtls",
+    "args": ["-configuration", ".jdtls-config", "-data", ".jdtls-workspace"]
+  }
+}
+```
+
 ### Configuration Options
 
 #### Required Fields
 
-| Option                | Type   | Description                                       |
-| --------------------- | ------ | ------------------------------------------------- |
-| `command`             | string | Command to start the LSP server (must be in PATH) |
-| `extensionToLanguage` | object | Maps file extensions to language identifiers      |
+| Option    | Type   | Description                                       |
+| --------- | ------ | ------------------------------------------------- |
+| `command` | string | Command to start the LSP server (must be in PATH) |
 
 #### Optional Fields
 
-| Option                  | Type     | Default   | Description                                            |
-| ----------------------- | -------- | --------- | ------------------------------------------------------ |
-| `args`                  | string[] | `[]`      | Command line arguments                                 |
-| `transport`             | string   | `"stdio"` | Transport type: `stdio` or `socket`                    |
-| `env`                   | object   | -         | Environment variables                                  |
-| `initializationOptions` | object   | -         | LSP initialization options                             |
-| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration` |
-| `workspaceFolder`       | string   | -         | Override workspace folder                              |
-| `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                        |
-| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                       |
-| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                  |
-| `maxRestarts`           | number   | `3`       | Maximum restart attempts                               |
-| `trustRequired`         | boolean  | `true`    | Require trusted workspace                              |
+| Option                  | Type     | Default   | Description                                             |
+| ----------------------- | -------- | --------- | ------------------------------------------------------- |
+| `args`                  | string[] | `[]`      | Command line arguments                                  |
+| `transport`             | string   | `"stdio"` | Transport type: `stdio`, `tcp`, or `socket`             |
+| `env`                   | object   | -         | Environment variables                                   |
+| `initializationOptions` | object   | -         | LSP initialization options                              |
+| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration`  |
+| `extensionToLanguage`   | object   | -         | Maps file extensions to language identifiers            |
+| `workspaceFolder`       | string   | -         | Override workspace folder (must be within project root) |
+| `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                         |
+| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                        |
+| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                   |
+| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                |
+| `trustRequired`         | boolean  | `true`    | Require trusted workspace                               |
 
 ### TCP/Socket Transport
 
@@ -269,7 +312,7 @@ LSP servers are only started in trusted workspaces by default. This is because l
 
 ### Trust Controls
 
-- **Trusted Workspace**: LSP servers start automatically
+- **Trusted Workspace**: LSP servers start if configured
 - **Untrusted Workspace**: LSP servers won't start unless `trustRequired: false` is set in the server configuration
 
 To mark a workspace as trusted, use the `/trust` command or configure trusted folders in settings.
