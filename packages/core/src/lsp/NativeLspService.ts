@@ -96,7 +96,7 @@ export class NativeLspService {
       return;
     }
 
-    // Detect languages in workspace
+    // Load LSP configs
     const userConfigs = await this.configLoader.loadUserConfigs();
     const extensionConfigs = await this.configLoader.loadExtensionConfigs(
       this.getActiveExtensions(),
