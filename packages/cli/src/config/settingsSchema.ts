@@ -1220,7 +1220,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
-      BeforeAgent: {
+      UserPromptSubmit: {
         type: 'array',
         label: 'Before Agent Hooks',
         category: 'Advanced',
@@ -1231,7 +1231,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
-      AfterAgent: {
+      Stop: {
         type: 'array',
         label: 'After Agent Hooks',
         category: 'Advanced',
