@@ -104,6 +104,10 @@ describe('ContentGenerationPipeline', () => {
       expect(OpenAIContentConverter).toHaveBeenCalledWith(
         'test-model',
         undefined,
+        false, // supportsFileInput
+        true, // supportsImageUrl (default)
+        false, // supportsAudioInput
+        false, // supportsVideoInput
       );
     });
   });

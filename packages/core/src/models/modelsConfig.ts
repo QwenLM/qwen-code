@@ -769,6 +769,17 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+
+    // Capabilities: apply model capabilities
+    if (model.capabilities) {
+      this._generationConfig.capabilities = model.capabilities;
+      this.generationConfigSources['capabilities'] = {
+        kind: 'modelProviders',
+        authType: model.authType,
+        modelId: model.id,
+        detail: 'capabilities',
+      };
+    }
   }
 
   /**

@@ -43,9 +43,14 @@ export class ContentGenerationPipeline {
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
+    const caps = this.contentGeneratorConfig.capabilities;
     this.converter = new OpenAIContentConverter(
       this.contentGeneratorConfig.model,
       this.contentGeneratorConfig.schemaCompliance,
+      caps?.fileInput ?? false,
+      caps?.imageUrl ?? true, // Default to true for backward compatibility
+      caps?.audioInput ?? false,
+      caps?.videoInput ?? false,
     );
   }
 
