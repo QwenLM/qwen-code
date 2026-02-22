@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { safeLiteralReplace } from './textUtils.js';
+import { safeLiteralReplace, normalizeContent } from './textUtils.js';
 
 describe('safeLiteralReplace', () => {
   it('returns original string when oldString empty or not found', () => {
@@ -75,5 +75,45 @@ describe('safeLiteralReplace', () => {
 
   it('handles newString with only dollar signs', () => {
     expect(safeLiteralReplace('abc', 'b', '$$')).toBe('a$$c');
+  });
+});
+
+describe('normalizeContent', () => {
+  it('strips UTF-8 BOM from the beginning of the string', () => {
+    const contentWithBOM = '\uFEFFHello World';
+    expect(normalizeContent(contentWithBOM)).toBe('Hello World');
+  });
+
+  it('preserves BOM-like characters that are not at the very beginning', () => {
+    const content = 'Hello\uFEFFWorld';
+    expect(normalizeContent(content)).toBe('Hello\uFEFFWorld');
+  });
+
+  it('converts CRLF to LF', () => {
+    const content = 'Line 1\r\nLine 2';
+    expect(normalizeContent(content)).toBe('Line 1\nLine 2');
+  });
+
+  it('converts standalone CR to LF', () => {
+    const content = 'Line 1\rLine 2';
+    expect(normalizeContent(content)).toBe('Line 1\nLine 2');
+  });
+
+  it('leaves existing LF unchanged', () => {
+    const content = 'Line 1\nLine 2';
+    expect(normalizeContent(content)).toBe('Line 1\nLine 2');
+  });
+
+  it('handles mixed line endings correctly', () => {
+    const content = 'Line 1\r\nLine 2\rLine 3\nLine 4';
+    expect(normalizeContent(content)).toBe('Line 1\nLine 2\nLine 3\nLine 4');
+  });
+
+  it('handles empty strings', () => {
+    expect(normalizeContent('')).toBe('');
+  });
+
+  it('handles strings without any newlines or BOM', () => {
+    expect(normalizeContent('Just a single line')).toBe('Just a single line');
   });
 });
