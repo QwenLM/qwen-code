@@ -44,6 +44,8 @@ export type AnthropicRuntimeFetchOptions = {
     dispatcher?: Dispatcher;
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // The fetch type must be 'any' to match Anthropic SDK's expected fetch signature
+  // which is more permissive than the standard Web Fetch API type
   fetch?: any;
 };
 
