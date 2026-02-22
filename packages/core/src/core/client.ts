@@ -69,6 +69,12 @@ import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
+// Hook triggers
+import {
+  fireUserPromptSubmitHook,
+  fireStopHook,
+} from './clientHookTriggers.js';
+
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
@@ -407,6 +413,35 @@ export class GeminiClient {
     options?: { isContinuation: boolean },
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
+    // Fire BeforeAgent hook through MessageBus (only if hooks are enabled)
+    const hooksEnabled = this.config.getEnableHooks();
+    const messageBus = this.config.getMessageBus();
+    if (hooksEnabled && messageBus) {
+      const hookOutput = await fireUserPromptSubmitHook(messageBus, request);
+
+      if (
+        hookOutput?.isBlockingDecision() ||
+        hookOutput?.shouldStopExecution()
+      ) {
+        yield {
+          type: GeminiEventType.Error,
+          value: {
+            error: new Error(
+              `BeforeAgent hook blocked processing: ${hookOutput.getEffectiveReason()}`,
+            ),
+          },
+        };
+        return new Turn(this.getChat(), prompt_id);
+      }
+
+      // Add additional context from hooks to the request
+      const additionalContext = hookOutput?.getAdditionalContext();
+      if (additionalContext) {
+        const requestArray = Array.isArray(request) ? request : [request];
+        request = [...requestArray, { text: additionalContext }];
+      }
+    }
+
     if (!options?.isContinuation) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -536,6 +571,50 @@ export class GeminiClient {
         return turn;
       }
     }
+    // Fire AfterAgent hook through MessageBus (only if hooks are enabled)
+    // This must be done before any early returns to ensure hooks are always triggered
+    if (hooksEnabled && messageBus && !turn.pendingToolCalls.length) {
+      // Get response text from the chat history
+      const history = this.getHistory();
+      const lastModelMessage = history
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '[no response text]';
+
+      const hookOutput = await fireStopHook(messageBus, request, responseText);
+
+      // For AfterAgent hooks, blocking/stop execution should force continuation (like Stop Hook)
+      // This enables Ralph Loop functionality where the hook can:
+      // 1. Return {"decision": "block", "reason": "<prompt>"} to continue with a new prompt
+      // 2. Optionally include "systemMessage" to display a status message
+      if (
+        hookOutput?.isBlockingDecision() ||
+        hookOutput?.shouldStopExecution()
+      ) {
+        // Emit system message if provided (e.g., "🔄 Ralph iteration 5")
+        if (hookOutput.systemMessage) {
+          yield {
+            type: GeminiEventType.HookSystemMessage,
+            value: hookOutput.systemMessage,
+          };
+        }
+
+        const continueReason = hookOutput.getEffectiveReason();
+        const continueRequest = [{ text: continueReason }];
+        return yield* this.sendMessageStream(
+          continueRequest,
+          signal,
+          prompt_id,
+          { isContinuation: true },
+          boundedTurns - 1,
+        );
+      }
+    }
+
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
         return turn;
@@ -557,9 +636,9 @@ export class GeminiClient {
       );
       if (nextSpeakerCheck?.next_speaker === 'model') {
         const nextRequest = [{ text: 'Please continue.' }];
-        // This recursive call's events will be yielded out, but the final
-        // turn object will be from the top-level call.
-        yield* this.sendMessageStream(
+        // This recursive call's events will be yielded out, and the final
+        // turn object from the recursive call will be returned.
+        return yield* this.sendMessageStream(
           nextRequest,
           signal,
           prompt_id,
@@ -568,6 +647,7 @@ export class GeminiClient {
         );
       }
     }
+
     return turn;
   }
 

@@ -33,6 +33,7 @@ import {
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -569,7 +570,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register MCP subcommands
     .command(mcpCommand)
     // Register Extension subcommands
-    .command(extensionsCommand);
+    .command(extensionsCommand)
+    // Register Hooks subcommands
+    .command(hooksCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -588,9 +591,11 @@ export async function parseArguments(): Promise<CliArgs> {
   // and not return to main CLI logic
   if (
     result._.length > 0 &&
-    (result._[0] === 'mcp' || result._[0] === 'extensions')
+    (result._[0] === 'mcp' ||
+      result._[0] === 'extensions' ||
+      result._[0] === 'hooks')
   ) {
-    // MCP commands handle their own execution and process exit
+    // MCP/Extensions/Hooks commands handle their own execution and process exit
     process.exit(0);
   }
 
@@ -1025,6 +1030,7 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
+    hooks: settings.hooks,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

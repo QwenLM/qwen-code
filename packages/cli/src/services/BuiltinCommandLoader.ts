@@ -21,6 +21,7 @@ import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
+import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
@@ -71,6 +72,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
+      hooksCommand,
       await ideCommand(),
       initCommand,
       languageCommand,
