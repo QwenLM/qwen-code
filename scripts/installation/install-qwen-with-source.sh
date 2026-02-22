@@ -6,6 +6,13 @@
 # Usage: install-qwen-with-source.sh --source [github|npm|internal|local-build]
 #        install-qwen-with-source.sh -s [github|npm|internal|local-build]
 
+# Check if running with sh (which doesn't support pipefail)
+if [[ -z "${BASH_VERSION}" ]]; then
+    # Re-execute with bash
+    exec bash "${0}" "${@}"
+fi
+
+
 # Disable pagers to prevent interactive prompts
 export GIT_PAGER=cat
 export PAGER=cat
@@ -54,10 +61,112 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Global variable for download command
+DOWNLOAD_CMD="curl -f -s -S -L"
+
+# Function to ensure curl or wget is available
+ensure_curl_or_wget() {
+    if command_exists curl; then
+        DOWNLOAD_CMD="curl -f -s -S -L"
+        return 0
+    fi
+
+    if command_exists wget; then
+        echo "curl not found, using wget for downloads."
+        DOWNLOAD_CMD="wget -q -O -"
+        return 0
+    fi
+
+    echo "Neither curl nor wget found. Attempting to install..."
+
+    # Check if we're root or have sudo
+    CURRENT_UID=$(id -u) || true
+    if [[ "${CURRENT_UID}" -eq 0 ]]; then
+        # Running as root, no sudo needed
+        SUDO_CMD=""
+    elif command_exists sudo; then
+        if sudo -n true 2>/dev/null || true; then
+            # Have sudo without password
+            SUDO_CMD="sudo"
+        fi
+    fi
+
+    if [[ -z "${SUDO_CMD}" ]] && [[ "${CURRENT_UID}" -ne 0 ]]; then
+        echo "Error: Cannot install curl - sudo is not available and not running as root."
+        echo "Please install curl or wget manually and run this script again."
+        exit 1
+    fi
+
+    # Try to install curl based on OS
+    if command_exists apt-get; then
+        echo "Installing curl via apt-get..."
+        ${SUDO_CMD} apt-get update && ${SUDO_CMD} apt-get install -y curl || true
+    elif command_exists dnf; then
+        echo "Installing curl via dnf..."
+        ${SUDO_CMD} dnf install -y curl || true
+    elif command_exists pacman; then
+        echo "Installing curl via pacman..."
+        ${SUDO_CMD} pacman -Syu --noconfirm curl || true
+    elif command_exists zypper; then
+        echo "Installing curl via zypper..."
+        ${SUDO_CMD} zypper install -y curl || true
+    elif command_exists yum; then
+        echo "Installing curl via yum..."
+        ${SUDO_CMD} yum install -y curl || true
+    elif command_exists brew; then
+        echo "Installing curl via Homebrew..."
+        ${SUDO_CMD} brew install curl || true
+    elif command_exists /opt/homebrew/bin/brew; then
+        echo "Installing curl via Homebrew (ARM)..."
+        ${SUDO_CMD} /opt/homebrew/bin/brew install curl || true
+    else
+        echo "Error: Cannot install curl - no supported package manager found."
+        echo "Please install curl or wget manually and run this script again."
+        exit 1
+    fi
+
+    # Verify installation
+    if command_exists curl; then
+        echo "✓ curl installed successfully"
+        return 0
+    else
+        echo "✗ Failed to install curl"
+        exit 1
+    fi
+}
+
+# Function to check if sudo is available
+check_sudo_available() {
+    if command_exists sudo; then
+        # Check if sudo actually works (non-root user may have sudo but not configured)
+        if sudo -n true 2>/dev/null; then
+            return 0
+        else
+            echo "Warning: sudo is installed but requires password."
+            return 1
+        fi
+    fi
+
+    # No sudo found - check if we're running as root
+    CHECK_UID=$(id -u) || true
+    if [[ "${CHECK_UID}" -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "Error: sudo is not available and you are not running as root."
+    echo ""
+    echo "This script requires either:"
+    echo "  1. sudo access (run with a user in sudoers group)"
+    echo "  2. root access (run as root)"
+    echo ""
+    echo "Please run this script with proper permissions or install packages manually."
+    return 1
+}
+
 # Function to fix npm global directory permissions
 fix_npm_permissions() {
     echo "Fixing npm global directory permissions..."
-    
+
     # Get the actual npm global directory
     NPM_GLOBAL_DIR=$(npm config get prefix 2>/dev/null)
     if [[ -z "${NPM_GLOBAL_DIR}" ]] || [[ "${NPM_GLOBAL_DIR}" == *"error"* ]]; then
@@ -65,7 +174,28 @@ fix_npm_permissions() {
         NPM_GLOBAL_DIR="${HOME}/.npm-global"
         echo "Warning: Could not determine npm prefix, using fallback: ${NPM_GLOBAL_DIR}"
     fi
-    
+
+    # SAFETY CHECK: Never modify system directories
+    # This prevents catastrophic failures like breaking sudo setuid binaries
+    case "${NPM_GLOBAL_DIR}" in
+        /|/usr|/usr/local|/bin|/sbin|/lib|/lib64|/opt|/snap|/var|/etc)
+            echo "Warning: npm prefix is a system directory (${NPM_GLOBAL_DIR})."
+            echo "Skipping permission fix to avoid breaking system binaries."
+            echo ""
+            echo "This is likely a system-wide npm installation."
+            echo "Consider using a user-owned npm prefix instead:"
+            echo "  npm config set prefix ~/.npm-global"
+            echo ""
+            echo "Alternatively, you can manually fix permissions for your user directory:"
+            echo "  mkdir -p ~/.npm-global"
+            echo "  npm config set prefix ~/.npm-global"
+            return 0
+            ;;
+        *)
+            # Safe to proceed with non-system directory
+            ;;
+    esac
+
     # 1. Change ownership of the entire npm global directory to current user
     #    Using only user ownership without specifying a group for cross-platform compatibility
     sudo chown -R "$(whoami)" "${NPM_GLOBAL_DIR}" 2>/dev/null || true
@@ -207,9 +337,9 @@ uninstall_nvm() {
 install_npm_only() {
     echo "Installing npm separately..."
 
-    if command_exists curl; then
-        echo "Attempting to install npm using: curl -qL https://www.npmjs.com/install.sh | sh"
-        if curl -qL https://www.npmjs.com/install.sh | sh; then
+    if command_exists curl || command_exists wget; then
+        echo "Attempting to install npm using: npmjs.com/install.sh"
+        if ${DOWNLOAD_CMD} https://www.npmjs.com/install.sh | sh; then
             NPM_VERSION_TMP=$(npm --version 2>/dev/null)
             if command_exists npm && [[ -n "${NPM_VERSION_TMP}" ]]; then
                 echo "✓ npm v${NPM_VERSION_TMP} installed via direct install script"
@@ -217,15 +347,46 @@ install_npm_only() {
             fi
         fi
     else
-        echo "curl command not found, proceeding with alternative methods"
+        echo "No download tool (curl/wget) available"
     fi
-    
+
     return 1
 }
 
 # Function to install Node.js via nvm
 install_nodejs_via_nvm() {
     export NVM_DIR="${HOME}/.nvm"
+
+    # Check glibc version before attempting installation
+    # Node.js 20+ requires glibc 2.27+
+    GLIBC_VERSION=$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    
+    # Handle empty version
+    if [[ -z "${GLIBC_VERSION}" ]]; then
+        # Try alternative method
+        GLIBC_VERSION=$(ldd -v 2>&1 | grep -oP 'Version\s+\K[0-9.]+' | head -1 || echo "0")
+    fi
+    
+    # Ensure GLIBC_VERSION is a clean value (remove any newlines)
+    GLIBC_VERSION=$(echo "${GLIBC_VERSION}" | tr -d '\n\r' | sed 's/[[:space:]]//g')
+    
+    # Extract major and minor version
+    GLIBC_MAJOR=$(echo "${GLIBC_VERSION}" | cut -d. -f1)
+    GLIBC_MINOR=$(echo "${GLIBC_VERSION}" | cut -d. -f2)
+    GLIBC_MAJOR=${GLIBC_MAJOR:-0}
+    GLIBC_MINOR=${GLIBC_MINOR:-0}
+
+    if [[ "${GLIBC_MAJOR}" -lt 2 ]] || \
+       [[ "${GLIBC_MAJOR}" -eq 2 && "${GLIBC_MINOR}" -lt 27 ]]; then
+        echo "✗ Error: Detected glibc ${GLIBC_VERSION}"
+        echo ""
+        echo "Qwen Code requires Node.js 20+, which needs glibc 2.27+."
+        echo "Your system (CentOS 7 with glibc 2.17) is not compatible."
+        echo ""
+        echo "Please upgrade your OS or use Docker."
+        echo ""
+        exit 1
+    fi
 
     # Check NVM completeness
     if [[ -d "${NVM_DIR}" ]]; then
@@ -280,7 +441,7 @@ install_nodejs_via_nvm() {
         # Ensure cleanup on exit
         trap 'rm -f "${TMP_INSTALL_SCRIPT}"' EXIT
 
-        if curl -f -s -S -o "${TMP_INSTALL_SCRIPT}" "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install_nvm.sh"; then
+        if ${DOWNLOAD_CMD} "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install_nvm.sh" > "${TMP_INSTALL_SCRIPT}"; then
             if bash "${TMP_INSTALL_SCRIPT}"; then
                 rm -f "${TMP_INSTALL_SCRIPT}"
                 trap - EXIT
@@ -324,13 +485,25 @@ install_nodejs_via_nvm() {
     # Install Node.js 20
     echo "Installing Node.js 20..."
     if nvm install 20 >/dev/null 2>&1; then
-        nvm use 20 >/dev/null 2>&1
-        nvm alias default 20 >/dev/null 2>&1
+        nvm use 20 >/dev/null 2>&1 || true
+        nvm alias default 20 >/dev/null 2>&1 || true
     else
         echo "✗ Failed to install Node.js 20"
         exit 1
     fi
-    
+
+    # Add NVM node to PATH for this script execution
+    # Find the actual installed Node.js version directory
+    NVM_NODE_PATH=""
+    if [[ -d "${NVM_DIR}/versions/node" ]]; then
+        # Find the v20.x.x directory
+        NVM_NODE_PATH=$(find "${NVM_DIR}/versions/node" -maxdepth 1 -type d -name 'v20.*' 2>/dev/null | head -1)/bin
+    fi
+
+    if [[ -n "${NVM_NODE_PATH}" ]] && [[ -d "${NVM_NODE_PATH}" ]]; then
+        export PATH="${NVM_NODE_PATH}:${PATH}"
+    fi
+
     # Verify Node.js
     if ! command_exists node; then
         echo "✗ Node.js installation verification failed"
@@ -375,6 +548,19 @@ install_nodejs_via_nvm() {
 
 # Function to check and install Qwen Code
 install_qwen_code() {
+    # Ensure NVM node is in PATH
+    export NVM_DIR="${HOME}/.nvm"
+    if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+        # shellcheck source=/dev/null
+        \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
+    fi
+
+    # Also add npm global bin to PATH
+    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
+    fi
+
     if command_exists qwen; then
         QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
         echo "✓ Qwen Code is already installed: ${QWEN_VERSION}"
@@ -442,16 +628,6 @@ install_qwen_code() {
     else
         echo "  (Skipping source.json creation - no source specified)"
     fi
-
-    # Verify installation
-    if command_exists qwen; then
-        QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
-        echo "✓ Qwen Code is available as 'qwen' command"
-        echo "  Installed version: ${QWEN_VERSION}"
-    else
-        echo "⚠ Qwen Code installed but not in PATH"
-        echo "  You may need to restart your terminal"
-    fi
 }
 
 # Function to create source.json
@@ -481,7 +657,34 @@ EOF
 main() {
     # Initialize variables
     RESTORE_NPMRC=false
-    
+
+    # Validate HOME variable
+    if [[ -z "${HOME}" ]]; then
+        echo "Warning: HOME environment variable is not set."
+        MAIN_UID=$(id -u) || true
+        if [[ "${MAIN_UID}" -eq 0 ]]; then
+            export HOME="/root"
+            echo "Using HOME=/root for root user."
+        else
+            CURRENT_USER=$(whoami) || true
+            DEFAULT_HOME="$(eval echo "~${CURRENT_USER}")" || true
+            export HOME="${DEFAULT_HOME}"
+            echo "Using HOME=${HOME}."
+        fi
+    fi
+
+    # Validate HOME directory exists
+    if [[ ! -d "${HOME}" ]]; then
+        echo "Error: HOME directory (${HOME}) does not exist."
+        exit 1
+    fi
+
+    # Check sudo availability first (basic permission check)
+    check_sudo_available
+
+    # Ensure curl/wget is available (needed to download NVM)
+    ensure_curl_or_wget
+
     # Step 1: Check and install Node.js
     install_nodejs
     echo ""
@@ -494,6 +697,17 @@ main() {
     echo "✓ Installation completed!"
     echo "==========================================="
     echo ""
+
+    # Ensure NVM and npm global bin are in PATH before final check
+    export NVM_DIR="${HOME}/.nvm"
+    if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+        # shellcheck source=/dev/null
+        \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
+    fi
+    NPM_GLOBAL_BIN="$(npm bin -g 2>/dev/null)" || true
+    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
+    fi
 
     # Check if qwen is immediately available
     if command_exists qwen; then
@@ -524,6 +738,56 @@ main() {
 
         echo ""
         echo "Or simply restart your terminal, then run: qwen"
+    fi
+
+    # Auto-configure PATH in shell config files
+    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null || echo "")
+    NVM_DIR="${HOME}/.nvm"
+
+    # Determine which config file to use
+    SHELL_CONFIG=""
+    if [[ -f "${HOME}/.bashrc" ]]; then
+        SHELL_CONFIG="${HOME}/.bashrc"
+    elif [[ -f "${HOME}/.bash_profile" ]]; then
+        SHELL_CONFIG="${HOME}/.bash_profile"
+    elif [[ -f "${HOME}/.profile" ]]; then
+        SHELL_CONFIG="${HOME}/.profile"
+    fi
+
+    if [[ -n "${SHELL_CONFIG}" ]]; then
+        # Check if already configured
+        NEEDS_CONFIG=false
+        if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+            if ! grep -q "npm bin -g" "${SHELL_CONFIG}" 2>/dev/null && \
+               ! grep -q "${NPM_GLOBAL_BIN}" "${SHELL_CONFIG}" 2>/dev/null; then
+                NEEDS_CONFIG=true
+            fi
+        fi
+
+        if [[ "${NEEDS_CONFIG}" == "true" ]]; then
+            echo ""
+            echo "Adding Qwen Code to PATH in ${SHELL_CONFIG}..."
+
+            # Append NVM configuration
+            if [[ -d "${NVM_DIR}" ]]; then
+                echo "" >> "${SHELL_CONFIG}"
+                echo "# NVM configuration (added by Qwen Code installer)" >> "${SHELL_CONFIG}"
+                echo "export NVM_DIR=\"${NVM_DIR}\"" >> "${SHELL_CONFIG}"
+                echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && \\. \"\$NVM_DIR/nvm.sh\"" >> "${SHELL_CONFIG}"
+                echo "[ -s \"\$NVM_DIR/bash_completion\" ] && \\. \"\$NVM_DIR/bash_completion\"" >> "${SHELL_CONFIG}"
+            fi
+
+            # Append npm global bin to PATH
+            if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+                echo "" >> "${SHELL_CONFIG}"
+                echo "# NPM global bin (added by Qwen Code installer)" >> "${SHELL_CONFIG}"
+                echo "export PATH=\"${NPM_GLOBAL_BIN}:\$PATH\"" >> "${SHELL_CONFIG}"
+            fi
+
+            echo "✓ Configuration added to ${SHELL_CONFIG}"
+            echo ""
+            echo "Please run: source ${SHELL_CONFIG}"
+        fi
     fi
 }
 
