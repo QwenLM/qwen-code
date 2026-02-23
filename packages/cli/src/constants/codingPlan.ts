@@ -73,10 +73,49 @@ export function generateCodingPlanTemplate(
         envKey: CODING_PLAN_ENV_KEY,
       },
       {
+        id: 'qwen3-coder-next',
+        name: 'qwen3-coder-next',
+        description:
+          'qwen3-coder-next model with thinking enabled from Bailian Coding Plan',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+        },
+      },
+      {
         id: 'qwen3-max-2026-01-23',
         name: 'qwen3-max-2026-01-23',
         description:
           'qwen3-max model with thinking enabled from Bailian Coding Plan',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+        },
+      },
+      {
+        id: 'glm-4.7',
+        name: 'glm-4.7',
+        description:
+          'glm-4.7 model with thinking enabled from Bailian Coding Plan',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+        },
+      },
+      {
+        id: 'kimi-k2.5',
+        name: 'kimi-k2.5',
+        description:
+          'kimi-k2.5 model with thinking enabled from Bailian Coding Plan',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
