@@ -750,7 +750,15 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    const previousContextWindowSize = this._generationConfig.contextWindowSize;
+    const previousContextWindowSource =
+      this.generationConfigSources['contextWindowSize'];
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      // If provider doesn't explicitly set contextWindowSize, leave room for
+      // lower layers (settings/cli/runtime) before falling back to auto-detect.
+      if (field === 'contextWindowSize' && gc.contextWindowSize === undefined) {
+        continue;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
       this.generationConfigSources[field] = {
@@ -761,13 +769,27 @@ export class ModelsConfig {
       };
     }
 
-    // contextWindowSize fallback: auto-detect from model when not set by provider
+    // contextWindowSize fallback: if provider did not set it explicitly,
+    // preserve non-provider override when available; otherwise auto-detect.
     if (gc.contextWindowSize === undefined) {
-      this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
-      this.generationConfigSources['contextWindowSize'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
+      const canPreservePrevious =
+        previousContextWindowSize !== undefined &&
+        previousContextWindowSource?.kind !== 'modelProviders';
+
+      if (canPreservePrevious) {
+        this._generationConfig.contextWindowSize = previousContextWindowSize;
+        this.generationConfigSources['contextWindowSize'] =
+          previousContextWindowSource;
+      } else {
+        this._generationConfig.contextWindowSize = tokenLimit(
+          model.id,
+          'input',
+        );
+        this.generationConfigSources['contextWindowSize'] = {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        };
+      }
     }
   }
 

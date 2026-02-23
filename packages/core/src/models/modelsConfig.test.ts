@@ -318,6 +318,44 @@ describe('ModelsConfig', () => {
     expect(gc.maxRetries).toBe(9);
   });
 
+  it('should preserve settings contextWindowSize when provider does not explicitly set it (#1898)', () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen-coder',
+          name: 'Qwen Coder',
+          baseUrl: 'http://localhost:8123/v1',
+          envKey: 'OPENAI_API_KEY',
+          generationConfig: {},
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'qwen-coder',
+        contextWindowSize: 262_144,
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        contextWindowSize: {
+          kind: 'settings',
+          detail: 'settings.model.generationConfig.contextWindowSize',
+        },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'qwen-coder');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    expect(gc.contextWindowSize).toBe(262_144);
+    expect(
+      modelsConfig.getGenerationConfigSources()['contextWindowSize']?.kind,
+    ).toBe('settings');
+  });
+
   it('should clear provider-sourced config when updateCredentials is called after switchModel', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
