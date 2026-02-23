@@ -6,7 +6,8 @@
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/mcp-chrome-integration/app/*"
   ],
   "repository": {
     "type": "git",
@@ -75,6 +76,7 @@
     "LICENSE"
   ],
   "devDependencies": {
+    "@types/chrome": "^0.1.32",
     "@types/marked": "^5.0.2",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
@@ -113,6 +115,8 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
+    "global-directory": "4.0.1",
+    "object-hash": "^3.0.0",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {

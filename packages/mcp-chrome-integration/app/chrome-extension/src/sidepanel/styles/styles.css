@@ -1,0 +1,89 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Chrome Extension - Theme Variables
+ *
+ * This file ONLY contains CSS variable definitions for Chrome extension context.
+ * Component styles are in @qwen-code/webui package and use these variables.
+ */
+
+/* ===========================
+   Chrome Extension Theme Variables
+   =========================== */
+:root {
+  /* Qwen Brand Colors */
+  --app-qwen-theme: #615fff;
+  --app-qwen-clay-button-orange: #4f46e5;
+  --app-qwen-ivory: #f5f5ff;
+  --app-qwen-slate: #141420;
+
+  /* Primary color */
+  --app-primary: var(--app-qwen-theme);
+  --app-primary-hover: var(--app-qwen-clay-button-orange);
+
+  /* Spacing */
+  --app-spacing-sm: 4px;
+  --app-spacing-md: 8px;
+  --app-spacing-lg: 12px;
+
+  /* Border Radius */
+  --app-radius-sm: 4px;
+  --app-radius-md: 6px;
+  --app-radius-lg: 8px;
+
+  /* Typography */
+  --app-font-mono: 'SF Mono', Monaco, Consolas, monospace;
+  --app-font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Colors - Chrome extension fallbacks */
+  --app-foreground: #cccccc;
+  --app-primary-foreground: #cccccc;
+  --app-secondary-foreground: #9d9d9d;
+  --app-background: #1e1e1e;
+  --app-primary-background: #1e1e1e;
+  --app-secondary-background: #252526;
+  --app-primary-border-color: #333333;
+
+  /* Input Colors */
+  --app-input-foreground: #cccccc;
+  --app-input-background: #3c3c3c;
+  --app-input-border: #555555;
+  --app-input-active-border: #615fff;
+  --app-input-placeholder-foreground: #6d6d6d;
+
+  /* Code & Links */
+  --app-code-background: rgba(255, 255, 255, 0.05);
+  --app-tool-background: #1e1e1e;
+  --app-link-foreground: #3794ff;
+  --app-link-active-foreground: #3794ff;
+
+  /* List Styles */
+  --app-list-hover-background: #2a2d2e;
+  --app-list-active-background: #094771;
+  --app-list-active-foreground: #ffffff;
+
+  /* Buttons */
+  --app-ghost-button-hover-background: rgba(90, 93, 94, 0.31);
+  --app-button-foreground: #ffffff;
+  --app-button-background: #0e639c;
+  --app-button-hover-background: #1177bb;
+
+  /* Menu */
+  --app-menu-background: #252526;
+  --app-menu-border: #454545;
+  --app-menu-foreground: #cccccc;
+  --app-menu-selection-background: #094771;
+  --app-menu-selection-foreground: #ffffff;
+
+  /* Widget */
+  --app-widget-border: #454545;
+  --app-widget-shadow: 0 2px 8px rgba(0, 0, 0, 0.36);
+
+  /* Status Colors */
+  --app-success: #10b981;
+  --app-warning: #f59e0b;
+  --app-error: #ef4444;
+}
