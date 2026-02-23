@@ -162,6 +162,32 @@ export function generateCodingPlanTemplate(
         },
       },
     },
+    {
+      id: 'glm-4.7',
+      name: 'glm-4.7',
+      description:
+        'glm-4.7 model with thinking enabled from Coding Plan (Global/Intl)',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+      },
+    },
+    {
+      id: 'kimi-k2.5',
+      name: 'kimi-k2.5',
+      description:
+        'kimi-k2.5 model with thinking enabled from Coding Plan (Global/Intl)',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+      },
+    },
   ];
 }
 
