@@ -75,15 +75,9 @@ export function generateCodingPlanTemplate(
       {
         id: 'qwen3-coder-next',
         name: 'qwen3-coder-next',
-        description:
-          'qwen3-coder-next model with thinking enabled from Bailian Coding Plan',
+        description: 'qwen3-coder-next model from Bailian Coding Plan',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
-        generationConfig: {
-          extra_body: {
-            enable_thinking: true,
-          },
-        },
       },
       {
         id: 'qwen3-max-2026-01-23',
@@ -147,6 +141,13 @@ export function generateCodingPlanTemplate(
       name: 'qwen3-coder-plus',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       description: 'qwen3-coder-plus model from Coding Plan (Global/Intl)',
+      envKey: CODING_PLAN_ENV_KEY,
+    },
+    {
+      id: 'qwen3-coder-next',
+      name: 'qwen3-coder-next',
+      description: 'qwen3-coder-next model from Coding Plan (Global/Intl)',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
     },
     {
