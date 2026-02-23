@@ -277,7 +277,7 @@ function executeArenaCommand(
   };
 
   const handleSessionError = (event: ArenaSessionErrorEvent) => {
-    addAndRecordArenaMessage(MessageType.ERROR, `Arena failed: ${event.error}`);
+    addAndRecordArenaMessage(MessageType.ERROR, `${event.error}`);
   };
 
   const handleSessionComplete = (event: ArenaSessionCompleteEvent) => {
@@ -340,7 +340,7 @@ function executeArenaCommand(
       },
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
-        addAndRecordArenaMessage(MessageType.ERROR, `Arena failed: ${message}`);
+        addAndRecordArenaMessage(MessageType.ERROR, `${message}`);
         debugLogger.error('Arena session failed:', error);
 
         // Clear the stored manager so subsequent /arena start calls

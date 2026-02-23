@@ -8,6 +8,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
+import { Storage } from '../../config/storage.js';
 import type { Config } from '../../config/config.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -42,15 +43,6 @@ const debugLogger = createDebugLogger('ARENA');
 const ARENA_POLL_INTERVAL_MS = 500;
 
 /**
- * Generates a unique Arena session ID.
- */
-function generateArenaSessionId(): string {
-  const timestamp = Date.now().toString(36);
-  const random = crypto.randomBytes(4).toString('hex');
-  return `arena-${timestamp}-${random}`;
-}
-
-/**
  * ArenaManager orchestrates multi-model competitive execution.
  *
  * It manages:
@@ -64,6 +56,7 @@ export class ArenaManager {
   private readonly config: Config;
   private readonly eventEmitter: ArenaEventEmitter;
   private readonly worktreeService: GitWorktreeService;
+  private readonly arenaBaseDir: string;
   private readonly callbacks: ArenaCallbacks;
   private backend: Backend | null = null;
   private cachedResult: ArenaSessionResult | null = null;
@@ -72,7 +65,7 @@ export class ArenaManager {
   private sessionStatus: ArenaSessionStatus = ArenaSessionStatus.INITIALIZING;
   private agents: Map<string, ArenaAgentState> = new Map();
   private arenaConfig: ArenaConfig | undefined;
-  private wasRepoInitialized = false;
+
   private startedAt: number | undefined;
   private masterAbortController: AbortController | undefined;
   private terminalCols: number;
@@ -87,9 +80,13 @@ export class ArenaManager {
     this.callbacks = callbacks;
     this.eventEmitter = new ArenaEventEmitter();
     const arenaSettings = config.getAgentsSettings().arena;
+    // Use the user-configured base dir, or default to ~/.qwen/arena.
+    this.arenaBaseDir =
+      arenaSettings?.worktreeBaseDir ??
+      path.join(Storage.getGlobalQwenDir(), 'arena');
     this.worktreeService = new GitWorktreeService(
       config.getWorkingDir(),
-      arenaSettings?.worktreeBaseDir,
+      this.arenaBaseDir,
     );
     this.terminalCols = process.stdout.columns || 120;
     this.terminalRows = process.stdout.rows || 40;
@@ -262,7 +259,7 @@ export class ArenaManager {
       this.terminalRows = options.rows;
     }
 
-    this.sessionId = generateArenaSessionId();
+    this.sessionId = this.config.getSessionId();
     this.startedAt = Date.now();
     this.sessionStatus = ArenaSessionStatus.INITIALIZING;
     this.masterAbortController = new AbortController();
@@ -286,6 +283,20 @@ export class ArenaManager {
     debugLogger.info(
       `Models: ${options.models.map((m) => m.modelId).join(', ')}`,
     );
+
+    // Fail fast on missing git or non-repo directory before any UI output
+    // so the user gets a clean, single error message without the
+    // "Arena started…" banner.
+    const gitCheck = await this.worktreeService.checkGitAvailable();
+    if (!gitCheck.available) {
+      throw new Error(gitCheck.error!);
+    }
+    const isRepo = await this.worktreeService.isGitRepository();
+    if (!isRepo) {
+      throw new Error(
+        'Failed to start arena: current directory is not a git repository.',
+      );
+    }
 
     // Emit session start event
     this.eventEmitter.emit(ArenaEventType.SESSION_START, {
@@ -419,7 +430,7 @@ export class ArenaManager {
     }
 
     // Clean up worktrees
-    await this.worktreeService.cleanupArenaSession(this.sessionId);
+    await this.worktreeService.cleanupSession(this.sessionId, 'arena');
 
     this.agents.clear();
     this.cachedResult = null;
@@ -589,13 +600,13 @@ export class ArenaManager {
       (m) => m.displayName || m.modelId,
     );
 
-    const result = await this.worktreeService.setupArenaWorktrees({
-      arenaSessionId: this.arenaConfig.sessionId,
+    const result = await this.worktreeService.setupWorktrees({
+      sessionId: this.arenaConfig.sessionId,
       sourceRepoPath: this.arenaConfig.sourceRepoPath,
       worktreeNames,
+      branchPrefix: 'arena',
+      metadata: { arenaSessionId: this.arenaConfig.sessionId },
     });
-
-    this.wasRepoInitialized = result.wasRepoInitialized;
 
     if (!result.success) {
       const errorMessages = result.errors
@@ -985,9 +996,9 @@ export class ArenaManager {
     if (!this.arenaConfig) {
       throw new Error('Arena config not initialized');
     }
-    return GitWorktreeService.getArenaSessionDir(
+    return GitWorktreeService.getSessionDir(
       this.arenaConfig.sessionId,
-      this.config.getAgentsSettings().arena?.worktreeBaseDir,
+      this.arenaBaseDir,
     );
   }
 
@@ -1335,7 +1346,7 @@ export class ArenaManager {
       startedAt: this.startedAt!,
       endedAt,
       totalDurationMs: endedAt - this.startedAt!,
-      wasRepoInitialized: this.wasRepoInitialized,
+      wasRepoInitialized: false,
     };
   }
 }

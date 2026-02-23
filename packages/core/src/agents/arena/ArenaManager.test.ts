@@ -12,8 +12,8 @@ import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 
-const hoistedMockSetupArenaWorktrees = vi.hoisted(() => vi.fn());
-const hoistedMockCleanupArenaSession = vi.hoisted(() => vi.fn());
+const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
+const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
 const hoistedMockGetWorktreeDiff = vi.hoisted(() => vi.fn());
 const hoistedMockApplyWorktreeChanges = vi.hoisted(() => vi.fn());
 const hoistedMockDetectBackend = vi.hoisted(() => vi.fn());
@@ -30,15 +30,17 @@ vi.mock('../index.js', async (importOriginal) => {
 // The class mock includes static methods used by ArenaManager.
 vi.mock('../../services/gitWorktreeService.js', () => {
   const MockClass = vi.fn().mockImplementation(() => ({
-    setupArenaWorktrees: hoistedMockSetupArenaWorktrees,
-    cleanupArenaSession: hoistedMockCleanupArenaSession,
+    checkGitAvailable: vi.fn().mockResolvedValue({ available: true }),
+    isGitRepository: vi.fn().mockResolvedValue(true),
+    setupWorktrees: hoistedMockSetupWorktrees,
+    cleanupSession: hoistedMockCleanupSession,
     getWorktreeDiff: hoistedMockGetWorktreeDiff,
     applyWorktreeChanges: hoistedMockApplyWorktreeChanges,
   }));
   // Static methods called by ArenaManager
-  (MockClass as unknown as Record<string, unknown>)['getArenaBaseDir'] = () =>
+  (MockClass as unknown as Record<string, unknown>)['getBaseDir'] = () =>
     path.join(os.tmpdir(), 'arena-mock');
-  (MockClass as unknown as Record<string, unknown>)['getArenaSessionDir'] = (
+  (MockClass as unknown as Record<string, unknown>)['getSessionDir'] = (
     sessionId: string,
   ) => path.join(os.tmpdir(), 'arena-mock', sessionId);
   (MockClass as unknown as Record<string, unknown>)['getWorktreesDir'] = (
@@ -74,38 +76,37 @@ describe('ArenaManager', () => {
     mockBackend = createMockBackend();
     hoistedMockDetectBackend.mockResolvedValue({ backend: mockBackend });
 
-    hoistedMockSetupArenaWorktrees.mockImplementation(
+    hoistedMockSetupWorktrees.mockImplementation(
       async ({
-        arenaSessionId,
+        sessionId,
         sourceRepoPath,
         worktreeNames,
       }: {
-        arenaSessionId: string;
+        sessionId: string;
         sourceRepoPath: string;
         worktreeNames: string[];
       }) => {
         const worktrees = worktreeNames.map((name) => ({
-          id: `${arenaSessionId}/${name}`,
+          id: `${sessionId}/${name}`,
           name,
-          path: path.join(sourceRepoPath, `.arena-${arenaSessionId}`, name),
-          branch: `arena/${arenaSessionId}/${name}`,
+          path: path.join(sourceRepoPath, `.arena-${sessionId}`, name),
+          branch: `arena/${sessionId}/${name}`,
           isActive: true,
           createdAt: Date.now(),
         }));
 
         return {
           success: true,
-          arenaSessionId,
+          sessionId,
           worktrees,
           worktreesByName: Object.fromEntries(
             worktrees.map((worktree) => [worktree.name, worktree]),
           ),
           errors: [],
-          wasRepoInitialized: false,
         };
       },
     );
-    hoistedMockCleanupArenaSession.mockResolvedValue({
+    hoistedMockCleanupSession.mockResolvedValue({
       success: true,
       removedWorktrees: [],
       removedBranches: [],
@@ -306,7 +307,7 @@ describe('ArenaManager', () => {
       const warningUpdate = updates.find((u) => u.type === 'warning');
       expect(warningUpdate).toBeDefined();
       expect(warningUpdate?.message).toContain('fallback to tmux backend');
-      expect(warningUpdate?.sessionId).toMatch(/^arena-/);
+      expect(warningUpdate?.sessionId).toBe('test-session');
     });
 
     it('should emit SESSION_ERROR and mark FAILED when backend init fails', async () => {
@@ -338,9 +339,11 @@ describe('ArenaManager', () => {
         timeoutSeconds: 30,
       });
 
-      // Wait until the backend has spawned at least one agent.
+      // Wait until the backend has spawned all agents.
+      // (Agents are spawned sequentially; cancelling between spawns would
+      // cause spawnAgentPty to overwrite the CANCELLED status back to RUNNING.)
       await waitForCondition(
-        () => mockBackend.spawnAgent.mock.calls.length > 0,
+        () => mockBackend.spawnAgent.mock.calls.length >= 2,
       );
 
       await manager.cancel();
@@ -361,8 +364,9 @@ describe('ArenaManager', () => {
       await manager.cleanup();
 
       expect(mockBackend.cleanup).toHaveBeenCalledTimes(1);
-      expect(hoistedMockCleanupArenaSession).toHaveBeenCalledWith(
+      expect(hoistedMockCleanupSession).toHaveBeenCalledWith(
         sessionIdBeforeCleanup,
+        'arena',
       );
       expect(manager.getBackend()).toBeNull();
       expect(manager.getSessionId()).toBeUndefined();

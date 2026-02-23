@@ -156,12 +156,6 @@ export function ArenaStatusDialog({
         </Text>
         <Text color={theme.text.secondary}> · </Text>
         <Text color={sessionLabel.color}>{sessionLabel.text}</Text>
-        {isInProcess && (
-          <>
-            <Text color={theme.text.secondary}> · </Text>
-            <Text color={theme.text.accent}>In-Process</Text>
-          </>
-        )}
       </Box>
 
       <Box height={1} />

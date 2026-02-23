@@ -106,7 +106,7 @@ describe('GitWorktreeService', () => {
 
     await expect(service.checkGitAvailable()).resolves.toEqual({
       available: false,
-      error: 'Git is not installed. Please install Git to use Arena feature.',
+      error: 'Git is not installed. Please install Git.',
     });
   });
 
@@ -140,23 +140,25 @@ describe('GitWorktreeService', () => {
     const result = await service.createWorktree('s1', 'Model A');
 
     expect(result.success).toBe(true);
-    expect(result.worktree?.branch).toBe('arena/s1/model-a');
-    expect(result.worktree?.path).toBe('/mock-qwen/arena/s1/worktrees/model-a');
+    expect(result.worktree?.branch).toBe('worktrees/s1/model-a');
+    expect(result.worktree?.path).toBe(
+      '/mock-qwen/worktrees/s1/worktrees/model-a',
+    );
     expect(hoistedMockRaw).toHaveBeenCalledWith([
       'worktree',
       'add',
       '-b',
-      'arena/s1/model-a',
-      '/mock-qwen/arena/s1/worktrees/model-a',
+      'worktrees/s1/model-a',
+      '/mock-qwen/worktrees/s1/worktrees/model-a',
       'main',
     ]);
   });
 
-  it('setupArenaWorktrees should fail early for colliding sanitized names', async () => {
+  it('setupWorktrees should fail early for colliding sanitized names', async () => {
     const service = new GitWorktreeService('/repo');
 
-    const result = await service.setupArenaWorktrees({
-      arenaSessionId: 's1',
+    const result = await service.setupWorktrees({
+      sessionId: 's1',
       sourceRepoPath: '/repo',
       worktreeNames: ['Model A', 'model_a'],
     });
@@ -167,12 +169,12 @@ describe('GitWorktreeService', () => {
     expect(isCommandAvailable).not.toHaveBeenCalled();
   });
 
-  it('setupArenaWorktrees should return system error when git is unavailable', async () => {
+  it('setupWorktrees should return system error when git is unavailable', async () => {
     (isCommandAvailable as Mock).mockReturnValue({ available: false });
     const service = new GitWorktreeService('/repo');
 
-    const result = await service.setupArenaWorktrees({
-      arenaSessionId: 's1',
+    const result = await service.setupWorktrees({
+      sessionId: 's1',
       sourceRepoPath: '/repo',
       worktreeNames: ['model-a'],
     });
@@ -181,12 +183,12 @@ describe('GitWorktreeService', () => {
     expect(result.errors).toEqual([
       {
         name: 'system',
-        error: 'Git is not installed. Please install Git to use Arena feature.',
+        error: 'Git is not installed. Please install Git.',
       },
     ]);
   });
 
-  it('setupArenaWorktrees should cleanup session after partial creation failure', async () => {
+  it('setupWorktrees should cleanup session after partial creation failure', async () => {
     const service = new GitWorktreeService('/repo');
     vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
     vi.spyOn(service, 'createWorktree')
@@ -196,7 +198,7 @@ describe('GitWorktreeService', () => {
           id: 's1/a',
           name: 'a',
           path: '/w/a',
-          branch: 'arena/s1/a',
+          branch: 'worktrees/s1/a',
           isActive: true,
           createdAt: 1,
         },
@@ -205,33 +207,31 @@ describe('GitWorktreeService', () => {
         success: false,
         error: 'boom',
       });
-    const cleanupSpy = vi
-      .spyOn(service, 'cleanupArenaSession')
-      .mockResolvedValue({
-        success: true,
-        removedWorktrees: [],
-        removedBranches: [],
-        errors: [],
-      });
+    const cleanupSpy = vi.spyOn(service, 'cleanupSession').mockResolvedValue({
+      success: true,
+      removedWorktrees: [],
+      removedBranches: [],
+      errors: [],
+    });
 
-    const result = await service.setupArenaWorktrees({
-      arenaSessionId: 's1',
+    const result = await service.setupWorktrees({
+      sessionId: 's1',
       sourceRepoPath: '/repo',
       worktreeNames: ['a', 'b'],
     });
 
     expect(result.success).toBe(false);
     expect(result.errors).toContainEqual({ name: 'b', error: 'boom' });
-    expect(cleanupSpy).toHaveBeenCalledWith('s1');
+    expect(cleanupSpy).toHaveBeenCalledWith('s1', 'worktrees');
   });
 
-  it('listArenaWorktrees should return empty array when session dir does not exist', async () => {
+  it('listWorktrees should return empty array when session dir does not exist', async () => {
     const err = new Error('missing') as NodeJS.ErrnoException;
     err.code = 'ENOENT';
     hoistedMockFsReaddir.mockRejectedValue(err);
     const service = new GitWorktreeService('/repo');
 
-    await expect(service.listArenaWorktrees('missing')).resolves.toEqual([]);
+    await expect(service.listWorktrees('missing')).resolves.toEqual([]);
   });
 
   it('removeWorktree should fallback to fs.rm + worktree prune when git remove fails', async () => {
@@ -250,28 +250,31 @@ describe('GitWorktreeService', () => {
     expect(hoistedMockRaw).toHaveBeenNthCalledWith(2, ['worktree', 'prune']);
   });
 
-  it('cleanupArenaSession should remove arena-prefixed branches only', async () => {
+  it('cleanupSession should remove prefixed branches only', async () => {
     const service = new GitWorktreeService('/repo');
-    vi.spyOn(service, 'listArenaWorktrees').mockResolvedValue([]);
+    vi.spyOn(service, 'listWorktrees').mockResolvedValue([]);
     hoistedMockBranch.mockImplementation((args?: string[]) => {
       if (args?.[0] === '-a') {
         return Promise.resolve({
           branches: {
             main: {},
-            'arena/s1/a': {},
-            'arena/s1/b': {},
+            'worktrees/s1/a': {},
+            'worktrees/s1/b': {},
           },
         });
       }
       return Promise.resolve({ branches: {} });
     });
 
-    const result = await service.cleanupArenaSession('s1');
+    const result = await service.cleanupSession('s1');
 
     expect(result.success).toBe(true);
-    expect(result.removedBranches).toEqual(['arena/s1/a', 'arena/s1/b']);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'arena/s1/a']);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'arena/s1/b']);
+    expect(result.removedBranches).toEqual([
+      'worktrees/s1/a',
+      'worktrees/s1/b',
+    ]);
+    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'worktrees/s1/a']);
+    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'worktrees/s1/b']);
     expect(hoistedMockRaw).toHaveBeenCalledWith(['worktree', 'prune']);
   });
 
@@ -323,7 +326,7 @@ describe('GitWorktreeService', () => {
     ]);
     expect(hoistedMockFsWriteFile).toHaveBeenCalled();
     expect(hoistedMockFsRm).toHaveBeenCalledWith(
-      expect.stringContaining('.arena-apply-'),
+      expect.stringContaining('.worktree-apply-'),
       { force: true },
     );
   });
@@ -358,7 +361,7 @@ describe('GitWorktreeService', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('apply failed');
     expect(hoistedMockFsRm).toHaveBeenCalledWith(
-      expect.stringContaining('.arena-apply-'),
+      expect.stringContaining('.worktree-apply-'),
       { force: true },
     );
   });
@@ -378,14 +381,14 @@ describe('GitWorktreeService', () => {
       return {
         id: `${sessionId}/${name}`,
         name,
-        path: `/mock-qwen/arena/${sessionId}/worktrees/${name}`,
-        branch: `arena/${sessionId}/${name}`,
+        path: `/mock-qwen/worktrees/${sessionId}/worktrees/${name}`,
+        branch: `worktrees/${sessionId}/${name}`,
         isActive: true,
         createdAt: 1,
       };
     }
 
-    it('setupArenaWorktrees should apply dirty state snapshot to each worktree', async () => {
+    it('setupWorktrees should apply dirty state snapshot to each worktree', async () => {
       hoistedMockStash.mockResolvedValue('snapshot-sha\n');
       const service = new GitWorktreeService('/repo');
       vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
@@ -399,8 +402,8 @@ describe('GitWorktreeService', () => {
           worktree: makeWorktreeInfo('b', 's1'),
         });
 
-      const result = await service.setupArenaWorktrees({
-        arenaSessionId: 's1',
+      const result = await service.setupWorktrees({
+        sessionId: 's1',
         sourceRepoPath: '/repo',
         worktreeNames: ['a', 'b'],
       });
@@ -422,7 +425,7 @@ describe('GitWorktreeService', () => {
       ]);
     });
 
-    it('setupArenaWorktrees should skip stash apply when working tree is clean', async () => {
+    it('setupWorktrees should skip stash apply when working tree is clean', async () => {
       hoistedMockStash.mockResolvedValue('\n');
       const service = new GitWorktreeService('/repo');
       vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
@@ -431,8 +434,8 @@ describe('GitWorktreeService', () => {
         worktree: makeWorktreeInfo('a', 's1'),
       });
 
-      const result = await service.setupArenaWorktrees({
-        arenaSessionId: 's1',
+      const result = await service.setupWorktrees({
+        sessionId: 's1',
         sourceRepoPath: '/repo',
         worktreeNames: ['a'],
       });
@@ -447,7 +450,7 @@ describe('GitWorktreeService', () => {
       expect(stashApplyCalls).toHaveLength(0);
     });
 
-    it('setupArenaWorktrees should still succeed when stash apply fails', async () => {
+    it('setupWorktrees should still succeed when stash apply fails', async () => {
       hoistedMockStash.mockResolvedValue('snapshot-sha\n');
       hoistedMockRaw.mockRejectedValue(new Error('stash apply conflict'));
       const service = new GitWorktreeService('/repo');
@@ -457,8 +460,8 @@ describe('GitWorktreeService', () => {
         worktree: makeWorktreeInfo('a', 's1'),
       });
 
-      const result = await service.setupArenaWorktrees({
-        arenaSessionId: 's1',
+      const result = await service.setupWorktrees({
+        sessionId: 's1',
         sourceRepoPath: '/repo',
         worktreeNames: ['a'],
       });
@@ -468,7 +471,7 @@ describe('GitWorktreeService', () => {
       expect(result.errors).toHaveLength(0);
     });
 
-    it('setupArenaWorktrees should still succeed when stash create fails', async () => {
+    it('setupWorktrees should still succeed when stash create fails', async () => {
       hoistedMockStash.mockRejectedValue(new Error('stash create failed'));
       const service = new GitWorktreeService('/repo');
       vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
@@ -477,8 +480,8 @@ describe('GitWorktreeService', () => {
         worktree: makeWorktreeInfo('a', 's1'),
       });
 
-      const result = await service.setupArenaWorktrees({
-        arenaSessionId: 's1',
+      const result = await service.setupWorktrees({
+        sessionId: 's1',
         sourceRepoPath: '/repo',
         worktreeNames: ['a'],
       });

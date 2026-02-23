@@ -11,15 +11,21 @@ import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
-import type { ArenaConfigFile } from '../agents/arena/types.js';
 
 /**
- * Commit message used for the baseline snapshot in arena worktrees.
+ * Commit message used for the baseline snapshot in worktrees.
  * After overlaying the user's dirty state (tracked changes + untracked files),
  * a commit with this message is created so that later diffs only capture the
  * agent's changes — not the pre-existing local edits.
  */
-export const ARENA_BASELINE_MESSAGE = 'arena: baseline (dirty state overlay)';
+export const BASELINE_COMMIT_MESSAGE = 'baseline (dirty state overlay)';
+
+/**
+ * Default directory and branch-prefix name used for worktrees.
+ * Changing this value affects the on-disk layout (`~/.qwen/<WORKTREES_DIR>/`)
+ * **and** the default git branch prefix (`<WORKTREES_DIR>/<sessionId>/…`).
+ */
+export const WORKTREES_DIR = 'worktrees';
 
 export interface WorktreeInfo {
   /** Unique identifier for this worktree */
@@ -36,15 +42,19 @@ export interface WorktreeInfo {
   createdAt: number;
 }
 
-export interface ArenaWorktreeConfig {
-  /** Arena session identifier */
-  arenaSessionId: string;
+export interface WorktreeSetupConfig {
+  /** Session identifier */
+  sessionId: string;
   /** Source repository path (project root) */
   sourceRepoPath: string;
   /** Names/identifiers for each worktree to create */
   worktreeNames: string[];
   /** Base branch to create worktrees from (defaults to current branch) */
   baseBranch?: string;
+  /** Branch prefix for worktree branches (default: 'worktrees') */
+  branchPrefix?: string;
+  /** Extra metadata to persist alongside the session config */
+  metadata?: Record<string, unknown>;
 }
 
 export interface CreateWorktreeResult {
@@ -53,76 +63,79 @@ export interface CreateWorktreeResult {
   error?: string;
 }
 
-export interface ArenaWorktreeSetupResult {
+export interface WorktreeSetupResult {
   success: boolean;
-  arenaSessionId: string;
+  sessionId: string;
   worktrees: WorktreeInfo[];
   worktreesByName: Record<string, WorktreeInfo>;
   errors: Array<{ name: string; error: string }>;
-  wasRepoInitialized: boolean;
 }
 
 /**
- * Service for managing git worktrees for Arena multi-agent execution.
+ * Minimal session config file written to disk.
+ * Callers can extend via the `metadata` field in WorktreeSetupConfig.
+ */
+interface SessionConfigFile {
+  sessionId: string;
+  sourceRepoPath: string;
+  worktreeNames: string[];
+  baseBranch?: string;
+  createdAt: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Service for managing git worktrees.
  *
  * Git worktrees allow multiple working directories to share a single repository,
- * enabling isolated environments for each Arena agent without copying the entire repo.
+ * enabling isolated environments without copying the entire repo.
  */
 export class GitWorktreeService {
   private sourceRepoPath: string;
   private git: SimpleGit;
-  private readonly customArenaBaseDir?: string;
+  private readonly customBaseDir?: string;
 
-  constructor(sourceRepoPath: string, customArenaBaseDir?: string) {
+  constructor(sourceRepoPath: string, customBaseDir?: string) {
     this.sourceRepoPath = path.resolve(sourceRepoPath);
     this.git = simpleGit(this.sourceRepoPath);
-    this.customArenaBaseDir = customArenaBaseDir;
+    this.customBaseDir = customBaseDir;
   }
 
   /**
-   * Gets the directory where Arena worktrees are stored.
+   * Gets the directory where worktrees are stored.
    * @param customDir - Optional custom base directory override
    */
-  static getArenaBaseDir(customDir?: string): string {
+  static getBaseDir(customDir?: string): string {
     if (customDir) {
       return path.resolve(customDir);
     }
-    return path.join(Storage.getGlobalQwenDir(), 'arena');
+    return path.join(Storage.getGlobalQwenDir(), WORKTREES_DIR);
   }
 
   /**
-   * Gets the directory for a specific Arena session.
+   * Gets the directory for a specific session.
    * @param customBaseDir - Optional custom base directory override
    */
-  static getArenaSessionDir(
-    arenaSessionId: string,
-    customBaseDir?: string,
-  ): string {
+  static getSessionDir(sessionId: string, customBaseDir?: string): string {
+    return path.join(GitWorktreeService.getBaseDir(customBaseDir), sessionId);
+  }
+
+  /**
+   * Gets the worktrees directory for a specific session.
+   * @param customBaseDir - Optional custom base directory override
+   */
+  static getWorktreesDir(sessionId: string, customBaseDir?: string): string {
     return path.join(
-      GitWorktreeService.getArenaBaseDir(customBaseDir),
-      arenaSessionId,
+      GitWorktreeService.getSessionDir(sessionId, customBaseDir),
+      WORKTREES_DIR,
     );
   }
 
   /**
-   * Gets the worktrees directory for a specific Arena session.
-   * @param customBaseDir - Optional custom base directory override
+   * Instance-level base dir, using the custom dir if provided at construction.
    */
-  static getWorktreesDir(
-    arenaSessionId: string,
-    customBaseDir?: string,
-  ): string {
-    return path.join(
-      GitWorktreeService.getArenaSessionDir(arenaSessionId, customBaseDir),
-      'worktrees',
-    );
-  }
-
-  /**
-   * Instance-level arena base dir, using the custom dir if provided at construction.
-   */
-  getArenaBaseDirForInstance(): string {
-    return GitWorktreeService.getArenaBaseDir(this.customArenaBaseDir);
+  getBaseDirForInstance(): string {
+    return GitWorktreeService.getBaseDir(this.customBaseDir);
   }
 
   /**
@@ -133,7 +146,7 @@ export class GitWorktreeService {
     if (!available) {
       return {
         available: false,
-        error: 'Git is not installed. Please install Git to use Arena feature.',
+        error: 'Git is not installed. Please install Git.',
       };
     }
     return { available: true };
@@ -177,7 +190,7 @@ export class GitWorktreeService {
 
       // Create initial commit so we can create worktrees
       await this.git.add('.');
-      await this.git.commit('Initial commit for Arena', {
+      await this.git.commit('Initial commit', {
         '--allow-empty': null,
       });
 
@@ -207,24 +220,25 @@ export class GitWorktreeService {
   }
 
   /**
-   * Creates a single worktree for an Arena agent.
+   * Creates a single worktree.
    */
   async createWorktree(
-    arenaSessionId: string,
+    sessionId: string,
     name: string,
     baseBranch?: string,
+    branchPrefix: string = WORKTREES_DIR,
   ): Promise<CreateWorktreeResult> {
     try {
       const worktreesDir = GitWorktreeService.getWorktreesDir(
-        arenaSessionId,
-        this.customArenaBaseDir,
+        sessionId,
+        this.customBaseDir,
       );
       await fs.mkdir(worktreesDir, { recursive: true });
 
       // Sanitize name for use as branch and directory name
       const sanitizedName = this.sanitizeName(name);
       const worktreePath = path.join(worktreesDir, sanitizedName);
-      const branchName = `arena/${arenaSessionId}/${sanitizedName}`;
+      const branchName = `${branchPrefix}/${sessionId}/${sanitizedName}`;
 
       // Check if worktree already exists
       const exists = await this.pathExists(worktreePath);
@@ -249,7 +263,7 @@ export class GitWorktreeService {
       ]);
 
       const worktree: WorktreeInfo = {
-        id: `${arenaSessionId}/${sanitizedName}`,
+        id: `${sessionId}/${sanitizedName}`,
         name,
         path: worktreePath,
         branch: branchName,
@@ -267,19 +281,18 @@ export class GitWorktreeService {
   }
 
   /**
-   * Sets up all worktrees for an Arena session.
-   * This is the main entry point for Arena worktree creation.
+   * Sets up all worktrees for a session.
+   * This is the main entry point for worktree creation.
    */
-  async setupArenaWorktrees(
-    config: ArenaWorktreeConfig,
-  ): Promise<ArenaWorktreeSetupResult> {
-    const result: ArenaWorktreeSetupResult = {
+  async setupWorktrees(
+    config: WorktreeSetupConfig,
+  ): Promise<WorktreeSetupResult> {
+    const result: WorktreeSetupResult = {
       success: false,
-      arenaSessionId: config.arenaSessionId,
+      sessionId: config.sessionId,
       worktrees: [],
       worktreesByName: {},
       errors: [],
-      wasRepoInitialized: false,
     };
 
     // Validate worktree names early (before touching git)
@@ -317,31 +330,31 @@ export class GitWorktreeService {
     // Ensure source is a git repository
     const isRepo = await this.isGitRepository();
     if (!isRepo) {
-      const initResult = await this.initializeRepository();
-      if (initResult.error) {
-        result.errors.push({ name: 'initialization', error: initResult.error });
-        return result;
-      }
-      result.wasRepoInitialized = initResult.initialized;
+      result.errors.push({
+        name: 'repository',
+        error: 'Source path is not a git repository.',
+      });
+      return result;
     }
 
-    // Create arena session directory
-    const sessionDir = GitWorktreeService.getArenaSessionDir(
-      config.arenaSessionId,
-      this.customArenaBaseDir,
+    // Create session directory
+    const sessionDir = GitWorktreeService.getSessionDir(
+      config.sessionId,
+      this.customBaseDir,
     );
     await fs.mkdir(sessionDir, { recursive: true });
 
-    // Save arena config for later reference
-    const arenaConfigPath = path.join(sessionDir, 'config.json');
-    const configFile: ArenaConfigFile = {
-      arenaSessionId: config.arenaSessionId,
+    // Save session config for later reference
+    const configPath = path.join(sessionDir, 'config.json');
+    const configFile: SessionConfigFile = {
+      sessionId: config.sessionId,
       sourceRepoPath: config.sourceRepoPath,
       worktreeNames: config.worktreeNames,
       baseBranch: config.baseBranch,
       createdAt: Date.now(),
+      ...config.metadata,
     };
-    await fs.writeFile(arenaConfigPath, JSON.stringify(configFile, null, 2));
+    await fs.writeFile(configPath, JSON.stringify(configFile, null, 2));
 
     // Capture the current dirty state (tracked: staged + unstaged changes)
     // without modifying the source working tree or index.
@@ -368,12 +381,15 @@ export class GitWorktreeService {
       // Non-fatal: proceed without untracked files
     }
 
-    // Create worktrees for each agent
+    const branchPrefix = config.branchPrefix ?? WORKTREES_DIR;
+
+    // Create worktrees for each entry
     for (const name of config.worktreeNames) {
       const createResult = await this.createWorktree(
-        config.arenaSessionId,
+        config.sessionId,
         name,
         config.baseBranch,
+        branchPrefix,
       );
 
       if (createResult.success && createResult.worktree) {
@@ -390,7 +406,7 @@ export class GitWorktreeService {
     // If any worktree failed, clean up all created resources and fail
     if (result.errors.length > 0) {
       try {
-        await this.cleanupArenaSession(config.arenaSessionId);
+        await this.cleanupSession(config.sessionId, branchPrefix);
       } catch (error) {
         result.errors.push({
           name: 'cleanup',
@@ -436,7 +452,7 @@ export class GitWorktreeService {
         //    only the agent's changes, excluding the pre-existing dirty state.
         try {
           await wtGit.add(['--all']);
-          await wtGit.commit(ARENA_BASELINE_MESSAGE, {
+          await wtGit.commit(BASELINE_COMMIT_MESSAGE, {
             '--allow-empty': null,
             '--no-verify': null,
           });
@@ -450,12 +466,15 @@ export class GitWorktreeService {
   }
 
   /**
-   * Lists all worktrees for an Arena session.
+   * Lists all worktrees for a session.
    */
-  async listArenaWorktrees(arenaSessionId: string): Promise<WorktreeInfo[]> {
+  async listWorktrees(
+    sessionId: string,
+    branchPrefix: string = WORKTREES_DIR,
+  ): Promise<WorktreeInfo[]> {
     const worktreesDir = GitWorktreeService.getWorktreesDir(
-      arenaSessionId,
-      this.customArenaBaseDir,
+      sessionId,
+      this.customBaseDir,
     );
 
     try {
@@ -465,7 +484,7 @@ export class GitWorktreeService {
       for (const entry of entries) {
         if (entry.isDirectory()) {
           const worktreePath = path.join(worktreesDir, entry.name);
-          const branchName = `arena/${arenaSessionId}/${entry.name}`;
+          const branchName = `${branchPrefix}/${sessionId}/${entry.name}`;
 
           // Try to get stats for creation time
           let createdAt = Date.now();
@@ -477,7 +496,7 @@ export class GitWorktreeService {
           }
 
           worktrees.push({
-            id: `${arenaSessionId}/${entry.name}`,
+            id: `${sessionId}/${entry.name}`,
             name: entry.name,
             path: worktreePath,
             branch: branchName,
@@ -523,9 +542,12 @@ export class GitWorktreeService {
   }
 
   /**
-   * Cleans up all worktrees and branches for an Arena session.
+   * Cleans up all worktrees and branches for a session.
    */
-  async cleanupArenaSession(arenaSessionId: string): Promise<{
+  async cleanupSession(
+    sessionId: string,
+    branchPrefix: string = WORKTREES_DIR,
+  ): Promise<{
     success: boolean;
     removedWorktrees: string[];
     removedBranches: string[];
@@ -538,7 +560,7 @@ export class GitWorktreeService {
       errors: [] as string[],
     };
 
-    const worktrees = await this.listArenaWorktrees(arenaSessionId);
+    const worktrees = await this.listWorktrees(sessionId, branchPrefix);
 
     // Remove all worktrees
     for (const worktree of worktrees) {
@@ -553,10 +575,10 @@ export class GitWorktreeService {
       }
     }
 
-    // Remove arena session directory
-    const sessionDir = GitWorktreeService.getArenaSessionDir(
-      arenaSessionId,
-      this.customArenaBaseDir,
+    // Remove session directory
+    const sessionDir = GitWorktreeService.getSessionDir(
+      sessionId,
+      this.customBaseDir,
     );
     try {
       await fs.rm(sessionDir, { recursive: true, force: true });
@@ -566,12 +588,12 @@ export class GitWorktreeService {
       );
     }
 
-    // Clean up arena branches
-    const branchPrefix = `arena/${arenaSessionId}/`;
+    // Clean up branches
+    const prefix = `${branchPrefix}/${sessionId}/`;
     try {
       const branches = await this.git.branch(['-a']);
       for (const branchName of Object.keys(branches.branches)) {
-        if (branchName.startsWith(branchPrefix)) {
+        if (branchName.startsWith(prefix)) {
           try {
             await this.git.branch(['-D', branchName]);
             result.removedBranches.push(branchName);
@@ -596,7 +618,7 @@ export class GitWorktreeService {
 
   /**
    * Gets the diff between a worktree and its baseline state.
-   * Prefers the arena baseline commit (which includes the dirty state overlay)
+   * Prefers the baseline commit (which includes the dirty state overlay)
    * so the diff only shows the agent's changes. Falls back to the base branch
    * when no baseline commit exists.
    */
@@ -623,7 +645,7 @@ export class GitWorktreeService {
   /**
    * Applies raw changes from a worktree back to the target working directory.
    *
-   * Diffs from the arena baseline commit (which already includes the user's
+   * Diffs from the baseline commit (which already includes the user's
    * dirty state) so the patch only contains the agent's new changes.
    * Falls back to merge-base when no baseline commit exists.
    */
@@ -642,7 +664,7 @@ export class GitWorktreeService {
       const hasBaseline = !!base;
 
       if (!base) {
-        // Fallback: diff from merge-base (legacy / non-arena worktrees)
+        // Fallback: diff from merge-base
         const targetHead = (await targetGit.revparse(['HEAD'])).trim();
         base = (
           await worktreeGit.raw(['merge-base', 'HEAD', targetHead])
@@ -658,8 +680,8 @@ export class GitWorktreeService {
       }
 
       const patchFile = path.join(
-        this.getArenaBaseDirForInstance(),
-        `.arena-apply-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`,
+        this.getBaseDirForInstance(),
+        `.worktree-apply-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`,
       );
       await fs.mkdir(path.dirname(patchFile), { recursive: true });
       await fs.writeFile(patchFile, patch, 'utf-8');
@@ -688,35 +710,35 @@ export class GitWorktreeService {
   }
 
   /**
-   * Lists all Arena sessions.
+   * Lists all sessions stored in the worktree base directory.
    */
-  static async listArenaSessions(customBaseDir?: string): Promise<
+  static async listSessions(customBaseDir?: string): Promise<
     Array<{
-      arenaSessionId: string;
+      sessionId: string;
       createdAt: number;
       sourceRepoPath: string;
       worktreeCount: number;
     }>
   > {
-    const arenaDir = GitWorktreeService.getArenaBaseDir(customBaseDir);
+    const baseDir = GitWorktreeService.getBaseDir(customBaseDir);
     const sessions: Array<{
-      arenaSessionId: string;
+      sessionId: string;
       createdAt: number;
       sourceRepoPath: string;
       worktreeCount: number;
     }> = [];
 
     try {
-      const entries = await fs.readdir(arenaDir, { withFileTypes: true });
+      const entries = await fs.readdir(baseDir, { withFileTypes: true });
 
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          const configPath = path.join(arenaDir, entry.name, 'config.json');
+          const configPath = path.join(baseDir, entry.name, 'config.json');
           try {
             const configContent = await fs.readFile(configPath, 'utf-8');
-            const config = JSON.parse(configContent) as ArenaConfigFile;
+            const config = JSON.parse(configContent) as SessionConfigFile;
 
-            const worktreesDir = path.join(arenaDir, entry.name, 'worktrees');
+            const worktreesDir = path.join(baseDir, entry.name, WORKTREES_DIR);
             let worktreeCount = 0;
             try {
               const worktreeEntries = await fs.readdir(worktreesDir);
@@ -726,7 +748,7 @@ export class GitWorktreeService {
             }
 
             sessions.push({
-              arenaSessionId: entry.name,
+              sessionId: entry.name,
               createdAt: config.createdAt || Date.now(),
               sourceRepoPath: config.sourceRepoPath || '',
               worktreeCount,
@@ -744,7 +766,7 @@ export class GitWorktreeService {
   }
 
   /**
-   * Finds the arena baseline commit in a worktree, if one exists.
+   * Finds the baseline commit in a worktree, if one exists.
    * Returns the commit SHA, or null if not found.
    */
   private async resolveBaseline(
@@ -755,7 +777,7 @@ export class GitWorktreeService {
         await worktreeGit.raw([
           'log',
           '--grep',
-          ARENA_BASELINE_MESSAGE,
+          BASELINE_COMMIT_MESSAGE,
           '--format=%H',
           '-1',
         ])
