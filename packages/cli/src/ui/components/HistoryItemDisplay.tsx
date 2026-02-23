@@ -39,7 +39,7 @@ import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
 import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
-import { ArenaAgentCard, ArenaSessionCard } from './messages/ArenaCards.js';
+import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;

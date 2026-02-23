@@ -5,20 +5,24 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ArenaManager,
   type ArenaAgentState,
+  type InProcessBackend,
+  type AgentStatsSummary,
   isTerminalStatus,
   ArenaSessionStatus,
+  DISPLAY_MODE,
 } from '@qwen-code/qwen-code-core';
-import { theme } from '../semantic-colors.js';
-import { useKeypress } from '../hooks/useKeypress.js';
-import { formatDuration } from '../utils/formatters.js';
-import { getArenaStatusLabel } from '../utils/displayUtils.js';
+import { theme } from '../../semantic-colors.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { formatDuration } from '../../utils/formatters.js';
+import { getArenaStatusLabel } from '../../utils/displayUtils.js';
 
 const STATUS_REFRESH_INTERVAL_MS = 2000;
+const IN_PROCESS_REFRESH_INTERVAL_MS = 1000;
 
 interface ArenaStatusDialogProps {
   manager: ArenaManager;
@@ -77,12 +81,20 @@ export function ArenaStatusDialog({
 }: ArenaStatusDialogProps): React.JSX.Element {
   const [tick, setTick] = useState(0);
 
+  // Detect in-process backend for live stats reading
+  const backend = manager.getBackend();
+  const isInProcess = backend?.type === DISPLAY_MODE.IN_PROCESS;
+  const inProcessBackend = isInProcess ? (backend as InProcessBackend) : null;
+
   useEffect(() => {
+    const interval = isInProcess
+      ? IN_PROCESS_REFRESH_INTERVAL_MS
+      : STATUS_REFRESH_INTERVAL_MS;
     const timer = setInterval(() => {
       setTick((prev) => prev + 1);
-    }, STATUS_REFRESH_INTERVAL_MS);
+    }, interval);
     return () => clearInterval(timer);
-  }, []);
+  }, [isInProcess]);
 
   // Force re-read on every tick
   void tick;
@@ -91,6 +103,20 @@ export function ArenaStatusDialog({
   const sessionLabel = getSessionStatusLabel(sessionStatus);
   const agents = manager.getAgentStates();
   const task = manager.getTask() ?? '';
+
+  // For in-process mode, read live stats directly from AgentInteractive
+  const liveStats = useMemo(() => {
+    if (!inProcessBackend) return null;
+    const statsMap = new Map<string, AgentStatsSummary>();
+    for (const agent of agents) {
+      const interactive = inProcessBackend.getAgent(agent.agentId);
+      if (interactive) {
+        statsMap.set(agent.agentId, interactive.getStats());
+      }
+    }
+    return statsMap;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inProcessBackend, agents, tick]);
 
   const maxTaskLen = 60;
   const displayTask =
@@ -130,6 +156,12 @@ export function ArenaStatusDialog({
         </Text>
         <Text color={theme.text.secondary}> · </Text>
         <Text color={sessionLabel.color}>{sessionLabel.text}</Text>
+        {isInProcess && (
+          <>
+            <Text color={theme.text.secondary}> · </Text>
+            <Text color={theme.text.accent}>In-Process</Text>
+          </>
+        )}
       </Box>
 
       <Box height={1} />
@@ -189,52 +221,73 @@ export function ArenaStatusDialog({
         const { text: statusText, color } = getArenaStatusLabel(agent.status);
         const elapsed = getElapsedMs(agent);
 
+        // Use live stats from AgentInteractive when in-process, otherwise
+        // fall back to the cached ArenaAgentState.stats (file-polled).
+        const live = liveStats?.get(agent.agentId);
+        const totalTokens = live?.totalTokens ?? agent.stats.totalTokens;
+        const rounds = live?.rounds ?? agent.stats.rounds;
+        const toolCalls = live?.totalToolCalls ?? agent.stats.toolCalls;
+        const successfulToolCalls =
+          live?.successfulToolCalls ?? agent.stats.successfulToolCalls;
+        const failedToolCalls =
+          live?.failedToolCalls ?? agent.stats.failedToolCalls;
+
         return (
-          <Box key={agent.agentId}>
-            <Box flexGrow={1}>
-              <Text color={theme.text.primary}>
-                {truncate(label, MAX_MODEL_NAME_LENGTH)}
-              </Text>
-            </Box>
-            <Box width={colStatus} justifyContent="flex-end">
-              <Text color={color}>{statusText}</Text>
-            </Box>
-            <Box width={colTime} justifyContent="flex-end">
-              <Text color={theme.text.primary}>
-                {pad(formatDuration(elapsed), colTime - 1, 'right')}
-              </Text>
-            </Box>
-            <Box width={colTokens} justifyContent="flex-end">
-              <Text color={theme.text.primary}>
-                {pad(
-                  agent.stats.totalTokens.toLocaleString(),
-                  colTokens - 1,
-                  'right',
-                )}
-              </Text>
-            </Box>
-            <Box width={colRounds} justifyContent="flex-end">
-              <Text color={theme.text.primary}>
-                {pad(String(agent.stats.rounds), colRounds - 1, 'right')}
-              </Text>
-            </Box>
-            <Box width={colTools} justifyContent="flex-end">
-              {agent.stats.failedToolCalls > 0 ? (
-                <Text>
-                  <Text color={theme.status.success}>
-                    {agent.stats.successfulToolCalls}
-                  </Text>
-                  <Text color={theme.text.secondary}>/</Text>
-                  <Text color={theme.status.error}>
-                    {agent.stats.failedToolCalls}
-                  </Text>
-                </Text>
-              ) : (
+          <Box key={agent.agentId} flexDirection="column">
+            <Box>
+              <Box flexGrow={1}>
                 <Text color={theme.text.primary}>
-                  {pad(String(agent.stats.toolCalls), colTools - 1, 'right')}
+                  {truncate(label, MAX_MODEL_NAME_LENGTH)}
                 </Text>
-              )}
+              </Box>
+              <Box width={colStatus} justifyContent="flex-end">
+                <Text color={color}>{statusText}</Text>
+              </Box>
+              <Box width={colTime} justifyContent="flex-end">
+                <Text color={theme.text.primary}>
+                  {pad(formatDuration(elapsed), colTime - 1, 'right')}
+                </Text>
+              </Box>
+              <Box width={colTokens} justifyContent="flex-end">
+                <Text color={theme.text.primary}>
+                  {pad(totalTokens.toLocaleString(), colTokens - 1, 'right')}
+                </Text>
+              </Box>
+              <Box width={colRounds} justifyContent="flex-end">
+                <Text color={theme.text.primary}>
+                  {pad(String(rounds), colRounds - 1, 'right')}
+                </Text>
+              </Box>
+              <Box width={colTools} justifyContent="flex-end">
+                {failedToolCalls > 0 ? (
+                  <Text>
+                    <Text color={theme.status.success}>
+                      {successfulToolCalls}
+                    </Text>
+                    <Text color={theme.text.secondary}>/</Text>
+                    <Text color={theme.status.error}>{failedToolCalls}</Text>
+                  </Text>
+                ) : (
+                  <Text color={theme.text.primary}>
+                    {pad(String(toolCalls), colTools - 1, 'right')}
+                  </Text>
+                )}
+              </Box>
             </Box>
+            {/* In-process mode: show extra detail row with cost + thought tokens */}
+            {live && (live.estimatedCost > 0 || live.thoughtTokens > 0) && (
+              <Box marginLeft={2}>
+                <Text color={theme.text.secondary}>
+                  {live.estimatedCost > 0 &&
+                    `Cost: $${live.estimatedCost.toFixed(4)}`}
+                  {live.estimatedCost > 0 && live.thoughtTokens > 0 && '  ·  '}
+                  {live.thoughtTokens > 0 &&
+                    `Thinking: ${live.thoughtTokens.toLocaleString()} tok`}
+                  {live.cachedTokens > 0 &&
+                    `  ·  Cached: ${live.cachedTokens.toLocaleString()} tok`}
+                </Text>
+              </Box>
+            )}
           </Box>
         );
       })}

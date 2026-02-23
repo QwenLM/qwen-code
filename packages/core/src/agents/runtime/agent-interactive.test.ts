@@ -184,13 +184,13 @@ describe('AgentInteractive', () => {
       expect(callCount).toBe(1);
     });
 
-    // Error recorded as assistant message with error metadata
+    // Error recorded as info message with error level
     const messages = agent.getMessages();
     const errorMsg = messages.find(
       (m) =>
-        m.role === 'assistant' &&
-        m.content.includes('Error: Model error') &&
-        m.metadata?.['error'] === true,
+        m.role === 'info' &&
+        m.content.includes('Model error') &&
+        m.metadata?.['level'] === 'error',
     );
     expect(errorMsg).toBeDefined();
 
@@ -286,21 +286,22 @@ describe('AgentInteractive', () => {
     expect(agent.getCore()).toBe(core);
   });
 
-  // ─── Stream Buffer & Message Recording ─────────────────────
+  // ─── Message Recording ─────────────────────────────────────
 
-  it('should record assistant text from stream events (not result.text)', async () => {
+  it('should record assistant text from ROUND_TEXT events', async () => {
     const { core, emitter } = createMockCore();
 
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
       () => {
-        emitter.emit(AgentEventType.STREAM_TEXT, {
+        emitter.emit(AgentEventType.ROUND_TEXT, {
           subagentId: 'test',
           round: 1,
-          text: 'Hello from stream',
+          text: 'Hello from round',
+          thoughtText: '',
           timestamp: Date.now(),
         });
         return Promise.resolve({
-          text: 'Hello from stream',
+          text: 'Hello from round',
           terminateMode: null,
           turnsUsed: 1,
         });
@@ -318,24 +319,24 @@ describe('AgentInteractive', () => {
     const assistantMsgs = agent
       .getMessages()
       .filter((m) => m.role === 'assistant' && !m.thought);
-    // Exactly one — from stream flush, not duplicated by result.text
     expect(assistantMsgs).toHaveLength(1);
-    expect(assistantMsgs[0]?.content).toBe('Hello from stream');
+    expect(assistantMsgs[0]?.content).toBe('Hello from round');
 
     await agent.shutdown();
   });
 
-  it('should not carry stream buffer across messages', async () => {
+  it('should not cross-contaminate text across messages', async () => {
     const { core, emitter } = createMockCore();
 
     let runCount = 0;
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
       () => {
         runCount++;
-        emitter.emit(AgentEventType.STREAM_TEXT, {
+        emitter.emit(AgentEventType.ROUND_TEXT, {
           subagentId: 'test',
           round: 1,
           text: `response-${runCount}`,
+          thoughtText: '',
           timestamp: Date.now(),
         });
         return Promise.resolve({
@@ -360,7 +361,6 @@ describe('AgentInteractive', () => {
       expect(runCount).toBe(2);
     });
 
-    // No message containing both responses (no cross-contamination)
     const messages = agent.getMessages();
     const assistantMessages = messages.filter(
       (m) => m.role === 'assistant' && !m.thought,
@@ -379,18 +379,11 @@ describe('AgentInteractive', () => {
 
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
       () => {
-        emitter.emit(AgentEventType.STREAM_TEXT, {
-          subagentId: 'test',
-          round: 1,
-          text: 'Let me think...',
-          thought: true,
-          timestamp: Date.now(),
-        });
-        emitter.emit(AgentEventType.STREAM_TEXT, {
+        emitter.emit(AgentEventType.ROUND_TEXT, {
           subagentId: 'test',
           round: 1,
           text: 'Here is the answer',
-          thought: false,
+          thoughtText: 'Let me think...',
           timestamp: Date.now(),
         });
         return Promise.resolve({
@@ -428,10 +421,11 @@ describe('AgentInteractive', () => {
 
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
       () => {
-        emitter.emit(AgentEventType.STREAM_TEXT, {
+        emitter.emit(AgentEventType.ROUND_TEXT, {
           subagentId: 'test',
           round: 1,
           text: 'I will read the file',
+          thoughtText: '',
           timestamp: Date.now(),
         });
         emitter.emit(AgentEventType.TOOL_CALL, {
@@ -449,12 +443,6 @@ describe('AgentInteractive', () => {
           callId: 'call-1',
           name: 'read_file',
           success: true,
-          timestamp: Date.now(),
-        });
-        emitter.emit(AgentEventType.ROUND_END, {
-          subagentId: 'test',
-          round: 1,
-          promptId: 'p1',
           timestamp: Date.now(),
         });
         return Promise.resolve({
@@ -487,16 +475,16 @@ describe('AgentInteractive', () => {
     await agent.shutdown();
   });
 
-  it('should flush text before tool_call to preserve temporal ordering', async () => {
+  it('should place text before tool_call to preserve temporal ordering', async () => {
     const { core, emitter } = createMockCore();
 
     (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
       () => {
-        // Text arrives before tool call in the stream
-        emitter.emit(AgentEventType.STREAM_TEXT, {
+        emitter.emit(AgentEventType.ROUND_TEXT, {
           subagentId: 'test',
           round: 1,
           text: 'Let me check',
+          thoughtText: '',
           timestamp: Date.now(),
         });
         emitter.emit(AgentEventType.TOOL_CALL, {
@@ -516,12 +504,6 @@ describe('AgentInteractive', () => {
           success: true,
           timestamp: Date.now(),
         });
-        emitter.emit(AgentEventType.ROUND_END, {
-          subagentId: 'test',
-          round: 1,
-          promptId: 'p1',
-          timestamp: Date.now(),
-        });
         return Promise.resolve({
           text: '',
           terminateMode: null,
@@ -539,68 +521,13 @@ describe('AgentInteractive', () => {
     });
 
     const messages = agent.getMessages();
-    // Filter to just the non-user messages for ordering check
     const nonUser = messages.filter((m) => m.role !== 'user');
 
-    // Text should come before tool_call
     const textIdx = nonUser.findIndex(
       (m) => m.role === 'assistant' && m.content === 'Let me check',
     );
     const toolIdx = nonUser.findIndex((m) => m.role === 'tool_call');
     expect(textIdx).toBeLessThan(toolIdx);
-
-    await agent.shutdown();
-  });
-
-  it('should return in-progress stream state during streaming', async () => {
-    const { core, emitter } = createMockCore();
-
-    let capturedInProgress: ReturnType<
-      typeof AgentInteractive.prototype.getInProgressStream
-    > = null;
-
-    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
-      () => {
-        emitter.emit(AgentEventType.STREAM_TEXT, {
-          subagentId: 'test',
-          round: 1,
-          text: 'thinking...',
-          thought: true,
-          timestamp: Date.now(),
-        });
-        emitter.emit(AgentEventType.STREAM_TEXT, {
-          subagentId: 'test',
-          round: 1,
-          text: 'visible text',
-          timestamp: Date.now(),
-        });
-        // Capture in-progress state before the loop returns
-        capturedInProgress = agent.getInProgressStream();
-        return Promise.resolve({
-          text: 'visible text',
-          terminateMode: null,
-          turnsUsed: 1,
-        });
-      },
-    );
-
-    const config = createConfig({ initialTask: 'test' });
-    const agent = new AgentInteractive(config, core);
-
-    await agent.start(context);
-    await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
-    });
-
-    // During streaming, in-progress state was available
-    expect(capturedInProgress).toEqual({
-      text: 'visible text',
-      thinking: 'thinking...',
-      round: 1,
-    });
-
-    // After flush, in-progress state is null
-    expect(agent.getInProgressStream()).toBeNull();
 
     await agent.shutdown();
   });

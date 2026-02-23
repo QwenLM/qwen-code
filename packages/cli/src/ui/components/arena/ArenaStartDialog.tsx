@@ -9,11 +9,11 @@ import { useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { useConfig } from '../contexts/ConfigContext.js';
-import { theme } from '../semantic-colors.js';
-import { useKeypress } from '../hooks/useKeypress.js';
-import { MultiSelect } from './shared/MultiSelect.js';
-import { t } from '../../i18n/index.js';
+import { useConfig } from '../../contexts/ConfigContext.js';
+import { theme } from '../../semantic-colors.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { MultiSelect } from '../shared/MultiSelect.js';
+import { t } from '../../../i18n/index.js';
 
 interface ArenaStartDialogProps {
   onClose: () => void;

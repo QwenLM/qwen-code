@@ -147,7 +147,7 @@ export interface AgentInteractiveConfig {
  */
 export interface AgentMessage {
   /** Discriminator for the message kind. */
-  role: 'user' | 'assistant' | 'tool_call' | 'tool_result';
+  role: 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'info';
   /** The text content of the message. */
   content: string;
   /** When the message was created (ms since epoch). */
@@ -157,7 +157,15 @@ export interface AgentMessage {
    * Mirrors AgentStreamTextEvent.thought. Only meaningful when role is 'assistant'.
    */
   thought?: boolean;
-  /** Optional metadata (e.g. tool call info, round number). */
+  /**
+   * Optional metadata.
+   *
+   * For role='info': metadata.level?: 'info' | 'warning' | 'success' | 'error'
+   *   Controls which status message component is rendered. Defaults to 'info'.
+   * For role='tool_call': callId, toolName, args, description, renderOutputAsMarkdown, round
+   * For role='tool_result': callId, toolName, success, resultDisplay, outputFile, round
+   * For role='assistant' with error: error=true
+   */
   metadata?: Record<string, unknown>;
 }
 

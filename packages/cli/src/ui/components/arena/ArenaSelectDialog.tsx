@@ -12,14 +12,14 @@ import {
   AgentStatus,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import { theme } from '../semantic-colors.js';
-import { useKeypress } from '../hooks/useKeypress.js';
-import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
-import { formatDuration } from '../utils/formatters.js';
-import { getArenaStatusLabel } from '../utils/displayUtils.js';
-import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
-import type { DescriptiveRadioSelectItem } from './shared/DescriptiveRadioButtonSelect.js';
+import { theme } from '../../semantic-colors.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { MessageType, type HistoryItemWithoutId } from '../../types.js';
+import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
+import { formatDuration } from '../../utils/formatters.js';
+import { getArenaStatusLabel } from '../../utils/displayUtils.js';
+import { DescriptiveRadioButtonSelect } from '../shared/DescriptiveRadioButtonSelect.js';
+import type { DescriptiveRadioSelectItem } from '../shared/DescriptiveRadioButtonSelect.js';
 
 interface ArenaSelectDialogProps {
   manager: ArenaManager;

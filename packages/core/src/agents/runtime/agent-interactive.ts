@@ -7,30 +7,28 @@
 /**
  * @fileoverview AgentInteractive — persistent interactive agent.
  *
- * Composes AgentCore with on-demand message processing to provide an agent
- * that processes user inputs sequentially and settles between batches.
- * Used by InProcessBackend for Arena's in-process mode.
- *
- * AgentInteractive is the **sole consumer** of AgentCore events. It builds
- * conversation state (messages + in-progress stream) that the UI reads.
- * The UI never directly subscribes to AgentCore events for data — it reads
- * from AgentInteractive and uses notifications to know when to re-render.
- *
- * Lifecycle: start() → (running ↔ completed/failed)* → shutdown()/abort()
+ * Composes AgentCore with on-demand message processing. Builds conversation
+ * state (messages, pending approvals, live outputs) that the UI reads.
  */
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
-  AgentStreamTextEvent,
+  AgentRoundTextEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
+  AgentToolOutputUpdateEvent,
+  AgentApprovalRequestEvent,
 } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
 import type { ContextState } from './agent-headless.js';
 import type { GeminiChat } from '../../core/geminiChat.js';
 import type { FunctionDeclaration } from '@google/genai';
+import type {
+  ToolCallConfirmationDetails,
+  ToolResultDisplay,
+} from '../../tools/tools.js';
 import { AsyncMessageQueue } from '../../utils/asyncMessageQueue.js';
 import {
   AgentTerminateMode,
@@ -38,7 +36,6 @@ import {
   isTerminalStatus,
   type AgentInteractiveConfig,
   type AgentMessage,
-  type InProgressStreamState,
 } from './agent-types.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
@@ -68,13 +65,23 @@ export class AgentInteractive {
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
 
-  // Stream accumulator — separate buffers for thought and non-thought text.
-  // Flushed to messages on ROUND_END (intermediate rounds), before TOOL_CALL
-  // events (to preserve temporal ordering), and after runReasoningLoop returns
-  // (final round, since ROUND_END doesn't fire for it).
-  private thoughtBuffer = '';
-  private textBuffer = '';
-  private streamRound = -1;
+  // Pending tool approval requests. Keyed by callId.
+  // Populated by TOOL_WAITING_APPROVAL, removed by TOOL_RESULT or when
+  // the user responds. The UI reads this to show confirmation dialogs.
+  private readonly pendingApprovals = new Map<
+    string,
+    ToolCallConfirmationDetails
+  >();
+
+  // Live streaming output for currently-executing tools. Keyed by callId.
+  // Populated by TOOL_OUTPUT_UPDATE (replaces previous), cleared on TOOL_RESULT.
+  // The UI reads this via getLiveOutputs() to show real-time stdout.
+  private readonly liveOutputs = new Map<string, ToolResultDisplay>();
+
+  // PTY PIDs for currently-executing shell tools. Keyed by callId.
+  // Populated by TOOL_OUTPUT_UPDATE when pid is present, cleared on TOOL_RESULT.
+  // The UI reads this via getShellPids() to enable interactive shell input.
+  private readonly shellPids = new Map<string, number>();
 
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
@@ -169,29 +176,24 @@ export class AgentInteractive {
         },
       );
 
-      // Finalize any unflushed stream content from the last round.
-      // ROUND_END doesn't fire for the final text-producing round
-      // (AgentCore breaks before emitting it), so we flush here.
-      this.flushStreamBuffers();
-
-      // Surface non-normal termination so Arena (and other consumers)
-      // can distinguish limit-triggered stops from successful completions.
+      // Surface non-normal termination as a visible info message and as
+      // lastRoundError so Arena can distinguish limit stops from successes.
       if (
         result.terminateMode &&
         result.terminateMode !== AgentTerminateMode.GOAL
       ) {
+        const msg = terminateModeMessage(result.terminateMode);
+        if (msg) {
+          this.addMessage('info', msg.text, { metadata: { level: msg.level } });
+        }
         this.lastRoundError = `Terminated: ${result.terminateMode}`;
       }
     } catch (err) {
       // Agent survives round errors — log and settle status in runLoop.
-      // Flush any partial stream content accumulated before the error.
-      this.flushStreamBuffers();
       const errorMessage = err instanceof Error ? err.message : String(err);
       this.lastRoundError = errorMessage;
       debugLogger.error('AgentInteractive round error:', err);
-      this.addMessage('assistant', `Error: ${errorMessage}`, {
-        metadata: { error: true },
-      });
+      this.addMessage('info', errorMessage, { metadata: { level: 'error' } });
     } finally {
       this.masterAbortController.signal.removeEventListener(
         'abort',
@@ -205,9 +207,14 @@ export class AgentInteractive {
 
   /**
    * Cancel only the current reasoning round.
+   * Adds a visible "cancelled" info message and clears pending approvals.
    */
   cancelCurrentRound(): void {
     this.roundAbortController?.abort();
+    this.pendingApprovals.clear();
+    this.addMessage('info', 'Agent round cancelled.', {
+      metadata: { level: 'warning' },
+    });
   }
 
   /**
@@ -232,6 +239,7 @@ export class AgentInteractive {
   abort(): void {
     this.masterAbortController.abort();
     this.queue.drain();
+    this.pendingApprovals.clear();
   }
 
   // ─── Message Queue ─────────────────────────────────────────
@@ -250,20 +258,6 @@ export class AgentInteractive {
 
   getMessages(): readonly AgentMessage[] {
     return this.messages;
-  }
-
-  /**
-   * Returns the in-progress streaming state for UI mid-switch handoff.
-   * The UI reads this when attaching to an agent that's currently streaming
-   * to display content accumulated before the UI subscribed.
-   */
-  getInProgressStream(): InProgressStreamState | null {
-    if (!this.textBuffer && !this.thoughtBuffer) return null;
-    return {
-      text: this.textBuffer,
-      thinking: this.thoughtBuffer,
-      round: this.streamRound,
-    };
   }
 
   getStatus(): AgentStatus {
@@ -288,6 +282,34 @@ export class AgentInteractive {
 
   getEventEmitter(): AgentEventEmitter | undefined {
     return this.core.getEventEmitter();
+  }
+
+  /**
+   * Returns tool calls currently awaiting user approval.
+   * Keyed by callId → full ToolCallConfirmationDetails (with onConfirm).
+   * The UI reads this to render confirmation dialogs inside ToolGroupMessage.
+   */
+  getPendingApprovals(): ReadonlyMap<string, ToolCallConfirmationDetails> {
+    return this.pendingApprovals;
+  }
+
+  /**
+   * Returns live output for currently-executing tools.
+   * Keyed by callId → latest ToolResultDisplay (replaces on each update).
+   * Entries are cleared when TOOL_RESULT arrives for the call.
+   */
+  getLiveOutputs(): ReadonlyMap<string, ToolResultDisplay> {
+    return this.liveOutputs;
+  }
+
+  /**
+   * Returns PTY PIDs for currently-executing interactive shell tools.
+   * Keyed by callId → PID. Populated from TOOL_OUTPUT_UPDATE when pid is
+   * present; cleared when TOOL_RESULT arrives. The UI uses this to enable
+   * interactive shell input via HistoryItemDisplay's activeShellPtyId prop.
+   */
+  getShellPids(): ReadonlyMap<string, number> {
+    return this.shellPids;
   }
 
   /**
@@ -343,67 +365,47 @@ export class AgentInteractive {
     this.messages.push(message);
   }
 
-  /**
-   * Flush accumulated stream buffers to finalized messages.
-   *
-   * Thought text → assistant message with thought=true.
-   * Regular text → assistant message.
-   * Called on ROUND_END, before TOOL_CALL (ordering), and after
-   * runReasoningLoop returns (final round).
-   */
-  private flushStreamBuffers(): void {
-    if (this.thoughtBuffer) {
-      this.addMessage('assistant', this.thoughtBuffer, { thought: true });
-      this.thoughtBuffer = '';
-    }
-    if (this.textBuffer) {
-      this.addMessage('assistant', this.textBuffer);
-      this.textBuffer = '';
-    }
-    this.streamRound = -1;
-  }
-
-  /**
-   * Set up listeners on AgentCore's event emitter.
-   *
-   * AgentInteractive is the sole consumer of these events. It builds
-   * the conversation state (messages + in-progress stream) that the
-   * UI reads. Listeners use canonical event types from agent-events.ts.
-   */
   private setupEventListeners(): void {
     const emitter = this.core.eventEmitter;
     if (!emitter) return;
 
-    emitter.on(AgentEventType.STREAM_TEXT, (event: AgentStreamTextEvent) => {
-      // Round boundary: flush previous round's buffers before starting a new one
-      if (event.round !== this.streamRound && this.streamRound !== -1) {
-        this.flushStreamBuffers();
+    emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
+      if (event.thoughtText) {
+        this.addMessage('assistant', event.thoughtText, { thought: true });
       }
-      this.streamRound = event.round;
-
-      if (event.thought) {
-        this.thoughtBuffer += event.text;
-      } else {
-        this.textBuffer += event.text;
+      if (event.text) {
+        this.addMessage('assistant', event.text);
       }
     });
 
     emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
-      // Flush text buffers first — in the stream, text arrives before
-      // tool calls, so flushing preserves temporal ordering in messages.
-      this.flushStreamBuffers();
-
       this.addMessage('tool_call', `Tool call: ${event.name}`, {
         metadata: {
           callId: event.callId,
           toolName: event.name,
           args: event.args,
+          description: event.description,
+          renderOutputAsMarkdown: event.isOutputMarkdown,
           round: event.round,
         },
       });
     });
 
+    emitter.on(
+      AgentEventType.TOOL_OUTPUT_UPDATE,
+      (event: AgentToolOutputUpdateEvent) => {
+        this.liveOutputs.set(event.callId, event.outputChunk);
+        if (event.pid !== undefined) {
+          this.shellPids.set(event.callId, event.pid);
+        }
+      },
+    );
+
     emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
+      this.liveOutputs.delete(event.callId);
+      this.shellPids.delete(event.callId);
+      this.pendingApprovals.delete(event.callId);
+
       const statusText = event.success ? 'succeeded' : 'failed';
       const summary = event.error
         ? `Tool ${event.name} ${statusText}: ${event.error}`
@@ -413,13 +415,67 @@ export class AgentInteractive {
           callId: event.callId,
           toolName: event.name,
           success: event.success,
+          resultDisplay: event.resultDisplay,
+          outputFile: event.outputFile,
           round: event.round,
         },
       });
     });
 
-    emitter.on(AgentEventType.ROUND_END, () => {
-      this.flushStreamBuffers();
-    });
+    emitter.on(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      (event: AgentApprovalRequestEvent) => {
+        const fullDetails = {
+          ...event.confirmationDetails,
+          onConfirm: async (
+            outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
+            payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
+          ) => {
+            this.pendingApprovals.delete(event.callId);
+            // Nudge the UI to re-render so the tool transitions visually
+            // from Confirming → Executing without waiting for the first
+            // real TOOL_OUTPUT_UPDATE from the tool's execution.
+            this.core.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+              subagentId: this.core.subagentId,
+              round: event.round,
+              callId: event.callId,
+              outputChunk: '',
+              timestamp: Date.now(),
+            } as AgentToolOutputUpdateEvent);
+            await event.respond(outcome, payload);
+          },
+        } as ToolCallConfirmationDetails;
+
+        this.pendingApprovals.set(event.callId, fullDetails);
+      },
+    );
+  }
+}
+
+/**
+ * Map a non-GOAL terminate mode to a visible status message for the UI,
+ * or return null to suppress the message entirely.
+ *
+ * CANCELLED is suppressed here because cancelCurrentRound() already emits
+ * its own warning. SHUTDOWN is suppressed as a normal lifecycle end.
+ */
+function terminateModeMessage(
+  mode: AgentTerminateMode,
+): { text: string; level: 'info' | 'warning' | 'error' } | null {
+  switch (mode) {
+    case AgentTerminateMode.MAX_TURNS:
+      return {
+        text: 'Agent stopped: maximum turns reached.',
+        level: 'warning',
+      };
+    case AgentTerminateMode.TIMEOUT:
+      return { text: 'Agent stopped: time limit reached.', level: 'warning' };
+    case AgentTerminateMode.ERROR:
+      return { text: 'Agent stopped due to an error.', level: 'error' };
+    case AgentTerminateMode.CANCELLED:
+    case AgentTerminateMode.SHUTDOWN:
+      return null;
+    default:
+      return null;
   }
 }

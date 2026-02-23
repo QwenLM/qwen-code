@@ -668,6 +668,8 @@ export class ArenaManager {
       await this.spawnAgentPty(agent);
     }
 
+    this.emitProgress('All agents are now live and working on the task.');
+
     // For in-process mode, set up event bridges instead of file-based polling.
     // For PTY mode, start polling agent status files.
     if (isInProcess) {

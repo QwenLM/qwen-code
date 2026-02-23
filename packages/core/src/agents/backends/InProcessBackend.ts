@@ -173,11 +173,18 @@ export class InProcessBackend implements Backend {
     for (const agent of this.agents.values()) {
       agent.abort();
     }
-    // Wait briefly for loops to settle
+    // Wait for loops to settle, but cap at 3s so CLI exit isn't blocked
+    // if an agent's reasoning loop doesn't terminate promptly after abort.
+    const CLEANUP_TIMEOUT_MS = 3000;
     const promises = Array.from(this.agents.values()).map((a) =>
       a.waitForCompletion().catch(() => {}),
     );
-    await Promise.allSettled(promises);
+    let timerId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<void>((resolve) => {
+      timerId = setTimeout(resolve, CLEANUP_TIMEOUT_MS);
+    });
+    await Promise.race([Promise.allSettled(promises), timeout]);
+    clearTimeout(timerId!);
 
     // Stop per-agent tool registries so tools like TaskTool can release
     // listeners registered on shared managers (e.g. SubagentManager).

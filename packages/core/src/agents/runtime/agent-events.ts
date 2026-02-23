@@ -28,9 +28,11 @@ export type AgentEvent =
   | 'start'
   | 'round_start'
   | 'round_end'
+  | 'round_text'
   | 'stream_text'
   | 'tool_call'
   | 'tool_result'
+  | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
   | 'finish'
@@ -41,9 +43,12 @@ export enum AgentEventType {
   START = 'start',
   ROUND_START = 'round_start',
   ROUND_END = 'round_end',
+  /** Complete round text, emitted once after streaming before tool calls. */
+  ROUND_TEXT = 'round_text',
   STREAM_TEXT = 'stream_text',
   TOOL_CALL = 'tool_call',
   TOOL_RESULT = 'tool_result',
+  TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
   FINISH = 'finish',
@@ -65,6 +70,14 @@ export interface AgentRoundEvent {
   subagentId: string;
   round: number;
   promptId: string;
+  timestamp: number;
+}
+
+export interface AgentRoundTextEvent {
+  subagentId: string;
+  round: number;
+  text: string;
+  thoughtText: string;
   timestamp: number;
 }
 
@@ -92,6 +105,8 @@ export interface AgentToolCallEvent {
   name: string;
   args: Record<string, unknown>;
   description: string;
+  /** Whether the tool's output should be rendered as markdown. */
+  isOutputMarkdown?: boolean;
   timestamp: number;
 }
 
@@ -104,7 +119,20 @@ export interface AgentToolResultEvent {
   error?: string;
   responseParts?: Part[];
   resultDisplay?: ToolResultDisplay;
+  /** Path to the temp file where oversized output was saved. */
+  outputFile?: string;
   durationMs?: number;
+  timestamp: number;
+}
+
+export interface AgentToolOutputUpdateEvent {
+  subagentId: string;
+  round: number;
+  callId: string;
+  /** Latest accumulated output for this tool call (replaces previous). */
+  outputChunk: ToolResultDisplay;
+  /** PTY process PID — present when the tool runs in an interactive shell. */
+  pid?: number;
   timestamp: number;
 }
 
@@ -160,9 +188,11 @@ export interface AgentEventMap {
   [AgentEventType.START]: AgentStartEvent;
   [AgentEventType.ROUND_START]: AgentRoundEvent;
   [AgentEventType.ROUND_END]: AgentRoundEvent;
+  [AgentEventType.ROUND_TEXT]: AgentRoundTextEvent;
   [AgentEventType.STREAM_TEXT]: AgentStreamTextEvent;
   [AgentEventType.TOOL_CALL]: AgentToolCallEvent;
   [AgentEventType.TOOL_RESULT]: AgentToolResultEvent;
+  [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;

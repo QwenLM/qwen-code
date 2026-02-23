@@ -22,6 +22,7 @@ import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
   CoreToolScheduler,
   type ToolCall,
+  type ExecutingToolCall,
   type WaitingToolCall,
 } from '../../core/coreToolScheduler.js';
 import type {
@@ -47,8 +48,10 @@ import type {
 import { AgentTerminateMode } from './agent-types.js';
 import type {
   AgentRoundEvent,
+  AgentRoundTextEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
+  AgentToolOutputUpdateEvent,
   AgentUsageEvent,
   AgentHooks,
 } from './agent-events.js';
@@ -327,6 +330,13 @@ export class AgentCore {
     let terminateMode: AgentTerminateMode | null = null;
 
     while (true) {
+      // Check abort before starting a new round — prevents unnecessary API
+      // calls after processFunctionCalls was unblocked by an abort signal.
+      if (abortController.signal.aborted) {
+        terminateMode = AgentTerminateMode.CANCELLED;
+        break;
+      }
+
       // Check termination conditions.
       if (options?.maxTurns && turnCounter >= options.maxTurns) {
         terminateMode = AgentTerminateMode.MAX_TURNS;
@@ -375,6 +385,7 @@ export class AgentCore {
 
       const functionCalls: FunctionCall[] = [];
       let roundText = '';
+      let roundThoughtText = '';
       let lastUsage: GenerateContentResponseUsageMetadata | undefined =
         undefined;
       let currentResponseId: string | undefined = undefined;
@@ -407,6 +418,7 @@ export class AgentCore {
           for (const p of parts) {
             const txt = p.text;
             const isThought = p.thought ?? false;
+            if (txt && isThought) roundThoughtText += txt;
             if (txt && !isThought) roundText += txt;
             if (txt)
               this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
@@ -419,6 +431,16 @@ export class AgentCore {
           }
           if (resp.usageMetadata) lastUsage = resp.usageMetadata;
         }
+      }
+
+      if (roundText || roundThoughtText) {
+        this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
+          subagentId: this.subagentId,
+          round: turnCounter,
+          text: roundText,
+          thoughtText: roundThoughtText,
+          timestamp: Date.now(),
+        } as AgentRoundTextEvent);
       }
 
       this.executionStats.rounds = turnCounter;
@@ -449,6 +471,15 @@ export class AgentCore {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {
           finalText = roundText.trim();
+          // Emit ROUND_END for the final round so all consumers see it.
+          // Previously this was skipped, requiring AgentInteractive to
+          // compensate with an explicit flushStreamBuffers() call.
+          this.eventEmitter?.emit(AgentEventType.ROUND_END, {
+            subagentId: this.subagentId,
+            round: turnCounter,
+            promptId,
+            timestamp: Date.now(),
+          } as AgentRoundEvent);
           // Clean up before breaking
           abortController.signal.removeEventListener('abort', onParentAbort);
           // null terminateMode = normal text completion
@@ -525,6 +556,7 @@ export class AgentCore {
           name: toolName,
           args: fc.args ?? {},
           description: `Tool "${toolName}" not found`,
+          isOutputMarkdown: false,
           timestamp: Date.now(),
         } as AgentToolCallEvent);
 
@@ -564,11 +596,28 @@ export class AgentCore {
     // Build scheduler
     const responded = new Set<string>();
     let resolveBatch: (() => void) | null = null;
+    const emittedCallIds = new Set<string>();
+    // pidMap: callId → PTY PID, populated by onToolCallsUpdate when a shell
+    // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
+    // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
+    const pidMap = new Map<string, number>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
-      outputUpdateHandler: undefined,
+      outputUpdateHandler: (callId, outputChunk) => {
+        this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+          subagentId: this.subagentId,
+          round: currentRound,
+          callId,
+          outputChunk,
+          pid: pidMap.get(callId),
+          timestamp: Date.now(),
+        } as AgentToolOutputUpdateEvent);
+      },
       onAllToolCallsComplete: async (completedCalls) => {
         for (const call of completedCalls) {
+          if (emittedCallIds.has(call.request.callId)) continue;
+          emittedCallIds.add(call.request.callId);
+
           const toolName = call.request.name;
           const duration = call.durationMs ?? 0;
           const success = call.status === 'success';
@@ -589,11 +638,8 @@ export class AgentCore {
             success,
             error: errorMessage,
             responseParts: call.response.responseParts,
-            resultDisplay: call.response.resultDisplay
-              ? typeof call.response.resultDisplay === 'string'
-                ? call.response.resultDisplay
-                : JSON.stringify(call.response.resultDisplay)
-              : undefined,
+            resultDisplay: call.response.resultDisplay,
+            outputFile: call.response.outputFile,
             durationMs: duration,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
@@ -628,6 +674,27 @@ export class AgentCore {
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
         for (const call of calls) {
+          // Track PTY PIDs so TOOL_OUTPUT_UPDATE events can carry them.
+          if (call.status === 'executing') {
+            const pid = (call as ExecutingToolCall).pid;
+            if (pid !== undefined) {
+              const isNewPid = !pidMap.has(call.request.callId);
+              pidMap.set(call.request.callId, pid);
+              // Emit immediately so the UI can offer interactive shell
+              // focus (Ctrl+F) before the tool produces its first output.
+              if (isNewPid) {
+                this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+                  subagentId: this.subagentId,
+                  round: currentRound,
+                  callId: call.request.callId,
+                  outputChunk: (call as ExecutingToolCall).liveOutput ?? '',
+                  pid,
+                  timestamp: Date.now(),
+                } as AgentToolOutputUpdateEvent);
+              }
+            }
+          }
+
           if (call.status !== 'awaiting_approval') continue;
           const waiting = call as WaitingToolCall;
 
@@ -681,6 +748,7 @@ export class AgentCore {
       };
 
       const description = this.getToolDescription(toolName, args);
+      const isOutputMarkdown = this.getToolIsOutputMarkdown(toolName);
       this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
         subagentId: this.subagentId,
         round: currentRound,
@@ -688,6 +756,7 @@ export class AgentCore {
         name: toolName,
         args,
         description,
+        isOutputMarkdown,
         timestamp: Date.now(),
       } as AgentToolCallEvent);
 
@@ -711,8 +780,52 @@ export class AgentCore {
           resolveBatch = null;
         };
       });
+
+      // Auto-resolve on abort so processFunctionCalls doesn't block forever
+      // when tools are awaiting approval or executing without abort support.
+      const onAbort = () => {
+        resolveBatch?.();
+        for (const req of requests) {
+          if (emittedCallIds.has(req.callId)) continue;
+          emittedCallIds.add(req.callId);
+
+          const errorMessage = 'Tool call cancelled by user abort.';
+          this.recordToolCallStats(req.name, false, 0, errorMessage);
+
+          this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
+            subagentId: this.subagentId,
+            round: currentRound,
+            callId: req.callId,
+            name: req.name,
+            success: false,
+            error: errorMessage,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: req.callId,
+                  name: req.name,
+                  response: { error: errorMessage },
+                },
+              },
+            ],
+            resultDisplay: errorMessage,
+            durationMs: 0,
+            timestamp: Date.now(),
+          } as AgentToolResultEvent);
+        }
+      };
+      abortController.signal.addEventListener('abort', onAbort, { once: true });
+
+      // If already aborted before the listener was registered, resolve
+      // immediately to avoid blocking forever.
+      if (abortController.signal.aborted) {
+        onAbort();
+      }
+
       await scheduler.schedule(requests, abortController.signal);
       await batchDone;
+
+      abortController.signal.removeEventListener('abort', onAbort);
     }
 
     // If all tool calls failed, inform the model so it can re-evaluate.
@@ -780,6 +893,15 @@ export class AgentCore {
       return toolInstance.getDescription() || '';
     } catch {
       return '';
+    }
+  }
+
+  private getToolIsOutputMarkdown(toolName: string): boolean {
+    try {
+      const toolRegistry = this.runtimeContext.getToolRegistry();
+      return toolRegistry.getTool(toolName)?.isOutputMarkdown ?? false;
+    } catch {
+      return false;
     }
   }
 

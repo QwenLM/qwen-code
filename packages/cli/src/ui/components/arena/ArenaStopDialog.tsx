@@ -12,12 +12,12 @@ import {
   createDebugLogger,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import { theme } from '../semantic-colors.js';
-import { useKeypress } from '../hooks/useKeypress.js';
-import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
-import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
-import type { DescriptiveRadioSelectItem } from './shared/DescriptiveRadioButtonSelect.js';
+import { theme } from '../../semantic-colors.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { MessageType, type HistoryItemWithoutId } from '../../types.js';
+import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
+import { DescriptiveRadioButtonSelect } from '../shared/DescriptiveRadioButtonSelect.js';
+import type { DescriptiveRadioSelectItem } from '../shared/DescriptiveRadioButtonSelect.js';
 
 const debugLogger = createDebugLogger('ARENA_STOP_DIALOG');
 
