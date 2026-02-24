@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -78,6 +78,7 @@ import {
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 
@@ -587,23 +588,25 @@ export class GeminiClient {
 
       const hookOutput = await fireStopHook(messageBus, request, responseText);
 
+      const stopOutput = hookOutput as StopHookOutput | undefined;
+
       // For AfterAgent hooks, blocking/stop execution should force continuation (like Stop Hook)
       // This enables Ralph Loop functionality where the hook can:
       // 1. Return {"decision": "block", "reason": "<prompt>"} to continue with a new prompt
       // 2. Optionally include "systemMessage" to display a status message
       if (
-        hookOutput?.isBlockingDecision() ||
-        hookOutput?.shouldStopExecution()
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
       ) {
         // Emit system message if provided (e.g., "🔄 Ralph iteration 5")
-        if (hookOutput.systemMessage) {
+        if (stopOutput.systemMessage) {
           yield {
             type: GeminiEventType.HookSystemMessage,
-            value: hookOutput.systemMessage,
+            value: stopOutput.systemMessage,
           };
         }
 
-        const continueReason = hookOutput.getEffectiveReason();
+        const continueReason = stopOutput.getEffectiveReason();
         const continueRequest = [{ text: continueReason }];
         return yield* this.sendMessageStream(
           continueRequest,
