@@ -32,6 +32,43 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
 
+const LANGUAGE_MAP: Record<string, string> = {
+  '.c': 'c',
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+  '.h': 'c',
+  '.hpp': 'cpp',
+  '.hxx': 'cpp',
+  '.cs': 'csharp',
+  '.go': 'go',
+  '.java': 'java',
+  '.js': 'javascript',
+  '.jsx': 'javascriptreact',
+  '.ts': 'typescript',
+  '.tsx': 'typescriptreact',
+  '.py': 'python',
+  '.rs': 'rust',
+  '.rb': 'ruby',
+  '.php': 'php',
+  '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.scala': 'scala',
+  '.vue': 'vue',
+  '.svelte': 'svelte',
+  '.html': 'html',
+  '.css': 'css',
+  '.json': 'json',
+  '.xml': 'xml',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.md': 'markdown',
+  '.sql': 'sql',
+  '.sh': 'shell',
+  '.bash': 'shell',
+  '.zsh': 'shell',
+};
+
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
   workspaceRoot: string;
@@ -155,7 +192,7 @@ export class LspServerManager {
     try {
       const uri = pathToFileURL(filePath).toString();
       const languageId = this.getLanguageId(filePath);
-      const text = fs.readFileSync(filePath, 'utf-8');
+      const text = await fs.promises.readFile(filePath, 'utf-8');
 
       handle.connection.send({
         jsonrpc: '2.0',
@@ -179,44 +216,7 @@ export class LspServerManager {
    */
   private getLanguageId(filePath: string): string {
     const ext = path.extname(filePath).toLowerCase();
-    const languageMap: Record<string, string> = {
-      '.c': 'c',
-      '.cpp': 'cpp',
-      '.cc': 'cpp',
-      '.cxx': 'cpp',
-      '.h': 'c',
-      '.hpp': 'cpp',
-      '.hxx': 'cpp',
-      '.cs': 'csharp',
-      '.go': 'go',
-      '.java': 'java',
-      '.js': 'javascript',
-      '.jsx': 'javascriptreact',
-      '.ts': 'typescript',
-      '.tsx': 'typescriptreact',
-      '.py': 'python',
-      '.rs': 'rust',
-      '.rb': 'ruby',
-      '.php': 'php',
-      '.swift': 'swift',
-      '.kt': 'kotlin',
-      '.scala': 'scala',
-      '.vue': 'vue',
-      '.svelte': 'svelte',
-      '.html': 'html',
-      '.css': 'css',
-      '.json': 'json',
-      '.xml': 'xml',
-      '.yaml': 'yaml',
-      '.yml': 'yaml',
-      '.md': 'markdown',
-      '.sql': 'sql',
-      '.sh': 'shell',
-      '.bash': 'shell',
-      '.zsh': 'shell',
-    };
-
-    return languageMap[ext] || 'plaintext';
+    return LANGUAGE_MAP[ext] || 'plaintext';
   }
 
   /**
