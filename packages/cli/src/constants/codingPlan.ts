@@ -54,9 +54,7 @@ export function generateCodingPlanTemplate(
     return [
       {
         id: 'qwen3.5-plus',
-        name: 'qwen3.5-plus',
-        description:
-          'qwen3.5-plus model with thinking enabled from Bailian Coding Plan',
+        name: '[Bailian Coding Plan] qwen3.5-plus',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -67,23 +65,19 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'qwen3-coder-plus',
-        name: 'qwen3-coder-plus',
+        name: '[Bailian Coding Plan] qwen3-coder-plus',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-        description: 'qwen3-coder-plus model from Bailian Coding Plan',
         envKey: CODING_PLAN_ENV_KEY,
       },
       {
         id: 'qwen3-coder-next',
-        name: 'qwen3-coder-next',
-        description: 'qwen3-coder-next model from Bailian Coding Plan',
+        name: '[Bailian Coding Plan] qwen3-coder-next',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
       },
       {
         id: 'qwen3-max-2026-01-23',
-        name: 'qwen3-max-2026-01-23',
-        description:
-          'qwen3-max model with thinking enabled from Bailian Coding Plan',
+        name: '[Bailian Coding Plan] qwen3-max-2026-01-23',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -94,9 +88,29 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'glm-4.7',
-        name: 'glm-4.7',
-        description:
-          'glm-4.7 model with thinking enabled from Bailian Coding Plan',
+        name: '[Bailian Coding Plan] glm-4.7',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+        },
+      },
+      {
+        id: 'glm-5',
+        name: '[Bailian Coding Plan] glm-5',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+        },
+      },
+      {
+        id: 'MiniMax-M2.5',
+        name: '[Bailian Coding Plan] MiniMax-M2.5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -107,9 +121,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'kimi-k2.5',
-        name: 'kimi-k2.5',
-        description:
-          'kimi-k2.5 model with thinking enabled from Bailian Coding Plan',
+        name: '[Bailian Coding Plan] kimi-k2.5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -121,13 +133,11 @@ export function generateCodingPlanTemplate(
     ];
   }
 
-  // Global region uses new description with region indicator
+  // Global region uses Bailian Coding Plan branding for Global/Intl
   return [
     {
       id: 'qwen3.5-plus',
-      name: 'qwen3.5-plus',
-      description:
-        'qwen3.5-plus model with thinking enabled from Coding Plan (Global/Intl)',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3.5-plus',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -138,23 +148,19 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'qwen3-coder-plus',
-      name: 'qwen3-coder-plus',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-plus',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
-      description: 'qwen3-coder-plus model from Coding Plan (Global/Intl)',
       envKey: CODING_PLAN_ENV_KEY,
     },
     {
       id: 'qwen3-coder-next',
-      name: 'qwen3-coder-next',
-      description: 'qwen3-coder-next model from Coding Plan (Global/Intl)',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-next',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
     },
     {
       id: 'qwen3-max-2026-01-23',
-      name: 'qwen3-max-2026-01-23',
-      description:
-        'qwen3-max model with thinking enabled from Coding Plan (Global/Intl)',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-max-2026-01-23',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -165,9 +171,29 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'glm-4.7',
-      name: 'glm-4.7',
-      description:
-        'glm-4.7 model with thinking enabled from Coding Plan (Global/Intl)',
+      name: '[Bailian Coding Plan for Global/Intl] glm-4.7',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+      },
+    },
+    {
+      id: 'glm-5',
+      name: '[Bailian Coding Plan for Global/Intl] glm-5',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+      },
+    },
+    {
+      id: 'MiniMax-M2.5',
+      name: '[Bailian Coding Plan for Global/Intl] MiniMax-M2.5',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -178,9 +204,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'kimi-k2.5',
-      name: 'kimi-k2.5',
-      description:
-        'kimi-k2.5 model with thinking enabled from Coding Plan (Global/Intl)',
+      name: '[Bailian Coding Plan for Global/Intl] kimi-k2.5',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
