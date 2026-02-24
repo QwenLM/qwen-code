@@ -8,29 +8,35 @@
 #        install-qwen-with-source.sh -s [github|npm|internal|local-build]
 
 # Re-execute with bash if running with sh or other shells
-# Skip re-exec if already in bash and avoid double-fork in git hooks
-if [[ -z "${BASH_VERSION}" ]] && [[ -z "${__QWEN_INSTALL_REEXEC:-}" ]]; then
+# This block must use POSIX-compliant syntax ([ not [[) since it runs before we know bash is available
+if [ -z "${BASH_VERSION}" ] && [ -z "${__QWEN_INSTALL_REEXEC:-}" ]; then
     # Check if we're in a git hook environment
-    if [[ "${0}" == *".git/hooks/"* ]] || [[ -n "${GIT_DIR:-}" ]]; then
+    case "${0}" in
+        *.git/hooks/*) export __QWEN_IN_GIT_HOOK=1 ;;
+    esac
+    if [ -n "${GIT_DIR:-}" ]; then
         export __QWEN_IN_GIT_HOOK=1
     fi
 
     # Try to find bash
     if command -v bash >/dev/null 2>&1; then
         export __QWEN_INSTALL_REEXEC=1
-        # Use exec only if not in git hook to avoid nested shell issues
-        if [[ -n "${__QWEN_IN_GIT_HOOK:-}" ]]; then
-            exec bash "${0}" "${@}"
-        else
-            exec bash "${0}" "${@}"
-        fi
+        # Re-exec with bash, preserving all arguments
+        exec bash -- "${0}" "$@"
     else
         echo "Error: This script requires bash. Please install bash first."
         exit 1
     fi
 fi
 
-set -eo pipefail
+# Enable strict mode (bash-specific options)
+# pipefail requires bash 3+; check before setting
+if [ -n "${BASH_VERSION:-}" ]; then
+    # shellcheck disable=SC3040
+    set -eo pipefail
+else
+    set -e
+fi
 
 # ============================================
 # Color definitions
