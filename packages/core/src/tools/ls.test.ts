@@ -118,6 +118,19 @@ describe('LSTool', () => {
       expect(result.returnDisplay).toBe('Listed 1 item(s).');
     });
 
+    it('should handle mixed CJK/Latin spacing mistakes in directory paths', async () => {
+      const realDir = path.join(tempRootDir, 'image图片');
+      await fs.mkdir(realDir, { recursive: true });
+      await fs.writeFile(path.join(realDir, 'clipboard.txt'), 'x');
+
+      const mangledDir = path.join(tempRootDir, 'image 图片');
+      const invocation = lsTool.build({ path: mangledDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('clipboard.txt');
+      expect(result.returnDisplay).toBe('Listed 1 item(s).');
+    });
+
     it('should handle empty directories', async () => {
       const emptyDir = path.join(tempRootDir, 'empty');
       await fs.mkdir(emptyDir);

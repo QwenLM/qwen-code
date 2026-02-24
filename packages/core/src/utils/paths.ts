@@ -243,6 +243,81 @@ export function resolvePath(
   }
 }
 
+const CJK_SCRIPT_PATTERN =
+  '(?:\\p{Script=Han}|\\p{Script=Hiragana}|\\p{Script=Katakana}|\\p{Script=Hangul})';
+
+const MIXED_SCRIPT_SPACE_PATTERNS = [
+  new RegExp(`(${CJK_SCRIPT_PATTERN})\\s+([A-Za-z0-9])`, 'gu'),
+  new RegExp(`([A-Za-z0-9])\\s+(${CJK_SCRIPT_PATTERN})`, 'gu'),
+];
+
+function collapseMixedScriptSpacing(segment: string): string {
+  let normalized = segment;
+  for (const pattern of MIXED_SCRIPT_SPACE_PATTERNS) {
+    normalized = normalized.replace(pattern, '$1$2');
+  }
+  return normalized;
+}
+
+/**
+ * Attempts to recover an existing path when an LLM accidentally inserts spaces
+ * between CJK and Latin characters within path segments.
+ *
+ * Example: `image 图片` -> `image图片`
+ *
+ * Returns the original normalized path when no existing corrected path can be
+ * found.
+ */
+export function resolvePathWithMixedScriptSpacingFix(filePath: string): string {
+  const normalizedPath = path.normalize(filePath);
+  if (fs.existsSync(normalizedPath)) {
+    return normalizedPath;
+  }
+
+  const parsed = path.parse(normalizedPath);
+  const rawSegments = normalizedPath
+    .slice(parsed.root.length)
+    .split(path.sep)
+    .filter((segment) => segment.length > 0);
+
+  if (rawSegments.length === 0) {
+    return normalizedPath;
+  }
+
+  let currentPath = parsed.root || '';
+  let usedCorrection = false;
+
+  for (const segment of rawSegments) {
+    const directPath = currentPath
+      ? path.join(currentPath, segment)
+      : segment;
+    if (fs.existsSync(directPath)) {
+      currentPath = directPath;
+      continue;
+    }
+
+    const correctedSegment = collapseMixedScriptSpacing(segment);
+    if (correctedSegment !== segment) {
+      const correctedPath = currentPath
+        ? path.join(currentPath, correctedSegment)
+        : correctedSegment;
+      if (fs.existsSync(correctedPath)) {
+        currentPath = correctedPath;
+        usedCorrection = true;
+        continue;
+      }
+    }
+
+    currentPath = directPath;
+  }
+
+  if (usedCorrection && fs.existsSync(currentPath)) {
+    return currentPath;
+  }
+
+  return normalizedPath;
+}
+
 export interface PathValidationOptions {
   /**
    * If true, allows both files and directories. If false (default), only allows directories.

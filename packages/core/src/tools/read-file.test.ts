@@ -424,6 +424,28 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('');
     });
 
+    it('should handle mixed CJK/Latin spacing mistakes in path segments', async () => {
+      const realDir = path.join(tempRootDir, 'image图片');
+      await fsp.mkdir(realDir, { recursive: true });
+      const realFilePath = path.join(realDir, 'clipboard.txt');
+      await fsp.writeFile(realFilePath, 'content-from-cjk-path', 'utf-8');
+
+      const mangledPath = path.join(
+        tempRootDir,
+        'image 图片',
+        'clipboard.txt',
+      );
+      const params: ReadFileToolParams = { absolute_path: mangledPath };
+      const invocation = tool.build(params) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+
+      const result = await invocation.execute(abortSignal);
+      expect(result.llmContent).toBe('content-from-cjk-path');
+      expect(result.returnDisplay).toBe('');
+    });
+
     describe('with .qwenignore', () => {
       beforeEach(async () => {
         await fsp.writeFile(

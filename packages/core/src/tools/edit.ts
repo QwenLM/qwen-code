@@ -16,7 +16,11 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import {
+  makeRelative,
+  resolvePathWithMixedScriptSpacingFix,
+  shortenPath,
+} from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -548,8 +552,9 @@ Expectation for required parameters:
       return `File path must be absolute: ${params.file_path}`;
     }
 
+    const resolvedPath = resolvePathWithMixedScriptSpacingFix(params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(params.file_path)) {
+    if (!workspaceContext.isPathWithinWorkspace(resolvedPath)) {
       const directories = workspaceContext.getDirectories();
       return `File path must be within one of the workspace directories: ${directories.join(', ')}`;
     }
@@ -560,27 +565,36 @@ Expectation for required parameters:
   protected createInvocation(
     params: EditToolParams,
   ): ToolInvocation<EditToolParams, ToolResult> {
+    const resolvedPath = resolvePathWithMixedScriptSpacingFix(params.file_path);
+    if (resolvedPath !== params.file_path) {
+      params.file_path = resolvedPath;
+    }
     return new EditToolInvocation(this.config, params);
   }
 
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
     return {
-      getFilePath: (params: EditToolParams) => params.file_path,
+      getFilePath: (params: EditToolParams) =>
+        resolvePathWithMixedScriptSpacingFix(params.file_path),
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
+        const resolvedPath = resolvePathWithMixedScriptSpacingFix(
+          params.file_path,
+        );
         try {
-          return this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
+          return this.config.getFileSystemService().readTextFile(resolvedPath);
         } catch (err) {
           if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
           return '';
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
+        const resolvedPath = resolvePathWithMixedScriptSpacingFix(
+          params.file_path,
+        );
         try {
           const currentContent = await this.config
             .getFileSystemService()
-            .readTextFile(params.file_path);
+            .readTextFile(resolvedPath);
           return applyReplacement(
             currentContent,
             params.old_string,
