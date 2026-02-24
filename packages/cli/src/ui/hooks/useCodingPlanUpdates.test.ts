@@ -391,8 +391,8 @@ describe('useCodingPlanUpdates', () => {
       >;
 
       // Should have new China configs + custom config only (global config removed since regions are mutually exclusive)
-      // The template has 3 models, so we expect 3 (from template) + 1 (custom) = 4
-      expect(updatedConfigs.length).toBe(4);
+      // The China template has 6 models, so we expect 6 (from template) + 1 (custom) = 7
+      expect(updatedConfigs.length).toBe(7);
 
       // Should NOT contain the Global config (mutually exclusive)
       expect(
