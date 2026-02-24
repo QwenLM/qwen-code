@@ -198,7 +198,6 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Qwen3-Coder-Plus: 65,536 max output tokens
   [/^qwen3-coder-plus(-.*)?$/, LIMITS['64k']],
-  [/^qwen3.5-plus(-.*)?$/, LIMITS['64k']],
 
   // Qwen3.5-Plus: 65,536 max output tokens
   [/^qwen3\.5-plus(-.*)?$/, LIMITS['64k']],

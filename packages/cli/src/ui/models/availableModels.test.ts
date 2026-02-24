@@ -9,14 +9,8 @@ import {
   getAvailableModelsForAuthType,
   getFilteredQwenModels,
   getOpenAIAvailableModelFromEnv,
-  isVisionModel,
-  getDefaultVisionModel,
 } from './availableModels.js';
-import {
-  AuthType,
-  type Config,
-  DEFAULT_QWEN_MODEL,
-} from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 
 describe('availableModels', () => {
   describe('Qwen models', () => {
@@ -187,22 +181,6 @@ describe('availableModels', () => {
     it('should return empty array for other auth types', () => {
       const models = getAvailableModelsForAuthType(AuthType.USE_GEMINI);
       expect(models).toEqual([]);
-    });
-  });
-
-  describe('isVisionModel', () => {
-    it('should return true for coder-model with vision capability', () => {
-      expect(isVisionModel('coder-model')).toBe(true);
-    });
-
-    it('should return false for unknown model', () => {
-      expect(isVisionModel('unknown-model')).toBe(false);
-    });
-  });
-
-  describe('getDefaultVisionModel', () => {
-    it('should return the default model ID', () => {
-      expect(getDefaultVisionModel()).toBe(DEFAULT_QWEN_MODEL);
     });
   });
 });

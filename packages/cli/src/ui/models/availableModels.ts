@@ -20,11 +20,8 @@ export type AvailableModel = {
   isVision?: boolean;
 };
 
-// Re-export constants from core for backwards compatibility
-export {
-  DEFAULT_QWEN_MODEL as MAINLINE_CODER,
-  DEFAULT_QWEN_MODEL as MAINLINE_VLM,
-};
+// Re-export constant from core for backwards compatibility
+export { DEFAULT_QWEN_MODEL as MAINLINE_CODER };
 
 const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(
   (model) => ({
@@ -133,22 +130,4 @@ export function getAvailableModelsForAuthType(
     default:
       return [];
   }
-}
-
-/**
- * coder-model now has vision capabilities by default.
- * This function is kept for backwards compatibility but always returns the current model.
- */
-export function getDefaultVisionModel(): string {
-  return DEFAULT_QWEN_MODEL;
-}
-
-/**
- * coder-model now has vision capabilities by default.
- * This function is kept for backwards compatibility but always returns true for the default model.
- */
-export function isVisionModel(modelId: string): boolean {
-  return getQwenOAuthModels().some(
-    (model) => model.id === modelId && model.isVision,
-  );
 }

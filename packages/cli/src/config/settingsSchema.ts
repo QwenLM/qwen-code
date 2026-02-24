@@ -1176,28 +1176,6 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
-
-  experimental: {
-    type: 'object',
-    label: 'Experimental',
-    category: 'Experimental',
-    requiresRestart: true,
-    default: {},
-    description: 'Setting to enable experimental features',
-    showInDialog: false,
-    properties: {
-      visionModelPreview: {
-        type: 'boolean',
-        label: 'Vision Model Preview',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: true,
-        description:
-          'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
-        showInDialog: false,
-      },
-    },
-  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

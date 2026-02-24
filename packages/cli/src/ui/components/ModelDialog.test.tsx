@@ -18,7 +18,6 @@ import { SettingScope } from '../../config/settings.js';
 import {
   getFilteredQwenModels,
   MAINLINE_CODER,
-  MAINLINE_VLM,
 } from '../models/availableModels.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({
@@ -134,14 +133,11 @@ describe('<ModelDialog />', () => {
     expect(props.items[0].value).toBe(
       `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
     );
-    expect(props.items[0].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
-    );
     expect(props.showNumbers).toBe(true);
   });
 
   it('initializes with the model from ConfigContext', () => {
-    const mockGetModel = vi.fn(() => MAINLINE_VLM);
+    const mockGetModel = vi.fn(() => MAINLINE_CODER);
     renderComponent(
       {},
       {
@@ -154,7 +150,7 @@ describe('<ModelDialog />', () => {
     expect(mockGetModel).toHaveBeenCalled();
     // Calculate expected index dynamically based on model list
     const qwenModels = getFilteredQwenModels();
-    const expectedIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
+    const expectedIndex = qwenModels.findIndex((m) => m.id === MAINLINE_CODER);
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
         initialIndex: expectedIndex,
@@ -369,7 +365,7 @@ describe('<ModelDialog />', () => {
     // MAINLINE_CODER (qwen3.5-plus) is at index 0
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
 
-    mockGetModel.mockReturnValue(MAINLINE_VLM);
+    mockGetModel.mockReturnValue(MAINLINE_CODER);
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
@@ -394,9 +390,11 @@ describe('<ModelDialog />', () => {
 
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
-    // Calculate expected index for MAINLINE_VLM dynamically
+    // Calculate expected index for MAINLINE_CODER dynamically
     const qwenModels = getFilteredQwenModels();
-    const expectedVlmIndex = qwenModels.findIndex((m) => m.id === MAINLINE_VLM);
-    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedVlmIndex);
+    const expectedCoderIndex = qwenModels.findIndex(
+      (m) => m.id === MAINLINE_CODER,
+    );
+    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
   });
 });
