@@ -371,6 +371,10 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.serverManager.warmupTypescriptServer(handle);
+
+        const filePath = uri.startsWith('file://') ? fileURLToPath(uri) : uri;
+        await this.serverManager.openDocument(handle, filePath);
+
         const response = await handle.connection.request(
           'textDocument/documentSymbol',
           {
