@@ -184,7 +184,17 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, `vertex-ai`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
-##### Example
+> [!note]
+> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, Vertex AI, etc., must be defined via `modelProviders`. The `/auth` command intentionally lists only the built-in Qwen OAuth and OpenAI flows.
+
+> [!warning]
+> **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
+
+##### Configuration Examples by Auth Type
+
+Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations:
+
+**OpenAI-compatible providers** (`openai`):
 
 ```json
 {
@@ -198,47 +208,213 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "enableCacheControl": true,
+          "contextWindowSize": 128000,
           "customHeaders": {
-            "X-Model-Version": "v1.0",
-            "X-Request-Priority": "high"
+            "X-Request-ID": "req-123",
+            "X-User-ID": "user-456"
           },
           "extra_body": {
-            "enable_thinking": true
+            "enable_thinking": true,
+            "service_tier": "priority"
           },
-          "samplingParams": { "temperature": 0.2 }
+          "samplingParams": {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 4096,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1
+          }
         }
-      }
-    ],
-    "anthropic": [
+      },
       {
-        "id": "claude-3-5-sonnet",
-        "envKey": "ANTHROPIC_API_KEY",
-        "baseUrl": "https://api.anthropic.com/v1"
-      }
-    ],
-    "gemini": [
-      {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini 2.0 Flash",
-        "envKey": "GEMINI_API_KEY",
-        "baseUrl": "https://generativelanguage.googleapis.com"
-      }
-    ],
-    "vertex-ai": [
-      {
-        "id": "gemini-1.5-pro-vertex",
-        "envKey": "GOOGLE_API_KEY",
-        "baseUrl": "https://generativelanguage.googleapis.com"
+        "id": "gpt-4o-mini",
+        "name": "GPT-4o Mini",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1",
+        "generationConfig": {
+          "timeout": 30000,
+          "samplingParams": {
+            "temperature": 0.5,
+            "max_tokens": 2048
+          }
+        }
       }
     ]
   }
 }
 ```
 
-> [!note]
-> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, Vertex AI, etc., must be defined via `modelProviders`. The `/auth` command intentionally lists only the built-in Qwen OAuth and OpenAI flows.
+**Anthropic** (`anthropic`):
 
-##### Resolution layers and atomicity
+```json
+{
+  "modelProviders": {
+    "anthropic": [
+      {
+        "id": "claude-3-5-sonnet",
+        "name": "Claude 3.5 Sonnet",
+        "envKey": "ANTHROPIC_API_KEY",
+        "baseUrl": "https://api.anthropic.com/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3,
+          "contextWindowSize": 200000,
+          "customHeaders": {
+            "anthropic-version": "2023-06-01"
+          },
+          "samplingParams": {
+            "temperature": 0.7,
+            "max_tokens": 8192,
+            "top_p": 0.9
+          }
+        }
+      },
+      {
+        "id": "claude-3-opus",
+        "name": "Claude 3 Opus",
+        "envKey": "ANTHROPIC_API_KEY",
+        "baseUrl": "https://api.anthropic.com/v1",
+        "generationConfig": {
+          "timeout": 180000,
+          "samplingParams": {
+            "temperature": 0.3,
+            "max_tokens": 4096
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**Google Gemini** (`gemini`):
+
+```json
+{
+  "modelProviders": {
+    "gemini": [
+      {
+        "id": "gemini-2.0-flash",
+        "name": "Gemini 2.0 Flash",
+        "envKey": "GEMINI_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com",
+        "capabilities": {
+          "vision": true
+        },
+        "generationConfig": {
+          "timeout": 60000,
+          "maxRetries": 2,
+          "contextWindowSize": 1000000,
+          "schemaCompliance": "auto",
+          "samplingParams": {
+            "temperature": 0.4,
+            "top_p": 0.95,
+            "max_tokens": 8192,
+            "top_k": 40
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**Google Vertex AI** (`vertex-ai`):
+
+```json
+{
+  "modelProviders": {
+    "vertex-ai": [
+      {
+        "id": "gemini-1.5-pro-vertex",
+        "name": "Gemini 1.5 Pro (Vertex AI)",
+        "envKey": "GOOGLE_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com",
+        "generationConfig": {
+          "timeout": 90000,
+          "contextWindowSize": 2000000,
+          "samplingParams": {
+            "temperature": 0.2,
+            "max_tokens": 8192
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**Local Self-Hosted Models (via OpenAI-compatible API)**:
+
+Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-compatible API endpoint. Configure them using the `openai` auth type with a local `baseUrl`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen2.5-7b",
+        "name": "Qwen2.5 7B (Ollama)",
+        "envKey": "OLLAMA_API_KEY",
+        "baseUrl": "http://localhost:11434/v1",
+        "generationConfig": {
+          "timeout": 300000,
+          "maxRetries": 1,
+          "contextWindowSize": 32768,
+          "samplingParams": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 4096
+          }
+        }
+      },
+      {
+        "id": "llama-3.1-8b",
+        "name": "Llama 3.1 8B (vLLM)",
+        "envKey": "VLLM_API_KEY",
+        "baseUrl": "http://localhost:8000/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 2,
+          "contextWindowSize": 128000,
+          "samplingParams": {
+            "temperature": 0.6,
+            "max_tokens": 8192
+          }
+        }
+      },
+      {
+        "id": "local-model",
+        "name": "Local Model (LM Studio)",
+        "envKey": "LMSTUDIO_API_KEY",
+        "baseUrl": "http://localhost:1234/v1",
+        "generationConfig": {
+          "timeout": 60000,
+          "samplingParams": {
+            "temperature": 0.5
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+For local servers that don't require authentication, you can use any placeholder value for the API key:
+
+```bash
+# For Ollama (no auth required)
+export OLLAMA_API_KEY="ollama"
+
+# For vLLM (if no auth is configured)
+export VLLM_API_KEY="not-needed"
+```
+
+> [!note]
+> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, Gemini, and Vertex AI providers.
+
+##### Resolution Layers and Atomicity
 
 The effective auth/model/credential values are chosen per field using the following precedence (first present wins). You can combine `--auth-type` with `--model` to point directly at a provider entry; these CLI flags run before other layers.
 
@@ -253,28 +429,139 @@ The effective auth/model/credential values are chosen per field using the follow
 
 \*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
 
-Model-provider sourced values are applied atomically: once a provider model is active, every field it defines is protected from lower layers until you manually clear credentials via `/auth`. The final `generationConfig` is the projection across all layers—lower layers only fill gaps left by higher ones, and the provider layer remains impenetrable.
+> [!warning]
+> **Deprecation of `security.auth.apiKey` and `security.auth.baseUrl`:** Directly configuring API credentials via `security.auth.apiKey` and `security.auth.baseUrl` in `settings.json` is deprecated. These settings were used in historical versions for credentials entered through the UI, but the credential input flow was removed in version 0.10.1. These fields will be fully removed in a future release. **It is strongly recommended to migrate to `modelProviders`** for all model and credential configurations. Use `envKey` in `modelProviders` to reference environment variables for secure credential management instead of hardcoding credentials in settings files.
 
-The merge strategy for `modelProviders` is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
+##### Generation Config Layering: The Impermeable Provider Layer
 
-##### Generation config layering
+The configuration resolution follows a strict layering model with one crucial rule: **the modelProvider layer is impermeable**.
 
-Per-field precedence for `generationConfig`:
+**How it works:**
 
-1. Programmatic overrides (e.g. runtime `/model`, `/auth` changes)
-2. `modelProviders[authType][].generationConfig`
-3. `settings.model.generationConfig`
-4. Content-generator defaults (`getDefaultGenerationConfig` for OpenAI, `getParameterValue` for Gemini, etc.)
+1. **When a modelProvider model IS selected** (e.g., via `/model` command choosing a provider-configured model):
+   - The entire `generationConfig` from the provider is applied **atomically**
+   - **The provider layer is completely impermeable** — lower layers (CLI, env, settings) do not participate in generationConfig resolution at all
+   - All fields defined in `modelProviders[].generationConfig` use the provider's values
+   - All fields **not defined** by the provider are set to `undefined` (not inherited from settings)
+   - This ensures provider configurations act as a complete, self-contained "sealed package"
 
-`samplingParams`, `customHeaders`, and `extra_body` are all treated atomically; provider values replace the entire object. If `modelProviders[].generationConfig` defines these fields, they are used directly; otherwise, values from `model.generationConfig` are used. No merging occurs between provider and global configuration levels. Defaults from the content generator apply last so each provider retains its tuned baseline.
+2. **When NO modelProvider model is selected** (e.g., using `--model` with a raw model ID, or using CLI/env/settings directly):
+   - The resolution falls through to lower layers
+   - Fields are populated from CLI → env → settings → defaults
+   - This creates a **Runtime Model** (see next section)
 
-##### Selection persistence and recommendations
+**Per-field precedence for `generationConfig`:**
+
+| Priority | Source | Behavior |
+|----------|--------|----------|
+| 1 | Programmatic overrides | Runtime `/model`, `/auth` changes |
+| 2 | `modelProviders[authType][].generationConfig` | **Impermeable layer** - completely replaces all generationConfig fields; lower layers do not participate |
+| 3 | `settings.model.generationConfig` | Only used for **Runtime Models** (when no provider model is selected) |
+| 4 | Content-generator defaults | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models |
+
+**Atomic field treatment:**
+
+The following fields are treated as atomic objects - provider values completely replace the entire object, no merging occurs:
+
+- `samplingParams` - Temperature, top_p, max_tokens, etc.
+- `customHeaders` - Custom HTTP headers
+- `extra_body` - Extra request body parameters
+
+**Example:**
+
+```json
+// User settings (~/.qwen/settings.json)
+{
+  "model": {
+    "generationConfig": {
+      "timeout": 30000,
+      "samplingParams": { "temperature": 0.5, "max_tokens": 1000 }
+    }
+  }
+}
+
+// modelProviders configuration
+{
+  "modelProviders": {
+    "openai": [{
+      "id": "gpt-4o",
+      "envKey": "OPENAI_API_KEY",
+      "generationConfig": {
+        "timeout": 60000,
+        "samplingParams": { "temperature": 0.2 }
+      }
+    }]
+  }
+}
+```
+
+When `gpt-4o` is selected from modelProviders:
+- `timeout` = 60000 (from provider, overrides settings)
+- `samplingParams.temperature` = 0.2 (from provider, completely replaces settings object)
+- `samplingParams.max_tokens` = **undefined** (not defined in provider, and provider layer does not inherit from settings — fields are explicitly set to undefined if not provided)
+
+When using a raw model via `--model gpt-4` (not from modelProviders, creates a Runtime Model):
+- `timeout` = 30000 (from settings)
+- `samplingParams.temperature` = 0.5 (from settings)
+- `samplingParams.max_tokens` = 1000 (from settings)
+
+The merge strategy for `modelProviders` itself is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
+
+##### Provider Models vs Runtime Models
+
+Qwen Code distinguishes between two types of model configurations:
+
+**Provider Model**:
+- Defined in `modelProviders` configuration
+- Has a complete, atomic configuration package
+- When selected, its configuration is applied as an impermeable layer
+- Appears in `/model` command list with full metadata (name, description, capabilities)
+- Recommended for multi-model workflows and team consistency
+
+**Runtime Model**:
+- Created dynamically when using raw model IDs via CLI (`--model`), environment variables, or settings
+- Not defined in `modelProviders`
+- Configuration is built by "projecting" through resolution layers (CLI → env → settings → defaults)
+- Automatically captured as a **RuntimeModelSnapshot** when a complete configuration is detected
+- Allows reuse without re-entering credentials
+
+**RuntimeModelSnapshot lifecycle:**
+
+When you configure a model without using `modelProviders`, Qwen Code automatically creates a RuntimeModelSnapshot to preserve your configuration:
+
+```bash
+# This creates a RuntimeModelSnapshot with ID: $runtime|openai|my-custom-model
+qwen --auth-type openai --model my-custom-model --openaiApiKey $KEY --openaiBaseUrl https://api.example.com/v1
+```
+
+The snapshot:
+- Captures model ID, API key, base URL, and generation config
+- Persists across sessions (stored in memory during runtime)
+- Appears in the `/model` command list as a runtime option
+- Can be switched to using `/model $runtime|openai|my-custom-model`
+
+**Key differences:**
+
+| Aspect | Provider Model | Runtime Model |
+|--------|---------------|---------------|
+| Configuration source | `modelProviders` in settings | CLI, env, settings layers |
+| Configuration atomicity | Complete, impermeable package | Layered, each field resolved independently |
+| Reusability | Always available in `/model` list | Captured as snapshot, appears if complete |
+| Team sharing | Yes (via committed settings) | No (user-local) |
+| Credential storage | Reference via `envKey` only | May capture actual key in snapshot |
+
+**When to use each:**
+
+- **Use Provider Models** when: You have standard models shared across a team, need consistent configurations, or want to prevent accidental overrides
+- **Use Runtime Models** when: Quickly testing a new model, using temporary credentials, or working with ad-hoc endpoints
+
+##### Selection Persistence and Recommendations
 
 > [!important]
 > Define `modelProviders` in the user-scope `~/.qwen/settings.json` whenever possible and avoid persisting credential overrides in any scope. Keeping the provider catalog in user settings prevents merge/override conflicts between project and user scopes and ensures `/auth` and `/model` updates always write back to a consistent scope.
 
 - `/model` and `/auth` persist `model.name` (where applicable) and `security.auth.selectedType` to the closest writable scope that already defines `modelProviders`; otherwise they fall back to the user scope. This keeps workspace/user files in sync with the active provider catalog.
-- Without `modelProviders`, the resolver mixes CLI/env/settings layers, which is fine for single-provider setups but cumbersome when frequently switching. Define provider catalogs whenever multi-model workflows are common so that switches stay atomic, source-attributed, and debuggable.
+- Without `modelProviders`, the resolver mixes CLI/env/settings layers, creating Runtime Models. This is fine for single-provider setups but cumbersome when frequently switching. Define provider catalogs whenever multi-model workflows are common so that switches stay atomic, source-attributed, and debuggable.
 
 #### context
 
