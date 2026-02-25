@@ -205,7 +205,7 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multip
 >
 > When using the `env` field in `settings.json`, credentials are stored in plain text. For better security, prefer `.env` files or shell `export` — see [Step 2](#step-2-set-environment-variables).
 
-For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Settings Reference → modelProviders](settings.md#modelproviders).
+For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Model Providers Reference](model-providers.md).
 
 #### Step 2: Set environment variables
 
