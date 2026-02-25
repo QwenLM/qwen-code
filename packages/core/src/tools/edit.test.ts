@@ -436,6 +436,26 @@ describe('EditTool', () => {
       expect(display.fileName).toBe(testFile);
     });
 
+    it('should handle mixed CJK/Latin spacing mistakes in file paths', async () => {
+      const realDir = path.join(rootDir, 'image图片');
+      fs.mkdirSync(realDir, { recursive: true });
+      const realFilePath = path.join(realDir, 'target.txt');
+      fs.writeFileSync(realFilePath, 'old value', 'utf8');
+
+      const mangledFilePath = path.join(rootDir, 'image 图片', 'target.txt');
+      const params: EditToolParams = {
+        file_path: mangledFilePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(realFilePath, 'utf8')).toBe('new value');
+    });
+
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {
       const newFileName = 'brand_new_file.txt';
       const newFilePath = path.join(rootDir, newFileName);

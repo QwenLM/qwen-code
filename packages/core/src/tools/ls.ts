@@ -10,6 +10,7 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isSubpath } from '../utils/paths.js';
+import { resolvePathWithMixedScriptSpacingFix } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
@@ -311,16 +312,17 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
+    const resolvedPath = resolvePathWithMixedScriptSpacingFix(params.path);
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;
     }
 
     const userSkillsBase = this.config.storage.getUserSkillsDir();
-    const isUnderUserSkills = isSubpath(userSkillsBase, params.path);
+    const isUnderUserSkills = isSubpath(userSkillsBase, resolvedPath);
 
     const workspaceContext = this.config.getWorkspaceContext();
     if (
-      !workspaceContext.isPathWithinWorkspace(params.path) &&
+      !workspaceContext.isPathWithinWorkspace(resolvedPath) &&
       !isUnderUserSkills
     ) {
       const directories = workspaceContext.getDirectories();
@@ -334,6 +336,9 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected createInvocation(
     params: LSToolParams,
   ): ToolInvocation<LSToolParams, ToolResult> {
-    return new LSToolInvocation(this.config, params);
+    return new LSToolInvocation(this.config, {
+      ...params,
+      path: resolvePathWithMixedScriptSpacingFix(params.path),
+    });
   }
 }

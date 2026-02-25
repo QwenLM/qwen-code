@@ -20,7 +20,10 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import {
+  isSubpath,
+  resolvePathWithMixedScriptSpacingFix,
+} from '../utils/paths.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -174,6 +177,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     params: ReadFileToolParams,
   ): string | null {
     const filePath = params.absolute_path;
+    const resolvedPath = resolvePathWithMixedScriptSpacingFix(filePath);
     if (params.absolute_path.trim() === '') {
       return "The 'absolute_path' parameter must be non-empty.";
     }
@@ -185,12 +189,12 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const workspaceContext = this.config.getWorkspaceContext();
     const projectTempDir = this.config.storage.getProjectTempDir();
     const userSkillsDir = this.config.storage.getUserSkillsDir();
-    const resolvedFilePath = path.resolve(filePath);
+    const resolvedFilePath = path.resolve(resolvedPath);
     const isWithinTempDir = isSubpath(projectTempDir, resolvedFilePath);
     const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
 
     if (
-      !workspaceContext.isPathWithinWorkspace(filePath) &&
+      !workspaceContext.isPathWithinWorkspace(resolvedPath) &&
       !isWithinTempDir &&
       !isWithinUserSkills
     ) {
@@ -207,7 +211,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
 
     const fileService = this.config.getFileService();
-    if (fileService.shouldQwenIgnoreFile(params.absolute_path)) {
+    if (fileService.shouldQwenIgnoreFile(resolvedPath)) {
       return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 
@@ -217,6 +221,9 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ReadFileToolParams,
   ): ToolInvocation<ReadFileToolParams, ToolResult> {
-    return new ReadFileToolInvocation(this.config, params);
+    return new ReadFileToolInvocation(this.config, {
+      ...params,
+      absolute_path: resolvePathWithMixedScriptSpacingFix(params.absolute_path),
+    });
   }
 }
