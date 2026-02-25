@@ -154,6 +154,15 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
                   {server.isDisabled && (
                     <Text color={theme.status.warning}> {t('(disabled)')}</Text>
                   )}
+                  {/* 显示无效工具警告 */}
+                  {!!server.invalidToolCount && server.invalidToolCount > 0 && (
+                    <Text color={theme.status.warning}>
+                      {' '}
+                      {t('{{count}} invalid tools', {
+                        count: String(server.invalidToolCount),
+                      })}
+                    </Text>
+                  )}
                 </Box>
               );
             })}

@@ -908,6 +908,19 @@ export default {
   connecting: 'подключение',
   disconnected: 'отключен',
   error: 'ошибка',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} недействительных инструментов',
+  invalid: 'недействительный',
+  'invalid: {{reason}}': 'недействительно: {{reason}}',
+  'missing name': 'отсутствует имя',
+  'missing description': 'отсутствует описание',
+  '(unnamed)': '(без имени)',
+  unknown: 'неизвестно',
+  'Warning: This tool cannot be called by the LLM':
+    'Предупреждение: Этот инструмент не может быть вызван LLM',
+  Reason: 'Причина',
+  'Tools must have both name and description to be used by the LLM.':
+    'Инструменты должны иметь как имя, так и описание, чтобы использоваться LLM.',
   'Modify in progress:': 'Идет изменение:',
   'Save and close external editor to continue':
     'Сохраните и закройте внешний редактор для продолжения',

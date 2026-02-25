@@ -641,6 +641,19 @@ export default {
   connecting: '接続中',
   disconnected: '切断済み',
   error: 'エラー',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 個の無効なツール',
+  invalid: '無効',
+  'invalid: {{reason}}': '無効: {{reason}}',
+  'missing name': '名前なし',
+  'missing description': '説明なし',
+  '(unnamed)': '(名前なし)',
+  unknown: '不明',
+  'Warning: This tool cannot be called by the LLM':
+    '警告: このツールはLLMによって呼び出すことができません',
+  Reason: '理由',
+  'Tools must have both name and description to be used by the LLM.':
+    'ツールはLLMによって使用されるには名前と説明の両方が必要です。',
   'Modify in progress:': '変更中:',
   'Save and close external editor to continue':
     '続行するには外部エディタを保存して閉じてください',

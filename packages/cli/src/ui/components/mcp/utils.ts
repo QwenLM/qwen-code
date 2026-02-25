@@ -101,3 +101,29 @@ export function formatServerCommand(server: MCPServerDisplayInfo): string {
   }
   return 'Unknown';
 }
+
+/**
+ * Check if a tool is valid (has both name and description required by LLM)
+ * @param name - Tool name
+ * @param description - Tool description
+ * @returns boolean indicating if the tool is valid
+ */
+export function isToolValid(name?: string, description?: string): boolean {
+  return !!name && !!description;
+}
+
+/**
+ * Get the reason why a tool is invalid
+ * @param name - Tool name
+ * @param description - Tool description
+ * @returns Array of missing fields
+ */
+export function getToolInvalidReasons(
+  name?: string,
+  description?: string,
+): string[] {
+  const reasons: string[] = [];
+  if (!name) reasons.push('missing name');
+  if (!description) reasons.push('missing description');
+  return reasons;
+}

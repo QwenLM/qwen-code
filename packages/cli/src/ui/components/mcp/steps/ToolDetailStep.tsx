@@ -137,6 +137,23 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
 
   return (
     <Box flexDirection="column" gap={1}>
+      {/* 无效工具警告 */}
+      {!tool.isValid && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text color={theme.status.error} bold>
+            {t('Warning: This tool cannot be called by the LLM')}
+          </Text>
+          <Text color={theme.status.error}>
+            {t('Reason')}: {tool.invalidReason || t('unknown')}
+          </Text>
+          <Text color={theme.text.secondary}>
+            {t(
+              'Tools must have both name and description to be used by the LLM.',
+            )}
+          </Text>
+        </Box>
+      )}
+
       {/* 工具描述 */}
       {tool.description && (
         <Box>

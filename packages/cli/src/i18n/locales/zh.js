@@ -736,6 +736,19 @@ export default {
   connecting: '连接中',
   disconnected: '已断开',
   error: '错误',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 个无效工具',
+  invalid: '无效',
+  'invalid: {{reason}}': '无效：{{reason}}',
+  'missing name': '缺少名称',
+  'missing description': '缺少描述',
+  '(unnamed)': '(未命名)',
+  unknown: '未知',
+  'Warning: This tool cannot be called by the LLM':
+    '警告：此工具无法被 LLM 调用',
+  Reason: '原因',
+  'Tools must have both name and description to be used by the LLM.':
+    '工具必须同时具有名称和描述才能被 LLM 使用。',
 
   // ============================================================================
   // Commands - Chat

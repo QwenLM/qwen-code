@@ -30,6 +30,7 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
+import { isToolValid, getToolInvalidReasons } from './utils.js';
 
 const debugLogger = createDebugLogger('MCP_DIALOG');
 
@@ -105,6 +106,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       // Use config.isMcpServerDisabled() to check if server is disabled
       const isDisabled = config.isMcpServerDisabled(name);
 
+      // Count invalid tools (missing name or description)
+      const invalidToolCount = serverTools.filter(
+        (t) => !t.name || !t.description,
+      ).length;
+
       serverInfos.push({
         name,
         status,
@@ -112,6 +118,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         scope,
         config: serverConfig,
         toolCount: serverTools.length,
+        invalidToolCount,
         promptCount: serverPrompts.length,
         isDisabled,
       });
@@ -191,13 +198,26 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         mcpTools.push(tool);
       }
     }
-    return mcpTools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      serverName: tool.serverName,
-      schema: tool.parameterSchema as object | undefined,
-      annotations: tool.annotations,
-    }));
+    return mcpTools.map((tool) => {
+      // Check if tool is valid (has both name and description required by LLM)
+      const isValid = isToolValid(tool.name, tool.description);
+
+      let invalidReason: string | undefined;
+      if (!isValid) {
+        const reasons = getToolInvalidReasons(tool.name, tool.description);
+        invalidReason = reasons.map((r) => t(r)).join(', ');
+      }
+
+      return {
+        name: tool.name || t('(unnamed)'),
+        description: tool.description,
+        serverName: tool.serverName,
+        schema: tool.parameterSchema as object | undefined,
+        annotations: tool.annotations,
+        isValid,
+        invalidReason,
+      };
+    });
   }, [config, selectedServer]);
 
   // View tool list

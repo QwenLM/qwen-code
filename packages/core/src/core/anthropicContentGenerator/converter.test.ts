@@ -743,6 +743,62 @@ describe('AnthropicContentConverter', () => {
       const result = await converter.convertGeminiToolsToAnthropic(tools);
       expect(result[0]?.input_schema?.type).toBe('object');
     });
+
+    it('skips functions without name or description', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'valid_tool',
+              description: 'A valid tool',
+            },
+            {
+              name: 'missing_description',
+              // no description
+            },
+            {
+              // no name
+              description: 'Missing name',
+            },
+            {
+              // neither name nor description
+              parametersJsonSchema: { type: 'object' },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('valid_tool');
+    });
+
+    it('skips functions with empty name or description', async () => {
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'valid_tool',
+              description: 'A valid tool',
+            },
+            {
+              name: '',
+              description: 'Empty name',
+            },
+            {
+              name: 'empty_description',
+              description: '',
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToAnthropic(tools);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('valid_tool');
+    });
   });
 
   describe('convertAnthropicResponseToGemini', () => {

@@ -907,6 +907,19 @@ export default {
   connecting: 'conectando',
   disconnected: 'desconectado',
   error: 'erro',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ferramentas inválidas',
+  invalid: 'inválido',
+  'invalid: {{reason}}': 'inválido: {{reason}}',
+  'missing name': 'nome ausente',
+  'missing description': 'descrição ausente',
+  '(unnamed)': '(sem nome)',
+  unknown: 'desconhecido',
+  'Warning: This tool cannot be called by the LLM':
+    'Aviso: Esta ferramenta não pode ser chamada pelo LLM',
+  Reason: 'Motivo',
+  'Tools must have both name and description to be used by the LLM.':
+    'As ferramentas devem ter tanto nome quanto descrição para serem usadas pelo LLM.',
   'Modify in progress:': 'Modificação em progresso:',
   'Save and close external editor to continue':
     'Salve e feche o editor externo para continuar',

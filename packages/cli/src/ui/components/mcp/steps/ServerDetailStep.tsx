@@ -156,6 +156,13 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
             <Text>
               {server.toolCount}{' '}
               {server.toolCount === 1 ? t('tool') : t('tools')}
+              {!!server.invalidToolCount && server.invalidToolCount > 0 && (
+                <Text color={theme.status.warning}>
+                  {' '}
+                  ({server.invalidToolCount}{' '}
+                  {server.invalidToolCount === 1 ? t('invalid') : t('invalid')})
+                </Text>
+              )}
             </Text>
           </Box>
         </Box>

@@ -111,7 +111,18 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
               >
                 {tool.name}
               </Text>
-              {annotations && (
+              {/* 显示无效工具警告 */}
+              {!tool.isValid && (
+                <>
+                  <Text color={theme.text.secondary}> </Text>
+                  <Text color={theme.status.warning}>
+                    {t('invalid: {{reason}}', {
+                      reason: tool.invalidReason || t('unknown'),
+                    })}
+                  </Text>
+                </>
+              )}
+              {annotations && tool.isValid && (
                 <>
                   <Text color={theme.text.secondary}> </Text>
                   <Text color={theme.text.secondary}>{annotations}</Text>

@@ -41,6 +41,8 @@ export interface MCPServerDisplayInfo {
   config: MCPServerConfig;
   /** 工具数量 */
   toolCount: number;
+  /** 无效工具数量（缺少name或description） */
+  invalidToolCount?: number;
   /** Prompt数量 */
   promptCount: number;
   /** 错误信息 */
@@ -69,6 +71,10 @@ export interface MCPToolDisplayInfo {
     idempotentHint?: boolean;
     openWorldHint?: boolean;
   };
+  /** 工具是否有效（有name和description才能被LLM调用） */
+  isValid: boolean;
+  /** 无效原因（当isValid为false时） */
+  invalidReason?: string;
 }
 
 /**
