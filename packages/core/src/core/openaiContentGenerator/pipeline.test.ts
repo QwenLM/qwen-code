@@ -10,7 +10,7 @@ import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { PipelineConfig } from './pipeline.js';
-import { ContentGenerationPipeline } from './pipeline.js';
+import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
@@ -508,6 +508,51 @@ describe('ContentGenerationPipeline', () => {
         expect.any(Object),
         request,
       );
+    });
+
+    it('should throw StreamContentError when stream chunk contains error_finish', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { content: 'Throttling: TPM(1/1)' },
+                finish_reason: 'error_finish',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow(StreamContentError);
+
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+      expect(mockConverter.convertOpenAIChunkToGemini).not.toHaveBeenCalled();
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {

@@ -20,6 +20,7 @@ import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageCont
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import { WarningMessage } from './messages/WarningMessage.js';
+import { RetryCountdownMessage } from './messages/RetryCountdownMessage.js';
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
@@ -125,6 +126,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'error' && (
         <ErrorMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'retry_countdown' && (
+        <RetryCountdownMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />

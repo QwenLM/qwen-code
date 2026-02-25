@@ -496,6 +496,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
+      sessionId: undefined,
     });
 
     await main();

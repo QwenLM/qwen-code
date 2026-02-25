@@ -128,6 +128,11 @@ export type HistoryItemWarning = HistoryItemBase & {
   text: string;
 };
 
+export type HistoryItemRetryCountdown = HistoryItemBase & {
+  type: 'retry_countdown';
+  text: string;
+};
+
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
   systemInfo: {
@@ -265,6 +270,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup

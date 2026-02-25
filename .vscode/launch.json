@@ -127,6 +127,19 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "env": {}
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Dev Launch CLI",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "skipFiles": ["<node_internals>/**"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "GEMINI_SANDBOX": "false"
+      }
     }
   ],
   "inputs": [

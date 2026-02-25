@@ -271,16 +271,15 @@ export class SubAgentScope {
       return;
     }
 
-    const abortController = new AbortController();
-    const onAbort = () => abortController.abort();
+    // Track the current round's AbortController for external signal propagation
+    let currentRoundAbortController: AbortController | null = null;
+    const onExternalAbort = () => {
+      currentRoundAbortController?.abort();
+    };
     if (externalSignal) {
-      if (externalSignal.aborted) {
-        abortController.abort();
-        this.terminateMode = SubagentTerminateMode.CANCELLED;
-        return;
-      }
-      externalSignal.addEventListener('abort', onAbort, { once: true });
+      externalSignal.addEventListener('abort', onExternalAbort);
     }
+
     const toolRegistry = this.runtimeContext.getToolRegistry();
 
     // Prepare the list of tools available to the subagent.
@@ -346,6 +345,15 @@ export class SubAgentScope {
       const startEvent = new SubagentExecutionEvent(this.name, 'started');
       logSubagentExecution(this.runtimeContext, startEvent);
       while (true) {
+        // Create a new AbortController for each round to avoid listener accumulation
+        const roundAbortController = new AbortController();
+        currentRoundAbortController = roundAbortController;
+
+        // If external signal already aborted, cancel immediately
+        if (externalSignal?.aborted) {
+          roundAbortController.abort();
+        }
+
         // Check termination conditions.
         if (
           this.runConfig.max_turns &&
@@ -364,10 +372,11 @@ export class SubAgentScope {
         }
 
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+
         const messageParams = {
           message: currentMessages[0]?.parts || [],
           config: {
-            abortSignal: abortController.signal,
+            abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
           },
         };
@@ -393,7 +402,7 @@ export class SubAgentScope {
           undefined;
         let currentResponseId: string | undefined = undefined;
         for await (const streamEvent of responseStream) {
-          if (abortController.signal.aborted) {
+          if (roundAbortController.signal.aborted) {
             this.terminateMode = SubagentTerminateMode.CANCELLED;
             return;
           }
@@ -487,7 +496,7 @@ export class SubAgentScope {
         if (functionCalls.length > 0) {
           currentMessages = await this.processFunctionCalls(
             functionCalls,
-            abortController,
+            roundAbortController,
             promptId,
             turnCounter,
             toolsList,
@@ -530,7 +539,11 @@ export class SubAgentScope {
 
       throw error;
     } finally {
-      if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+      // Clear the reference to allow GC
+      currentRoundAbortController = null;
       this.executionStats.totalDurationMs = Date.now() - startTime;
       const summary = this.stats.getSummary(Date.now());
       this.eventEmitter?.emit(SubAgentEventType.FINISH, {

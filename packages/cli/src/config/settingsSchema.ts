@@ -373,7 +373,7 @@ const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
       },

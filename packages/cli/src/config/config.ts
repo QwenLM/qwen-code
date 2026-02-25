@@ -50,6 +50,19 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 
+// UUID v4 regex pattern for validation
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Validates if a string is a valid UUID format
+ * @param value - The string to validate
+ * @returns True if the string is a valid UUID, false otherwise
+ */
+function isValidUUID(value: string): boolean {
+  return UUID_REGEX.test(value);
+}
+
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { buildWebSearchConfig } from './webSearch.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -137,6 +150,8 @@ export interface CliArgs {
   continue: boolean | undefined;
   /** Resume a specific session by its ID */
   resume: string | undefined;
+  /** Specify a session ID without session resumption */
+  sessionId: string | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
@@ -449,6 +464,10 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Resume a specific session by its ID. Use without an ID to show session picker.',
         })
+        .option('session-id', {
+          type: 'string',
+          description: 'Specify a session ID for this run.',
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
@@ -534,6 +553,15 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
+          }
+          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+            return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['sessionId'] && !isValidUUID(argv['sessionId'] as string)) {
+            return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (argv['resume'] && !isValidUUID(argv['resume'] as string)) {
+            return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           return true;
         }),
@@ -899,6 +927,17 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+  } else if (argv['sessionId']) {
+    // Use provided session ID without session resumption
+    // Check if session ID is already in use
+    const sessionService = new SessionService(cwd);
+    const exists = await sessionService.sessionExists(argv['sessionId']);
+    if (exists) {
+      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      writeStderrLine(message);
+      process.exit(1);
+    }
+    sessionId = argv['sessionId'];
   }
 
   const modelProvidersConfig = settings.modelProviders;

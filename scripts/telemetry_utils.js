@@ -18,10 +18,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const projectRoot = path.resolve(__dirname, '..');
-const projectHash = crypto
-  .createHash('sha256')
-  .update(projectRoot)
-  .digest('hex');
+
+/**
+ * Generates a unique hash for a project based on its root path.
+ * On Windows, paths are case-insensitive, so we normalize to lowercase
+ * to ensure the same physical path always produces the same hash.
+ * This logic must match getProjectHash() in packages/core/src/utils/paths.ts
+ */
+function getProjectHash(projectRoot) {
+  // On Windows, normalize path to lowercase for case-insensitive matching
+  const normalizedPath =
+    os.platform() === 'win32' ? projectRoot.toLowerCase() : projectRoot;
+  return crypto.createHash('sha256').update(normalizedPath).digest('hex');
+}
+
+const projectHash = getProjectHash(projectRoot);
 
 // User-level .gemini directory in home
 const USER_GEMINI_DIR = path.join(os.homedir(), '.qwen');

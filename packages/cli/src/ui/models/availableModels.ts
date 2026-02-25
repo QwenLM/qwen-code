@@ -28,7 +28,7 @@ export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
     label: MAINLINE_CODER,
     get description() {
       return t(
-        'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+        'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
       );
     },
   },

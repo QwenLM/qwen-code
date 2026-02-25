@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ to manage attachments',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → select, Delete to remove, ↓ to exit',
+  'Attachments: ': 'Attachments: ',
+
   'Basics:': 'Basics:',
   'Add context': 'Add context',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -1057,8 +1063,8 @@ export default {
   '(not set)': '(not set)',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
 
@@ -1411,6 +1417,13 @@ export default {
     'Failed to open browser. Check out the extensions gallery at {{url}}',
 
   // ============================================================================
+  // Retry / Rate Limit
+  // ============================================================================
+  'Rate limit error: {{reason}}': 'Rate limit error: {{reason}}',
+  'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
+    'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+
+  // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
   'Please enter your API key:': 'Please enter your API key:',
@@ -1451,8 +1464,12 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
+  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
   "Paste your api key of Bailian Coding Plan and you're all set!":
     "Paste your api key of Bailian Coding Plan and you're all set!",
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!",
   Custom: 'Custom',
   'More instructions about configuring `modelProviders` manually.':
     'More instructions about configuring `modelProviders` manually.',
@@ -1460,4 +1477,18 @@ export default {
   '(Press Escape to go back)': '(Press Escape to go back)',
   '(Press Enter to submit, Escape to cancel)':
     '(Press Enter to submit, Escape to cancel)',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'New model configurations are available for {{region}}. Update now?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'New model configurations are available for Bailian Coding Plan (China). Update now?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
+    'Authenticated successfully with {{region}}. API key is stored in settings.env.',
 };

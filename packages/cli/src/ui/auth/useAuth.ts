@@ -30,9 +30,10 @@ import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
-  CODING_PLAN_MODELS,
+  getCodingPlanConfig,
+  isCodingPlanConfig,
+  CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-  CODING_PLAN_VERSION,
 } from '../../constants/codingPlan.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
@@ -285,29 +286,35 @@ export const useAuthCommand = (
 
   /**
    * Handle coding plan submission - generates configs from template and stores api-key
+   * @param apiKey - The API key to store
+   * @param region - The region to use (default: CHINA)
    */
   const handleCodingPlanSubmit = useCallback(
-    async (apiKey: string) => {
+    async (
+      apiKey: string,
+      region: CodingPlanRegion = CodingPlanRegion.CHINA,
+    ) => {
       try {
         setIsAuthenticating(true);
         setAuthError(null);
 
-        const envKeyName = CODING_PLAN_ENV_KEY;
+        // Get configuration based on region
+        const { template, version, regionName } = getCodingPlanConfig(region);
 
         // Get persist scope
         const persistScope = getPersistScopeForModelSelection(settings);
 
-        // Store api-key in settings.env
-        settings.setValue(persistScope, `env.${envKeyName}`, apiKey);
+        // Store api-key in settings.env (unified env key)
+        settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, apiKey);
 
         // Sync to process.env immediately so refreshAuth can read the apiKey
-        process.env[envKeyName] = apiKey;
+        process.env[CODING_PLAN_ENV_KEY] = apiKey;
 
         // Generate model configs from template
-        const newConfigs: ProviderModelConfig[] = CODING_PLAN_MODELS.map(
+        const newConfigs: ProviderModelConfig[] = template.map(
           (templateConfig) => ({
             ...templateConfig,
-            envKey: envKeyName,
+            envKey: CODING_PLAN_ENV_KEY,
           }),
         );
 
@@ -317,17 +324,9 @@ export const useAuthCommand = (
             settings.merged.modelProviders as ModelProvidersConfig | undefined
           )?.[AuthType.USE_OPENAI] || [];
 
-        // Identify Coding Plan configs by baseUrl + envKey
-        // Remove existing Coding Plan configs to ensure template changes are applied
-        const isCodingPlanConfig = (config: ProviderModelConfig) =>
-          config.envKey === envKeyName &&
-          CODING_PLAN_MODELS.some(
-            (template) => template.baseUrl === config.baseUrl,
-          );
-
-        // Filter out existing Coding Plan configs, keep user custom configs
+        // Filter out all existing Coding Plan configs (mutually exclusive)
         const nonCodingPlanConfigs = existingConfigs.filter(
-          (existing) => !isCodingPlanConfig(existing),
+          (existing) => !isCodingPlanConfig(existing.baseUrl, existing.envKey),
         );
 
         // Add new Coding Plan configs at the beginning
@@ -347,12 +346,11 @@ export const useAuthCommand = (
           AuthType.USE_OPENAI,
         );
 
-        // Persist coding plan version for future update detection
-        settings.setValue(
-          persistScope,
-          'codingPlan.version',
-          CODING_PLAN_VERSION,
-        );
+        // Persist coding plan region
+        settings.setValue(persistScope, 'codingPlan.region', region);
+
+        // Persist coding plan version (single field for backward compatibility)
+        settings.setValue(persistScope, 'codingPlan.version', version);
 
         // If there are configs, use the first one as the model
         if (updatedConfigs.length > 0 && updatedConfigs[0]?.id) {
@@ -386,7 +384,8 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with Coding Plan. API key is stored in settings.env.',
+              'Authenticated successfully with {{region}}. API key is stored in settings.env.',
+              { region: regionName },
             ),
           },
           Date.now(),

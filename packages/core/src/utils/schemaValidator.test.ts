@@ -209,4 +209,89 @@ describe('SchemaValidator', () => {
       expect(params.is_background).toBe(true);
     });
   });
+
+  describe('JSON Schema version support', () => {
+    it('should support JSON Schema draft-2020-12', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+        },
+        required: ['url'],
+      };
+      const params = { url: 'https://example.com' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+    });
+
+    it('should validate correctly with draft-2020-12 schema', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+        },
+        required: ['count'],
+      };
+      const validParams = { count: 42 };
+      const invalidParams = { count: 'not a number' };
+
+      expect(SchemaValidator.validate(schema, validParams)).toBeNull();
+      expect(SchemaValidator.validate(schema, invalidParams)).not.toBeNull();
+    });
+
+    it('should support JSON Schema draft-07 (default)', () => {
+      const schema = {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+        },
+        required: ['name'],
+      };
+      const params = { name: 'test' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+    });
+
+    it('should handle nested schemas with $schema', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: {
+          config: {
+            type: 'object',
+            properties: {
+              enabled: { type: 'boolean' },
+            },
+          },
+        },
+      };
+      const params = { config: { enabled: true } };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+    });
+
+    it('should support 2020-12 specific keywords like prefixItems', () => {
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'array',
+        prefixItems: [{ type: 'string' }, { type: 'integer' }],
+      };
+      const params = ['hello', 42];
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+    });
+
+    it('should gracefully handle unsupported schema versions', () => {
+      // draft-2019-09 is not supported by Ajv by default
+      const schema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {
+          value: { type: 'string' },
+        },
+      };
+      const params = { value: 'test' };
+      // Should skip validation and return null (graceful degradation)
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+    });
+  });
 });

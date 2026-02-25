@@ -38,6 +38,12 @@ export type TransportOptions = {
    * When provided, takes precedence over `continue`.
    */
   resume?: string;
+  /**
+   * Session ID to use for this session.
+   * Passed to CLI via --session-id to ensure consistent session ID.
+   * When resume is provided, this should match the resume ID.
+   */
+  sessionId?: string;
 };
 
 type ToolInput = Record<string, unknown>;
@@ -421,6 +427,14 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   resume?: string;
+
+  /**
+   * Specify a session ID for the new session.
+   * This ensures the SDK and CLI use the same session ID without resuming a previous session.
+   * Equivalent to CLI's `--session-id` flag.
+   * @example '123e4567-e89b-12d3-a456-426614174000'
+   */
+  sessionId?: string;
 
   /**
    * Timeout configuration for various SDK operations.
