@@ -174,11 +174,12 @@ const enableCommand: SlashCommand = {
     const registry = hookSystem.getRegistry();
     const allHooks = registry.getAllHooks();
 
-    // Return disabled hooks for enable command
-    return allHooks
+    // Return disabled hooks for enable command (deduplicated by name)
+    const disabledHookNames = allHooks
       .filter((hook) => !hook.enabled)
       .map((hook) => hook.config.name || hook.config.command || '')
       .filter((name) => name && name.startsWith(partialArg));
+    return [...new Set(disabledHookNames)];
   },
 };
 
@@ -242,11 +243,12 @@ const disableCommand: SlashCommand = {
     const registry = hookSystem.getRegistry();
     const allHooks = registry.getAllHooks();
 
-    // Return enabled hooks for disable command
-    return allHooks
+    // Return enabled hooks for disable command (deduplicated by name)
+    const enabledHookNames = allHooks
       .filter((hook) => hook.enabled)
       .map((hook) => hook.config.name || hook.config.command || '')
       .filter((name) => name && name.startsWith(partialArg));
+    return [...new Set(enabledHookNames)];
   },
 };
 

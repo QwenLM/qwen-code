@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -262,6 +262,22 @@ please review the project settings (.qwen/settings.json) and remove them.`;
         // Check if this hook is in the disabled list
         const hookName = this.getHookName({ config: hookConfig });
         const isDisabled = disabledHooks.includes(hookName);
+
+        // Check for duplicate hooks (same name+command+source+eventName+matcher+sequential)
+        const isDuplicate = this.entries.some(
+          (existing) =>
+            existing.eventName === eventName &&
+            existing.source === source &&
+            this.getHookName(existing) === hookName &&
+            existing.matcher === definition.matcher &&
+            existing.sequential === definition.sequential,
+        );
+        if (isDuplicate) {
+          debugLogger.debug(
+            `Skipping duplicate hook "${hookName}" for ${eventName} from ${source}`,
+          );
+          continue;
+        }
 
         // Add source to hook config
         hookConfig.source = source;
