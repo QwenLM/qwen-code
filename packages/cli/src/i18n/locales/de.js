@@ -97,7 +97,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Verfügbare Qwen Code CLI-Werkzeuge:',
   'No tools available': 'Keine Werkzeuge verfügbar',
@@ -359,7 +359,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Werkzeugspezifische Nutzungsstatistiken anzeigen.',
   'exit the cli': 'CLI beenden',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP-Verwaltungsdialog öffnen oder mit OAuth-fähigem Server authentifizieren',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Konfigurierte MCP-Server und Werkzeuge auflisten oder mit OAuth-fähigen Servern authentifizieren',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -881,9 +883,37 @@ export default {
   'Do you want to proceed?': 'Möchten Sie fortfahren?',
   'Yes, allow once': 'Ja, einmal erlauben',
   'Allow always': 'Immer erlauben',
+  Yes: 'Ja',
   No: 'Nein',
   'No (esc)': 'Nein (Esc)',
   'Yes, allow always for this session': 'Ja, für diese Sitzung immer erlauben',
+
+  // MCP Management Dialog (translations for MCP UI components)
+  Disable: 'Deaktivieren',
+  Enable: 'Aktivieren',
+  Reconnect: 'Neu verbinden',
+  'View tools': 'Werkzeuge anzeigen',
+  '(disabled)': '(deaktiviert)',
+  'Error:': 'Fehler:',
+  Extension: 'Erweiterung',
+  tool: 'Werkzeug',
+  connected: 'verbunden',
+  connecting: 'verbindet',
+  disconnected: 'getrennt',
+  error: 'Fehler',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ungültige Werkzeuge',
+  invalid: 'ungültig',
+  'invalid: {{reason}}': 'ungültig: {{reason}}',
+  'missing name': 'Name fehlt',
+  'missing description': 'Beschreibung fehlt',
+  '(unnamed)': '(unbenannt)',
+  unknown: 'unbekannt',
+  'Warning: This tool cannot be called by the LLM':
+    'Warnung: Dieses Werkzeug kann nicht vom LLM aufgerufen werden',
+  Reason: 'Grund',
+  'Tools must have both name and description to be used by the LLM.':
+    'Werkzeuge müssen sowohl einen Namen als auch eine Beschreibung haben, um vom LLM verwendet zu werden.',
   'Modify in progress:': 'Änderung in Bearbeitung:',
   'Save and close external editor to continue':
     'Speichern und externen Editor schließen, um fortzufahren',

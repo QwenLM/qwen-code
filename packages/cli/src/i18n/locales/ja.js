@@ -83,7 +83,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
@@ -316,7 +316,9 @@ export default {
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP管理ダイアログを開く、またはOAuth対応サーバーで認証',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '設定済みのMCPサーバーとツールを一覧表示、またはOAuth対応サーバーで認証',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -621,9 +623,37 @@ export default {
   'Do you want to proceed?': '続行しますか?',
   'Yes, allow once': 'はい(今回のみ許可)',
   'Allow always': '常に許可する',
+  Yes: 'はい',
   No: 'いいえ',
   'No (esc)': 'いいえ (Esc)',
   'Yes, allow always for this session': 'はい、このセッションで常に許可',
+
+  // MCP Management - Core translations
+  Disable: '無効化',
+  Enable: '有効化',
+  Reconnect: '再接続',
+  'View tools': 'ツールを表示',
+  '(disabled)': '(無効)',
+  'Error:': 'エラー:',
+  Extension: '拡張機能',
+  tool: 'ツール',
+  connected: '接続済み',
+  connecting: '接続中',
+  disconnected: '切断済み',
+  error: 'エラー',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 個の無効なツール',
+  invalid: '無効',
+  'invalid: {{reason}}': '無効: {{reason}}',
+  'missing name': '名前なし',
+  'missing description': '説明なし',
+  '(unnamed)': '(名前なし)',
+  unknown: '不明',
+  'Warning: This tool cannot be called by the LLM':
+    '警告: このツールはLLMによって呼び出すことができません',
+  Reason: '理由',
+  'Tools must have both name and description to be used by the LLM.':
+    'ツールはLLMによって使用されるには名前と説明の両方が必要です。',
   'Modify in progress:': '変更中:',
   'Save and close external editor to continue':
     '続行するには外部エディタを保存して閉じてください',

@@ -117,7 +117,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Анализ проекта и создание адаптированного файла QWEN.md',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
@@ -379,7 +379,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
   'exit the cli': 'Выход из CLI',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Открыть диалог управления MCP или авторизоваться на сервере с поддержкой OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Показать настроенные MCP-серверы и инструменты, или авторизоваться на серверах с поддержкой OAuth',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
@@ -888,9 +890,37 @@ export default {
   'Do you want to proceed?': 'Вы хотите продолжить?',
   'Yes, allow once': 'Да, разрешить один раз',
   'Allow always': 'Всегда разрешать',
+  Yes: 'Да',
   No: 'Нет',
   'No (esc)': 'Нет (esc)',
   'Yes, allow always for this session': 'Да, всегда разрешать для этой сессии',
+
+  // MCP Management - Core translations
+  Disable: 'Отключить',
+  Enable: 'Включить',
+  Reconnect: 'Переподключить',
+  'View tools': 'Просмотреть инструменты',
+  '(disabled)': '(отключен)',
+  'Error:': 'Ошибка:',
+  Extension: 'Расширение',
+  tool: 'инструмент',
+  connected: 'подключен',
+  connecting: 'подключение',
+  disconnected: 'отключен',
+  error: 'ошибка',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} недействительных инструментов',
+  invalid: 'недействительный',
+  'invalid: {{reason}}': 'недействительно: {{reason}}',
+  'missing name': 'отсутствует имя',
+  'missing description': 'отсутствует описание',
+  '(unnamed)': '(без имени)',
+  unknown: 'неизвестно',
+  'Warning: This tool cannot be called by the LLM':
+    'Предупреждение: Этот инструмент не может быть вызван LLM',
+  Reason: 'Причина',
+  'Tools must have both name and description to be used by the LLM.':
+    'Инструменты должны иметь как имя, так и описание, чтобы использоваться LLM.',
   'Modify in progress:': 'Идет изменение:',
   'Save and close external editor to continue':
     'Сохраните и закройте внешний редактор для продолжения',

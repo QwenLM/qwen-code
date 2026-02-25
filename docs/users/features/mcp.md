@@ -30,10 +30,10 @@ Qwen Code loads MCP servers from `mcpServers` in your `settings.json`. You can c
 qwen mcp add --transport http my-server http://localhost:3000/mcp
 ```
 
-2. Verify it shows up:
+2. Open MCP management dialog to view and manage servers:
 
 ```bash
-qwen mcp list
+qwen mcp
 ```
 
 3. Restart Qwen Code in the same project (or start it if it wasn’t running yet), then ask the model to use tools from that server.
@@ -273,12 +273,6 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `--description`     | Set the description for the server.                                 | —                  | `--description "Local tools"`             |
 | `--include-tools`   | A comma-separated list of tools to include.                         | all tools included | `--include-tools mytool,othertool`        |
 | `--exclude-tools`   | A comma-separated list of tools to exclude.                         | none               | `--exclude-tools mytool`                  |
-
-#### Listing servers (`qwen mcp list`)
-
-```bash
-qwen mcp list
-```
 
 #### Removing a server (`qwen mcp remove`)
 

@@ -12,12 +12,7 @@ import {
   MCPDiscoveryState,
   getMCPServerStatus,
   getMCPDiscoveryState,
-  DiscoveredMCPTool,
 } from '@qwen-code/qwen-code-core';
-
-import type { CallableTool } from '@google/genai';
-import { Type } from '@google/genai';
-import { MessageType } from '../types.js';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -37,23 +32,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-// Helper function to create a mock DiscoveredMCPTool
-const createMockMCPTool = (
-  name: string,
-  serverName: string,
-  description?: string,
-) =>
-  new DiscoveredMCPTool(
-    {
-      callTool: vi.fn(),
-      tool: vi.fn(),
-    } as unknown as CallableTool,
-    serverName,
-    name,
-    description || `Description for ${name}`,
-    { type: Type.OBJECT, properties: {} },
-  );
-
 describe('mcpCommand', () => {
   let mockContext: ReturnType<typeof createMockCommandContext>;
   let mockConfig: {
@@ -70,7 +48,7 @@ describe('mcpCommand', () => {
     // Set up default mock environment
     vi.unstubAllEnvs();
 
-    // Default mock implementations
+    // Default mock implementations - these are kept for auth subcommand tests
     vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
     vi.mocked(getMCPDiscoveryState).mockReturnValue(
       MCPDiscoveryState.COMPLETED,
@@ -98,7 +76,16 @@ describe('mcpCommand', () => {
   });
 
   describe('basic functionality', () => {
-    it('should show an error if config is not available', async () => {
+    it('should open MCP management dialog by default', async () => {
+      const result = await mcpCommand.action!(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'mcp',
+      });
+    });
+
+    it('should open MCP management dialog even if config is not available', async () => {
       const contextWithoutConfig = createMockCommandContext({
         services: {
           config: null,
@@ -108,21 +95,19 @@ describe('mcpCommand', () => {
       const result = await mcpCommand.action!(contextWithoutConfig, '');
 
       expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'Config not loaded.',
+        type: 'dialog',
+        dialog: 'mcp',
       });
     });
 
-    it('should show an error if tool registry is not available', async () => {
+    it('should open MCP management dialog even if tool registry is not available', async () => {
       mockConfig.getToolRegistry = vi.fn().mockReturnValue(undefined);
 
       const result = await mcpCommand.action!(mockContext, '');
 
       expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: 'Could not retrieve tool registry.',
+        type: 'dialog',
+        dialog: 'mcp',
       });
     });
   });
@@ -138,73 +123,31 @@ describe('mcpCommand', () => {
       mockConfig.getMcpServers = vi.fn().mockReturnValue(mockMcpServers);
     });
 
-    it('should display configured MCP servers with status indicators and their tools', async () => {
-      // Setup getMCPServerStatus mock implementation
-      vi.mocked(getMCPServerStatus).mockImplementation((serverName) => {
-        if (serverName === 'server1') return MCPServerStatus.CONNECTED;
-        if (serverName === 'server2') return MCPServerStatus.CONNECTED;
-        return MCPServerStatus.DISCONNECTED; // server3
+    it('should open MCP management dialog regardless of server configuration', async () => {
+      const result = await mcpCommand.action!(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'mcp',
       });
-
-      // Mock tools from each server using actual DiscoveredMCPTool instances
-      const mockServer1Tools = [
-        createMockMCPTool('server1_tool1', 'server1'),
-        createMockMCPTool('server1_tool2', 'server1'),
-      ];
-      const mockServer2Tools = [createMockMCPTool('server2_tool1', 'server2')];
-      const mockServer3Tools = [createMockMCPTool('server3_tool1', 'server3')];
-
-      const allTools = [
-        ...mockServer1Tools,
-        ...mockServer2Tools,
-        ...mockServer3Tools,
-      ];
-
-      mockConfig.getToolRegistry = vi.fn().mockReturnValue({
-        getAllTools: vi.fn().mockReturnValue(allTools),
-      });
-
-      await mcpCommand.action!(mockContext, '');
-
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.MCP_STATUS,
-          tools: allTools.map((tool) => ({
-            serverName: tool.serverName,
-            name: tool.name,
-            description: tool.description,
-            schema: tool.schema,
-          })),
-          showTips: true,
-        }),
-        expect.any(Number),
-      );
     });
 
-    it('should display tool descriptions when desc argument is used', async () => {
-      await mcpCommand.action!(mockContext, 'desc');
+    it('should open MCP management dialog with desc argument', async () => {
+      const result = await mcpCommand.action!(mockContext, 'desc');
 
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.MCP_STATUS,
-          showDescriptions: true,
-          showTips: false,
-        }),
-        expect.any(Number),
-      );
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'mcp',
+      });
     });
 
-    it('should not display descriptions when nodesc argument is used', async () => {
-      await mcpCommand.action!(mockContext, 'nodesc');
+    it('should open MCP management dialog with nodesc argument', async () => {
+      const result = await mcpCommand.action!(mockContext, 'nodesc');
 
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.MCP_STATUS,
-          showDescriptions: false,
-          showTips: false,
-        }),
-        expect.any(Number),
-      );
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'mcp',
+      });
     });
   });
 });

@@ -109,8 +109,8 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available Qwen Code tools. Usage: /tools [desc]':
+    'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -384,8 +384,10 @@ export default {
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
   'exit the cli': 'sair da cli',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    'listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Abrir diálogo de gerenciamento MCP ou autenticar com servidor habilitado para OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+    'Listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Adicionar diretórios ao workspace. Use vírgula para separar vários caminhos',
@@ -887,9 +889,37 @@ export default {
   'Do you want to proceed?': 'Você deseja prosseguir?',
   'Yes, allow once': 'Sim, permitir uma vez',
   'Allow always': 'Permitir sempre',
+  Yes: 'Sim',
   No: 'Não',
   'No (esc)': 'Não (esc)',
   'Yes, allow always for this session': 'Sim, permitir sempre para esta sessão',
+
+  // MCP Management - Core translations
+  Disable: 'Desativar',
+  Enable: 'Ativar',
+  Reconnect: 'Reconectar',
+  'View tools': 'Ver ferramentas',
+  '(disabled)': '(desativado)',
+  'Error:': 'Erro:',
+  Extension: 'Extensão',
+  tool: 'ferramenta',
+  connected: 'conectado',
+  connecting: 'conectando',
+  disconnected: 'desconectado',
+  error: 'erro',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ferramentas inválidas',
+  invalid: 'inválido',
+  'invalid: {{reason}}': 'inválido: {{reason}}',
+  'missing name': 'nome ausente',
+  'missing description': 'descrição ausente',
+  '(unnamed)': '(sem nome)',
+  unknown: 'desconhecido',
+  'Warning: This tool cannot be called by the LLM':
+    'Aviso: Esta ferramenta não pode ser chamada pelo LLM',
+  Reason: 'Motivo',
+  'Tools must have both name and description to be used by the LLM.':
+    'As ferramentas devem ter tanto nome quanto descrição para serem usadas pelo LLM.',
   'Modify in progress:': 'Modificação em progresso:',
   'Save and close external editor to continue':
     'Salve e feche o editor externo para continuar',

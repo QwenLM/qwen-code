@@ -445,7 +445,7 @@ export class Config {
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private readonly allowedMcpServers?: string[];
-  private readonly excludedMcpServers?: string[];
+  private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1152,15 +1152,23 @@ export class Config {
       );
     }
 
-    if (this.excludedMcpServers) {
-      mcpServers = Object.fromEntries(
-        Object.entries(mcpServers).filter(
-          ([key]) => !this.excludedMcpServers?.includes(key),
-        ),
-      );
-    }
+    // Note: We no longer filter out excluded servers here.
+    // The UI layer should check isMcpServerDisabled() to determine
+    // whether to show a server as disabled.
 
     return mcpServers;
+  }
+
+  getExcludedMcpServers(): string[] | undefined {
+    return this.excludedMcpServers;
+  }
+
+  setExcludedMcpServers(excluded: string[]): void {
+    this.excludedMcpServers = excluded;
+  }
+
+  isMcpServerDisabled(serverName: string): boolean {
+    return this.excludedMcpServers?.includes(serverName) ?? false;
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {

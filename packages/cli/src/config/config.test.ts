@@ -1256,7 +1256,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     });
   });
 
-  it('should read excludeMCPServers from settings', async () => {
+  it('should read excludeMCPServers from settings but still return all servers', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -1264,12 +1264,18 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       mcp: { excluded: ['server1', 'server2'] },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
+    // getMcpServers() now returns all servers, use isMcpServerDisabled() to check status
     expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
       server3: { url: 'http://localhost:8082' },
     });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
-  it('should override allowMCPServers with excludeMCPServers if overlapping', async () => {
+  it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -1280,9 +1286,14 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
+    // allowedMcpServers filters which servers are available
+    // but excluded servers are still returned by getMcpServers()
     expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
       server2: { url: 'http://localhost:8081' },
     });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
   });
 
   it('should prioritize mcp server flag if set', async () => {
