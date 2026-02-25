@@ -9,7 +9,6 @@ import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
-import type { PromptContent } from '../../services/acpSessionManager.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -354,17 +353,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       formattedText = `${contextParts}\n\n${text}`;
     }
 
-    // Build prompt content
-    let promptContent: PromptContent[] = [];
-
-    // Add text content (with context if present)
-    if (formattedText) {
-      promptContent.push({
-        type: 'text',
-        text: formattedText,
-      });
-    }
-
     // Add image attachments - save to files and reference them
     if (attachments && attachments.length > 0) {
       console.log(
@@ -406,29 +394,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
       if (imageReferences.length > 0) {
         const imageText = imageReferences.join(' ');
         // Update the formatted text with image references
-        const updatedText = formattedText
+        formattedText = formattedText
           ? `${formattedText}\n\n${imageText}`
           : imageText;
-
-        // Replace the prompt content with updated text
-        promptContent = [
-          {
-            type: 'text',
-            text: updatedText,
-          },
-        ];
-
-        console.log(
-          '[SessionMessageHandler] Updated text with image references:',
-          updatedText,
-        );
       }
     }
-
-    console.log('[SessionMessageHandler] Final promptContent:', {
-      count: promptContent.length,
-      types: promptContent.map((c) => c.type),
-    });
 
     // Ensure we have an active conversation
     if (!this.currentConversationId) {
@@ -557,8 +527,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         data: { timestamp: Date.now() },
       });
 
-      // Send multimodal content instead of plain text
-      await this.agentManager.sendMessage(promptContent);
+      await this.agentManager.sendMessage(formattedText);
 
       // Save assistant message
       if (this.currentStreamContent && this.currentConversationId) {
