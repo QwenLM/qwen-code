@@ -52,6 +52,9 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 
+.qwen/
+!.qwen/commands/
+!.qwen/skills/
 logs/
 # GHA credentials
 gha-creds-*.json

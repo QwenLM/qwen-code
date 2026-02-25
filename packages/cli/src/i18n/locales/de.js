@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ Anhänge verwalten',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → auswählen, Entf zum Löschen, ↓ beenden',
+  'Attachments: ': 'Anhänge: ',
+
   'Basics:': 'Grundlagen:',
   'Add context': 'Kontext hinzufügen',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -1030,8 +1036,8 @@ export default {
   '(not set)': '(nicht gesetzt)',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Das neueste Qwen Coder Modell von Alibaba Cloud ModelStudio (Version: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — effizientes Hybridmodell mit führender Programmierleistung',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Das neueste Qwen Vision Modell von Alibaba Cloud ModelStudio (Version: qwen3-vl-plus-2025-09-23)',
 
@@ -1417,8 +1423,12 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
+  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
   "Paste your api key of Bailian Coding Plan and you're all set!":
     'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    'Fügen Sie Ihren Coding Plan (Bailian, Global/Intl) API-Schlüssel ein und Sie sind bereit!',
   Custom: 'Benutzerdefiniert',
   'More instructions about configuring `modelProviders` manually.':
     'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
@@ -1428,4 +1438,18 @@ export default {
   '(Press Enter to submit, Escape to cancel)':
     '(Enter zum Absenden, Escape zum Abbrechen)',
   'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Neue Modellkonfigurationen sind für {{region}} verfügbar. Jetzt aktualisieren?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'Neue Modellkonfigurationen sind für Bailian Coding Plan (China) verfügbar. Jetzt aktualisieren?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'Neue Modellkonfigurationen sind für Coding Plan (Bailian, Global/Intl) verfügbar. Jetzt aktualisieren?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
+  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
+    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel ist in settings.env gespeichert.',
 };

@@ -17,6 +17,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
+import { CodingPlanRegion } from '../../constants/codingPlan.js';
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders';
@@ -34,7 +35,7 @@ function parseDefaultAuthType(
 }
 
 // Sub-mode types for API-KEY authentication
-type ApiKeySubMode = 'coding-plan' | 'custom';
+type ApiKeySubMode = 'coding-plan' | 'coding-plan-intl' | 'custom';
 
 // View level for navigation
 type ViewLevel = 'main' | 'api-key-sub' | 'api-key-input' | 'custom-info';
@@ -52,6 +53,9 @@ export function AuthDialog(): React.JSX.Element {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [apiKeySubModeIndex, setApiKeySubModeIndex] = useState<number>(0);
+  const [region, setRegion] = useState<CodingPlanRegion>(
+    CodingPlanRegion.CHINA,
+  );
 
   // Main authentication entries
   const mainItems = [
@@ -71,8 +75,13 @@ export function AuthDialog(): React.JSX.Element {
   const apiKeySubItems = [
     {
       key: 'coding-plan',
-      label: t('Coding Plan (Bailian)'),
+      label: t('Coding Plan (Bailian, China)'),
       value: 'coding-plan' as ApiKeySubMode,
+    },
+    {
+      key: 'coding-plan-intl',
+      label: t('Coding Plan (Bailian, Global/Intl)'),
+      value: 'coding-plan-intl' as ApiKeySubMode,
     },
     {
       key: 'custom',
@@ -135,6 +144,10 @@ export function AuthDialog(): React.JSX.Element {
     onAuthError(null);
 
     if (subMode === 'coding-plan') {
+      setRegion(CodingPlanRegion.CHINA);
+      setViewLevel('api-key-input');
+    } else if (subMode === 'coding-plan-intl') {
+      setRegion(CodingPlanRegion.GLOBAL);
       setViewLevel('api-key-input');
     } else {
       setViewLevel('custom-info');
@@ -149,8 +162,8 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Submit to parent for processing
-    await handleCodingPlanSubmit(apiKey);
+    // Submit to parent for processing with region info
+    await handleCodingPlanSubmit(apiKey, region);
   };
 
   const handleGoBack = () => {
@@ -246,10 +259,12 @@ export function AuthDialog(): React.JSX.Element {
       </Box>
       <Box marginTop={1} paddingLeft={2}>
         <Text color={theme.text.secondary}>
-          {apiKeySubItems[apiKeySubModeIndex]?.value === 'coding-plan'
-            ? t("Paste your api key of Bailian Coding Plan and you're all set!")
-            : t(
+          {apiKeySubItems[apiKeySubModeIndex]?.value === 'custom'
+            ? t(
                 'More instructions about configuring `modelProviders` manually.',
+              )
+            : t(
+                "Paste your api key of Bailian Coding Plan and you're all set!",
               )}
         </Text>
       </Box>
@@ -264,7 +279,11 @@ export function AuthDialog(): React.JSX.Element {
   // Render API key input for coding-plan mode
   const renderApiKeyInputView = () => (
     <Box marginTop={1}>
-      <ApiKeyInput onSubmit={handleApiKeyInputSubmit} onCancel={handleGoBack} />
+      <ApiKeyInput
+        onSubmit={handleApiKeyInputSubmit}
+        onCancel={handleGoBack}
+        region={region}
+      />
     </Box>
   );
 

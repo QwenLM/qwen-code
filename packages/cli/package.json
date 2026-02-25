@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.10.1",
+  "version": "0.10.5",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -34,7 +34,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.10.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.10.5"
   },
   "dependencies": {
     "@google/genai": "1.30.0",
@@ -81,12 +81,12 @@
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/node": "^20.11.24",
+    "@types/prompts": "^2.4.9",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/semver": "^7.7.0",
     "@types/shell-quote": "^1.7.5",
     "@types/yargs": "^17.0.32",
-    "@types/prompts": "^2.4.9",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",
@@ -94,6 +94,15 @@
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
+  },
+  "optionalDependencies": {
+    "@teddyzhu/clipboard": "^0.0.5",
+    "@teddyzhu/clipboard-darwin-arm64": "0.0.5",
+    "@teddyzhu/clipboard-darwin-x64": "0.0.5",
+    "@teddyzhu/clipboard-linux-x64-gnu": "0.0.5",
+    "@teddyzhu/clipboard-linux-arm64-gnu": "0.0.5",
+    "@teddyzhu/clipboard-win32-x64-msvc": "0.0.5",
+    "@teddyzhu/clipboard-win32-arm64-msvc": "0.0.5"
   },
   "engines": {
     "node": ">=20"

@@ -161,6 +161,13 @@ const distPackageJson = {
     '@lydell/node-pty-linux-x64': '1.1.0',
     '@lydell/node-pty-win32-arm64': '1.1.0',
     '@lydell/node-pty-win32-x64': '1.1.0',
+    '@teddyzhu/clipboard': '0.0.5',
+    '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
+    '@teddyzhu/clipboard-darwin-x64': '0.0.5',
+    '@teddyzhu/clipboard-linux-x64-gnu': '0.0.5',
+    '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
+    '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
+    '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
   },
   engines: rootPackageJson.engines,
 };

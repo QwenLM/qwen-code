@@ -11,6 +11,7 @@ import { defaultKeyBindings } from '../config/keyBindings.js';
 import type { Key } from './hooks/useKeypress.js';
 
 describe('keyMatchers', () => {
+  const isWindows = process.platform === 'win32';
   const createKey = (name: string, mods: Partial<Key> = {}): Key => ({
     name,
     ctrl: false,
@@ -49,7 +50,8 @@ describe('keyMatchers', () => {
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
-    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) => key.ctrl && key.name === 'v',
+    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
+      (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
@@ -216,8 +218,12 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.PASTE_CLIPBOARD_IMAGE,
-      positive: [createKey('v', { ctrl: true })],
-      negative: [createKey('v'), createKey('c', { ctrl: true })],
+      positive: isWindows
+        ? [createKey('v', { meta: true })]
+        : [createKey('v', { ctrl: true }), createKey('v', { meta: true })],
+      negative: isWindows
+        ? [createKey('v', { ctrl: true }), createKey('v')]
+        : [createKey('v'), createKey('c', { ctrl: true })],
     },
 
     // App level bindings

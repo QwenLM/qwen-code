@@ -6,116 +6,86 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { createDebugLogger, execCommand } from '@qwen-code/qwen-code-core';
-
-const MACOS_CLIPBOARD_TIMEOUT_MS = 1500;
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ClipboardModule = any;
+
+let cachedClipboardModule: ClipboardModule | null = null;
+let clipboardLoadAttempted = false;
+
+async function getClipboardModule(): Promise<ClipboardModule | null> {
+  if (clipboardLoadAttempted) return cachedClipboardModule;
+  clipboardLoadAttempted = true;
+
+  try {
+    const modName = '@teddyzhu/clipboard';
+    cachedClipboardModule = await import(modName);
+    return cachedClipboardModule;
+  } catch (_e) {
+    debugLogger.error(
+      'Failed to load @teddyzhu/clipboard native module. Clipboard image features will be unavailable.',
+    );
+    return null;
+  }
+}
+
 /**
- * Checks if the system clipboard contains an image (macOS only for now)
+ * Checks if the system clipboard contains an image
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(): Promise<boolean> {
-  if (process.platform !== 'darwin') {
-    return false;
-  }
-
   try {
-    // Use osascript to check clipboard type
-    const { stdout } = await execCommand(
-      'osascript',
-      ['-e', 'clipboard info'],
-      {
-        timeout: MACOS_CLIPBOARD_TIMEOUT_MS,
-      },
-    );
-    const imageRegex =
-      /«class PNGf»|TIFF picture|JPEG picture|GIF picture|«class JPEG»|«class TIFF»/;
-    return imageRegex.test(stdout);
-  } catch {
+    const mod = await getClipboardModule();
+    if (!mod) return false;
+    const clipboard = new mod.ClipboardManager();
+    return clipboard.hasFormat('image');
+  } catch (error) {
+    debugLogger.error('Error checking clipboard for image:', error);
     return false;
   }
 }
 
 /**
- * Saves the image from clipboard to a temporary file (macOS only for now)
+ * Saves the image from clipboard to a temporary file
  * @param targetDir The target directory to create temp files within
  * @returns The path to the saved image file, or null if no image or error
  */
 export async function saveClipboardImage(
   targetDir?: string,
 ): Promise<string | null> {
-  if (process.platform !== 'darwin') {
-    return null;
-  }
-
   try {
+    const mod = await getClipboardModule();
+    if (!mod) return null;
+    const clipboard = new mod.ClipboardManager();
+
+    if (!clipboard.hasFormat('image')) {
+      return null;
+    }
+
     // Create a temporary directory for clipboard images within the target directory
     // This avoids security restrictions on paths outside the target directory
     const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, '.qwen-clipboard');
+    const tempDir = path.join(baseDir, 'clipboard');
     await fs.mkdir(tempDir, { recursive: true });
 
     // Generate a unique filename with timestamp
     const timestamp = new Date().getTime();
+    const tempFilePath = path.join(tempDir, `clipboard-${timestamp}.png`);
 
-    // Try different image formats in order of preference
-    const formats = [
-      { class: 'PNGf', extension: 'png' },
-      { class: 'JPEG', extension: 'jpg' },
-      { class: 'TIFF', extension: 'tiff' },
-      { class: 'GIFf', extension: 'gif' },
-    ];
+    const imageData = clipboard.getImageData();
+    // Use data buffer from the API
+    const buffer = imageData.data;
 
-    for (const format of formats) {
-      const tempFilePath = path.join(
-        tempDir,
-        `clipboard-${timestamp}.${format.extension}`,
-      );
-
-      // Try to save clipboard as this format
-      const script = `
-        try
-          set imageData to the clipboard as «class ${format.class}»
-          set fileRef to open for access POSIX file "${tempFilePath}" with write permission
-          write imageData to fileRef
-          close access fileRef
-          return "success"
-        on error errMsg
-          try
-            close access POSIX file "${tempFilePath}"
-          end try
-          return "error"
-        end try
-      `;
-
-      const { stdout } = await execCommand('osascript', ['-e', script], {
-        timeout: MACOS_CLIPBOARD_TIMEOUT_MS,
-      });
-
-      if (stdout.trim() === 'success') {
-        // Verify the file was created and has content
-        try {
-          const stats = await fs.stat(tempFilePath);
-          if (stats.size > 0) {
-            return tempFilePath;
-          }
-        } catch {
-          // File doesn't exist, continue to next format
-        }
-      }
-
-      // Clean up failed attempt
-      try {
-        await fs.unlink(tempFilePath);
-      } catch {
-        // Ignore cleanup errors
-      }
+    if (!buffer) {
+      return null;
     }
 
-    // No format worked
-    return null;
+    await fs.writeFile(tempFilePath, buffer);
+
+    return tempFilePath;
   } catch (error) {
     debugLogger.error('Error saving clipboard image:', error);
     return null;
@@ -123,8 +93,8 @@ export async function saveClipboardImage(
 }
 
 /**
- * Cleans up old temporary clipboard image files
- * Removes files older than 1 hour
+ * Cleans up old temporary clipboard image files using LRU strategy
+ * Keeps maximum 100 images, when exceeding removes 50 oldest files to reduce cleanup frequency
  * @param targetDir The target directory where temp files are stored
  */
 export async function cleanupOldClipboardImages(
@@ -132,23 +102,49 @@ export async function cleanupOldClipboardImages(
 ): Promise<void> {
   try {
     const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, '.qwen-clipboard');
+    const tempDir = path.join(baseDir, 'clipboard');
     const files = await fs.readdir(tempDir);
-    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    const MAX_IMAGES = 100;
+    const CLEANUP_COUNT = 50;
+
+    // Filter clipboard image files and get their stats
+    const imageFiles: Array<{ name: string; path: string; atime: number }> = [];
 
     for (const file of files) {
       if (
         file.startsWith('clipboard-') &&
         (file.endsWith('.png') ||
           file.endsWith('.jpg') ||
+          file.endsWith('.webp') ||
+          file.endsWith('.heic') ||
+          file.endsWith('.heif') ||
           file.endsWith('.tiff') ||
-          file.endsWith('.gif'))
+          file.endsWith('.gif') ||
+          file.endsWith('.bmp'))
       ) {
         const filePath = path.join(tempDir, file);
         const stats = await fs.stat(filePath);
-        if (stats.mtimeMs < oneHourAgo) {
-          await fs.unlink(filePath);
-        }
+        imageFiles.push({
+          name: file,
+          path: filePath,
+          atime: stats.atimeMs,
+        });
+      }
+    }
+
+    // If exceeds limit, remove CLEANUP_COUNT oldest files to reduce cleanup frequency
+    if (imageFiles.length > MAX_IMAGES) {
+      // Sort by access time (oldest first)
+      imageFiles.sort((a, b) => a.atime - b.atime);
+
+      // Remove CLEANUP_COUNT oldest files (or all excess files if less than CLEANUP_COUNT)
+      const removeCount = Math.min(
+        CLEANUP_COUNT,
+        imageFiles.length - MAX_IMAGES + CLEANUP_COUNT,
+      );
+      const filesToRemove = imageFiles.slice(0, removeCount);
+      for (const file of filesToRemove) {
+        await fs.unlink(file.path);
       }
     }
   } catch {
