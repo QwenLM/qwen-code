@@ -562,16 +562,14 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     );
   }, [getCurrentStep, servers.length]);
 
-  // ESC键处理
+  // ESC 键处理 - 仅关闭对话框，子组件的返回由各自处理避免重复触发
   useKeypress(
     (key) => {
-      if (key.name === 'escape') {
-        const currentStep = getCurrentStep();
-        if (currentStep === MCP_MANAGEMENT_STEPS.SERVER_LIST) {
-          onClose();
-        } else {
-          handleNavigateBack();
-        }
+      if (
+        key.name === 'escape' &&
+        getCurrentStep() === MCP_MANAGEMENT_STEPS.SERVER_LIST
+      ) {
+        onClose();
       }
     },
     { isActive: true },
