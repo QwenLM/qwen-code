@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ to manage attachments',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → select, Delete to remove, ↓ to exit',
+  'Attachments: ': 'Attachments: ',
+
   'Basics:': 'Basics:',
   'Add context': 'Add context',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':

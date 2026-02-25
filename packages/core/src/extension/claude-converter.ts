@@ -100,7 +100,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Grep: 'Grep',
   KillShell: 'None',
   NotebookEdit: 'None',
-  Read: ['ReadFile', 'ReadManyFiles'],
+  Read: 'ReadFile',
   Skill: 'Skill',
   Task: 'Task',
   TodoWrite: 'TodoWrite',
