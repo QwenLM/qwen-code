@@ -81,19 +81,21 @@ describe('Image Utils', () => {
     it('should accept supported image types', () => {
       const pngFile = new File([''], 'test.png', { type: 'image/png' });
       const jpegFile = new File([''], 'test.jpg', { type: 'image/jpeg' });
-      const gifFile = new File([''], 'test.gif', { type: 'image/gif' });
+      const heicFile = new File([''], 'test.heic', { type: 'image/heic' });
 
       expect(isSupportedImage(pngFile)).toBe(true);
       expect(isSupportedImage(jpegFile)).toBe(true);
-      expect(isSupportedImage(gifFile)).toBe(true);
+      expect(isSupportedImage(heicFile)).toBe(true);
     });
 
     it('should reject unsupported file types', () => {
       const textFile = new File([''], 'test.txt', { type: 'text/plain' });
       const pdfFile = new File([''], 'test.pdf', { type: 'application/pdf' });
+      const gifFile = new File([''], 'test.gif', { type: 'image/gif' });
 
       expect(isSupportedImage(textFile)).toBe(false);
       expect(isSupportedImage(pdfFile)).toBe(false);
+      expect(isSupportedImage(gifFile)).toBe(false);
     });
   });
 
@@ -140,8 +142,8 @@ describe('Image Utils', () => {
     it('should return correct extensions', () => {
       expect(getExtensionFromMimeType('image/png')).toBe('.png');
       expect(getExtensionFromMimeType('image/jpeg')).toBe('.jpg');
-      expect(getExtensionFromMimeType('image/gif')).toBe('.gif');
       expect(getExtensionFromMimeType('image/webp')).toBe('.webp');
+      expect(getExtensionFromMimeType('image/bmp')).toBe('.bmp');
       expect(getExtensionFromMimeType('image/tiff')).toBe('.tiff');
       expect(getExtensionFromMimeType('image/heic')).toBe('.heic');
       expect(getExtensionFromMimeType('unknown/type')).toBe('.png'); // default
@@ -199,7 +201,6 @@ describe('Image Utils', () => {
     it('should use correct extension for each mime type', () => {
       expect(generatePastedImageName('image/png')).toMatch(/\.png$/);
       expect(generatePastedImageName('image/jpeg')).toMatch(/\.jpg$/);
-      expect(generatePastedImageName('image/gif')).toMatch(/\.gif$/);
       expect(generatePastedImageName('image/webp')).toMatch(/\.webp$/);
       expect(generatePastedImageName('image/tiff')).toMatch(/\.tiff$/);
       expect(generatePastedImageName('image/heic')).toMatch(/\.heic$/);

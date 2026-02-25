@@ -4,18 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Supported image MIME types
-// Aligned with Core's SUPPORTED_IMAGE_MIME_TYPES in packages/core/src/utils/request-tokenizer/supportedImageFormats.ts
-export const SUPPORTED_IMAGE_TYPES = [
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-  'image/webp',
-  'image/bmp',
-  'image/tiff',
-  'image/heic',
-];
+import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core/src/utils/request-tokenizer/supportedImageFormats.js';
 
 // Maximum file size in bytes (10MB)
 export const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
@@ -50,7 +39,7 @@ export async function fileToBase64(file: File | Blob): Promise<string> {
  * Check if a file is a supported image type
  */
 export function isSupportedImage(file: File): boolean {
-  return SUPPORTED_IMAGE_TYPES.includes(file.type);
+  return isSupportedImageMimeType(file.type);
 }
 
 /**
@@ -78,22 +67,6 @@ export function formatFileSize(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-/**
- * Extract image dimensions from base64 string
- */
-export async function getImageDimensions(
-  base64: string,
-): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      resolve({ width: img.width, height: img.height });
-    };
-    img.onerror = reject;
-    img.src = base64;
-  });
 }
 
 /**
@@ -137,12 +110,10 @@ export function getExtensionFromMimeType(mimeType: string): string {
     'image/png': '.png',
     'image/jpeg': '.jpg',
     'image/jpg': '.jpg',
-    'image/gif': '.gif',
     'image/webp': '.webp',
     'image/bmp': '.bmp',
     'image/tiff': '.tiff',
     'image/heic': '.heic',
-    'image/svg+xml': '.svg',
   };
   return mimeMap[mimeType] || '.png';
 }

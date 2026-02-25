@@ -11,6 +11,7 @@ import {
   isSupportedImage,
   isWithinSizeLimit,
   formatFileSize,
+  MAX_TOTAL_IMAGE_SIZE,
   type ImageAttachment,
 } from '../utils/imageUtils.js';
 
@@ -18,12 +19,16 @@ interface UsePasteHandlerOptions {
   onImagesAdded?: (images: ImageAttachment[]) => void;
   onTextPaste?: (text: string) => void;
   onError?: (error: string) => void;
+  getCurrentTotalSize?: () => number;
+  maxTotalSize?: number;
 }
 
 export function usePasteHandler({
   onImagesAdded,
   onTextPaste,
   onError,
+  getCurrentTotalSize,
+  maxTotalSize = MAX_TOTAL_IMAGE_SIZE,
 }: UsePasteHandlerOptions) {
   const processingRef = useRef(false);
 
@@ -50,6 +55,7 @@ export function usePasteHandler({
 
         const imageAttachments: ImageAttachment[] = [];
         const errors: string[] = [];
+        let runningTotal = getCurrentTotalSize?.() ?? 0;
 
         try {
           for (let i = 0; i < files.length; i++) {
@@ -76,6 +82,13 @@ export function usePasteHandler({
               continue;
             }
 
+            if (runningTotal + file.size > maxTotalSize) {
+              errors.push(
+                `Skipping image "${file.name || 'pasted image'}" – total attachment size would exceed ${formatFileSize(maxTotalSize)}.`,
+              );
+              continue;
+            }
+
             try {
               // If the file doesn't have a name (clipboard paste), generate one
               const imageFile =
@@ -88,6 +101,7 @@ export function usePasteHandler({
               const attachment = await createImageAttachment(imageFile);
               if (attachment) {
                 imageAttachments.push(attachment);
+                runningTotal += attachment.size;
               }
             } catch (error) {
               console.error('Failed to process pasted image:', error);
@@ -121,7 +135,7 @@ export function usePasteHandler({
         onTextPaste(text);
       }
     },
-    [onImagesAdded, onTextPaste, onError],
+    [onImagesAdded, onTextPaste, onError, getCurrentTotalSize, maxTotalSize],
   );
 
   return { handlePaste };

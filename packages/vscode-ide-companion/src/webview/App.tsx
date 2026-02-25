@@ -50,7 +50,6 @@ import {
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 import type { ImageAttachment } from './utils/imageUtils.js';
-import { formatFileSize, MAX_TOTAL_IMAGE_SIZE } from './utils/imageUtils.js';
 import { usePasteHandler } from './hooks/usePasteHandler.js';
 import { ImagePreview } from './components/ImagePreview.js';
 
@@ -288,27 +287,10 @@ export const App: React.FC = () => {
 
   // Image handling
   const handleAddImages = useCallback((newImages: ImageAttachment[]) => {
-    setAttachedImages((prev) => {
-      const currentTotal = prev.reduce((sum, img) => sum + img.size, 0);
-      let runningTotal = currentTotal;
-      const accepted: ImageAttachment[] = [];
-
-      for (const img of newImages) {
-        if (runningTotal + img.size > MAX_TOTAL_IMAGE_SIZE) {
-          console.warn(
-            `Skipping image "${img.name}" – total attachment size would exceed ${formatFileSize(MAX_TOTAL_IMAGE_SIZE)}.`,
-          );
-          continue;
-        }
-        accepted.push(img);
-        runningTotal += img.size;
-      }
-
-      if (accepted.length === 0) {
-        return prev;
-      }
-      return [...prev, ...accepted];
-    });
+    if (newImages.length === 0) {
+      return;
+    }
+    setAttachedImages((prev) => [...prev, ...newImages]);
   }, []);
 
   const handleRemoveImage = useCallback((imageId: string) => {
@@ -322,6 +304,8 @@ export const App: React.FC = () => {
   // Initialize paste handler
   const { handlePaste } = usePasteHandler({
     onImagesAdded: handleAddImages,
+    getCurrentTotalSize: () =>
+      attachedImages.reduce((sum, img) => sum + img.size, 0),
     onError: (error) => {
       console.error('Paste error:', error);
       // You can show a toast/notification here if needed
