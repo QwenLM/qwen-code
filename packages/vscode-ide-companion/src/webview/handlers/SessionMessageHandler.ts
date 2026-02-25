@@ -196,8 +196,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const buffer = Buffer.from(pureBase64, 'base64');
       fs.writeFileSync(tempFilePath, buffer);
 
-      console.log('[SessionMessageHandler] Saved image to:', tempFilePath);
-
       // Return relative path from workspace root
       const relativePath = path.relative(
         workspaceFolder.uri.fsPath,
@@ -321,14 +319,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }>,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
-    if (attachments && attachments.length > 0) {
-      console.log(
-        '[SessionMessageHandler] Message includes',
-        attachments.length,
-        'image attachments',
-      );
-    }
-
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
@@ -355,21 +345,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Add image attachments - save to files and reference them
     if (attachments && attachments.length > 0) {
-      console.log(
-        '[SessionMessageHandler] Processing attachments - saving to files',
-      );
-
       // Save images as files and add references to the text
       const imageReferences: string[] = [];
 
       for (const attachment of attachments) {
-        console.log('[SessionMessageHandler] Processing attachment:', {
-          id: attachment.id,
-          name: attachment.name,
-          type: attachment.type,
-          dataLength: attachment.data.length,
-        });
-
         // Save image to file
         const imagePath = await this.saveImageToFile(
           attachment.data,
@@ -378,10 +357,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         if (imagePath) {
           // Add file reference to the message (like CLI does with @path)
           imageReferences.push(`@${imagePath}`);
-          console.log(
-            '[SessionMessageHandler] Added image reference:',
-            `@${imagePath}`,
-          );
         } else {
           console.warn(
             '[SessionMessageHandler] Failed to save image:',
@@ -476,10 +451,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
       userMessage,
     );
 
-    // Send to WebView with file context and attachments
+    // Send to WebView with file context
     this.sendToWebView({
       type: 'message',
-      data: { ...userMessage, fileContext, attachments },
+      data: { ...userMessage, fileContext },
     });
 
     // Check if agent is connected

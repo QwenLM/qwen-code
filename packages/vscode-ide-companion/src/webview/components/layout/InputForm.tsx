@@ -21,10 +21,8 @@ import { ModelSelector } from './ModelSelector.js';
 /**
  * Extended props that accept ApprovalModeValue and ModelSelector
  */
-export interface InputFormProps extends Omit<
-  BaseInputFormProps,
-  'editModeInfo'
-> {
+export interface InputFormProps
+  extends Omit<BaseInputFormProps, 'editModeInfo'> {
   /** Edit mode value (local type) */
   editMode: ApprovalModeValue;
   /** Whether to show model selector */

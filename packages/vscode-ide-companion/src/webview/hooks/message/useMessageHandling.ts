@@ -5,7 +5,6 @@
  */
 
 import { useState, useRef, useCallback } from 'react';
-import type { ImageAttachment } from '../../utils/imageUtils.js';
 
 export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
@@ -17,7 +16,6 @@ export interface TextMessage {
     startLine?: number;
     endLine?: number;
   };
-  attachments?: ImageAttachment[];
 }
 
 /**
