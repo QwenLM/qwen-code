@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
 import type { QwenSession, QwenMessage } from './qwenSessionReader.js';
 
 /**
@@ -28,19 +29,12 @@ export class QwenSessionManager {
   }
 
   /**
-   * Calculate project hash (same as CLI)
-   * Qwen CLI uses SHA256 hash of the project path
-   */
-  private getProjectHash(workingDir: string): string {
-    return crypto.createHash('sha256').update(workingDir).digest('hex');
-  }
-
-  /**
-   * Get the session directory for a project
+   * Get the session directory for a project with backward compatibility
    */
   private getSessionDir(workingDir: string): string {
-    const projectHash = this.getProjectHash(workingDir);
-    return path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+    const projectHash = getProjectHash(workingDir);
+    const sessionDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+    return sessionDir;
   }
 
   /**
@@ -87,7 +81,7 @@ export class QwenSessionManager {
       // Create session object
       const session: QwenSession = {
         sessionId,
-        projectHash: this.getProjectHash(workingDir),
+        projectHash: getProjectHash(workingDir),
         startTime: messages[0]?.timestamp || new Date().toISOString(),
         lastUpdated: new Date().toISOString(),
         messages,
