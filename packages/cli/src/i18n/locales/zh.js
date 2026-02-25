@@ -109,7 +109,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     '分析项目并创建定制的 QWEN.md 文件',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
@@ -355,7 +355,9 @@ export default {
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
   'exit the cli': '退出命令行界面',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    '打开 MCP 管理对话框，或在支持 OAuth 的服务器上进行身份验证',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '列出已配置的 MCP 服务器和工具，或使用支持 OAuth 的服务器进行身份验证',
   'Manage workspace directories': '管理工作区目录',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -679,6 +681,7 @@ export default {
     '使用支持 OAuth 的 MCP 服务器进行认证',
   'List configured MCP servers and tools': '列出已配置的 MCP 服务器和工具',
   'Restarts MCP servers.': '重启 MCP 服务器',
+  'Open MCP management dialog': '打开 MCP 管理对话框',
   'Config not loaded.': '配置未加载',
   'Could not retrieve tool registry.': '无法检索工具注册表',
   'No MCP servers configured with OAuth authentication.':
@@ -693,6 +696,36 @@ export default {
     "认证 MCP 服务器 '{{name}}' 失败：{{error}}",
   "Re-discovering tools from '{{name}}'...":
     "正在重新发现 '{{name}}' 的工具...",
+
+  // ============================================================================
+  // MCP Management Dialog
+  // ============================================================================
+  'Manage MCP servers': '管理 MCP 服务器',
+  'Server Detail': '服务器详情',
+  'Disable Server': '禁用服务器',
+  'Server Logs': '服务器日志',
+  Tools: '工具',
+  'Tool Detail': '工具详情',
+  'MCP Management': 'MCP 管理',
+  'Unknown step': '未知步骤',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ 导航 · Enter 选择 · Esc 关闭',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ 导航 · Enter 选择 · Esc 返回',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ 导航 · Enter 确认 · Esc 返回',
+  '↑↓ to navigate · M to pause/resume · Q/Esc to back':
+    '↑↓ 导航 · M 暂停/继续 · Q/Esc 返回',
+  'User Settings (global)': '用户设置（全局）',
+  'Workspace Settings (project-specific)': '工作区设置（项目级）',
+  'Disable server:': '禁用服务器：',
+  'Select where to add the server to the exclude list:':
+    '选择将服务器添加到排除列表的位置：',
+  'Press Enter to confirm, Esc to cancel': '按 Enter 确认，Esc 取消',
+  'View tools': '查看工具',
+  'View logs': '查看日志',
+  Reconnect: '重新连接',
+  Enable: '启用',
 
   // ============================================================================
   // Commands - Chat

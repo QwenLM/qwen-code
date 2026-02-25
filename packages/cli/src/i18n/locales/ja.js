@@ -83,7 +83,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
@@ -316,7 +316,9 @@ export default {
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP管理ダイアログを開く、またはOAuth対応サーバーで認証',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '設定済みのMCPサーバーとツールを一覧表示、またはOAuth対応サーバーで認証',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':

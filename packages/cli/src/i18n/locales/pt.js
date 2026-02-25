@@ -109,8 +109,8 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available Qwen Code tools. Usage: /tools [desc]':
+    'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -384,8 +384,10 @@ export default {
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
   'exit the cli': 'sair da cli',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    'listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Abrir diálogo de gerenciamento MCP ou autenticar com servidor habilitado para OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+    'Listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Adicionar diretórios ao workspace. Use vírgula para separar vários caminhos',

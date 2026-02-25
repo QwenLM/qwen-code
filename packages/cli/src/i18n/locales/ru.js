@@ -111,7 +111,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Анализ проекта и создание адаптированного файла QWEN.md',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
@@ -373,7 +373,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
   'exit the cli': 'Выход из CLI',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Открыть диалог управления MCP или авторизоваться на сервере с поддержкой OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Показать настроенные MCP-серверы и инструменты, или авторизоваться на серверах с поддержкой OAuth',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
