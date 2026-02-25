@@ -142,7 +142,67 @@ describe('Image Utils', () => {
       expect(getExtensionFromMimeType('image/jpeg')).toBe('.jpg');
       expect(getExtensionFromMimeType('image/gif')).toBe('.gif');
       expect(getExtensionFromMimeType('image/webp')).toBe('.webp');
+      expect(getExtensionFromMimeType('image/tiff')).toBe('.tiff');
+      expect(getExtensionFromMimeType('image/heic')).toBe('.heic');
       expect(getExtensionFromMimeType('unknown/type')).toBe('.png'); // default
+    });
+  });
+
+  describe('createImageAttachment', () => {
+    it('should create attachment from valid image file', async () => {
+      const content = 'fake-image-data';
+      const file = new File([content], 'test.png', { type: 'image/png' });
+      const { createImageAttachment } = await import('./imageUtils.js');
+      const attachment = await createImageAttachment(file);
+
+      expect(attachment).not.toBeNull();
+      expect(attachment?.name).toBe('test.png');
+      expect(attachment?.type).toBe('image/png');
+      expect(attachment?.data).toMatch(/^data:image\/png;base64,/);
+      expect(attachment?.id).toMatch(/^img_\d+_[a-z0-9]+$/);
+      expect(attachment?.timestamp).toBeGreaterThan(0);
+    });
+
+    it('should return null for unsupported image type', async () => {
+      const file = new File(['content'], 'test.txt', { type: 'text/plain' });
+      const { createImageAttachment } = await import('./imageUtils.js');
+      const attachment = await createImageAttachment(file);
+      expect(attachment).toBeNull();
+    });
+
+    it('should return null for oversized file', async () => {
+      // Create a mock file that exceeds 10MB limit
+      const largeContent = 'a'.repeat(11 * 1024 * 1024);
+      const file = new File([largeContent], 'large.png', { type: 'image/png' });
+      Object.defineProperty(file, 'size', { value: 11 * 1024 * 1024 });
+
+      const { createImageAttachment } = await import('./imageUtils.js');
+      const attachment = await createImageAttachment(file);
+      expect(attachment).toBeNull();
+    });
+  });
+
+  describe('generatePastedImageName', () => {
+    let generatePastedImageName: typeof import('./imageUtils.js').generatePastedImageName;
+
+    beforeAll(async () => {
+      const mod = await import('./imageUtils.js');
+      generatePastedImageName = mod.generatePastedImageName;
+    });
+
+    it('should generate valid timestamp-based names', () => {
+      const name = generatePastedImageName('image/png');
+
+      expect(name).toMatch(/^pasted_image_\d{6}\.png$/);
+    });
+
+    it('should use correct extension for each mime type', () => {
+      expect(generatePastedImageName('image/png')).toMatch(/\.png$/);
+      expect(generatePastedImageName('image/jpeg')).toMatch(/\.jpg$/);
+      expect(generatePastedImageName('image/gif')).toMatch(/\.gif$/);
+      expect(generatePastedImageName('image/webp')).toMatch(/\.webp$/);
+      expect(generatePastedImageName('image/tiff')).toMatch(/\.tiff$/);
+      expect(generatePastedImageName('image/heic')).toMatch(/\.heic$/);
     });
   });
 

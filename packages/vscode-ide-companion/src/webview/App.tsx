@@ -52,6 +52,7 @@ import {
 import type { ImageAttachment } from './utils/imageUtils.js';
 import { formatFileSize, MAX_TOTAL_IMAGE_SIZE } from './utils/imageUtils.js';
 import { usePasteHandler } from './hooks/usePasteHandler.js';
+import { ImagePreview } from './components/ImagePreview.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -857,7 +858,6 @@ export const App: React.FC = () => {
                   timestamp={msg.timestamp || 0}
                   onFileClick={handleFileClick}
                   fileContext={msg.fileContext}
-                  attachments={msg.attachments}
                 />
               );
             }
@@ -992,7 +992,6 @@ export const App: React.FC = () => {
           activeSelection={fileContext.activeSelection}
           skipAutoActiveContext={skipAutoActiveContext}
           contextUsage={contextUsage}
-          attachedImages={attachedImages}
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
@@ -1005,8 +1004,6 @@ export const App: React.FC = () => {
           onToggleSkipAutoActiveContext={() =>
             setSkipAutoActiveContext((v) => !v)
           }
-          onPaste={handlePaste}
-          onRemoveImage={handleRemoveImage}
           onShowCommandMenu={async () => {
             if (inputFieldRef.current) {
               inputFieldRef.current.focus();
@@ -1043,10 +1040,19 @@ export const App: React.FC = () => {
             }
           }}
           onAttachContext={handleAttachContextClick}
+          onPaste={handlePaste}
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
           onCompletionClose={completion.closeCompletion}
+          extraContent={
+            attachedImages.length > 0 ? (
+              <ImagePreview
+                images={attachedImages}
+                onRemove={handleRemoveImage}
+              />
+            ) : null
+          }
           showModelSelector={showModelSelector}
           availableModels={availableModels}
           currentModelId={modelInfo?.modelId}

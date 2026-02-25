@@ -5,6 +5,7 @@
  */
 
 // Supported image MIME types
+// Aligned with Core's SUPPORTED_IMAGE_MIME_TYPES in packages/core/src/utils/request-tokenizer/supportedImageFormats.ts
 export const SUPPORTED_IMAGE_TYPES = [
   'image/png',
   'image/jpeg',
@@ -12,6 +13,8 @@ export const SUPPORTED_IMAGE_TYPES = [
   'image/gif',
   'image/webp',
   'image/bmp',
+  'image/tiff',
+  'image/heic',
 ];
 
 // Maximum file size in bytes (10MB)
@@ -127,6 +130,7 @@ export async function createImageAttachment(
 
 /**
  * Get extension from MIME type
+ * Aligned with Core's SUPPORTED_IMAGE_MIME_TYPES
  */
 export function getExtensionFromMimeType(mimeType: string): string {
   const mimeMap: Record<string, string> = {
@@ -136,6 +140,8 @@ export function getExtensionFromMimeType(mimeType: string): string {
     'image/gif': '.gif',
     'image/webp': '.webp',
     'image/bmp': '.bmp',
+    'image/tiff': '.tiff',
+    'image/heic': '.heic',
     'image/svg+xml': '.svg',
   };
   return mimeMap[mimeType] || '.png';

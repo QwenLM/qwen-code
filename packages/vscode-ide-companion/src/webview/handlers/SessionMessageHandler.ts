@@ -15,14 +15,24 @@ import * as path from 'path';
 
 const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
 
+// Helper to check if error is authentication-related
+function isAuthError(errorMsg: string): boolean {
+  return (
+    errorMsg.includes('Authentication required') ||
+    errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
+    errorMsg.includes('Unauthorized') ||
+    errorMsg.includes('Invalid token') ||
+    errorMsg.includes('No active ACP session')
+  );
+}
+
 /**
  * Session message handler
- * Handles all session-related messages
  */
 export class SessionMessageHandler extends BaseMessageHandler {
   private currentStreamContent = '';
   private loginHandler: (() => Promise<void>) | null = null;
-  private isTitleSet = false; // Flag to track if title has been set
+  private isTitleSet = false;
 
   canHandle(messageType: string): boolean {
     return [
@@ -157,144 +167,62 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Save base64 image to a temporary file
-   * @param base64Data The base64 encoded image data (with or without data URL prefix)
-   * @param fileName Original filename
-   * @returns The path to the saved file or null if failed
+   * Save base64 image to clipboard directory (aligned with CLI)
    */
   private async saveImageToFile(
     base64Data: string,
     fileName: string,
   ): Promise<string | null> {
-    try {
-      // Get workspace folder
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!workspaceFolder) {
-        console.error('[SessionMessageHandler] No workspace folder found');
-        return null;
-      }
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) return null;
 
-      // Create temp directory for images (same as CLI)
-      const tempDir = path.join(
-        workspaceFolder.uri.fsPath,
-        '.gemini-clipboard',
-      );
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-
-      // Generate unique filename (same pattern as CLI)
-      const timestamp = Date.now();
-      const ext = path.extname(fileName) || '.png';
-      const tempFileName = `clipboard-${timestamp}${ext}`;
-      const tempFilePath = path.join(tempDir, tempFileName);
-
-      // Extract base64 data if it's a data URL
-      let pureBase64 = base64Data;
-      const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
-      if (dataUrlMatch) {
-        pureBase64 = dataUrlMatch[1];
-      }
-
-      // Write file
-      const buffer = Buffer.from(pureBase64, 'base64');
-      fs.writeFileSync(tempFilePath, buffer);
-
-      console.log('[SessionMessageHandler] Saved image to:', tempFilePath);
-
-      // Return relative path from workspace root
-      const relativePath = path.relative(
-        workspaceFolder.uri.fsPath,
-        tempFilePath,
-      );
-      return relativePath;
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to save image:', error);
-      return null;
+    const tempDir = path.join(workspaceFolder.uri.fsPath, 'clipboard');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
     }
+
+    const timestamp = Date.now();
+    const ext = path.extname(fileName) || '.png';
+    const tempFileName = `clipboard-${timestamp}${ext}`;
+    const tempFilePath = path.join(tempDir, tempFileName);
+
+    // Extract base64 data if it's a data URL
+    const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
+    const pureBase64 = dataUrlMatch ? dataUrlMatch[1] : base64Data;
+
+    fs.writeFileSync(tempFilePath, Buffer.from(pureBase64, 'base64'));
+
+    return path.relative(workspaceFolder.uri.fsPath, tempFilePath);
   }
 
   /**
-   * Get current stream content
+   * Read image file and convert to base64 for multimodal sending
    */
-  getCurrentStreamContent(): string {
-    return this.currentStreamContent;
-  }
+  private async readImageFile(
+    imagePath: string,
+  ): Promise<{ data: string; mimeType: string } | null> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) return null;
 
-  /**
-   * Append stream content
-   */
-  appendStreamContent(chunk: string): void {
-    this.currentStreamContent += chunk;
-  }
+    const fullPath = path.join(workspaceFolder.uri.fsPath, imagePath);
+    if (!fs.existsSync(fullPath)) return null;
 
-  /**
-   * Reset stream content
-   */
-  resetStreamContent(): void {
-    this.currentStreamContent = '';
-  }
+    const buffer = fs.readFileSync(fullPath);
+    const data = buffer.toString('base64');
 
-  /**
-   * Notify the webview that streaming has finished.
-   */
-  private sendStreamEnd(reason?: string): void {
-    const data: { timestamp: number; reason?: string } = {
-      timestamp: Date.now(),
+    const ext = path.extname(fullPath).toLowerCase();
+    const mimeTypeMap: Record<string, string> = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp',
+      '.tiff': 'image/tiff',
+      '.heic': 'image/heic',
     };
 
-    if (reason) {
-      data.reason = reason;
-    }
-
-    this.sendToWebView({
-      type: 'streamEnd',
-      data,
-    });
-  }
-
-  /**
-   * Prompt user to login and invoke the registered login handler/command.
-   * Returns true if a login was initiated.
-   */
-  private async promptLogin(message: string): Promise<boolean> {
-    const result = await vscode.window.showWarningMessage(message, 'Login Now');
-    if (result === 'Login Now') {
-      if (this.loginHandler) {
-        await this.loginHandler();
-      } else {
-        await vscode.commands.executeCommand('qwen-code.login');
-      }
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Prompt user to login or view offline. Returns 'login', 'offline', or 'dismiss'.
-   * When login is chosen, it triggers the login handler/command.
-   */
-  private async promptLoginOrOffline(
-    message: string,
-  ): Promise<'login' | 'offline' | 'dismiss'> {
-    const selection = await vscode.window.showWarningMessage(
-      message,
-      'Login Now',
-      'View Offline',
-    );
-
-    if (selection === 'Login Now') {
-      if (this.loginHandler) {
-        await this.loginHandler();
-      } else {
-        await vscode.commands.executeCommand('qwen-code.login');
-      }
-      return 'login';
-    }
-    if (selection === 'View Offline') {
-      return 'offline';
-    }
-    return 'dismiss';
+    return { data, mimeType: mimeTypeMap[ext] || 'image/png' };
   }
 
   /**
@@ -324,25 +252,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: number;
     }>,
   ): Promise<void> {
-    console.log('[SessionMessageHandler] handleSendMessage called with:', text);
-    if (attachments && attachments.length > 0) {
-      console.log(
-        '[SessionMessageHandler] Message includes',
-        attachments.length,
-        'image attachments',
-      );
-    }
-
-    // Guard: do not process empty or whitespace-only messages.
-    // This prevents ghost user-message bubbles when slash-command completions
-    // or model-selector interactions clear the input but still trigger a submit.
+    // Guard: ignore empty messages
     const trimmedText = text.replace(/\u200B/g, '').trim();
     if (!trimmedText) {
-      console.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
 
-    // Format message with file context if present
+    // Format message with context
     let formattedText = text;
     if (context && context.length > 0) {
       const contextParts = context
@@ -353,217 +269,127 @@ export class SessionMessageHandler extends BaseMessageHandler {
           return ctx.value;
         })
         .join('\n');
-
       formattedText = `${contextParts}\n\n${text}`;
     }
 
-    // Build prompt content
-    let promptContent: PromptContent[] = [];
+    // Build multimodal prompt content
+    const promptContent: PromptContent[] = [];
 
-    // Add text content (with context if present)
-    if (formattedText) {
-      promptContent.push({
-        type: 'text',
-        text: formattedText,
-      });
-    }
-
-    // Add image attachments - save to files and reference them
+    // Save images to files and read back as multimodal content (aligned with CLI)
+    const savedImagePaths: string[] = [];
     if (attachments && attachments.length > 0) {
-      console.log(
-        '[SessionMessageHandler] Processing attachments - saving to files',
-      );
-
-      // Save images as files and add references to the text
-      const imageReferences: string[] = [];
-
       for (const attachment of attachments) {
-        console.log('[SessionMessageHandler] Processing attachment:', {
-          id: attachment.id,
-          name: attachment.name,
-          type: attachment.type,
-          dataLength: attachment.data.length,
-        });
-
-        // Save image to file
         const imagePath = await this.saveImageToFile(
           attachment.data,
           attachment.name,
         );
         if (imagePath) {
-          // Add file reference to the message (like CLI does with @path)
-          imageReferences.push(`@${imagePath}`);
-          console.log(
-            '[SessionMessageHandler] Added image reference:',
-            `@${imagePath}`,
-          );
-        } else {
-          console.warn(
-            '[SessionMessageHandler] Failed to save image:',
-            attachment.name,
-          );
+          savedImagePaths.push(imagePath);
         }
-      }
-
-      // Add image references to the text
-      if (imageReferences.length > 0) {
-        const imageText = imageReferences.join(' ');
-        // Update the formatted text with image references
-        const updatedText = formattedText
-          ? `${formattedText}\n\n${imageText}`
-          : imageText;
-
-        // Replace the prompt content with updated text
-        promptContent = [
-          {
-            type: 'text',
-            text: updatedText,
-          },
-        ];
-
-        console.log(
-          '[SessionMessageHandler] Updated text with image references:',
-          updatedText,
-        );
       }
     }
 
-    console.log('[SessionMessageHandler] Final promptContent:', {
-      count: promptContent.length,
-      types: promptContent.map((c) => c.type),
-    });
+    // Add text content
+    if (formattedText) {
+      promptContent.push({ type: 'text', text: formattedText });
+    }
 
-    // Ensure we have an active conversation
+    // Add images as multimodal content
+    for (const imagePath of savedImagePaths) {
+      const imageData = await this.readImageFile(imagePath);
+      if (imageData) {
+        promptContent.push({
+          type: 'image',
+          data: imageData.data,
+          mimeType: imageData.mimeType,
+        });
+      }
+    }
+
+    // Ensure conversation exists
     if (!this.currentConversationId) {
-      console.log(
-        '[SessionMessageHandler] No active conversation, creating one...',
-      );
       try {
         const newConv = await this.conversationStore.createConversation();
         this.currentConversationId = newConv.id;
-        this.sendToWebView({
-          type: 'conversationLoaded',
-          data: newConv,
-        });
+        this.sendToWebView({ type: 'conversationLoaded', data: newConv });
       } catch (error) {
-        const errorMsg = `Failed to create conversation: ${error}`;
-        console.error('[SessionMessageHandler]', errorMsg);
-        vscode.window.showErrorMessage(errorMsg);
         this.sendToWebView({
           type: 'error',
-          data: { message: errorMsg },
+          data: { message: `Failed to create conversation: ${error}` },
         });
         return;
       }
     }
 
-    if (!this.currentConversationId) {
-      const errorMsg =
-        'Failed to create conversation. Please restart the extension.';
-      console.error('[SessionMessageHandler]', errorMsg);
-      vscode.window.showErrorMessage(errorMsg);
-      this.sendToWebView({
-        type: 'error',
-        data: { message: errorMsg },
-      });
-      return;
-    }
-
-    // Check if this is the first message
-    let isFirstMessage = false;
-    try {
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      isFirstMessage = !conversation || conversation.messages.length === 0;
-    } catch (error) {
-      console.error(
-        '[SessionMessageHandler] Failed to check conversation:',
-        error,
-      );
-    }
-
-    // Generate title for first message, but only if it hasn't been set yet
-    if (isFirstMessage && !this.isTitleSet) {
+    // Set session title for first message
+    const conversation = await this.conversationStore
+      .getConversation(this.currentConversationId)
+      .catch(() => null);
+    if (
+      (!conversation || conversation.messages.length === 0) &&
+      !this.isTitleSet
+    ) {
       const title = text.substring(0, 50) + (text.length > 50 ? '...' : '');
       this.sendToWebView({
         type: 'sessionTitleUpdated',
-        data: {
-          sessionId: this.currentConversationId,
-          title,
-        },
+        data: { sessionId: this.currentConversationId, title },
       });
-      this.isTitleSet = true; // Mark title as set
+      this.isTitleSet = true;
     }
 
-    // Save user message
+    // Save and forward user message
     const userMessage: ChatMessage = {
       role: 'user',
       content: text,
       timestamp: Date.now(),
     };
-
-    // Store the original message with just text
     await this.conversationStore.addMessage(
       this.currentConversationId,
       userMessage,
     );
-
-    // Send to WebView with file context and attachments
     this.sendToWebView({
       type: 'message',
       data: { ...userMessage, fileContext, attachments },
     });
 
-    // Check if agent is connected
+    // Check connection
     if (!this.agentManager.isConnected) {
-      console.warn('[SessionMessageHandler] Agent not connected');
-
-      // Show non-modal notification with Login button
       await this.promptLogin('You need to login first to use Qwen Code.');
       return;
     }
 
-    // Ensure an ACP session exists before sending prompt
+    // Ensure ACP session exists
     if (!this.agentManager.currentSessionId) {
       try {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.agentManager.createNewSession(workingDir);
-      } catch (createErr) {
-        console.error(
-          '[SessionMessageHandler] Failed to create session before sending message:',
-          createErr,
+        await this.agentManager.createNewSession(
+          workspaceFolder?.uri.fsPath || process.cwd(),
         );
+      } catch (createErr) {
         const errorMsg =
           createErr instanceof Error ? createErr.message : String(createErr);
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN)
-        ) {
+        if (isAuthError(errorMsg)) {
           await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
+            'Your login session has expired. Please login again.',
           );
-          return;
+        } else {
+          vscode.window.showErrorMessage(
+            `Failed to create session: ${errorMsg}`,
+          );
         }
-        vscode.window.showErrorMessage(`Failed to create session: ${errorMsg}`);
         return;
       }
     }
 
     // Send to agent
     try {
-      this.resetStreamContent();
-
+      this.currentStreamContent = '';
       this.sendToWebView({
         type: 'streamStart',
         data: { timestamp: Date.now() },
       });
-
-      // Send multimodal content instead of plain text
       await this.agentManager.sendMessage(promptContent);
 
-      // Save assistant message
       if (this.currentStreamContent && this.currentConversationId) {
         const assistantMessage: ChatMessage = {
           role: 'assistant',
@@ -575,142 +401,124 @@ export class SessionMessageHandler extends BaseMessageHandler {
           assistantMessage,
         );
       }
-
-      this.sendStreamEnd();
+      this.sendToWebView({
+        type: 'streamEnd',
+        data: { timestamp: Date.now() },
+      });
     } catch (error) {
-      console.error('[SessionMessageHandler] Error sending message:', error);
-
-      const err = error as unknown as Error;
-      // Safely convert error to string
       const errorMsg = error ? String(error) : 'Unknown error';
       const lower = errorMsg.toLowerCase();
 
-      // Suppress user-cancelled/aborted errors (ESC/Stop button)
-      const isAbortLike =
-        (err && (err as Error).name === 'AbortError') ||
+      // User cancelled
+      if (
         lower.includes('abort') ||
-        lower.includes('aborted') ||
-        lower.includes('request was aborted') ||
-        lower.includes('canceled') ||
-        lower.includes('cancelled') ||
-        lower.includes('user_cancelled');
-
-      if (isAbortLike) {
-        // Do not show VS Code error popup for intentional cancellations.
-        // Ensure the webview knows the stream ended due to user action.
-        this.sendStreamEnd('user_cancelled');
+        lower.includes('cancel') ||
+        (error as Error)?.name === 'AbortError'
+      ) {
+        this.sendToWebView({
+          type: 'streamEnd',
+          data: { timestamp: Date.now(), reason: 'user_cancelled' },
+        });
         return;
       }
-      // Check for session not found error and handle it appropriately
-      if (
-        errorMsg.includes('Session not found') ||
-        errorMsg.includes('No active ACP session') ||
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token')
-      ) {
-        // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
-        );
 
-        // Send a specific error to the webview for better UI handling
+      // Auth error
+      if (isAuthError(errorMsg)) {
+        await this.promptLogin(
+          'Your login session has expired. Please login again.',
+        );
         this.sendToWebView({
           type: 'sessionExpired',
           data: { message: 'Session expired. Please login again.' },
         });
-        this.sendStreamEnd('session_expired');
-      } else {
-        const isTimeoutError =
-          lower.includes('timeout') || lower.includes('timed out');
-        if (isTimeoutError) {
-          // Note: session_prompt no longer has a timeout, so this should rarely occur
-          // This path may still be hit for other methods (initialize, etc.) or network-level timeouts
-          console.warn(
-            '[SessionMessageHandler] Request timed out; suppressing popup',
-          );
-
-          const timeoutMessage: ChatMessage = {
-            role: 'assistant',
-            content:
-              'Request timed out. This may be due to a network issue. Please try again.',
-            timestamp: Date.now(),
-          };
-
-          // Send a timeout message to the WebView
-          this.sendToWebView({
-            type: 'message',
-            data: timeoutMessage,
-          });
-          this.sendStreamEnd('timeout');
-        } else {
-          // Handling of Non-Timeout Errors
-          vscode.window.showErrorMessage(`Error sending message: ${error}`);
-          this.sendToWebView({
-            type: 'error',
-            data: { message: errorMsg },
-          });
-          this.sendStreamEnd('error');
-        }
+        return;
       }
+
+      // Timeout
+      if (lower.includes('timeout')) {
+        this.sendToWebView({
+          type: 'message',
+          data: {
+            role: 'assistant',
+            content: 'Request timed out. Please try again.',
+            timestamp: Date.now(),
+          },
+        });
+        return;
+      }
+
+      // Other errors
+      vscode.window.showErrorMessage(`Error sending message: ${error}`);
+      this.sendToWebView({ type: 'error', data: { message: errorMsg } });
     }
   }
 
-  /**
-   * Handle new Qwen session request
-   */
-  private async handleNewQwenSession(): Promise<void> {
-    try {
-      console.log('[SessionMessageHandler] Creating new Qwen session...');
-
-      // Ensure connection (login) before creating a new session
-      if (!this.agentManager.isConnected) {
-        const proceeded = await this.promptLogin(
-          'You need to login before creating a new session.',
-        );
-        if (!proceeded) {
-          return;
-        }
+  private async promptLogin(message: string): Promise<boolean> {
+    const result = await vscode.window.showWarningMessage(message, 'Login Now');
+    if (result === 'Login Now') {
+      if (this.loginHandler) {
+        await this.loginHandler();
+      } else {
+        await vscode.commands.executeCommand('qwen-code.login');
       }
+      return true;
+    }
+    return false;
+  }
 
+  private async promptLoginOrOffline(
+    message: string,
+  ): Promise<'login' | 'offline' | 'dismiss'> {
+    const selection = await vscode.window.showWarningMessage(
+      message,
+      'Login Now',
+      'View Offline',
+    );
+    if (selection === 'Login Now') {
+      if (this.loginHandler) {
+        await this.loginHandler();
+      } else {
+        await vscode.commands.executeCommand('qwen-code.login');
+      }
+      return 'login';
+    }
+    if (selection === 'View Offline') {
+      return 'offline';
+    }
+    return 'dismiss';
+  }
+
+  private sendStreamEnd(reason?: string): void {
+    this.sendToWebView({
+      type: 'streamEnd',
+      data: { timestamp: Date.now(), reason },
+    });
+  }
+
+  private async handleNewQwenSession(): Promise<void> {
+    if (!this.agentManager.isConnected) {
+      const proceeded = await this.promptLogin(
+        'You need to login before creating a new session.',
+      );
+      if (!proceeded) return;
+    }
+
+    try {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-
-      await this.agentManager.createNewSession(workingDir);
-
-      this.sendToWebView({
-        type: 'conversationCleared',
-        data: {},
-      });
-
-      // Reset title flag when creating a new session
+      await this.agentManager.createNewSession(
+        workspaceFolder?.uri.fsPath || process.cwd(),
+      );
+      this.sendToWebView({ type: 'conversationCleared', data: {} });
       this.isTitleSet = false;
     } catch (error) {
-      console.error(
-        '[SessionMessageHandler] Failed to create new session:',
-        error,
-      );
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (isAuthError(errorMsg)) {
         await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to create a new session.',
+          'Your login session has expired. Please login again.',
         );
-
-        // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired.' },
         });
       } else {
         this.sendToWebView({
@@ -721,39 +529,29 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
   }
 
-  /**
-   * Handle switch Qwen session request
-   */
   private async handleSwitchQwenSession(sessionId: string): Promise<void> {
-    try {
-      console.log('[SessionMessageHandler] Switching to session:', sessionId);
-
-      // If not connected yet, offer to login or view offline
-      if (!this.agentManager.isConnected) {
-        const choice = await this.promptLoginOrOffline(
-          'You are not logged in. Login now to fully restore this session, or view it offline.',
+    // Handle offline mode
+    if (!this.agentManager.isConnected) {
+      const choice = await this.promptLoginOrOffline(
+        'You are not logged in. Login to restore session, or view offline.',
+      );
+      if (choice === 'offline') {
+        const messages = await this.agentManager.getSessionMessages(sessionId);
+        this.currentConversationId = sessionId;
+        this.sendToWebView({
+          type: 'qwenSessionSwitched',
+          data: { sessionId, messages },
+        });
+        vscode.window.showInformationMessage(
+          'Showing cached content. Login to interact.',
         );
-
-        if (choice === 'offline') {
-          // Show messages from local cache only
-          const messages =
-            await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
-          this.sendToWebView({
-            type: 'qwenSessionSwitched',
-            data: { sessionId, messages },
-          });
-          vscode.window.showInformationMessage(
-            'Showing cached session content. Login to interact with the AI.',
-          );
-          return;
-        } else if (choice !== 'login') {
-          // User dismissed; do nothing
-          return;
-        }
+        return;
       }
+      if (choice !== 'login') return;
+    }
 
-      // Get session details (includes cwd and filePath when using ACP)
+    try {
+      // Get session details
       let sessionDetails: Record<string, unknown> | null = null;
       try {
         const allSessions = await this.agentManager.getSessionList();
@@ -762,220 +560,76 @@ export class SessionMessageHandler extends BaseMessageHandler {
             (s: { id?: string; sessionId?: string }) =>
               s.id === sessionId || s.sessionId === sessionId,
           ) || null;
-      } catch (err) {
-        console.log(
-          '[SessionMessageHandler] Could not get session details:',
-          err,
-        );
+      } catch {
+        // Ignore details fetch errors
       }
 
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+      // Try ACP load
+      this.currentConversationId = sessionId;
+      this.sendToWebView({
+        type: 'qwenSessionSwitched',
+        data: { sessionId, messages: [], session: sessionDetails },
+      });
 
-      // Try to load session via ACP (now we should be connected)
-      try {
-        // Set current id and clear UI first so replayed updates append afterwards
-        this.currentConversationId = sessionId;
-        this.sendToWebView({
-          type: 'qwenSessionSwitched',
-          data: { sessionId, messages: [], session: sessionDetails },
-        });
+      await this.agentManager.loadSessionViaAcp(
+        sessionId,
+        sessionDetails?.cwd as string | undefined,
+      );
+      this.isTitleSet = false;
+    } catch (loadError) {
+      const errorMsg =
+        loadError instanceof Error ? loadError.message : String(loadError);
 
-        const loadResponse = await this.agentManager.loadSessionViaAcp(
-          sessionId,
-          (sessionDetails?.cwd as string | undefined) || undefined,
-        );
-        console.log(
-          '[SessionMessageHandler] session/load succeeded (per ACP spec result is null; actual history comes via session/update):',
-          loadResponse,
-        );
-
-        // Reset title flag when switching sessions
-        this.isTitleSet = false;
-
-        // Successfully loaded session, return early to avoid fallback logic
-        return;
-      } catch (loadError) {
-        console.warn(
-          '[SessionMessageHandler] session/load failed, using fallback:',
-          loadError,
-        );
-
-        // Safely convert error to string
-        const errorMsg = loadError ? String(loadError) : 'Unknown error';
-
-        // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
-          // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to switch sessions.',
-          );
-
-          // Send a specific error to the webview for better UI handling
-          this.sendToWebView({
-            type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
-          });
-          return;
-        }
-
-        // Fallback: create new session
-        const messages = await this.agentManager.getSessionMessages(sessionId);
-
-        // If we are connected, try to create a fresh ACP session so user can interact
-        if (this.agentManager.isConnected) {
-          try {
-            const newAcpSessionId =
-              await this.agentManager.createNewSession(workingDir);
-
-            this.currentConversationId = newAcpSessionId;
-
-            this.sendToWebView({
-              type: 'qwenSessionSwitched',
-              data: { sessionId, messages, session: sessionDetails },
-            });
-
-            // Only show the cache warning if we actually fell back to local cache
-            // and didn't successfully load via ACP
-            // Check if we truly fell back by checking if loadError is not null/undefined
-            // and if it's not a successful response that looks like an error
-            if (
-              loadError &&
-              typeof loadError === 'object' &&
-              !('result' in loadError)
-            ) {
-              vscode.window.showWarningMessage(
-                'Session restored from local cache. Some context may be incomplete.',
-              );
-            }
-          } catch (createError) {
-            console.error(
-              '[SessionMessageHandler] Failed to create session:',
-              createError,
-            );
-
-            // Safely convert error to string
-            const createErrorMsg = createError
-              ? String(createError)
-              : 'Unknown error';
-            // Check for authentication/session expiration errors in session creation
-            if (
-              createErrorMsg.includes('Authentication required') ||
-              createErrorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-              createErrorMsg.includes('Unauthorized') ||
-              createErrorMsg.includes('Invalid token') ||
-              createErrorMsg.includes('No active ACP session')
-            ) {
-              // Show a more user-friendly error message for expired sessions
-              await this.promptLogin(
-                'Your login session has expired or is invalid. Please login again to switch sessions.',
-              );
-
-              // Send a specific error to the webview for better UI handling
-              this.sendToWebView({
-                type: 'sessionExpired',
-                data: { message: 'Session expired. Please login again.' },
-              });
-              return;
-            }
-
-            throw createError;
-          }
-        } else {
-          // Offline view only
-          this.currentConversationId = sessionId;
-          this.sendToWebView({
-            type: 'qwenSessionSwitched',
-            data: { sessionId, messages, session: sessionDetails },
-          });
-          vscode.window.showWarningMessage(
-            'Showing cached session content. Login to interact with the AI.',
-          );
-        }
-      }
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to switch session:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
+      if (isAuthError(errorMsg)) {
         await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to switch sessions.',
+          'Your login session has expired. Please login again.',
         );
-
-        // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired.' },
         });
-      } else {
-        this.sendToWebView({
-          type: 'error',
-          data: { message: `Failed to switch session: ${error}` },
-        });
+        return;
       }
+
+      // Fallback: load from local cache
+      const messages = await this.agentManager.getSessionMessages(sessionId);
+      this.sendToWebView({
+        type: 'qwenSessionSwitched',
+        data: { sessionId, messages },
+      });
+      vscode.window.showWarningMessage(
+        'Session restored from cache. Some context may be incomplete.',
+      );
     }
   }
 
-  /**
-   * Handle get Qwen sessions request
-   */
   private async handleGetQwenSessions(
     cursor?: number,
     size?: number,
   ): Promise<void> {
     try {
-      // Paged when possible; falls back to full list if ACP not supported
       const page = await this.agentManager.getSessionListPaged({
         cursor,
         size,
       });
-      const append = typeof cursor === 'number';
       this.sendToWebView({
         type: 'qwenSessionList',
         data: {
           sessions: page.sessions,
           nextCursor: page.nextCursor,
           hasMore: page.hasMore,
-          append,
+          append: typeof cursor === 'number',
         },
       });
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to get sessions:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (isAuthError(errorMsg)) {
         await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to view sessions.',
+          'Your login session has expired. Please login again.',
         );
-
-        // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired.' },
         });
       } else {
         this.sendToWebView({
@@ -986,208 +640,87 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
   }
 
-  /**
-   * Handle save session request
-   */
   private async handleSaveSession(tag: string): Promise<void> {
+    if (!this.currentConversationId) {
+      this.sendToWebView({
+        type: 'saveSessionResponse',
+        data: { success: false, message: 'No active conversation to save' },
+      });
+      return;
+    }
+
     try {
-      if (!this.currentConversationId) {
-        throw new Error('No active conversation to save');
-      }
-
-      // Try ACP save first
-      try {
-        const response = await this.agentManager.saveSessionViaAcp(
-          this.currentConversationId,
-          tag,
-        );
-
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: response,
-        });
-      } catch (acpError) {
-        // Safely convert error to string
-        const errorMsg = acpError ? String(acpError) : 'Unknown error';
-        // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
-          // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to save sessions.',
-          );
-
-          // Send a specific error to the webview for better UI handling
-          this.sendToWebView({
-            type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
-          });
-          return;
-        }
-      }
-
+      const response = await this.agentManager.saveSessionViaAcp(
+        this.currentConversationId,
+        tag,
+      );
+      this.sendToWebView({ type: 'saveSessionResponse', data: response });
       await this.handleGetQwenSessions();
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to save session:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (isAuthError(errorMsg)) {
         await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to save sessions.',
+          'Your login session has expired. Please login again.',
         );
-
-        // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired.' },
         });
       } else {
         this.sendToWebView({
           type: 'saveSessionResponse',
-          data: {
-            success: false,
-            message: `Failed to save session: ${error}`,
-          },
+          data: { success: false, message: `Failed to save session: ${error}` },
         });
       }
     }
   }
 
-  /**
-   * Handle cancel streaming request
-   */
   private async handleCancelStreaming(): Promise<void> {
-    try {
-      console.log('[SessionMessageHandler] Canceling streaming...');
-
-      // Cancel the current streaming operation in the agent manager
-      await this.agentManager.cancelCurrentPrompt();
-
-      // Send streamEnd message to WebView to update UI
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
-
-      console.log('[SessionMessageHandler] Streaming cancelled successfully');
-    } catch (_error) {
-      console.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
-
-      // Always send streamEnd to update UI, regardless of errors
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
-    }
+    await this.agentManager.cancelCurrentPrompt().catch(() => {});
+    this.sendToWebView({
+      type: 'streamEnd',
+      data: { timestamp: Date.now(), reason: 'user_cancelled' },
+    });
   }
 
-  /**
-   * Handle resume session request
-   */
   private async handleResumeSession(sessionId: string): Promise<void> {
-    try {
-      // If not connected, offer to login or view offline
-      if (!this.agentManager.isConnected) {
-        const choice = await this.promptLoginOrOffline(
-          'You are not logged in. Login now to fully restore this session, or view it offline.',
-        );
-
-        if (choice === 'offline') {
-          const messages =
-            await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
-          this.sendToWebView({
-            type: 'qwenSessionSwitched',
-            data: { sessionId, messages },
-          });
-          vscode.window.showInformationMessage(
-            'Showing cached session content. Login to interact with the AI.',
-          );
-          return;
-        } else if (choice !== 'login') {
-          return;
-        }
-      }
-
-      // Try ACP load first
-      try {
-        // Pre-clear UI so replayed updates append afterwards
+    if (!this.agentManager.isConnected) {
+      const choice = await this.promptLoginOrOffline(
+        'You are not logged in. Login to restore session, or view offline.',
+      );
+      if (choice === 'offline') {
+        const messages = await this.agentManager.getSessionMessages(sessionId);
         this.currentConversationId = sessionId;
         this.sendToWebView({
           type: 'qwenSessionSwitched',
-          data: { sessionId, messages: [] },
+          data: { sessionId, messages },
         });
-
-        await this.agentManager.loadSessionViaAcp(sessionId);
-
-        // Reset title flag when resuming sessions
-        this.isTitleSet = false;
-
-        // Successfully loaded session, return early to avoid fallback logic
-        await this.handleGetQwenSessions();
+        vscode.window.showInformationMessage(
+          'Showing cached content. Login to interact.',
+        );
         return;
-      } catch (acpError) {
-        // Safely convert error to string
-        const errorMsg = acpError ? String(acpError) : 'Unknown error';
-        // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
-          // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to resume sessions.',
-          );
-
-          // Send a specific error to the webview for better UI handling
-          this.sendToWebView({
-            type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
-          });
-          return;
-        }
       }
+      if (choice !== 'login') return;
+    }
 
+    try {
+      this.currentConversationId = sessionId;
+      this.sendToWebView({
+        type: 'qwenSessionSwitched',
+        data: { sessionId, messages: [] },
+      });
+      await this.agentManager.loadSessionViaAcp(sessionId);
+      this.isTitleSet = false;
       await this.handleGetQwenSessions();
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to resume session:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (isAuthError(errorMsg)) {
         await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to resume sessions.',
+          'Your login session has expired. Please login again.',
         );
-
-        // Send a specific error to the webview for better UI handling
         this.sendToWebView({
           type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
+          data: { message: 'Session expired.' },
         });
       } else {
         this.sendToWebView({
@@ -1198,42 +731,34 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
   }
 
-  /**
-   * Set approval mode via agent (ACP session/set_mode)
-   */
   private async handleSetApprovalMode(data?: {
     modeId?: ApprovalModeValue;
   }): Promise<void> {
-    try {
-      const modeId = data?.modeId || 'default';
-      await this.agentManager.setApprovalModeFromUi(modeId);
-      // No explicit response needed; WebView listens for modeChanged
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to set mode:', error);
+    const modeId = data?.modeId || 'default';
+    await this.agentManager.setApprovalModeFromUi(modeId).catch((error) => {
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to set mode: ${error}` },
       });
-    }
+    });
   }
 
-  /**
-   * Set model via agent (ACP session/set_model)
-   * Displays VSCode native notifications on success or failure.
-   */
   private async handleSetModel(data?: { modelId?: string }): Promise<void> {
+    const modelId = data?.modelId;
+    if (!modelId) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: 'Model ID is required' },
+      });
+      return;
+    }
     try {
-      const modelId = data?.modelId;
-      if (!modelId) {
-        throw new Error('Model ID is required');
-      }
       await this.agentManager.setModelFromUi(modelId);
       void vscode.window.showInformationMessage(
         `Model switched to: ${modelId}`,
       );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('[SessionMessageHandler] Failed to set model:', error);
       vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
       this.sendToWebView({
         type: 'error',
