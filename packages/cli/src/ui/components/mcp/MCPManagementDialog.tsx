@@ -46,7 +46,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   ]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // 加载MCP服务器数据
+  // Load MCP server data
   useEffect(() => {
     const loadServers = async () => {
       if (!config) return;
@@ -57,7 +57,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         const toolRegistry = config.getToolRegistry();
         const promptRegistry = await config.getPromptRegistry();
 
-        // 获取 settings 以确定每个服务器的 scope
+        // Get settings to determine the scope of each server
         const settings = loadSettings();
         const userSettings = settings.forScope(SettingScope.User).settings;
         const workspaceSettings = settings.forScope(
@@ -71,7 +71,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         >) {
           const status = getMCPServerStatus(name);
 
-          // 获取该服务器的工具
+          // Get tools for this server
           const allTools: AnyDeclarativeTool[] =
             toolRegistry?.getAllTools() || [];
           const serverTools = allTools.filter(
@@ -79,20 +79,20 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
               t instanceof DiscoveredMCPTool && t.serverName === name,
           );
 
-          // 获取该服务器的prompts
+          // Get prompts for this server
           const allPrompts: DiscoveredMCPPrompt[] =
             promptRegistry?.getAllPrompts() || [];
           const serverPrompts = allPrompts.filter(
             (p) => 'serverName' in p && p.serverName === name,
           );
 
-          // 确定来源类型
+          // Determine source type
           let source: 'user' | 'project' | 'extension' = 'user';
           if (serverConfig.extensionName) {
             source = 'extension';
           }
 
-          // 确定配置所在的 scope
+          // Determine the scope of the configuration
           let scope: 'user' | 'workspace' | 'extension' = 'user';
           if (serverConfig.extensionName) {
             scope = 'extension';
@@ -102,7 +102,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
             scope = 'user';
           }
 
-          // 使用 config.isMcpServerDisabled() 检查服务器是否被禁用
+          // Use config.isMcpServerDisabled() to check if server is disabled
           const isDisabled = config.isMcpServerDisabled(name);
 
           serverInfos.push({
@@ -126,7 +126,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     loadServers();
   }, [config]);
 
-  // 选中的服务器
+  // Selected server
   const selectedServer = useMemo(() => {
     if (selectedServerIndex >= 0 && selectedServerIndex < servers.length) {
       return servers[selectedServerIndex];
@@ -134,7 +134,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     return null;
   }, [servers, selectedServerIndex]);
 
-  // 当前步骤
+  // Current step
   const getCurrentStep = useCallback(
     () =>
       navigationStack[navigationStack.length - 1] ||
@@ -142,7 +142,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [navigationStack],
   );
 
-  // 导航处理
+  // Navigation handlers
   const handleNavigateToStep = useCallback((step: string) => {
     setNavigationStack((prev) => [...prev, step]);
   }, []);
@@ -154,7 +154,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     });
   }, []);
 
-  // 选择服务器
+  // Select server
   const handleSelectServer = useCallback(
     (index: number) => {
       setSelectedServerIndex(index);
@@ -163,7 +163,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [handleNavigateToStep],
   );
 
-  // 获取服务器工具列表
+  // Get server tool list
   const getServerTools = useCallback((): MCPToolDisplayInfo[] => {
     if (!config || !selectedServer) return [];
 
@@ -185,20 +185,21 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       description: tool.description,
       serverName: tool.serverName,
       schema: tool.parameterSchema as object | undefined,
+      annotations: tool.annotations,
     }));
   }, [config, selectedServer]);
 
-  // 查看工具列表
+  // View tool list
   const handleViewTools = useCallback(() => {
     handleNavigateToStep(MCP_MANAGEMENT_STEPS.TOOL_LIST);
   }, [handleNavigateToStep]);
 
-  // 查看服务器日志
+  // View server logs
   const handleViewLogs = useCallback(() => {
     handleNavigateToStep(MCP_MANAGEMENT_STEPS.SERVER_LOGS);
   }, [handleNavigateToStep]);
 
-  // 选择工具
+  // Select tool
   const handleSelectTool = useCallback(
     (tool: MCPToolDisplayInfo) => {
       setSelectedTool(tool);
@@ -207,7 +208,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [handleNavigateToStep],
   );
 
-  // 重新加载服务器数据
+  // Reload server data
   const reloadServers = useCallback(async () => {
     if (!config) return;
 
@@ -217,7 +218,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const toolRegistry = config.getToolRegistry();
       const promptRegistry = await config.getPromptRegistry();
 
-      // 获取 settings 以确定每个服务器的 scope
+      // Get settings to determine the scope of each server
       const settings = loadSettings();
       const userSettings = settings.forScope(SettingScope.User).settings;
       const workspaceSettings = settings.forScope(
@@ -244,13 +245,13 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           (p) => 'serverName' in p && p.serverName === name,
         );
 
-        // 确定来源类型
+        // Determine source type
         let source: 'user' | 'project' | 'extension' = 'user';
         if (serverConfig.extensionName) {
           source = 'extension';
         }
 
-        // 确定配置所在的 scope
+        // Determine the scope of the configuration
         let scope: 'user' | 'workspace' | 'extension' = 'user';
         if (serverConfig.extensionName) {
           scope = 'extension';
@@ -260,7 +261,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           scope = 'user';
         }
 
-        // 使用 config.isMcpServerDisabled() 检查服务器是否被禁用
+        // Use config.isMcpServerDisabled() to check if server is disabled
         const isDisabled = config.isMcpServerDisabled(name);
 
         serverInfos.push({
@@ -281,7 +282,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     }
   }, [config]);
 
-  // 重新连接服务器
+  // Reconnect server
   const handleReconnect = useCallback(async () => {
     if (!config || !selectedServer) return;
 
@@ -291,16 +292,16 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       if (toolRegistry) {
         await toolRegistry.discoverToolsForServer(selectedServer.name);
       }
-      // 重新加载服务器数据以更新状态
+      // Reload server data to update status
       await reloadServers();
     } catch (_error) {
-      // 错误处理 - 静默失败
+      // Error handling - fail silently
     } finally {
       setIsLoading(false);
     }
   }, [config, selectedServer, reloadServers]);
 
-  // 启用服务器
+  // Enable server
   const handleEnableServer = useCallback(async () => {
     if (!config || !selectedServer) return;
 
@@ -310,7 +311,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       const server = selectedServer;
       const settings = loadSettings();
 
-      // 从 user 和 workspace 的排除列表中移除
+      // Remove from user and workspace exclusion lists
       for (const scope of [SettingScope.User, SettingScope.Workspace]) {
         const scopeSettings = settings.forScope(scope).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
@@ -323,42 +324,42 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         }
       }
 
-      // 更新运行时配置的排除列表
+      // Update runtime config exclusion list
       const currentExcluded = config.getExcludedMcpServers() || [];
       const newExcluded = currentExcluded.filter(
         (name: string) => name !== server.name,
       );
       config.setExcludedMcpServers(newExcluded);
 
-      // 重新发现该服务器的工具
+      // Rediscover tools for this server
       const toolRegistry = config.getToolRegistry();
       if (toolRegistry) {
         await toolRegistry.discoverToolsForServer(server.name);
       }
 
-      // 重新加载服务器列表
+      // Reload server data
       await reloadServers();
     } catch (_error) {
-      // 错误处理 - 静默失败
+      // Error handling - fail silently
     } finally {
       setIsLoading(false);
     }
   }, [config, selectedServer, reloadServers]);
 
-  // 处理禁用/启用操作
+  // Handle disable/enable action
   const handleDisable = useCallback(() => {
     if (!selectedServer) return;
 
-    // 如果服务器已被禁用，则直接启用
+    // If server is already disabled, enable it directly
     if (selectedServer.isDisabled) {
       void handleEnableServer();
     } else {
-      // 否则导航到禁用 scope 选择
+      // Otherwise navigate to disable scope selection
       handleNavigateToStep(MCP_MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT);
     }
   }, [selectedServer, handleEnableServer, handleNavigateToStep]);
 
-  // 选择禁用 scope 后执行禁用
+  // Execute disable after selecting scope
   const handleSelectDisableScope = useCallback(
     async (scope: 'user' | 'workspace') => {
       if (!config || !selectedServer) return;
@@ -369,13 +370,13 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         const server = selectedServer;
         const settings = loadSettings();
 
-        // 获取当前的排除列表
+        // Get current exclusion list
         const scopeSettings = settings.forScope(
           scope === 'user' ? SettingScope.User : SettingScope.Workspace,
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // 如果服务器不在排除列表中，添加它
+        // If server is not in exclusion list, add it
         if (!currentExcluded.includes(server.name)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
@@ -385,19 +386,19 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           );
         }
 
-        // 使用新的 disableMcpServer 方法禁用服务器
+        // Use new disableMcpServer method to disable server
         const toolRegistry = config.getToolRegistry();
         if (toolRegistry) {
           await toolRegistry.disableMcpServer(server.name);
         }
 
-        // 重新加载服务器列表
+        // Reload server list
         await reloadServers();
 
-        // 返回到服务器详情页
+        // Return to server detail page
         handleNavigateBack();
       } catch (_error) {
-        // 错误处理 - 静默失败
+        // Error handling - fail silently
       } finally {
         setIsLoading(false);
       }
@@ -405,7 +406,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [config, selectedServer, handleNavigateBack, reloadServers],
   );
 
-  // 渲染步骤头部
+  // Render step header
   const renderStepHeader = useCallback(() => {
     const currentStep = getCurrentStep();
     let headerText = '';
@@ -440,7 +441,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     );
   }, [getCurrentStep, selectedServer, selectedTool]);
 
-  // 渲染步骤内容
+  // Render step content
   const renderStepContent = useCallback(() => {
     if (isLoading) {
       return (
@@ -523,7 +524,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     getServerTools,
   ]);
 
-  // 渲染步骤底部
+  // Render step footer
   const renderStepFooter = useCallback(() => {
     const currentStep = getCurrentStep();
     let footerText = '';
@@ -562,7 +563,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     );
   }, [getCurrentStep, servers.length]);
 
-  // ESC 键处理 - 仅关闭对话框，子组件的返回由各自处理避免重复触发
+  // ESC key handler - only close dialog, child components handle back navigation to avoid duplicate triggers
   useKeypress(
     (key) => {
       if (
