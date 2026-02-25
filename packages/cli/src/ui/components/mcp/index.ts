@@ -10,7 +10,6 @@ export { MCPManagementDialog } from './MCPManagementDialog.js';
 // Steps
 export { ServerListStep } from './steps/ServerListStep.js';
 export { ServerDetailStep } from './steps/ServerDetailStep.js';
-export { ServerLogsStep } from './steps/ServerLogsStep.js';
 export { ToolListStep } from './steps/ToolListStep.js';
 export { ToolDetailStep } from './steps/ToolDetailStep.js';
 
@@ -22,7 +21,6 @@ export type {
   MCPPromptDisplayInfo,
   ServerListStepProps,
   ServerDetailStepProps,
-  ServerLogsStepProps,
   ToolListStepProps,
   ToolDetailStepProps,
   MCPManagementStep,

@@ -10,9 +10,7 @@ import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
 import type { ToolListStepProps, MCPToolDisplayInfo } from '../types.js';
-
-// 可视区域最大显示工具数量
-const VISIBLE_TOOLS_COUNT = 10;
+import { VISIBLE_TOOLS_COUNT } from '../constants.js';
 
 export const ToolListStep: React.FC<ToolListStepProps> = ({
   tools,

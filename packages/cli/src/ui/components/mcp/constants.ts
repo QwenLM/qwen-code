@@ -19,6 +19,16 @@ export const MAX_DISPLAY_TOOLS = 10;
 export const MAX_DISPLAY_PROMPTS = 10;
 
 /**
+ * 日志列表可视区域最大显示数量
+ */
+export const VISIBLE_LOGS_COUNT = 15;
+
+/**
+ * 工具列表可视区域最大显示数量
+ */
+export const VISIBLE_TOOLS_COUNT = 10;
+
+/**
  * 分组显示名称映射
  */
 export const SOURCE_DISPLAY_NAMES: Record<string, string> = {

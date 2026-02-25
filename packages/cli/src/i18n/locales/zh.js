@@ -708,7 +708,6 @@ export default {
   'Manage MCP servers': '管理 MCP 服务器',
   'Server Detail': '服务器详情',
   'Disable Server': '禁用服务器',
-  'Server Logs': '服务器日志',
   Tools: '工具',
   'Tool Detail': '工具详情',
   'MCP Management': 'MCP 管理',
@@ -719,8 +718,6 @@ export default {
     '↑↓ 导航 · Enter 选择 · Esc 返回',
   '↑↓ to navigate · Enter to confirm · Esc to back':
     '↑↓ 导航 · Enter 确认 · Esc 返回',
-  '↑↓ to navigate · M to pause/resume · Q/Esc to back':
-    '↑↓ 导航 · M 暂停/继续 · Q/Esc 返回',
   'User Settings (global)': '用户设置（全局）',
   'Workspace Settings (project-specific)': '工作区设置（项目级）',
   'Disable server:': '禁用服务器：',
@@ -728,9 +725,17 @@ export default {
     '选择将服务器添加到排除列表的位置：',
   'Press Enter to confirm, Esc to cancel': '按 Enter 确认，Esc 取消',
   'View tools': '查看工具',
-  'View logs': '查看日志',
   Reconnect: '重新连接',
   Enable: '启用',
+  Disable: '禁用',
+  '(disabled)': '(已禁用)',
+  'Error:': '错误：',
+  Extension: '扩展',
+  tool: '工具',
+  connected: '已连接',
+  connecting: '连接中',
+  disconnected: '已断开',
+  error: '错误',
 
   // ============================================================================
   // Commands - Chat
@@ -857,6 +862,7 @@ export default {
   'Do you want to proceed?': '是否继续？',
   'Yes, allow once': '是，允许一次',
   'Allow always': '总是允许',
+  Yes: '是',
   No: '否',
   'No (esc)': '否 (esc)',
   'Yes, allow always for this session': '是，本次会话总是允许',

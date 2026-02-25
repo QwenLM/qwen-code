@@ -152,7 +152,7 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
                   {/* 显示 Scope 和禁用状态 */}
                   <Text color={theme.text.secondary}> [{server.scope}]</Text>
                   {server.isDisabled && (
-                    <Text color={theme.status.warning}> (disabled)</Text>
+                    <Text color={theme.status.warning}> {t('(disabled)')}</Text>
                   )}
                 </Box>
               );

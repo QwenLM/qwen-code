@@ -17,12 +17,11 @@ import {
   formatServerCommand,
 } from '../utils.js';
 
-type ServerAction = 'view-tools' | 'view-logs' | 'reconnect' | 'toggle-disable';
+type ServerAction = 'view-tools' | 'reconnect' | 'toggle-disable';
 
 export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
   server,
   onViewTools,
-  onViewLogs,
   onReconnect,
   onDisable,
   onBack,
@@ -39,13 +38,6 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
         return t('View tools');
       },
       value: 'view-tools' as const,
-    },
-    {
-      key: 'view-logs',
-      get label() {
-        return t('View logs');
-      },
-      value: 'view-logs' as const,
     },
     {
       key: 'reconnect',
@@ -71,9 +63,6 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
         switch (selectedAction) {
           case 'view-tools':
             onViewTools();
-            break;
-          case 'view-logs':
-            onViewLogs?.();
             break;
           case 'reconnect':
             onReconnect?.();
@@ -115,7 +104,7 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
             >
               {getStatusIcon(server.status)} {t(server.status)}
               {server.isDisabled && (
-                <Text color={theme.status.warning}> (disabled)</Text>
+                <Text color={theme.status.warning}> {t('(disabled)')}</Text>
               )}
             </Text>
           </Box>
@@ -192,9 +181,6 @@ export const ServerDetailStep: React.FC<ServerDetailStepProps> = ({
             switch (value) {
               case 'view-tools':
                 onViewTools();
-                break;
-              case 'view-logs':
-                onViewLogs?.();
                 break;
               case 'reconnect':
                 onReconnect?.();

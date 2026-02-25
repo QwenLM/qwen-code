@@ -18,9 +18,6 @@ export const MCP_MANAGEMENT_STEPS = {
   DISABLE_SCOPE_SELECT: 'disable-scope-select',
   TOOL_LIST: 'tool-list',
   TOOL_DETAIL: 'tool-detail',
-  PROMPT_LIST: 'prompt-list',
-  PROMPT_DETAIL: 'prompt-detail',
-  SERVER_LOGS: 'server-logs',
 } as const;
 
 export type MCPManagementStep =
@@ -124,8 +121,6 @@ export interface ServerDetailStepProps {
   server: MCPServerDisplayInfo | null;
   /** 查看工具列表回调 */
   onViewTools: () => void;
-  /** 查看日志回调 */
-  onViewLogs?: () => void;
   /** 重新连接回调 */
   onReconnect?: () => void;
   /** 禁用服务器回调 */
@@ -166,40 +161,6 @@ export interface ToolListStepProps {
 export interface ToolDetailStepProps {
   /** 工具信息 */
   tool: MCPToolDisplayInfo | null;
-  /** 返回回调 */
-  onBack: () => void;
-}
-
-/**
- * PromptListStep组件属性
- */
-export interface PromptListStepProps {
-  /** Prompt列表 */
-  prompts: MCPPromptDisplayInfo[];
-  /** 服务器名称 */
-  serverName: string;
-  /** 选择回调 */
-  onSelect: (prompt: MCPPromptDisplayInfo) => void;
-  /** 返回回调 */
-  onBack: () => void;
-}
-
-/**
- * PromptDetailStep组件属性
- */
-export interface PromptDetailStepProps {
-  /** Prompt信息 */
-  prompt: MCPPromptDisplayInfo | null;
-  /** 返回回调 */
-  onBack: () => void;
-}
-
-/**
- * ServerLogsStep组件属性
- */
-export interface ServerLogsStepProps {
-  /** 服务器信息 */
-  server: MCPServerDisplayInfo | null;
   /** 返回回调 */
   onBack: () => void;
 }

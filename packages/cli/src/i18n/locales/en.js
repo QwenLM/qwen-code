@@ -750,7 +750,6 @@ export default {
   'Manage MCP servers': 'Manage MCP servers',
   'Server Detail': 'Server Detail',
   'Disable Server': 'Disable Server',
-  'Server Logs': 'Server Logs',
   Tools: 'Tools',
   'Tool Detail': 'Tool Detail',
   'MCP Management': 'MCP Management',
@@ -761,8 +760,6 @@ export default {
     '↑↓ to navigate · Enter to select · Esc to back',
   '↑↓ to navigate · Enter to confirm · Esc to back':
     '↑↓ to navigate · Enter to confirm · Esc to back',
-  '↑↓ to navigate · M to pause/resume · Q/Esc to back':
-    '↑↓ to navigate · M to pause/resume · Q/Esc to back',
   'User Settings (global)': 'User Settings (global)',
   'Workspace Settings (project-specific)':
     'Workspace Settings (project-specific)',
@@ -772,14 +769,22 @@ export default {
   'Press Enter to confirm, Esc to cancel':
     'Press Enter to confirm, Esc to cancel',
   'View tools': 'View tools',
-  'View logs': 'View logs',
   Reconnect: 'Reconnect',
   Enable: 'Enable',
+  Disable: 'Disable',
   'Status:': 'Status:',
   'Command:': 'Command:',
   'Working Directory:': 'Working Directory:',
   'Capabilities:': 'Capabilities:',
   prompts: 'prompts',
+  '(disabled)': '(disabled)',
+  'Error:': 'Error:',
+  Extension: 'Extension',
+  tool: 'tool',
+  connected: 'connected',
+  connecting: 'connecting',
+  disconnected: 'disconnected',
+  error: 'error',
 
   // ============================================================================
   // Commands - Chat
@@ -913,6 +918,7 @@ export default {
   'Do you want to proceed?': 'Do you want to proceed?',
   'Yes, allow once': 'Yes, allow once',
   'Allow always': 'Allow always',
+  Yes: 'Yes',
   No: 'No',
   'No (esc)': 'No (esc)',
   'Yes, allow always for this session': 'Yes, allow always for this session',

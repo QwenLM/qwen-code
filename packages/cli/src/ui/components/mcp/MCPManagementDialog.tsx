@@ -17,7 +17,6 @@ import type {
 import { MCP_MANAGEMENT_STEPS } from './types.js';
 import { ServerListStep } from './steps/ServerListStep.js';
 import { ServerDetailStep } from './steps/ServerDetailStep.js';
-import { ServerLogsStep } from './steps/ServerLogsStep.js';
 import { ToolListStep } from './steps/ToolListStep.js';
 import { ToolDetailStep } from './steps/ToolDetailStep.js';
 import { DisableScopeSelectStep } from './steps/DisableScopeSelectStep.js';
@@ -28,8 +27,11 @@ import {
   type MCPServerConfig,
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
+
+const debugLogger = createDebugLogger('MCP_DIALOG');
 
 export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   onClose,
@@ -46,85 +48,94 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   ]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load MCP server data
+  // Load MCP server data - extracted to a separate function for reuse
+  const fetchServerData = useCallback(async (): Promise<
+    MCPServerDisplayInfo[]
+  > => {
+    if (!config) return [];
+
+    const mcpServers = config.getMcpServers() || {};
+    const toolRegistry = config.getToolRegistry();
+    const promptRegistry = config.getPromptRegistry();
+
+    // Get settings to determine the scope of each server
+    const settings = loadSettings();
+    const userSettings = settings.forScope(SettingScope.User).settings;
+    const workspaceSettings = settings.forScope(
+      SettingScope.Workspace,
+    ).settings;
+
+    const serverInfos: MCPServerDisplayInfo[] = [];
+
+    for (const [name, serverConfig] of Object.entries(mcpServers) as Array<
+      [string, MCPServerConfig]
+    >) {
+      const status = getMCPServerStatus(name);
+
+      // Get tools for this server
+      const allTools: AnyDeclarativeTool[] = toolRegistry?.getAllTools() || [];
+      const serverTools = allTools.filter(
+        (t): t is DiscoveredMCPTool =>
+          t instanceof DiscoveredMCPTool && t.serverName === name,
+      );
+
+      // Get prompts for this server
+      const allPrompts: DiscoveredMCPPrompt[] =
+        promptRegistry?.getAllPrompts() || [];
+      const serverPrompts = allPrompts.filter(
+        (p) => 'serverName' in p && p.serverName === name,
+      );
+
+      // Determine source type
+      let source: 'user' | 'project' | 'extension' = 'user';
+      if (serverConfig.extensionName) {
+        source = 'extension';
+      }
+
+      // Determine the scope of the configuration
+      let scope: 'user' | 'workspace' | 'extension' = 'user';
+      if (serverConfig.extensionName) {
+        scope = 'extension';
+      } else if (workspaceSettings.mcpServers?.[name]) {
+        scope = 'workspace';
+      } else if (userSettings.mcpServers?.[name]) {
+        scope = 'user';
+      }
+
+      // Use config.isMcpServerDisabled() to check if server is disabled
+      const isDisabled = config.isMcpServerDisabled(name);
+
+      serverInfos.push({
+        name,
+        status,
+        source,
+        scope,
+        config: serverConfig,
+        toolCount: serverTools.length,
+        promptCount: serverPrompts.length,
+        isDisabled,
+      });
+    }
+
+    return serverInfos;
+  }, [config]);
+
+  // Load MCP server data on initial render
   useEffect(() => {
     const loadServers = async () => {
-      if (!config) return;
-
       setIsLoading(true);
       try {
-        const mcpServers = config.getMcpServers() || {};
-        const toolRegistry = config.getToolRegistry();
-        const promptRegistry = await config.getPromptRegistry();
-
-        // Get settings to determine the scope of each server
-        const settings = loadSettings();
-        const userSettings = settings.forScope(SettingScope.User).settings;
-        const workspaceSettings = settings.forScope(
-          SettingScope.Workspace,
-        ).settings;
-
-        const serverInfos: MCPServerDisplayInfo[] = [];
-
-        for (const [name, serverConfig] of Object.entries(mcpServers) as Array<
-          [string, MCPServerConfig]
-        >) {
-          const status = getMCPServerStatus(name);
-
-          // Get tools for this server
-          const allTools: AnyDeclarativeTool[] =
-            toolRegistry?.getAllTools() || [];
-          const serverTools = allTools.filter(
-            (t): t is DiscoveredMCPTool =>
-              t instanceof DiscoveredMCPTool && t.serverName === name,
-          );
-
-          // Get prompts for this server
-          const allPrompts: DiscoveredMCPPrompt[] =
-            promptRegistry?.getAllPrompts() || [];
-          const serverPrompts = allPrompts.filter(
-            (p) => 'serverName' in p && p.serverName === name,
-          );
-
-          // Determine source type
-          let source: 'user' | 'project' | 'extension' = 'user';
-          if (serverConfig.extensionName) {
-            source = 'extension';
-          }
-
-          // Determine the scope of the configuration
-          let scope: 'user' | 'workspace' | 'extension' = 'user';
-          if (serverConfig.extensionName) {
-            scope = 'extension';
-          } else if (workspaceSettings.mcpServers?.[name]) {
-            scope = 'workspace';
-          } else if (userSettings.mcpServers?.[name]) {
-            scope = 'user';
-          }
-
-          // Use config.isMcpServerDisabled() to check if server is disabled
-          const isDisabled = config.isMcpServerDisabled(name);
-
-          serverInfos.push({
-            name,
-            status,
-            source,
-            scope,
-            config: serverConfig,
-            toolCount: serverTools.length,
-            promptCount: serverPrompts.length,
-            isDisabled,
-          });
-        }
-
+        const serverInfos = await fetchServerData();
         setServers(serverInfos);
+      } catch (error) {
+        debugLogger.error('Error loading MCP servers:', error);
       } finally {
         setIsLoading(false);
       }
     };
 
     loadServers();
-  }, [config]);
+  }, [fetchServerData]);
 
   // Selected server
   const selectedServer = useMemo(() => {
@@ -194,11 +205,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     handleNavigateToStep(MCP_MANAGEMENT_STEPS.TOOL_LIST);
   }, [handleNavigateToStep]);
 
-  // View server logs
-  const handleViewLogs = useCallback(() => {
-    handleNavigateToStep(MCP_MANAGEMENT_STEPS.SERVER_LOGS);
-  }, [handleNavigateToStep]);
-
   // Select tool
   const handleSelectTool = useCallback(
     (tool: MCPToolDisplayInfo) => {
@@ -208,79 +214,18 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     [handleNavigateToStep],
   );
 
-  // Reload server data
+  // Reload server data - uses the extracted fetchServerData function
   const reloadServers = useCallback(async () => {
-    if (!config) return;
-
     setIsLoading(true);
     try {
-      const mcpServers = config.getMcpServers() || {};
-      const toolRegistry = config.getToolRegistry();
-      const promptRegistry = await config.getPromptRegistry();
-
-      // Get settings to determine the scope of each server
-      const settings = loadSettings();
-      const userSettings = settings.forScope(SettingScope.User).settings;
-      const workspaceSettings = settings.forScope(
-        SettingScope.Workspace,
-      ).settings;
-
-      const serverInfos: MCPServerDisplayInfo[] = [];
-
-      for (const [name, serverConfig] of Object.entries(mcpServers) as Array<
-        [string, MCPServerConfig]
-      >) {
-        const status = getMCPServerStatus(name);
-
-        const allTools: AnyDeclarativeTool[] =
-          toolRegistry?.getAllTools() || [];
-        const serverTools = allTools.filter(
-          (t): t is DiscoveredMCPTool =>
-            t instanceof DiscoveredMCPTool && t.serverName === name,
-        );
-
-        const allPrompts: DiscoveredMCPPrompt[] =
-          promptRegistry?.getAllPrompts() || [];
-        const serverPrompts = allPrompts.filter(
-          (p) => 'serverName' in p && p.serverName === name,
-        );
-
-        // Determine source type
-        let source: 'user' | 'project' | 'extension' = 'user';
-        if (serverConfig.extensionName) {
-          source = 'extension';
-        }
-
-        // Determine the scope of the configuration
-        let scope: 'user' | 'workspace' | 'extension' = 'user';
-        if (serverConfig.extensionName) {
-          scope = 'extension';
-        } else if (workspaceSettings.mcpServers?.[name]) {
-          scope = 'workspace';
-        } else if (userSettings.mcpServers?.[name]) {
-          scope = 'user';
-        }
-
-        // Use config.isMcpServerDisabled() to check if server is disabled
-        const isDisabled = config.isMcpServerDisabled(name);
-
-        serverInfos.push({
-          name,
-          status,
-          source,
-          scope,
-          config: serverConfig,
-          toolCount: serverTools.length,
-          promptCount: serverPrompts.length,
-          isDisabled,
-        });
-      }
-
+      const serverInfos = await fetchServerData();
       setServers(serverInfos);
+    } catch (error) {
+      debugLogger.error('Error reloading MCP servers:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [config]);
+  }, [fetchServerData]);
 
   // Reconnect server
   const handleReconnect = useCallback(async () => {
@@ -294,8 +239,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       }
       // Reload server data to update status
       await reloadServers();
-    } catch (_error) {
-      // Error handling - fail silently
+    } catch (error) {
+      debugLogger.error(
+        `Error reconnecting to server '${selectedServer.name}':`,
+        error,
+      );
     } finally {
       setIsLoading(false);
     }
@@ -339,8 +287,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
       // Reload server data
       await reloadServers();
-    } catch (_error) {
-      // Error handling - fail silently
+    } catch (error) {
+      debugLogger.error(
+        `Error enabling server '${selectedServer.name}':`,
+        error,
+      );
     } finally {
       setIsLoading(false);
     }
@@ -397,8 +348,11 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
         // Return to server detail page
         handleNavigateBack();
-      } catch (_error) {
-        // Error handling - fail silently
+      } catch (error) {
+        debugLogger.error(
+          `Error disabling server '${selectedServer.name}':`,
+          error,
+        );
       } finally {
         setIsLoading(false);
       }
@@ -420,9 +374,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         break;
       case MCP_MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
         headerText = t('Disable Server');
-        break;
-      case MCP_MANAGEMENT_STEPS.SERVER_LOGS:
-        headerText = t('Server Logs');
         break;
       case MCP_MANAGEMENT_STEPS.TOOL_LIST:
         headerText = t('Tools');
@@ -464,7 +415,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           <ServerDetailStep
             server={selectedServer}
             onViewTools={handleViewTools}
-            onViewLogs={handleViewLogs}
             onReconnect={handleReconnect}
             onDisable={handleDisable}
             onBack={handleNavigateBack}
@@ -478,11 +428,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
             onSelectScope={handleSelectDisableScope}
             onBack={handleNavigateBack}
           />
-        );
-
-      case MCP_MANAGEMENT_STEPS.SERVER_LOGS:
-        return (
-          <ServerLogsStep server={selectedServer} onBack={handleNavigateBack} />
         );
 
       case MCP_MANAGEMENT_STEPS.TOOL_LIST:
@@ -515,7 +460,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     selectedTool,
     handleSelectServer,
     handleViewTools,
-    handleViewLogs,
     handleReconnect,
     handleDisable,
     handleNavigateBack,
@@ -542,9 +486,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         break;
       case MCP_MANAGEMENT_STEPS.DISABLE_SCOPE_SELECT:
         footerText = t('↑↓ to navigate · Enter to confirm · Esc to back');
-        break;
-      case MCP_MANAGEMENT_STEPS.SERVER_LOGS:
-        footerText = t('↑↓ to navigate · M to pause/resume · Q/Esc to back');
         break;
       case MCP_MANAGEMENT_STEPS.TOOL_LIST:
         footerText = t('↑↓ to navigate · Enter to select · Esc to back');
