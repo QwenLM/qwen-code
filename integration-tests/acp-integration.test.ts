@@ -648,6 +648,101 @@ function setupAcpTest(
     }
   });
 
+  it('blocks write tools in plan mode (issue #1806)', async () => {
+    const rig = new TestRig();
+    rig.setup('acp plan mode enforcement');
+
+    const toolCallEvents: Array<{
+      toolName: string;
+      status: string;
+      error?: string;
+    }> = [];
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      permissionHandler: () => ({ optionId: 'proceed_once' }),
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      // Set mode to 'plan'
+      const setModeResult = (await sendRequest('session/set_mode', {
+        sessionId: newSession.sessionId,
+        modeId: 'plan',
+      })) as { modeId: string };
+      expect(setModeResult.modeId).toBe('plan');
+
+      // Try to create a file - this should be blocked by plan mode
+      const promptResult = await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: 'Create a file called test.txt with content "Hello World"',
+          },
+        ],
+      });
+      expect(promptResult).toBeDefined();
+
+      // Give time for tool calls to be processed
+      await delay(2000);
+
+      // Collect tool call events from session updates
+      sessionUpdates.forEach((update) => {
+        if (update.update?.sessionUpdate === 'tool_call_update') {
+          const toolUpdate = update.update as {
+            sessionUpdate: string;
+            toolName?: string;
+            status?: string;
+            error?: { message?: string };
+          };
+          if (toolUpdate.toolName) {
+            toolCallEvents.push({
+              toolName: toolUpdate.toolName,
+              status: toolUpdate.status ?? 'unknown',
+              error: toolUpdate.error?.message,
+            });
+          }
+        }
+      });
+
+      // Verify that if write_file was attempted, it was blocked
+      const writeFileEvents = toolCallEvents.filter(
+        (e) => e.toolName === 'write_file',
+      );
+
+      // If the LLM tried to call write_file in plan mode, it should have been blocked
+      if (writeFileEvents.length > 0) {
+        const blockedEvent = writeFileEvents.find(
+          (e) => e.status === 'error' && e.error?.includes('Plan mode'),
+        );
+        expect(blockedEvent).toBeDefined();
+        expect(blockedEvent?.error).toContain('Plan mode is active');
+      }
+
+      // Verify the file was NOT created
+      const fs = await import('fs');
+      const path = await import('path');
+      const testFilePath = path.join(rig.testDir!, 'test.txt');
+      const fileExists = fs.existsSync(testFilePath);
+      expect(fileExists).toBe(false);
+    } catch (e) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('receives usage metadata in agent_message_chunk updates', async () => {
     const rig = new TestRig();
     rig.setup('acp usage metadata');
