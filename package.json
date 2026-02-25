@@ -71,6 +71,7 @@
   },
   "files": [
     "dist/",
+    "packages/cli/src/commands/extensions/examples/",
     "README.md",
     "LICENSE"
   ],

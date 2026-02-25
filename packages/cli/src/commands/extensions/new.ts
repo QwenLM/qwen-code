@@ -10,6 +10,7 @@ import type { CommandModule } from 'yargs';
 import { fileURLToPath } from 'node:url';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { readPackageUp } from 'read-package-up';
 
 interface NewArgs {
   path: string;
@@ -19,7 +20,43 @@ interface NewArgs {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const EXAMPLES_PATH = join(__dirname, 'examples');
+/**
+ * Resolve the examples directory path.
+ *
+ * After esbuild bundles everything into dist/cli.js, __dirname points to
+ * the dist/ folder and the original source-relative path no longer works.
+ * We first try the source-relative path (for development), then fall back
+ * to locating the package root via readPackageUp and using the path that
+ * npm publishes (packages/cli/src/commands/extensions/examples).
+ */
+async function resolveExamplesPath(): Promise<string> {
+  // Development: source-relative path
+  const devPath = join(__dirname, 'examples');
+  if (await pathExists(devPath)) {
+    return devPath;
+  }
+
+  // Production: find package root and use the published examples path
+  const result = await readPackageUp({ cwd: __dirname });
+  if (result) {
+    const pkgRoot = dirname(result.path);
+    const prodPath = join(
+      pkgRoot,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'extensions',
+      'examples',
+    );
+    if (await pathExists(prodPath)) {
+      return prodPath;
+    }
+  }
+
+  // Fallback to original path (will fail with a clear ENOENT)
+  return devPath;
+}
 
 async function pathExists(path: string) {
   try {
@@ -40,7 +77,8 @@ async function createDirectory(path: string) {
 async function copyDirectory(template: string, path: string) {
   await createDirectory(path);
 
-  const examplePath = join(EXAMPLES_PATH, template);
+  const examplesPath = await resolveExamplesPath();
+  const examplePath = join(examplesPath, template);
   const entries = await readdir(examplePath, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(examplePath, entry.name);
@@ -79,7 +117,8 @@ async function handleNew(args: NewArgs) {
 }
 
 async function getBoilerplateChoices() {
-  const entries = await readdir(EXAMPLES_PATH, { withFileTypes: true });
+  const examplesPath = await resolveExamplesPath();
+  const entries = await readdir(examplesPath, { withFileTypes: true });
   return entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name);
