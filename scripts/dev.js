@@ -67,13 +67,16 @@ register('${loaderUrl}', pathToFileURL('./'));
 `;
 writeFileSync(registerPath, registerCode);
 
+// Preserve existing NODE_OPTIONS (e.g. VS Code debugger injects --inspect flags via NODE_OPTIONS)
+const existingNodeOptions = process.env.NODE_OPTIONS || '';
+const importFlag = `--import ${pathToFileURL(registerPath).href}`;
+
 const env = {
   ...process.env,
   DEV: 'true',
   CLI_VERSION: 'dev',
   NODE_ENV: 'development',
-  // Use --import with register() instead of deprecated --loader
-  NODE_OPTIONS: `--import ${pathToFileURL(registerPath).href}`,
+  NODE_OPTIONS: `${existingNodeOptions} ${importFlag}`.trim(),
 };
 
 const nodeArgs = [tsxPath, cliEntry, ...process.argv.slice(2)];

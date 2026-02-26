@@ -41,6 +41,13 @@ export interface SDKTestHelperOptions {
    * Whether to create .qwen/settings.json
    */
   createQwenConfig?: boolean;
+  /**
+   * Whether to enable chat recording for this test.
+   * - Set to `true` to enable recording (needed for session-id duplicate detection tests)
+   * - Set to `false` or leave undefined to disable recording (default for most tests)
+   * This sets chatRecording in general settings.
+   */
+  chatRecording?: boolean;
 }
 
 /**
@@ -91,7 +98,8 @@ export class SDKTestHelper {
         },
         general: {
           ...generalSettings,
-          chatRecording: false, // SDK tests don't need chat recording
+          // Default to disabling chat recording unless explicitly enabled
+          ...(options.chatRecording !== true ? { chatRecording: false } : {}),
         },
       };
 

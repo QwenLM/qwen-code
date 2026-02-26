@@ -12,6 +12,7 @@ import type {
   SessionMetrics,
   ServerGeminiStreamEvent,
   TaskResultDisplay,
+  McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType,
@@ -82,6 +83,18 @@ export interface MessageEmitter {
     parentToolUseId?: string | null,
   ): void;
   emitSystemMessage(subtype: string, data?: unknown): void;
+  /**
+   * Emits a tool progress stream event.
+   * Only emits when the adapter supports partial messages (stream mode).
+   * In non-streaming mode, this is a no-op.
+   *
+   * @param request - Tool call request info
+   * @param progress - Structured MCP progress data
+   */
+  emitToolProgress(
+    request: ToolCallRequestInfo,
+    progress: McpToolProgressData,
+  ): void;
 }
 
 /**
@@ -1049,6 +1062,22 @@ export abstract class BaseJsonOutputAdapter {
       data,
     } as const;
     this.emitMessageImpl(systemMessage);
+  }
+
+  /**
+   * Emits a tool progress stream event.
+   * Default implementation is a no-op. StreamJsonOutputAdapter overrides this
+   * to emit stream events when includePartialMessages is enabled.
+   *
+   * @param _request - Tool call request info
+   * @param _progress - Structured MCP progress data
+   */
+  emitToolProgress(
+    _request: ToolCallRequestInfo,
+    _progress: McpToolProgressData,
+  ): void {
+    // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
+    // as stream events when includePartialMessages is enabled.
   }
 
   /**

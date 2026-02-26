@@ -296,7 +296,9 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
     // Verify first call has isContinuation: false
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
@@ -641,7 +643,9 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
 
     // JSON adapter emits array of messages, last one is result with stats

@@ -18,6 +18,9 @@ import type {
 } from '@google/genai';
 import { createUserContent } from '@google/genai';
 import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { parseAndFormatApiError } from '../utils/errorParsing.js';
+import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
@@ -32,6 +35,8 @@ import {
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
+const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -42,7 +47,7 @@ export enum StreamEventType {
 
 export type StreamEvent =
   | { type: StreamEventType.CHUNK; value: GenerateContentResponse }
-  | { type: StreamEventType.RETRY };
+  | { type: StreamEventType.RETRY; retryInfo?: RetryInfo };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -58,6 +63,17 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
   maxAttempts: 2, // 1 initial call + 1 retry
   initialDelayMs: 500,
 };
+
+/**
+ * Options for retrying on rate-limit throttling errors returned as stream content.
+ * Fixed 60s delay matches the DashScope per-minute quota window.
+ * 10 retries aligns with Claude Code's retry behavior.
+ */
+const RATE_LIMIT_RETRY_OPTIONS = {
+  maxRetries: 10,
+  delayMs: 60000,
+};
+
 /**
  * Returns true if the response is valid, false otherwise.
  *
@@ -268,6 +284,7 @@ export class GeminiChat {
     return (async function* () {
       try {
         let lastError: unknown = new Error('Request failed after all retries.');
+        let rateLimitRetryCount = 0;
 
         for (
           let attempt = 0;
@@ -275,7 +292,7 @@ export class GeminiChat {
           attempt++
         ) {
           try {
-            if (attempt > 0) {
+            if (attempt > 0 || rateLimitRetryCount > 0) {
               yield { type: StreamEventType.RETRY };
             }
 
@@ -294,6 +311,40 @@ export class GeminiChat {
             break;
           } catch (error) {
             lastError = error;
+
+            // Handle rate-limit / throttling errors returned as stream content.
+            // These arrive as StreamContentError with finish_reason="error_finish"
+            // from the pipeline, containing the throttling message in the content.
+            // Covers TPM throttling, GLM rate limits, and other provider throttling.
+            const isRateLimit = isRateLimitError(error);
+            if (
+              isRateLimit &&
+              rateLimitRetryCount < RATE_LIMIT_RETRY_OPTIONS.maxRetries
+            ) {
+              rateLimitRetryCount++;
+              const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
+              const message = parseAndFormatApiError(
+                error instanceof Error ? error.message : String(error),
+              );
+              debugLogger.warn(
+                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${RATE_LIMIT_RETRY_OPTIONS.maxRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              yield {
+                type: StreamEventType.RETRY,
+                retryInfo: {
+                  message,
+                  attempt: rateLimitRetryCount,
+                  maxRetries: RATE_LIMIT_RETRY_OPTIONS.maxRetries,
+                  delayMs,
+                },
+              };
+              // Don't count rate-limit retries against the content retry limit
+              attempt--;
+              await new Promise((res) => setTimeout(res, delayMs));
+              continue;
+            }
+
             const isContentError = error instanceof InvalidStreamError;
 
             if (isContentError) {

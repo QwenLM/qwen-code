@@ -213,9 +213,28 @@ export async function parseInstallSource(
   let repoSource = repo;
   let marketplaceConfig: ClaudeMarketplaceConfig | null = null;
 
-  // Step 2: Determine repo type and convert owner/repo format if needed
-  if (isGitUrl(repo)) {
-    // Git URL (http://, https://, git@, sso://)
+  // Step 2: Determine repo type with correct priority order
+  // Priority 1: Check if it's a local path that exists
+  let isLocalPath = false;
+  try {
+    await stat(repo);
+    isLocalPath = true;
+  } catch {
+    // Not a local path or doesn't exist, continue with other checks
+  }
+
+  if (isLocalPath) {
+    // Local path exists
+    installMetadata = {
+      source: repo,
+      type: 'local',
+      pluginName,
+    };
+
+    // Try to read marketplace config from local path
+    marketplaceConfig = await readLocalMarketplaceConfig(repo);
+  } else if (isGitUrl(repo)) {
+    // Priority 2: Git URL (http://, https://, git@, sso://)
     installMetadata = {
       source: repoSource,
       type: 'git',
@@ -230,7 +249,7 @@ export async function parseInstallSource(
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
   } else if (isOwnerRepoFormat(repo)) {
-    // owner/repo format - convert to GitHub URL
+    // Priority 3: owner/repo format - convert to GitHub URL
     repoSource = convertOwnerRepoToGitHubUrl(repo);
     installMetadata = {
       source: repoSource,
@@ -246,25 +265,12 @@ export async function parseInstallSource(
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
   } else {
-    // Local path
-    try {
-      await stat(repo);
-      installMetadata = {
-        source: repo,
-        type: 'local',
-        pluginName,
-      };
-
-      // Try to read marketplace config from local path
-      marketplaceConfig = await readLocalMarketplaceConfig(repo);
-    } catch {
-      throw new Error(`Install source not found: ${repo}`);
-    }
+    // None of the above formats matched
+    throw new Error(`Install source not found: ${repo}`);
   }
 
   // Step 3: If marketplace config exists, update type to marketplace
   if (marketplaceConfig) {
-    installMetadata.type = 'marketplace';
     installMetadata.marketplaceConfig = marketplaceConfig;
     installMetadata.originSource = 'Claude';
   }

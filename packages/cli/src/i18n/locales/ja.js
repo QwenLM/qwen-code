@@ -110,6 +110,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'change the auth method': '認証方式を変更',
+  'Configure authentication information for login':
+    'ログイン用の認証情報を設定',
   'Copy the last result or code snippet to clipboard':
     '最後の結果またはコードスニペットをクリップボードにコピー',
 
@@ -679,6 +681,11 @@ export default {
   'Terms of Services and Privacy Notice for Qwen Code':
     'Qwen Code の利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
+  'Login with QwenChat account to use daily free quota.':
+    'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'ログインに失敗しました。メッセージ: {{message}}',
@@ -724,8 +731,8 @@ export default {
   // Dialogs - Model
   'Select Model': 'モデルを選択',
   '(Press Esc to close)': '(Esc で閉じる)',
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Alibaba Cloud ModelStudioの最新Qwen Coderモデル(バージョン: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
@@ -882,4 +889,72 @@ export default {
     'コードが壊れた?叩けば治るさ',
     'USBの差し込みに挑戦中...',
   ],
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'モデルを手動で設定したい上級ユーザー向け。',
+  'Please configure your models in settings.json:':
+    'settings.json でモデルを設定してください：',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    '環境変数を使用して API キーを設定してください（例：OPENAI_API_KEY）',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "modelProviders['openai']（または他の認証タイプ）にモデル設定を追加してください",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    '各プロバイダーには：id、envKey（必須）、およびオプションの baseUrl、generationConfig が必要です',
+  'Use /model command to select your preferred model from the configured list':
+    '/model コマンドを使用して、設定済みリストからお好みのモデルを選択してください',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'サポートされている認証タイプ：openai、anthropic、gemini、vertex-ai など',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'Please enter your API key:': 'APIキーを入力してください：',
+  'API key cannot be empty.': 'APIキーは空にできません。',
+  'You can get your exclusive Coding Plan API-KEY here:':
+    'Coding Plan の API-KEY はこちらで取得できます：',
+  'New model configurations are available for Bailian Coding Plan. Update now?':
+    'Bailian Coding Plan の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Coding Plan の設定が正常に更新されました。新しいモデルが利用可能になりました。',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'Coding Plan の API キーが見つかりません。Coding Plan で再認証してください。',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Coding Plan の設定更新に失敗しました: {{message}}',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, 中国)',
+  'Coding Plan (Bailian, Global/Intl)':
+    'Coding Plan (Bailian, グローバル/国際)',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Bailian Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    'Coding Plan (Bailian, グローバル/国際) のAPIキーを貼り付けるだけで準備完了です！',
+  Custom: 'カスタム',
+  'More instructions about configuring `modelProviders` manually.':
+    '`modelProviders`を手動で設定する方法の詳細はこちら。',
+  'Select API-KEY configuration mode:': 'API-KEY設定モードを選択してください：',
+  '(Press Escape to go back)': '(Escapeキーで戻る)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enterで送信、Escapeでキャンセル)',
+  'More instructions please check:': '詳細な手順はこちらをご確認ください：',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    '{{region}} の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'Bailian Coding Plan (中国) の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'Coding Plan (Bailian, グローバル/国際) の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
+  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
+    '{{region}} での認証に成功しました。APIキーは settings.env に保存されています。',
 };

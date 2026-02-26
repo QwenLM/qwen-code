@@ -882,6 +882,115 @@ describe('StreamJsonOutputAdapter', () => {
     });
   });
 
+  describe('emitToolProgress', () => {
+    const mockRequest = {
+      callId: 'tool-call-1',
+      name: 'mcp__echo-test__echo',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: '',
+    };
+
+    it('should emit tool_progress stream event when includePartialMessages is true', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 10,
+        message: 'Echo: 1',
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(1);
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('stream_event');
+      expect(parsed.parent_tool_use_id).toBeNull();
+      expect(parsed.session_id).toBe('test-session-id');
+      expect(parsed.uuid).toBeDefined();
+      expect(parsed.event).toEqual({
+        type: 'tool_progress',
+        tool_use_id: 'tool-call-1',
+        content: {
+          type: 'mcp_tool_progress',
+          progress: 1,
+          total: 10,
+          message: 'Echo: 1',
+        },
+      });
+    });
+
+    it('should not emit tool_progress when includePartialMessages is false', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 10,
+        message: 'Echo: 1',
+      });
+
+      expect(stdoutWriteSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit multiple tool_progress events for sequential progress updates', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 3,
+        message: 'Echo: 1',
+      });
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 2,
+        total: 3,
+        message: 'Echo: 1, 2',
+      });
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 3,
+        total: 3,
+        message: 'Echo: 1, 2, 3',
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(3);
+
+      const events = stdoutWriteSpy.mock.calls.map(
+        (call: unknown[]) => JSON.parse(call[0] as string).event,
+      );
+      expect(events[0].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 3,
+        message: 'Echo: 1',
+      });
+      expect(events[1].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 2,
+        total: 3,
+        message: 'Echo: 1, 2',
+      });
+      expect(events[2].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 3,
+        total: 3,
+        message: 'Echo: 1, 2, 3',
+      });
+
+      // All events should share the same tool_use_id
+      for (const event of events) {
+        expect(event.type).toBe('tool_progress');
+        expect(event.tool_use_id).toBe('tool-call-1');
+      }
+    });
+  });
+
   describe('getSessionId and getModel', () => {
     beforeEach(() => {
       adapter = new StreamJsonOutputAdapter(mockConfig, false);

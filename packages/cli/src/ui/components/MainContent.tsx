@@ -34,7 +34,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={uiState.historyRemountKey}
+        key={`${uiState.historyRemountKey}-${uiState.currentModel}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           <DebugModeNotification key="debug-notification" />,

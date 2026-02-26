@@ -29,6 +29,7 @@ import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
@@ -638,6 +639,24 @@ export async function discoverTools(
       return [];
     }
 
+    // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
+    // that are not preserved by mcpToTool's functionDeclarations conversion.
+    const annotationsMap = new Map<string, McpToolAnnotations>();
+    try {
+      const listToolsResult = await mcpClient.listTools();
+      for (const mcpTool of listToolsResult.tools) {
+        if (mcpTool.annotations) {
+          annotationsMap.set(mcpTool.name, mcpTool.annotations);
+        }
+      }
+    } catch {
+      // If listTools fails, proceed without annotations — non-critical
+      debugLogger.error(
+        `Failed to fetch tool annotations from MCP server '${mcpServerName}'`,
+      );
+    }
+
+    const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
     const discoveredTools: DiscoveredMCPTool[] = [];
     for (const funcDecl of tool.functionDeclarations) {
       try {
@@ -655,6 +674,9 @@ export async function discoverTools(
             mcpServerConfig.trust,
             undefined,
             cliConfig,
+            mcpClient, // raw MCP Client for direct callTool with progress
+            mcpTimeout,
+            annotationsMap.get(funcDecl.name!),
           ),
         );
       } catch (error) {

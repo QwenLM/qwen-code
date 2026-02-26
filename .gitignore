@@ -52,7 +52,10 @@ packages/web-templates/src/generated/
 packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
+
 .qwen/
+!.qwen/commands/
+!.qwen/skills/
 logs/
 # GHA credentials
 gha-creds-*.json
@@ -70,6 +73,8 @@ __pycache__/
 
 integration-tests/concurrent-runner/output/
 integration-tests/concurrent-runner/task-*
+
+integration-tests/terminal-capture/scenarios/screenshots/
 
 # storybook
 *storybook.log

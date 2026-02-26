@@ -214,7 +214,7 @@ export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'marketplace';
+  type: 'git' | 'local' | 'link' | 'github-release';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release installs.
   ref?: string;
@@ -768,6 +768,19 @@ export class Config {
     settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
   ): void {
     this.modelsConfig.updateCredentials(credentials, settingsGenerationConfig);
+  }
+
+  /**
+   * Reload model providers configuration at runtime.
+   * This enables hot-reloading of modelProviders settings without restarting the CLI.
+   * Should be called before refreshAuth when settings.json has been updated.
+   *
+   * @param modelProvidersConfig - The updated model providers configuration
+   */
+  reloadModelProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
   }
 
   /**

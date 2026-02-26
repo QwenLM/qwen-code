@@ -68,7 +68,10 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
           setSelected((prev) => Math.max(prev - 1, 0));
           break;
         case 'Enter':
+          // Prevent form submission AND stop propagation so the input form
+          // does not treat this Enter as a message send.
           event.preventDefault();
+          event.stopPropagation();
           if (models[selected]) {
             onSelectModel(models[selected].modelId);
             onClose();
@@ -84,11 +87,14 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
     };
 
     document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('keydown', handleKeyDown);
+    // Use capture phase so Enter is handled before bubble-phase handlers
+    // (e.g. the InputForm's Enter-to-submit) and stopPropagation can
+    // prevent an empty user message.
+    document.addEventListener('keydown', handleKeyDown, true);
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [visible, models, selected, onSelectModel, onClose]);
 

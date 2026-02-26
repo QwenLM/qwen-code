@@ -70,12 +70,14 @@ if (!geminiSandbox) {
 geminiSandbox = (geminiSandbox || '').toLowerCase();
 
 const commandExists = (cmd) => {
-  const checkCommand = os.platform() === 'win32' ? 'where' : 'command -v';
+  // Use 'where.exe' (not 'where') on Windows because PowerShell aliases
+  // 'where' to 'Where-Object', which breaks command detection.
+  const checkCommand = os.platform() === 'win32' ? 'where.exe' : 'command -v';
   try {
     execSync(`${checkCommand} ${cmd}`, { stdio: 'ignore' });
     return true;
   } catch {
-    if (os.platform() === 'win32') {
+    if (os.platform() === 'win32' && !cmd.endsWith('.exe')) {
       try {
         execSync(`${checkCommand} ${cmd}.exe`, { stdio: 'ignore' });
         return true;

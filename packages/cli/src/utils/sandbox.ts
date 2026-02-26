@@ -337,7 +337,7 @@ export async function start_sandbox(
 
   writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);
 
-  // determine full path for gemini-cli to distinguish linked vs installed setting
+  // determine full path for qwen-code to distinguish linked vs installed setting
   const gcPath = fs.realpathSync(process.argv[1]);
 
   const projectSandboxDockerfile = path.join(
@@ -350,9 +350,9 @@ export async function start_sandbox(
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 
-  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under gemini-cli repo
+  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under qwen-code repo
   //
-  // note this can only be done with binary linked from gemini-cli repo
+  // note this can only be done with binary linked from qwen-code repo
   if (process.env['BUILD_SANDBOX']) {
     if (!gcPath.includes('qwen-code/packages/')) {
       throw new FatalSandboxError(
@@ -389,8 +389,8 @@ export async function start_sandbox(
   if (!(await ensureSandboxImageIsPresent(config.command, image))) {
     const remedy =
       image === LOCAL_DEV_SANDBOX_IMAGE_NAME
-        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the gemini-cli repo to build it locally, or check the image name and your network connection.'
-        : 'Please check the image name, your network connection, or notify gemini-cli-dev@google.com if the issue persists.';
+        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the qwen-code repo to build it locally, or check the image name and your network connection.'
+        : 'Please check the image name, your network connection, or notify qwen-code-dev@service.alibaba.com if the issue persists.';
     throw new FatalSandboxError(
       `Sandbox image '${image}' is missing or could not be pulled. ${remedy}`,
     );
@@ -544,7 +544,7 @@ export async function start_sandbox(
     process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true';
   let containerName;
   if (isIntegrationTest) {
-    containerName = `gemini-cli-integration-test-${randomBytes(4).toString(
+    containerName = `qwen-code-integration-test-${randomBytes(4).toString(
       'hex',
     )}`;
     writeStderrLine(`ContainerName: ${containerName}`);
@@ -716,10 +716,16 @@ export async function start_sandbox(
   let userFlag = '';
   const finalEntrypoint = entrypoint(workdir, cliArgs);
 
-  if (process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true') {
+  // Check if we should use current user's UID/GID in sandbox
+  // In integration test mode, we still respect SANDBOX_SET_UID_GID to allow
+  // tests that need to access host's ~/.qwen (e.g., --resume functionality)
+  const useCurrentUser = await shouldUseCurrentUserInSandbox();
+
+  if (!useCurrentUser) {
+    // Use root user (default for integration tests or when explicitly disabled)
     args.push('--user', 'root');
     userFlag = '--user root';
-  } else if (await shouldUseCurrentUserInSandbox()) {
+  } else {
     // For the user-creation logic to work, the container must start as root.
     // The entrypoint script then handles dropping privileges to the correct user.
     args.push('--user', 'root');

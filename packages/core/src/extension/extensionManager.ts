@@ -763,7 +763,7 @@ export class ExtensionManager {
       let tempDir: string | undefined;
 
       if (
-        installMetadata.type === 'marketplace' &&
+        installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
         !installMetadata.pluginName
       ) {
@@ -774,7 +774,6 @@ export class ExtensionManager {
       }
 
       if (
-        installMetadata.type === 'marketplace' ||
         installMetadata.type === 'git' ||
         installMetadata.type === 'github-release'
       ) {
@@ -793,10 +792,7 @@ export class ExtensionManager {
           }
         } catch (_error) {
           await cloneFromGit(installMetadata, tempDir);
-          if (
-            installMetadata.type === 'git' ||
-            installMetadata.type === 'github-release'
-          ) {
+          if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
         }

@@ -116,6 +116,29 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  // Coding Plan configuration
+  codingPlan: {
+    type: 'object',
+    label: 'Coding Plan',
+    category: 'Model',
+    requiresRestart: false,
+    default: {},
+    description: 'Coding Plan template version tracking and configuration.',
+    showInDialog: false,
+    properties: {
+      version: {
+        type: 'string',
+        label: 'Coding Plan Template Version',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
+        showInDialog: false,
+      },
+    },
+  },
+
   // Environment variables fallback
   env: {
     type: 'object',
@@ -350,7 +373,7 @@ const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
       },

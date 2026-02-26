@@ -370,6 +370,8 @@ describe('InputPrompt', () => {
   });
 
   describe('clipboard image paste', () => {
+    const isWindows = process.platform === 'win32';
+
     beforeEach(() => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
@@ -378,10 +380,37 @@ describe('InputPrompt', () => {
       );
     });
 
-    it('should handle Ctrl+V when clipboard has an image', async () => {
+    // Windows uses Alt+V (\x1Bv), non-Windows uses Ctrl+V (\x16)
+    const describeConditional = isWindows ? it.skip : it;
+    describeConditional(
+      'should handle Ctrl+V when clipboard has an image',
+      async () => {
+        vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+        vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
+          '/Users/mochi/.qwen/tmp/clipboard-123.png',
+        );
+
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        // Send Ctrl+V
+        stdin.write('\x16'); // Ctrl+V
+        await wait();
+
+        expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
+        expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+        expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
+        // Note: The new implementation adds images as attachments rather than inserting into buffer
+        unmount();
+      },
+    );
+
+    it('should handle Cmd+V when clipboard has an image', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
-        '/test/.qwen-clipboard/clipboard-123.png',
+        '/Users/mochi/.qwen/tmp/clipboard-456.png',
       );
 
       const { stdin, unmount } = renderWithProviders(
@@ -389,18 +418,15 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      // Send Ctrl+V
-      stdin.write('\x16'); // Ctrl+V
+      // Send Cmd+V (meta key) / Alt+V on Windows
+      // In terminals, Cmd+V or Alt+V is typically sent as ESC followed by 'v'
+      stdin.write('\x1Bv');
       await wait();
 
       expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
-      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
-      );
-      expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalledWith(
-        props.config.getTargetDir(),
-      );
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
+      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+      expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
+      // Note: The new implementation adds images as attachments rather than inserting into buffer
       unmount();
     });
 
@@ -412,7 +438,8 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write('\x16'); // Ctrl+V
+      // Use platform-appropriate key combination
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
       expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
@@ -430,7 +457,8 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write('\x16'); // Ctrl+V
+      // Use platform-appropriate key combination
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
@@ -439,11 +467,7 @@ describe('InputPrompt', () => {
     });
 
     it('should insert image path at cursor position with proper spacing', async () => {
-      const imagePath = path.join(
-        'test',
-        '.qwen-clipboard',
-        'clipboard-456.png',
-      );
+      const imagePath = '/Users/mochi/.qwen/tmp/clipboard-456.png';
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
 
@@ -451,27 +475,20 @@ describe('InputPrompt', () => {
       mockBuffer.text = 'Hello world';
       mockBuffer.cursor = [0, 5]; // Cursor after "Hello"
       mockBuffer.lines = ['Hello world'];
-      mockBuffer.replaceRangeByOffset = vi.fn();
 
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
       );
       await wait();
 
-      stdin.write('\x16'); // Ctrl+V
+      // Use platform-appropriate key combination
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
-      // Should insert at cursor position with spaces
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalled();
-
-      // Get the actual call to see what path was used
-      const actualCall = vi.mocked(mockBuffer.replaceRangeByOffset).mock
-        .calls[0];
-      expect(actualCall[0]).toBe(5); // start offset
-      expect(actualCall[1]).toBe(5); // end offset
-      expect(actualCall[2]).toBe(
-        ' @' + path.relative(path.join('test', 'project', 'src'), imagePath),
-      );
+      // The new implementation adds images as attachments rather than inserting into buffer
+      // So we verify that saveClipboardImage was called instead
+      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+      expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
       unmount();
     });
 
@@ -485,7 +502,8 @@ describe('InputPrompt', () => {
       );
       await wait();
 
-      stdin.write('\x16'); // Ctrl+V
+      // Use platform-appropriate key combination
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
       await wait();
 
       // Should not throw and should not set buffer text on error

@@ -94,6 +94,7 @@ import {
   useSettingInputRequests,
   usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
+import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
@@ -231,6 +232,9 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.addItem,
     config.getWorkingDir(),
   );
+
+  const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
+    useCodingPlanUpdates(settings, config, historyManager.addItem);
 
   const [isPermissionsDialogOpen, setPermissionsDialogOpen] = useState(false);
   const openPermissionsDialog = useCallback(
@@ -402,6 +406,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingAuthType,
     qwenAuthState,
     handleAuthSelect,
+    handleCodingPlanSubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -687,7 +692,6 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidth,
     terminalHeight,
     handleVisionSwitchRequired, // onVisionSwitchRequired
-    embeddedShellFocused,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -895,6 +899,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [escapePressedOnce, setEscapePressedOnce] = useState(false);
+  const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1171,6 +1177,47 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
+      } else if (keyMatchers[Command.ESCAPE](key)) {
+        // Escape key handling
+        // Skip if shell is focused (to allow shell's own escape handling)
+        if (embeddedShellFocused) {
+          return;
+        }
+
+        // If input has content, use double-press to clear
+        if (buffer.text.length > 0) {
+          if (escapePressedOnce) {
+            // Second press: clear input, keep the flag to allow immediate cancel
+            buffer.setText('');
+            return;
+          }
+          // First press: set flag and show prompt
+          setEscapePressedOnce(true);
+          escapeTimerRef.current = setTimeout(() => {
+            setEscapePressedOnce(false);
+            escapeTimerRef.current = null;
+          }, CTRL_EXIT_PROMPT_DURATION_MS);
+          return;
+        }
+
+        // Input is empty, cancel request immediately (no double-press needed)
+        if (streamingState === StreamingState.Responding) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          cancelOngoingRequest?.();
+          setEscapePressedOnce(false);
+          return;
+        }
+
+        // No action available, reset the flag
+        if (escapeTimerRef.current) {
+          clearTimeout(escapeTimerRef.current);
+          escapeTimerRef.current = null;
+        }
+        setEscapePressedOnce(false);
+        return;
       }
 
       let enteringConstrainHeightMode = false;
@@ -1215,10 +1262,15 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
-      buffer.text.length,
       ctrlDPressedOnce,
       setCtrlDPressedOnce,
       ctrlDTimerRef,
+      escapePressedOnce,
+      setEscapePressedOnce,
+      escapeTimerRef,
+      streamingState,
+      cancelOngoingRequest,
+      buffer,
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
@@ -1275,6 +1327,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
+    !!codingPlanUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
@@ -1339,6 +1392,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      codingPlanUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -1429,6 +1483,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      codingPlanUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -1508,10 +1563,12 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,
@@ -1552,10 +1609,12 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,

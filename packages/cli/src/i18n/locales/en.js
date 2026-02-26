@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ to manage attachments',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → select, Delete to remove, ↓ to exit',
+  'Attachments: ': 'Attachments: ',
+
   'Basics:': 'Basics:',
   'Add context': 'Add context',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -140,6 +146,8 @@ export default {
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'change the auth method': 'change the auth method',
+  'Configure authentication information for login':
+    'Configure authentication information for login',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
 
@@ -937,6 +945,11 @@ export default {
   'Terms of Services and Privacy Notice for Qwen Code':
     'Terms of Services and Privacy Notice for Qwen Code',
   'Qwen OAuth': 'Qwen OAuth',
+  'Login with QwenChat account to use daily free quota.':
+    'Login with QwenChat account to use daily free quota.',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Use coding plan credentials or your own api-keys/providers.',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'Failed to login. Message: {{message}}',
@@ -1010,8 +1023,8 @@ export default {
   '(not set)': '(not set)',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
 
@@ -1362,4 +1375,80 @@ export default {
     'Opening extensions page in your browser: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Failed to open browser. Check out the extensions gallery at {{url}}',
+
+  // ============================================================================
+  // Retry / Rate Limit
+  // ============================================================================
+  'Rate limit error: {{reason}}': 'Rate limit error: {{reason}}',
+  'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
+    'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'Please enter your API key:': 'Please enter your API key:',
+  'API key cannot be empty.': 'API key cannot be empty.',
+  'You can get your exclusive Coding Plan API-KEY here:':
+    'You can get your exclusive Coding Plan API-KEY here:',
+  'API key is stored in settings.env. You can migrate it to a .env file for better security.':
+    'API key is stored in settings.env. You can migrate it to a .env file for better security.',
+  'New model configurations are available for Bailian Coding Plan. Update now?':
+    'New model configurations are available for Bailian Coding Plan. Update now?',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Coding Plan configuration updated successfully. New models are now available.',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'Coding Plan API key not found. Please re-authenticate with Coding Plan.',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Failed to update Coding Plan configuration: {{message}}',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'For advanced users who want to configure models manually.',
+  'Please configure your models in settings.json:':
+    'Please configure your models in settings.json:',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    'Set API key via environment variable (e.g., OPENAI_API_KEY)',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "Add model configuration to modelProviders['openai'] (or other auth types)",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig',
+  'Use /model command to select your preferred model from the configured list':
+    'Use /model command to select your preferred model from the configured list',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.',
+  'More instructions please check:': 'More instructions please check:',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
+  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    "Paste your api key of Bailian Coding Plan and you're all set!",
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!",
+  Custom: 'Custom',
+  'More instructions about configuring `modelProviders` manually.':
+    'More instructions about configuring `modelProviders` manually.',
+  'Select API-KEY configuration mode:': 'Select API-KEY configuration mode:',
+  '(Press Escape to go back)': '(Press Escape to go back)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Press Enter to submit, Escape to cancel)',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'New model configurations are available for {{region}}. Update now?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'New model configurations are available for Bailian Coding Plan (China). Update now?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
+    'Authenticated successfully with {{region}}. API key is stored in settings.env.',
 };

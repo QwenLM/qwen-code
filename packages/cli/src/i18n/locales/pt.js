@@ -141,6 +141,8 @@ export default {
     'abrir documentação completa do Qwen Code no seu navegador',
   'Configuration not available.': 'Configuração não disponível.',
   'change the auth method': 'alterar o método de autenticação',
+  'Configure authentication information for login':
+    'Configurar informações de autenticação para login',
   'Copy the last result or code snippet to clipboard':
     'Copiar o último resultado ou trecho de código para a área de transferência',
 
@@ -958,6 +960,11 @@ export default {
   'Terms of Services and Privacy Notice for Qwen Code':
     'Termos de Serviço e Aviso de Privacidade do Qwen Code',
   'Qwen OAuth': 'Qwen OAuth',
+  'Login with QwenChat account to use daily free quota.':
+    'Faça login com sua conta QwenChat para usar a cota gratuita diária.',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Use credenciais do Coding Plan ou suas próprias chaves API/provedores.',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'Falha ao fazer login. Mensagem: {{message}}',
@@ -1032,8 +1039,8 @@ export default {
   '(not set)': '(não definido)',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Falha ao trocar o modelo para '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'O modelo Qwen Coder mais recente do Alibaba Cloud ModelStudio (versão: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — modelo híbrido eficiente com desempenho líder em programação',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'O modelo Qwen Vision mais recente do Alibaba Cloud ModelStudio (versão: qwen3-vl-plus-2025-09-23)',
 
@@ -1385,4 +1392,72 @@ export default {
     'Abrindo página de extensões no seu navegador: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Falha ao abrir o navegador. Confira a galeria de extensões em {{url}}',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'Para usuários avançados que desejam configurar modelos manualmente.',
+  'Please configure your models in settings.json:':
+    'Por favor, configure seus modelos em settings.json:',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    'Defina a chave de API via variável de ambiente (ex: OPENAI_API_KEY)',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "Adicione a configuração do modelo a modelProviders['openai'] (ou outros tipos de autenticação)",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    'Cada provedor precisa de: id, envKey (obrigatório), além de baseUrl e generationConfig opcionais',
+  'Use /model command to select your preferred model from the configured list':
+    'Use o comando /model para selecionar seu modelo preferido da lista configurada',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'Tipos de autenticação suportados: openai, anthropic, gemini, vertex-ai, etc.',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'Please enter your API key:': 'Por favor, digite sua chave de API:',
+  'API key cannot be empty.': 'A chave de API não pode estar vazia.',
+  'You can get your exclusive Coding Plan API-KEY here:':
+    'Você pode obter sua chave de API exclusiva do Coding Plan aqui:',
+  'New model configurations are available for Bailian Coding Plan. Update now?':
+    'Novas configurações de modelo estão disponíveis para o Bailian Coding Plan. Atualizar agora?',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Configuração do Coding Plan atualizada com sucesso. Novos modelos agora estão disponíveis.',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'Chave de API do Coding Plan não encontrada. Por favor, re-autentique com o Coding Plan.',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Falha ao atualizar a configuração do Coding Plan: {{message}}',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
+  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Cole sua chave de API do Bailian Coding Plan e pronto!',
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    'Cole sua chave de API do Coding Plan (Bailian, Global/Intl) e pronto!',
+  Custom: 'Personalizado',
+  'More instructions about configuring `modelProviders` manually.':
+    'Mais instruções sobre como configurar `modelProviders` manualmente.',
+  'Select API-KEY configuration mode:':
+    'Selecione o modo de configuração da API-KEY:',
+  '(Press Escape to go back)': '(Pressione Escape para voltar)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Pressione Enter para enviar, Escape para cancelar)',
+  'More instructions please check:': 'Mais instruções, consulte:',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'Novas configurações de modelo estão disponíveis para o Bailian Coding Plan (China). Atualizar agora?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'Novas configurações de modelo estão disponíveis para o Coding Plan (Bailian, Global/Intl). Atualizar agora?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
+  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
+    'Autenticado com sucesso com {{region}}. A chave de API está armazenada em settings.env.',
 };
