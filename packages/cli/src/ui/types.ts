@@ -256,6 +256,48 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+// --- Context Usage types ---
+
+export interface ContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ContextSkillDetail {
+  name: string;
+  tokens: number;
+}
+
+export type HistoryItemContextUsage = HistoryItemBase & {
+  type: 'context_usage';
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ContextCategoryBreakdown;
+  builtinTools: ContextToolDetail[];
+  mcpTools: ContextToolDetail[];
+  memoryFiles: ContextMemoryDetail[];
+  skills: ContextSkillDetail[];
+  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  isEstimated?: boolean;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -284,7 +326,8 @@ export type HistoryItemWithoutId =
   | HistoryItemExtensionsList
   | HistoryItemToolsList
   | HistoryItemSkillsList
-  | HistoryItemMcpStatus;
+  | HistoryItemMcpStatus
+  | HistoryItemContextUsage;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -307,6 +350,7 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  CONTEXT_USAGE = 'context_usage',
 }
 
 // Simplified message structure for internal feedback
