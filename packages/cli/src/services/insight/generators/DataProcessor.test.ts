@@ -874,6 +874,16 @@ describe('DataProcessor', () => {
         },
         {
           sessionId: 'session1',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'system',
+          subtype: 'slash_command',
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
           timestamp: '2025-01-15T10:05:00Z',
           type: 'assistant',
           message: { role: 'assistant', parts: [{ text: 'Hi' }] },
@@ -909,7 +919,7 @@ describe('DataProcessor', () => {
       ).generateMetrics(files);
 
       expect(result).toMatchObject({
-        totalMessages: 3,
+        totalMessages: 2,
         totalSessions: 1,
         heatmap: expect.any(Object),
         activeHours: expect.any(Object),

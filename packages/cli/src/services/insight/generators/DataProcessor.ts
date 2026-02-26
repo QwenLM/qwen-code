@@ -842,7 +842,6 @@ None captured`;
       for (const fileInfo of batch) {
         try {
           const records = await readJsonlFile<ChatRecord>(fileInfo.path);
-          totalMessages += records.length;
 
           // Process each record
           for (const record of records) {
@@ -850,11 +849,19 @@ None captured`;
             const dateKey = this.formatDate(timestamp);
             const hour = timestamp.getHours();
 
-            // Update heatmap (count of interactions per day)
-            heatmap[dateKey] = (heatmap[dateKey] || 0) + 1;
+            // Count user messages and slash commands (actual user interactions)
+            const isUserMessage = record.type === 'user';
+            const isSlashCommand =
+              record.type === 'system' && record.subtype === 'slash_command';
+            if (isUserMessage || isSlashCommand) {
+              totalMessages++;
 
-            // Update active hours
-            activeHours[hour] = (activeHours[hour] || 0) + 1;
+              // Update heatmap (count of user interactions per day)
+              heatmap[dateKey] = (heatmap[dateKey] || 0) + 1;
+
+              // Update active hours
+              activeHours[hour] = (activeHours[hour] || 0) + 1;
+            }
 
             // Track session times
             if (!sessionStartTimes[record.sessionId]) {
