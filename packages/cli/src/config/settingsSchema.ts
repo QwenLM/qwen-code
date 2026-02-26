@@ -484,6 +484,16 @@ const SETTINGS_SCHEMA = {
         description: 'Whether the user has seen the IDE integration nudge.',
         showInDialog: false,
       },
+      dedicatedTerminal: {
+        type: 'boolean',
+        label: 'Dedicated Terminal',
+        category: 'IDE',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable dedicated terminal for displaying shell command execution in the IDE.',
+        showInDialog: true,
+      },
     },
   },
 
