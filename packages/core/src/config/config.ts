@@ -61,6 +61,7 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { CodebaseSearchTool } from '../tools/codebaseSearch.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -783,6 +784,10 @@ export class Config {
 
         // Start polling for changes
         this.indexService.startPolling();
+
+        // Register codebaseSearch tool when index is ready.
+        // The tool is only available after the index has been fully built.
+        this.registerCodebaseSearchToolWhenReady(this.indexService);
       } catch (error) {
         console.warn(
           `[Config] Failed to initialize codebase indexing: ${error}`,
@@ -1667,6 +1672,39 @@ export class Config {
     return this.skillManager;
   }
 
+  /**
+   * Registers the codebaseSearch tool when the index becomes ready.
+   *
+   * If the index is already built (e.g. from a previous session), the tool
+   * is registered immediately. Otherwise, a `build_complete` listener is
+   * attached so the tool appears as soon as indexing finishes.
+   */
+  private registerCodebaseSearchToolWhenReady(
+    indexService: IndexService,
+  ): void {
+    const createAndRegister = () => {
+      const tool = new CodebaseSearchTool(() =>
+        indexService.getRetrievalServiceAsync(),
+      );
+      this.toolRegistry.registerTool(tool);
+      // Refresh the LLM client's tool list so the new tool becomes callable.
+      this.geminiClient.setTools().catch((error) => {
+        console.warn(
+          `[Config] Failed to refresh tools after codebaseSearch registration: ${error}`,
+        );
+      });
+    };
+
+    if (indexService.isIndexReady()) {
+      createAndRegister();
+    }
+
+    // Also listen for future build completions (first build or rebuilds).
+    indexService.on('build_complete', () => {
+      createAndRegister();
+    });
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ): Promise<ToolRegistry> {
@@ -1709,6 +1747,7 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
+    registerCoreTool(CodebaseSearchTool, this);
     if (this.getExperimentalSkills()) {
       registerCoreTool(SkillTool, this);
     }

@@ -227,6 +227,15 @@ export class ToolRegistry {
   }
 
   /**
+   * Removes a tool by name.
+   * @param name The tool name to remove.
+   * @returns True if the tool was found and removed, false otherwise.
+   */
+  unregisterTool(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  /**
    * Discovers tools from project (if available and configured).
    * Can be called multiple times to update discovered tools.
    * This will discover tools from the command line and from MCP servers.

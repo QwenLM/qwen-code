@@ -122,30 +122,29 @@ export class ContextBuilder {
       ? this.deduplicateChunks(chunks)
       : chunks;
 
-    const lines: string[] = ['## Relevant Code\n'];
-    let charCount = lines[0]!.length;
+    const title = '## Relevant Code(Sort by relevance)';
+    const chunkTexts = processedChunks.map((chunk) =>
+      this.formatChunkSection(chunk),
+    );
+    let charCount =
+      title.length + chunkTexts.reduce((sum, header) => sum + header.length, 0);
 
-    for (const chunk of processedChunks) {
-      // Build chunk section
-      const chunkLines = this.formatChunkSection(chunk);
-      const chunkText = chunkLines.join('\n');
-      const chunkChars = chunkText.length;
+    for (let i = 0; i < processedChunks.length; i++) {
+      const chunk = processedChunks[i];
+      const chunkHeaderLength = chunkTexts[i]!.length;
+      const chunkFullContent = this.formatChunkSection(chunk, true);
+      const chunkFullLength = chunkFullContent.length;
 
-      // Check token budget
-      if (charCount + chunkChars > maxChars) {
-        // Try to fit at least a truncated version
-        const remaining = maxChars - charCount;
-        if (remaining > 200) {
-          lines.push(this.formatTruncatedChunk(chunk, remaining));
-        }
-        break;
+      // Check if adding the full chunk exceeds the budget
+      if (charCount + (chunkFullLength - chunkHeaderLength) < maxChars) {
+        chunkTexts[i] = chunkFullContent; // Use full content
+        charCount += chunkFullLength - chunkHeaderLength;
+      } else {
+        break; // Stop adding more chunks if we exceed the budget
       }
-
-      lines.push(chunkText);
-      charCount += chunkChars;
     }
 
-    return lines.join('\n');
+    return `${title}\n${chunkTexts.join('\n')}`;
   }
 
   /**
@@ -160,10 +159,10 @@ export class ContextBuilder {
     return this.buildTextView(chunks, budget);
   }
 
-  /**
-   * Formats a single chunk as a markdown code section.
-   */
-  private formatChunkSection(chunk: ScoredChunk): string[] {
+  private formatChunkSection(
+    chunk: ScoredChunk,
+    withContent?: boolean,
+  ): string {
     const lines: string[] = [];
 
     // Header with file path and line numbers
@@ -173,35 +172,11 @@ export class ContextBuilder {
         : `### ${chunk.filePath}`;
       lines.push(header);
     }
-
-    // Code block with language detection
-    // const language = this.config.detectLanguage
-    //   ? this.detectLanguage(chunk.filePath)
-    //   : '';
-    // lines.push('```' + language);
-    // lines.push(chunk.content);
-    // lines.push('```\n');
-
-    return lines;
-  }
-
-  /**
-   * Formats a truncated chunk to fit remaining budget.
-   */
-  private formatTruncatedChunk(chunk: ScoredChunk, maxChars: number): string {
-    const header = `### ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (truncated)`;
-    const language = this.detectLanguage(chunk.filePath);
-    const overhead = header.length + language.length + 20; // Account for markdown syntax
-    const contentBudget = maxChars - overhead;
-
-    if (contentBudget <= 0) {
-      return '';
+    if (withContent && chunk.content) {
+      lines.push(chunk.content);
+      lines.push('\n');
     }
-
-    const truncatedContent =
-      chunk.content.substring(0, contentBudget) + '\n// ...truncated';
-
-    return [header, '```' + language, truncatedContent, '```'].join('\n');
+    return lines.join('\n');
   }
 
   /**
@@ -231,7 +206,7 @@ export class ContextBuilder {
   /**
    * Detects programming language from file extension.
    */
-  private detectLanguage(filePath: string): string {
+  detectLanguage(filePath: string): string {
     const ext = filePath.substring(filePath.lastIndexOf('.'));
     return LANGUAGE_MAP[ext.toLowerCase()] ?? '';
   }

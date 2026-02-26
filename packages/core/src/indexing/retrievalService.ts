@@ -111,6 +111,12 @@ export interface RetrieveOptions {
    * Default: 0 (no filtering)
    */
   minScoreThreshold?: number;
+  /**
+   * Whether the query is about test code.
+   * When true, the test-file penalty is skipped so test files rank normally.
+   * Default: false
+   */
+  isTestRelated?: boolean;
 }
 
 /**
@@ -314,64 +320,201 @@ export class RetrievalService {
     }
 
     // 4. RRF Fusion with multi-source boost
-    let fusedResults = this.rrfFusion(
+    const fusedResults = this.rrfFusion(
       sources,
       this.config.rrfK,
       multiSourceBoost,
     );
 
-    // 4.5. Apply minimum score threshold filter
-    // Filter out low-confidence results to improve precision
-    if (minScoreThreshold > 0) {
-      const maxScore = fusedResults.length > 0 ? fusedResults[0].fusedScore : 0;
+    return this.postProcessResults(fusedResults, {
+      query,
+      topK,
+      maxTokens,
+      enableGraph,
+      graphDepth,
+      maxGraphNodes,
+      testFilePenalty,
+      multiSourceBoost,
+      minScoreThreshold,
+      enableRerank,
+      isTestRelated: enhancedQuery.isTestRelated ?? false,
+    });
+  }
+
+  /**
+   * Performs hybrid retrieval with pre-enhanced queries, skipping the internal
+   * query enhancement step. All post-processing stages (score threshold,
+   * test-file penalty, reranking, graph expansion, context building) are
+   * applied identically to {@link retrieve}.
+   *
+   * This is designed for callers that already have LLM-generated enhanced
+   * queries (e.g. the codebaseSearch tool where the LLM provides bm25/vector
+   * queries directly as tool parameters).
+   *
+   * @param rerankQuery Query string passed to the reranker for relevance scoring.
+   * @param bm25Queries Pre-enhanced BM25 keyword queries.
+   * @param vectorQueries Pre-enhanced vector/semantic queries.
+   * @param options Retrieval options (same as {@link retrieve}).
+   * @returns Retrieval response with chunks, graph data, and formatted views.
+   */
+  async retrieveWithEnhancedQueries(
+    rerankQuery: string,
+    bm25Queries: string[],
+    vectorQueries: string[],
+    options: RetrieveOptions = {},
+  ): Promise<RetrievalResponse> {
+    const {
+      topK = this.config.topK,
+      maxTokens = this.config.maxTokens,
+      enableGraph = this.config.enableGraph,
+      graphDepth = this.config.graphDepth,
+      maxGraphNodes = this.config.maxGraphNodes,
+      weights = {},
+      testFilePenalty = 0.1,
+      multiSourceBoost = 1.3,
+      minScoreThreshold = 0,
+      enableRerank = true,
+      isTestRelated = false,
+    } = options;
+
+    const mergedWeights = {
+      bm25: weights.bm25 ?? this.config.weights.bm25,
+      vector: weights.vector ?? this.config.weights.vector,
+      recent: weights.recent ?? this.config.weights.recent,
+    };
+
+    // Execute all BM25, vector, and recent searches in parallel.
+    const bm25Promises = bm25Queries.map((q) =>
+      this.bm25Search(q, this.config.bm25TopK),
+    );
+    const vectorPromises = vectorQueries.map((q) =>
+      this.vectorSearch(q, this.config.vectorTopK),
+    );
+    const recentPromise = this.recentFilesSearch(this.config.recentTopK);
+
+    const [bm25ResultArrays, vectorResultArrays, recentResults] =
+      await Promise.all([
+        Promise.all(bm25Promises),
+        Promise.all(vectorPromises),
+        recentPromise,
+      ]);
+
+    // Build RRF fusion sources.
+    const sources: Array<{
+      results: ScoredChunk[];
+      weight: number;
+      source: 'bm25' | 'vector' | 'recent';
+    }> = [];
+
+    for (const results of bm25ResultArrays) {
+      sources.push({ results, weight: mergedWeights.bm25, source: 'bm25' });
+    }
+    for (const results of vectorResultArrays) {
+      sources.push({
+        results,
+        weight: mergedWeights.vector,
+        source: 'vector',
+      });
+    }
+    sources.push({
+      results: recentResults,
+      weight: mergedWeights.recent,
+      source: 'recent',
+    });
+
+    const fusedResults = this.rrfFusion(
+      sources,
+      this.config.rrfK,
+      multiSourceBoost,
+    );
+
+    return this.postProcessResults(fusedResults, {
+      query: rerankQuery,
+      topK,
+      maxTokens,
+      enableGraph,
+      graphDepth,
+      maxGraphNodes,
+      testFilePenalty,
+      multiSourceBoost,
+      minScoreThreshold,
+      enableRerank,
+      isTestRelated,
+    });
+  }
+
+  /**
+   * Shared post-processing pipeline applied after RRF fusion.
+   *
+   * Stages:
+   * 1. Minimum score threshold filter
+   * 2. Test file penalty (skipped for test-related queries)
+   * 3. Optional reranking via cross-encoder
+   * 4. Top-K selection
+   * 5. Optional symbol-graph expansion
+   * 6. Context view building
+   */
+  private async postProcessResults(
+    fusedResults: FusedScoredChunk[],
+    opts: {
+      query: string;
+      topK: number;
+      maxTokens: number;
+      enableGraph: boolean;
+      graphDepth: number;
+      maxGraphNodes: number;
+      testFilePenalty: number;
+      multiSourceBoost: number;
+      minScoreThreshold: number;
+      enableRerank: boolean;
+      isTestRelated: boolean;
+    },
+  ): Promise<RetrievalResponse> {
+    let results = fusedResults;
+
+    // 1. Apply minimum score threshold filter
+    if (opts.minScoreThreshold > 0) {
+      const maxScore = results.length > 0 ? results[0].fusedScore : 0;
       if (maxScore > 0) {
-        // Normalize threshold relative to max score
-        const absoluteThreshold = maxScore * minScoreThreshold;
-        fusedResults = fusedResults.filter(
-          (r) => r.fusedScore >= absoluteThreshold,
-        );
+        const absoluteThreshold = maxScore * opts.minScoreThreshold;
+        results = results.filter((r) => r.fusedScore >= absoluteThreshold);
       }
     }
 
-    // 5. Apply test file penalty (skip if query is test-related)
-    // When the user is explicitly searching for tests, we should NOT penalize test files
-    const shouldApplyTestPenalty = !enhancedQuery.isTestRelated;
-    const adjustedResults = shouldApplyTestPenalty
-      ? this.applyTestFilePenalty(fusedResults, testFilePenalty)
-      : fusedResults;
+    // 2. Apply test file penalty (skip if query is test-related)
+    const adjustedResults = !opts.isTestRelated
+      ? this.applyTestFilePenalty(results, opts.testFilePenalty)
+      : results;
 
-    let topResults: FusedScoredChunk[] = [];
-    if (enableRerank && this.reranker) {
-      // 6. Optional reranking
+    // 3. Optional reranking + 4. Top-K selection
+    let topResults: FusedScoredChunk[];
+    if (opts.enableRerank && this.reranker) {
       const rerankedResults = await this.rerank(
-        query,
-        adjustedResults.slice(0, topK * 5),
-      ); // Rerank top 5x results to allow reranker to have enough candidates
-      // 7. Take top-K results
-      topResults = rerankedResults.slice(0, topK);
+        opts.query,
+        adjustedResults.slice(0, opts.topK * 5),
+      );
+      topResults = rerankedResults.slice(0, opts.topK);
     } else {
-      topResults = adjustedResults.slice(0, topK);
+      topResults = adjustedResults.slice(0, opts.topK);
     }
 
-    // 8. Optional graph expansion
+    // 5. Optional graph expansion
     let symbolExpansion: GraphExpansionResult | null = null;
-    if (enableGraph && topResults.length > 0) {
+    if (opts.enableGraph && topResults.length > 0) {
       const seedChunkIds = topResults.map((r) => r.id);
 
-      // Symbol-level expansion via dataSource (worker-backed)
       if (this.dataSource) {
         try {
           symbolExpansion = await this.dataSource.graphExpand(seedChunkIds, {
-            maxDepth: graphDepth,
-            maxChunks: maxGraphNodes,
+            maxDepth: opts.graphDepth,
+            maxChunks: opts.maxGraphNodes,
           });
         } catch (error) {
           console.warn(`Symbol graph expansion failed: ${error}`);
         }
       }
 
-      // 8.5. Merge graph expansion results into topResults
-      // Load chunks discovered via graph traversal and add them with decaying scores
+      // Merge graph-discovered chunks with decaying scores
       if (symbolExpansion && symbolExpansion.relatedChunkIds.length > 0) {
         const existingIds = new Set(topResults.map((r) => r.id));
         const newChunkIds = symbolExpansion.relatedChunkIds.filter(
@@ -384,8 +527,6 @@ export class RetrievalService {
               ? await this.dataSource.chunksByIds(newChunkIds)
               : [];
 
-            // Assign decaying scores based on graph distance
-            // Use the lowest score from topResults as the base, then decay
             const baseScore =
               topResults.length > 0
                 ? topResults[topResults.length - 1]!.fusedScore * 0.5
@@ -406,7 +547,6 @@ export class RetrievalService {
               }),
             );
 
-            // Append graph-discovered chunks within token budget
             topResults.push(...graphScoredChunks);
           } catch (error) {
             console.warn(`Failed to load graph expansion chunks: ${error}`);
@@ -415,8 +555,14 @@ export class RetrievalService {
       }
     }
 
-    // 9. Build context views
-    const textView = this.contextBuilder.buildTextView(topResults, maxTokens);
+    // 6. Build context views
+    topResults = topResults
+      .sort((a, b) => b.fusedScore - a.fusedScore)
+      .slice(0, opts.topK * 2);
+    const textView = this.contextBuilder.buildTextView(
+      topResults,
+      opts.maxTokens,
+    );
 
     return {
       chunks: topResults,
