@@ -41,7 +41,6 @@ const external = [
 // path resolution starts from the wrong directory.
 const nativeExternals = [
   'better-sqlite3',
-  'zvec',
   'web-tree-sitter',
   'tree-sitter-javascript',
   'tree-sitter-typescript',

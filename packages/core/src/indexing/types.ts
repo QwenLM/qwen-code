@@ -632,6 +632,29 @@ export interface BuildCheckpoint {
   updatedAt: number;
 }
 
+// ===== Worker DB Query Types =====
+
+/**
+ * Atomic DB operations the worker can execute on behalf of the main thread.
+ *
+ * Keeps all database I/O (SQLite FTS5, ZVec vector store, SQLite graph store)
+ * inside the worker thread, while the retrieval pipeline logic (RRF fusion,
+ * reranking, LLM-based query enhancement) runs in the main thread via
+ * RetrievalService + IRetrievalDataSource.
+ */
+export type DbQueryOp =
+  | { type: 'fts_search'; query: string; limit: number }
+  | { type: 'recent_chunks'; limit: number }
+  | { type: 'chunks_by_ids'; chunkIds: string[] }
+  | { type: 'primary_languages' }
+  | { type: 'vector_query'; queryVector: number[]; topK: number }
+  | {
+      type: 'graph_expand';
+      seedChunkIds: string[];
+      maxDepth: number;
+      maxChunks: number;
+    };
+
 // ===== Worker Message Types =====
 
 /**
@@ -643,7 +666,8 @@ export type WorkerMessage =
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'cancel' }
-  | { type: 'get_status' };
+  | { type: 'get_status' }
+  | { type: 'db_query'; id: string; op: DbQueryOp };
 
 /**
  * Messages sent from worker to main thread.
@@ -656,4 +680,6 @@ export type WorkerResponse =
   | { type: 'resumed' }
   | { type: 'cancelled' }
   | { type: 'status'; payload: IndexingProgress }
-  | { type: 'error'; payload: { message: string } };
+  | { type: 'error'; payload: { message: string } }
+  | { type: 'db_result'; id: string; result: unknown }
+  | { type: 'db_error'; id: string; message: string };

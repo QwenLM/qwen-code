@@ -22,13 +22,12 @@
  */
 
 import type {
-  IMetadataStore,
-  ISymbolGraphStore,
-  IVectorStore,
   GraphExpansionResult,
   RetrievalConfig,
   RetrievalResponse,
   ScoredChunk,
+  Chunk,
+  VectorSearchResult,
 } from './types.js';
 import { QueryEnhancer, type QueryEnhancerConfig } from './queryEnhancer.js';
 import { ContextBuilder, type ContextBuilderConfig } from './contextBuilder.js';
@@ -92,7 +91,7 @@ export interface RetrieveOptions {
     vector?: number;
     recent?: number;
   };
-  /** Whether to enable HyDE query enhancement. */
+  /** Whether to enable LLM/cross-encoder reranking of fused results. */
   enableRerank?: boolean;
   /**
    * Penalty factor for test files (0-1).
@@ -112,6 +111,26 @@ export interface RetrieveOptions {
    * Default: 0 (no filtering)
    */
   minScoreThreshold?: number;
+}
+
+/**
+ * Async data source interface for DB-layer retrieval operations.
+ * Implemented by {@link WorkerRetrievalDataSource}, which routes each call
+ * to the worker thread via db_query messages so all DB I/O stays in the worker.
+ */
+export interface IRetrievalDataSource {
+  ftsSearch(query: string, limit: number): Promise<ScoredChunk[]>;
+  recentChunks(limit: number): Promise<ScoredChunk[]>;
+  chunksByIds(ids: string[]): Promise<Chunk[]>;
+  primaryLanguages(): Promise<string[]>;
+  vectorQuery(
+    queryVector: number[],
+    topK: number,
+  ): Promise<VectorSearchResult[]>;
+  graphExpand(
+    seedChunkIds: string[],
+    options: { maxDepth: number; maxChunks: number },
+  ): Promise<GraphExpansionResult | null>;
 }
 
 /**
@@ -137,33 +156,30 @@ export interface FusedScoredChunk extends ScoredChunk {
 export class RetrievalService {
   private readonly config: RetrievalConfig;
   private readonly queryEnhancer: QueryEnhancer;
-  private readonly symbolGraphStore: ISymbolGraphStore | null;
   private contextBuilder: ContextBuilder;
   private reranker?: IReranker;
 
   /**
    * Creates a new RetrievalService instance.
    *
-   * @param metadataStore Store for chunk metadata and FTS.
-   * @param vectorStore Store for vector similarity search.
    * @param llmClient Client for query.
    * @param embeddingLlmClient Client for generating embeddings.
    * @param config Optional configuration overrides.
    * @param queryEnhancerConfig Optional query enhancer configuration.
-   * @param symbolGraphStore Optional symbol graph store for symbol-level expansion.
    */
   constructor(
-    private readonly metadataStore: IMetadataStore,
-    private readonly vectorStore: IVectorStore,
-    llmClient: BaseLlmClient,
-    private readonly embeddingLlmClient: EmbeddingLlmClient,
+    llmClient: BaseLlmClient | undefined,
+    private readonly embeddingLlmClient: EmbeddingLlmClient | undefined,
     config: Partial<RetrievalConfig> = {},
     queryEnhancerConfig: Partial<QueryEnhancerConfig> = {},
-    symbolGraphStore: ISymbolGraphStore | null = null,
+    /**
+     * Async data source that routes all DB operations to the worker thread.
+     * Required — all DB calls (FTS, vector, graph, recent) go through this interface.
+     */
+    private readonly dataSource?: IRetrievalDataSource,
   ) {
     this.config = { ...DEFAULT_RETRIEVAL_CONFIG, ...config };
     this.queryEnhancer = new QueryEnhancer(queryEnhancerConfig, llmClient);
-    this.symbolGraphStore = symbolGraphStore;
     this.contextBuilder = new ContextBuilder();
 
     if (process.env['DASHSCOPE_API_KEY']) {
@@ -201,9 +217,12 @@ export class RetrievalService {
       recent: weights.recent ?? this.config.weights.recent,
     };
 
-    // Get primary languages from the repository's indexed files
-    // This ensures HyDE generates code in the correct language
-    const primaryLanguages = this.metadataStore.getPrimaryLanguages();
+    // Get primary languages from the repository's indexed files.
+    // Fetched async when using dataSource (worker-backed), sync otherwise.
+    // Start immediately in parallel with phase1 DB searches.
+    const primaryLangsPromise: Promise<string[]> = this.dataSource
+      ? this.dataSource.primaryLanguages()
+      : Promise.resolve([]);
 
     // === Phase 1: Start original-query retrieval AND LLM enhancement in parallel ===
     // This eliminates the latency of waiting for LLM enhancement before searching.
@@ -214,9 +233,12 @@ export class RetrievalService {
       this.config.vectorTopK,
     );
     const phase1RecentPromise = this.recentFilesSearch(this.config.recentTopK);
-    const enhancePromise = this.queryEnhancer.enhance(query, {
-      primaryLanguages,
-    });
+
+    // Chain enhance off primaryLangsPromise so HyDE generates language-aware code.
+    // Both start immediately; enhance begins as soon as primaryLanguages resolves.
+    const enhancePromise = primaryLangsPromise.then((primaryLanguages) =>
+      this.queryEnhancer.enhance(query, { primaryLanguages }),
+    );
 
     const [phase1BM25, phase1Vector, phase1Recent, enhancedQuery] =
       await Promise.all([
@@ -324,7 +346,7 @@ export class RetrievalService {
       const rerankedResults = await this.rerank(
         query,
         adjustedResults.slice(0, topK * 5),
-      ); // Rerank top 10x results to allow reranker to have enough candidates
+      ); // Rerank top 5x results to allow reranker to have enough candidates
       // 7. Take top-K results
       topResults = rerankedResults.slice(0, topK);
     } else {
@@ -336,16 +358,13 @@ export class RetrievalService {
     if (enableGraph && topResults.length > 0) {
       const seedChunkIds = topResults.map((r) => r.id);
 
-      // Symbol-level expansion via SqliteGraphStore
-      if (this.symbolGraphStore) {
+      // Symbol-level expansion via dataSource (worker-backed)
+      if (this.dataSource) {
         try {
-          symbolExpansion = this.symbolGraphStore.expandFromChunks(
-            seedChunkIds,
-            {
-              maxDepth: graphDepth,
-              maxChunks: maxGraphNodes,
-            },
-          );
+          symbolExpansion = await this.dataSource.graphExpand(seedChunkIds, {
+            maxDepth: graphDepth,
+            maxChunks: maxGraphNodes,
+          });
         } catch (error) {
           console.warn(`Symbol graph expansion failed: ${error}`);
         }
@@ -361,7 +380,9 @@ export class RetrievalService {
 
         if (newChunkIds.length > 0) {
           try {
-            const graphChunks = this.metadataStore.getChunksByIds(newChunkIds);
+            const graphChunks = this.dataSource
+              ? await this.dataSource.chunksByIds(newChunkIds)
+              : [];
 
             // Assign decaying scores based on graph distance
             // Use the lowest score from topResults as the base, then decay
@@ -457,13 +478,12 @@ export class RetrievalService {
       return [];
     }
 
+    if (!this.dataSource) {
+      return [];
+    }
+
     try {
-      const results = this.metadataStore.searchFTS(query, topK);
-      return results.map((r, index) => ({
-        ...r,
-        rank: index + 1,
-        source: 'bm25' as const,
-      }));
+      return await this.dataSource.ftsSearch(query, topK);
     } catch {
       return [];
     }
@@ -481,8 +501,13 @@ export class RetrievalService {
       return [];
     }
 
+    // embeddingLlmClient is required for generating the query vector.
+    if (!this.embeddingLlmClient) {
+      return [];
+    }
+
     try {
-      // Generate query embedding
+      // Embedding generation always happens here (main thread API call).
       const embeddings = await this.embeddingLlmClient.generateEmbedding([
         query,
       ]);
@@ -491,8 +516,10 @@ export class RetrievalService {
       }
       const queryVector = embeddings[0];
 
-      // Execute vector search
-      const results = await this.vectorStore.query(queryVector, topK);
+      if (!this.dataSource) {
+        return [];
+      }
+      const results = await this.dataSource.vectorQuery(queryVector, topK);
 
       return results.map((r, index) => ({
         id: r.chunkId,
@@ -518,8 +545,10 @@ export class RetrievalService {
    */
   async recentFilesSearch(topK: number): Promise<ScoredChunk[]> {
     try {
-      // Use optimized database query to get recent chunks directly
-      return this.metadataStore.getRecentChunks(topK);
+      if (!this.dataSource) {
+        return [];
+      }
+      return this.dataSource.recentChunks(topK);
     } catch {
       return [];
     }

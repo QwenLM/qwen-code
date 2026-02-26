@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 // Use createRequire to load CommonJS module zvec in ESM context
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line no-restricted-syntax
-const zvec = require('zvec');
+const zvec = require('@zvec/zvec');
 const {
   ZVecCollectionSchema,
   ZVecCreateAndOpen,
@@ -19,16 +19,14 @@ const {
   ZVecDataType,
   ZVecIndexType,
   ZVecMetricType,
-  ZVecInitialize,
-  ZVecLogLevel,
-  ZVecLogType,
 } = zvec;
 import type {
   ZVecCollection,
   ZVecDoc,
+  ZVecDocInput,
   ZVecFieldSchema,
   ZVecVectorSchema,
-} from 'zvec';
+} from '@zvec/zvec';
 
 import { Storage } from '../../config/storage.js';
 import type { Chunk, IVectorStore, VectorSearchResult } from '../types.js';
@@ -38,9 +36,6 @@ const EMBEDDING_DIMENSION = 1024;
 
 /** Batch size for vector insertions. */
 const INSERT_BATCH_SIZE = 100;
-
-/** Flag to track if Zvec has been globally initialized. */
-let zvecInitialized = false;
 
 /**
  * Gets the vector store directory path for a project.
@@ -75,15 +70,6 @@ export class VectorStore implements IVectorStore {
    * Initializes the vector store, creating or opening the collection.
    */
   async initialize(): Promise<void> {
-    // Global Zvec initialization (only once per process)
-    if (!zvecInitialized) {
-      ZVecInitialize({
-        logType: ZVecLogType.CONSOLE,
-        logLevel: ZVecLogLevel.WARN,
-      });
-      zvecInitialized = true;
-    }
-
     // Check if collection already exists
     const collectionExists = fs.existsSync(this.collectionPath);
 
@@ -91,8 +77,9 @@ export class VectorStore implements IVectorStore {
       // Open existing collection
       try {
         this.collection = ZVecOpen(this.collectionPath);
-      } catch {
+      } catch (error) {
         // If open fails, try to recreate
+        console.log(error);
         await this.recreateCollection();
       }
     } else {
@@ -193,7 +180,7 @@ export class VectorStore implements IVectorStore {
 
     for (let i = 0; i < docs.length; i += INSERT_BATCH_SIZE) {
       const batch = docs.slice(i, i + INSERT_BATCH_SIZE);
-      const zvecDocs: ZVecDoc[] = batch.map(({ chunk, embedding }) => ({
+      const zvecDocs: ZVecDocInput[] = batch.map(({ chunk, embedding }) => ({
         id: chunk.id,
         vectors: {
           content_embedding: new Float32Array(embedding),
@@ -207,7 +194,7 @@ export class VectorStore implements IVectorStore {
         },
       }));
 
-      const result = this.collection.insert(zvecDocs);
+      const result = this.collection.insertSync(zvecDocs);
       // insert returns an array of status objects
       const failedResults = Array.isArray(result)
         ? result.filter((r) => !r.ok)
@@ -249,7 +236,7 @@ export class VectorStore implements IVectorStore {
       queryParams.filter = filter;
     }
 
-    const results = this.collection.query(queryParams);
+    const results = this.collection.querySync(queryParams);
 
     return results.map((doc: ZVecDoc, index: number) => ({
       chunkId: (doc.fields?.['chunk_id'] as string) ?? '',
@@ -281,7 +268,7 @@ export class VectorStore implements IVectorStore {
     let deletedCount = 0;
     do {
       deletedCount = 0;
-      const matchingDocs = this.collection.query({
+      const matchingDocs = this.collection.querySync({
         fieldName: 'content_embedding',
         topk: BATCH_SIZE,
         // Use a dummy vector for filter-only query
@@ -291,7 +278,7 @@ export class VectorStore implements IVectorStore {
 
       for (const doc of matchingDocs) {
         if (doc.id) {
-          this.collection.delete(doc.id);
+          this.collection.deleteSync(doc.id);
           deletedCount++;
         }
       }
@@ -308,7 +295,7 @@ export class VectorStore implements IVectorStore {
     }
 
     for (const id of chunkIds) {
-      this.collection.delete(id);
+      this.collection.deleteSync(id);
     }
   }
 
@@ -330,7 +317,7 @@ export class VectorStore implements IVectorStore {
       throw new Error('VectorStore not initialized');
     }
 
-    this.collection.optimize();
+    this.collection.optimizeSync();
   }
 
   /**
@@ -354,7 +341,7 @@ export class VectorStore implements IVectorStore {
    */
   destroy(): void {
     if (this.collection) {
-      this.collection.destroy();
+      this.collection.destroySync();
       this.collection = null;
     }
   }

@@ -18,16 +18,16 @@ import type {
   WorkerMessage,
   WorkerResponse,
   ChangeSet,
+  DbQueryOp,
 } from './types.js';
 import { hasChanges } from './types.js';
 import { MetadataStore, getIndexDir } from './stores/metadataStore.js';
-import { VectorStore } from './stores/vectorStore.js';
-import { SqliteGraphStore } from './stores/sqliteGraphStore.js';
 import { DEFAULT_INDEX_CONFIG } from './defaults.js';
 import { ChangeDetector } from './changeDetector.js';
 import { BranchHandler, type BranchChangeResult } from './branchHandler.js';
 import { FileScanner } from './fileScanner.js';
 import { RetrievalService } from './retrievalService.js';
+import { WorkerRetrievalDataSource } from './workerRetrievalProxy.js';
 import { EmbeddingLlmClient } from './embeddingLlmClient.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 
@@ -120,7 +120,19 @@ export class IndexService extends EventEmitter {
   private currentProgress: IndexingProgress;
   private isBuilding = false;
   private enabled = true;
+  /** Cached RetrievalService backed by WorkerRetrievalDataSource. */
   private retrievalService: RetrievalService | null = null;
+  /**
+   * Pending DB query promises keyed by request ID.
+   * Resolved/rejected when the worker sends db_result / db_error.
+   */
+  private readonly pendingDbQueries = new Map<
+    string,
+    {
+      resolve: (result: unknown) => void;
+      reject: (error: Error) => void;
+    }
+  >();
 
   // Polling and change detection
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -291,6 +303,24 @@ export class IndexService extends EventEmitter {
         this.currentProgress = response.payload;
         break;
 
+      case 'db_result': {
+        const pending = this.pendingDbQueries.get(response.id);
+        if (pending) {
+          this.pendingDbQueries.delete(response.id);
+          pending.resolve(response.result);
+        }
+        break;
+      }
+
+      case 'db_error': {
+        const pending = this.pendingDbQueries.get(response.id);
+        if (pending) {
+          this.pendingDbQueries.delete(response.id);
+          pending.reject(new Error(response.message));
+        }
+        break;
+      }
+
       case 'error':
       default:
         this.emit('error', new Error(response.payload.message));
@@ -303,7 +333,8 @@ export class IndexService extends EventEmitter {
    */
   private handleWorkerError(error: Error): void {
     this.emit('error', error);
-
+    // Reject all in-flight DB query requests so callers don't hang.
+    this.rejectPendingDbQueries(error);
     // Attempt recovery if building
     if (this.isBuilding) {
       this.attemptRecovery();
@@ -316,7 +347,12 @@ export class IndexService extends EventEmitter {
   private handleWorkerExit(code: number): void {
     this.worker = null;
 
-    // If exit code is non-zero and we were building, attempt recovery
+    if (code !== 0) {
+      // Reject any in-flight DB query requests.
+      this.rejectPendingDbQueries(
+        new Error(`Worker exited unexpectedly with code ${code}`),
+      );
+    }
     if (code !== 0 && this.isBuilding) {
       this.attemptRecovery();
     }
@@ -359,6 +395,56 @@ export class IndexService extends EventEmitter {
       );
       this.attemptRecovery();
     }
+  }
+
+  /**
+   * Rejects all pending DB query promises with the given error.
+   * Called when the worker errors, exits, or the service is terminated.
+   */
+  private rejectPendingDbQueries(error: Error): void {
+    for (const pending of this.pendingDbQueries.values()) {
+      pending.reject(error);
+    }
+    this.pendingDbQueries.clear();
+  }
+
+  /**
+   * Sends a single DB query operation to the worker thread and returns a Promise
+   * that resolves with the raw result, or rejects on error / timeout.
+   *
+   * This is the transport layer used by {@link WorkerRetrievalDataSource}.
+   * The worker executes the operation against its exclusively-owned stores
+   * and replies with a db_result / db_error message.
+   */
+  private sendDbQuery(op: DbQueryOp): Promise<unknown> {
+    this.ensureWorker();
+    const id = crypto.randomUUID();
+    return new Promise<unknown>((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        if (this.pendingDbQueries.delete(id)) {
+          reject(new Error('DB query timed out after 30 seconds'));
+        }
+      }, 30_000);
+
+      this.pendingDbQueries.set(id, {
+        resolve: (result) => {
+          clearTimeout(timeoutHandle);
+          resolve(result);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutHandle);
+          reject(err);
+        },
+      });
+
+      try {
+        this.sendMessage({ type: 'db_query', id, op });
+      } catch (err) {
+        this.pendingDbQueries.delete(id);
+        clearTimeout(timeoutHandle);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 
   /**
@@ -780,6 +866,11 @@ export class IndexService extends EventEmitter {
       this.branchHandler = null;
     }
 
+    // Reject all pending DB queries before terminating the worker.
+    this.rejectPendingDbQueries(new Error('IndexService terminated'));
+    // Drop the cached RetrievalService — will be recreated after next build.
+    this.retrievalService = null;
+
     // Terminate worker
     if (this.worker) {
       await this.worker.terminate();
@@ -808,73 +899,46 @@ export class IndexService extends EventEmitter {
   }
 
   /**
-   * Creates an async version of RetrievalService with properly initialized stores.
-   * Use this when you need guaranteed store initialization.
+   * Returns a {@link RetrievalService} whose DB layer is backed by the worker thread.
    *
-   * @returns Promise resolving to RetrievalService or null if not available.
+   * The returned service:
+   * - Runs all retrieval pipeline logic in the main thread:
+   *   LLM-based query enhancement (HyDE, multi-query), RRF fusion, reranking.
+   * - Routes every atomic DB operation (FTS5, vector search, graph traversal)
+   *   through a {@link WorkerRetrievalDataSource} to the worker via db_query
+   *   messages, so the worker's exclusive DB connections are never shared.
+   *
+   * @returns RetrievalService, or null if the index is not ready or
+   *          no BaseLlmClient has been configured.
    */
   async getRetrievalServiceAsync(): Promise<RetrievalService | null> {
     if (this.retrievalService) {
       return this.retrievalService;
     }
-    // Check if index is ready
     if (!this.isIndexReady()) {
       return null;
     }
-    // Check if baseLlmClient is available
     if (!this.baseLlmClient) {
       return null;
     }
-    try {
-      // Create stores for retrieval
-      const metadataStore = new MetadataStore(this.projectHash);
-      const vectorStore = new VectorStore(this.projectHash);
+    // Ensure the worker is alive — it owns the database connections.
+    this.ensureWorker();
 
-      // Initialize vector store
-      await vectorStore.initialize();
+    const dataSource = new WorkerRetrievalDataSource((op) =>
+      this.sendDbQuery(op),
+    );
+    const embeddingClient = this.llmClientConfig
+      ? new EmbeddingLlmClient(this.llmClientConfig)
+      : undefined;
 
-      let symbolGraphStore: SqliteGraphStore | undefined;
-      if (this.config.enableGraph) {
-        try {
-          symbolGraphStore = new SqliteGraphStore(this.projectHash);
-          symbolGraphStore.initialize();
-        } catch (error) {
-          console.warn('Failed to initialize SqliteGraphStore:', error);
-        }
-      }
-
-      const embeddingLlmClient = new EmbeddingLlmClient(this.llmClientConfig!);
-
-      this.retrievalService = new RetrievalService(
-        metadataStore,
-        vectorStore,
-        this.baseLlmClient,
-        embeddingLlmClient,
-        {
-          topK: 20,
-          bm25TopK: 50,
-          vectorTopK: 50,
-          recentTopK: 20,
-          rrfK: 60,
-          maxTokens: 8000,
-          enableGraph: this.config.enableGraph,
-          graphDepth: 2,
-          maxGraphNodes: 50,
-          weights: {
-            bm25: 1.0,
-            vector: 1.0,
-            recent: 0.5,
-          },
-        },
-        {}, // queryEnhancerConfig
-        symbolGraphStore ?? null,
-      );
-
-      return this.retrievalService;
-    } catch (error) {
-      console.error('Error initializing RetrievalService:', error);
-      return null;
-    }
+    this.retrievalService = new RetrievalService(
+      this.baseLlmClient,
+      embeddingClient,
+      { enableGraph: this.config.enableGraph },
+      {}, // queryEnhancerConfig — defaults
+      dataSource,
+    );
+    return this.retrievalService;
   }
 
   /**
@@ -885,6 +949,9 @@ export class IndexService extends EventEmitter {
    */
   setBaseLlmClient(client: BaseLlmClient): void {
     this.baseLlmClient = client;
+    // Reset the cached service so it is recreated with the new client
+    // on the next getRetrievalServiceAsync() call.
+    this.retrievalService = null;
   }
 
   // ===== Event Emitter Type Safety =====

@@ -13,6 +13,7 @@ import type {
   IndexingProgress,
   IndexConfig,
   ChangeSet,
+  DbQueryOp,
 } from '../types.js';
 import { MetadataStore } from '../stores/metadataStore.js';
 import { VectorStore } from '../stores/vectorStore.js';
@@ -160,6 +161,10 @@ class IndexWorker {
 
         case 'get_status':
           this.handleGetStatus();
+          break;
+
+        case 'db_query':
+          await this.handleDbQuery(message.id, message.op);
           break;
 
         default:
@@ -333,6 +338,59 @@ class IndexWorker {
       type: 'status',
       payload: this.indexManager.getProgress(),
     });
+  }
+
+  /**
+   * Handles a DB query from the main thread.
+   *
+   * Executes the requested operation against the worker's exclusively-owned stores
+   * and sends the serialised result back as a db_result message.
+   * All six operations are simple, synchronous (or single-await) store calls.
+   */
+  private async handleDbQuery(id: string, op: DbQueryOp): Promise<void> {
+    if (!this.metadataStore || !this.vectorStore) {
+      this.sendResponse({
+        type: 'db_error',
+        id,
+        message: 'Worker stores not initialised',
+      });
+      return;
+    }
+    try {
+      let result: unknown;
+      switch (op.type) {
+        case 'fts_search':
+          result = this.metadataStore.searchFTS(op.query, op.limit);
+          break;
+        case 'recent_chunks':
+          result = this.metadataStore.getRecentChunks(op.limit);
+          break;
+        case 'chunks_by_ids':
+          result = this.metadataStore.getChunksByIds(op.chunkIds);
+          break;
+        case 'primary_languages':
+          result = this.metadataStore.getPrimaryLanguages();
+          break;
+        case 'vector_query':
+          result = await this.vectorStore.query(op.queryVector, op.topK);
+          break;
+        case 'graph_expand':
+          result = this.symbolGraphStore
+            ? this.symbolGraphStore.expandFromChunks(op.seedChunkIds, {
+                maxDepth: op.maxDepth,
+                maxChunks: op.maxChunks,
+              })
+            : null;
+          break;
+        default:
+          throw new Error(
+            `Unknown db_query op type: ${(op as DbQueryOp).type}`,
+          );
+      }
+      this.sendResponse({ type: 'db_result', id, result });
+    } catch (error) {
+      this.sendResponse({ type: 'db_error', id, message: String(error) });
+    }
   }
 
   /**
