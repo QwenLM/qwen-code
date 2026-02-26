@@ -44,18 +44,16 @@ export const InsightProgressMessage: React.FC<InsightProgressMessageProps> = ({
   }
 
   return (
-    <Box flexDirection="column">
-      <Box flexDirection="row" marginBottom={0}>
-        <Box marginRight={1}>
-          <Spinner type="dots" />
-        </Box>
-        <Text color={theme.text.accent}>{stage}</Text>
-      </Box>
-      <Box flexDirection="row" marginLeft={2}>
-        <Text color={theme.text.primary}>
-          {bar} {Math.round(percent)}%
-        </Text>
-      </Box>
+    <Box flexDirection="row">
+      <Text color={theme.text.accent}>
+        <Spinner type="dots" />
+      </Text>
+      <Text> </Text>
+      <Text color={theme.text.secondary}>{bar} </Text>
+      <Text color={theme.text.accent}>
+        {stage}
+        {progress.detail ? ` (${progress.detail})` : ''}
+      </Text>
     </Box>
   );
 };

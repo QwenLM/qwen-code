@@ -53,6 +53,14 @@ export const insightCommand: SlashCommand = {
         context.ui.setPendingItem(progressItem);
       };
 
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('This may take a couple minutes. Sit tight!'),
+        },
+        Date.now(),
+      );
+
       // Initial progress
       updateProgress(t('Starting insight generation...'), 0);
 

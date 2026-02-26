@@ -284,20 +284,20 @@ export class DataProcessor {
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
   ): Promise<InsightData> {
-    if (onProgress) onProgress('Scanning chat files', 0);
+    if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
-    if (onProgress) onProgress('Generating metrics', 10);
+    if (onProgress) onProgress('Crunching the numbers', 10);
     const metrics = await this.generateMetrics(allChatFiles, onProgress);
 
-    if (onProgress) onProgress('Analyzing sessions', 20);
+    if (onProgress) onProgress('Preparing sessions...', 20);
     const facets = await this.generateFacets(
       allChatFiles,
       facetsOutputDir,
       onProgress,
     );
 
-    if (onProgress) onProgress('Generating qualitative insights', 80);
+    if (onProgress) onProgress('Generating personalized insights...', 80);
     const qualitative = await this.generateQualitativeInsights(metrics, facets);
 
     // Aggregate satisfaction, friction, success and outcome data from facets
@@ -309,7 +309,7 @@ export class DataProcessor {
       goalsAgg,
     } = this.aggregateFacetsData(facets);
 
-    if (onProgress) onProgress('Finalizing report', 100);
+    if (onProgress) onProgress('Assembling report...', 100);
 
     return {
       ...metrics,
@@ -924,7 +924,7 @@ None captured`;
         const percentComplete = batchEnd / totalFiles;
         const overallProgress = 10 + Math.round(percentComplete * 10);
         onProgress(
-          `Generating metrics (${batchEnd}/${totalFiles})`,
+          `Crunching the numbers (${batchEnd}/${totalFiles})`,
           overallProgress,
         );
       }
