@@ -1,0 +1,787 @@
+  INFO Started local extension host with pid 24856.
+   ERR Extension 'johnny-zhao.oai-compatible-copilot CANNOT USE these API proposals 'chatProvider'. You MUST start in extension development mode or use the --enable-proposed-api command line flag
+error @ workbench.desktop.main.js:38
+   ERR Extension 'ms-vsliveshare.vsliveshare' wants API proposal 'notebookCellExecutionState' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+error @ workbench.desktop.main.js:38
+   ERR [xdebug.php-debug]: 属性“title”是必要属性，其类型必须是 `string` 或 `object`
+error @ workbench.desktop.main.js:38
+  WARN [redhat.vscode-yaml]: 无法注册“redhat.telemetry.enabled”。此属性已注册。
+warn @ workbench.desktop.main.js:38
+ Unrecognized feature: 'local-network-access'.
+gb @ workbench.desktop.main.js:4466
+ An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+mountTo @ workbench.desktop.main.js:4466
+ Overwriting grammar scope name to file mapping for scope source.dart.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/dart/syntaxes/dart.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dart-code.dart-code-3.128.0/syntaxes/dart.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.rust.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/rust/syntaxes/rust.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dustypomerleau.rust-syntax-0.6.1/syntaxes/rust.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.python.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/python/syntaxes/MagicPython.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-python.vscode-pylance-2026.1.1/grammars/PylancePython.tmLanguage
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.cmake.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMake.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMake.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.cmakecache.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMakeCache.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMakeCache.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.java.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/java/syntaxes/java.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.java-1.53.0-win32-x64/language-support/java/java.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.yaml.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/yaml/syntaxes/yaml.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.vscode-yaml-1.20.0/syntaxes/yaml.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.groovy.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/groovy/syntaxes/groovy.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/vscjava.vscode-gradle-3.17.2/syntaxes/groovy.tmLanguage.json
+register @ workbench.desktop.main.js:1372
+ Overwriting grammar scope name to file mapping for scope source.dart.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/dart/syntaxes/dart.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dart-code.dart-code-3.128.0/syntaxes/dart.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.rust.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/rust/syntaxes/rust.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dustypomerleau.rust-syntax-0.6.1/syntaxes/rust.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.python.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/python/syntaxes/MagicPython.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-python.vscode-pylance-2026.1.1/grammars/PylancePython.tmLanguage
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.cmake.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMake.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMake.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.cmakecache.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMakeCache.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMakeCache.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.java.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/java/syntaxes/java.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.java-1.53.0-win32-x64/language-support/java/java.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.yaml.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/yaml/syntaxes/yaml.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.vscode-yaml-1.20.0/syntaxes/yaml.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+ Overwriting grammar scope name to file mapping for scope source.groovy.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/groovy/syntaxes/groovy.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/vscjava.vscode-gradle-3.17.2/syntaxes/groovy.tmLanguage.json
+register @ textMateTokenization…er.workerMain.js:26
+  INFO MCP Registry configured: https://api.mcp.github.com
+ [Extension Host] Loaded translations for languages: ca, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt-BR, ru, tr, vi, zh-CN, zh-TW
+ [Extension Host] [dotenvx@1.44.2] injecting env (1) from c:\Users\ZZBuAoYe\.vscode\extensions\rooveterinaryinc.roo-cline-3.50.5\.env
+   ERR [Extension Host] (node:24856) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Code --trace-deprecation ...` to show where the warning was created)
+error @ workbench.desktop.main.js:38
+ [Extension Host] (node:24856) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Code --trace-deprecation ...` to show where the warning was created)
+gMs @ workbench.desktop.main.js:537
+   ERR [Extension Host] (node:24856) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+error @ workbench.desktop.main.js:38
+ [Extension Host] (node:24856) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+gMs @ workbench.desktop.main.js:537
+ [Extension Host] Looking for parseable documents...
+  INFO [perf] Render performance baseline is 15ms
+  INFO Settings Sync: Account status changed from uninitialized to available
+ [Extension Host] Found all parseable documents.
+ [Extension Host] Parsing documents and looking for CSS class definitions...
+ [Extension Host] [SidebarWebviewProvider] resolveWebviewView called
+ [Extension Host] [SidebarWebviewProvider] Setting webview HTML
+ [Extension Host] [SidebarWebviewProvider] Setting up message handlers
+ [Extension Host] [SidebarWebviewProvider] Webview setup complete, visible: true
+ Unrecognized feature: 'local-network-access'.
+（匿名） @ index.html?id=2f2d68…2-b676-76dfbf…:1060
+ [App] Rendering messages: Array(0)
+ [Extension Host] CloudService not ready, deferring cloud profile sync
+ [Extension Host] [auth] Using WebAuthService
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Webview ready event received
+ [Extension Host] [SidebarWebviewProvider] Auth state: null
+ [Extension Host] [SidebarWebviewProvider] Agent initialized: false
+ [Extension Host] [SidebarWebviewProvider] Initializing agent connection
+ [Extension Host] [SidebarWebviewProvider] Connecting to agent...
+ [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772115235964
+ [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+ [Extension Host] [auth] changeState: initializing -> attempting-session
+  INFO Auto updating outdated extensions. anthropic.claude-code, qwenlm.qwen-code-vscode-ide-companion
+ [Extension Host] [ACP] Sending initialize request...
+api.github.com/copilot/mcp_registry:1  Failed to load resource: the server responded with a status of 404 ()
+ [Extension Host] [auth] changeState: attempting-session -> active-session
+ [Extension Host] [CloudService] Auth state changed to: active-session, user: undefined
+ [Extension Host] [RetryQueue] Queue resumed
+ [Extension Host] [CloudService] Resuming retry queue for active session
+ [Extension Host] [auth] User in personal account context - not setting organization info
+api.github.com/copilot/mcp_registry:1  Failed to load resource: the server responded with a status of 404 ()
+api.github.com/copilot/mcp_registry:1  Failed to load resource: the server responded with a status of 404 ()
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+ [Extension Host] [ACP] Response for initialize: Object
+ [Extension Host] [ACP] Initialize successful
+ [Extension Host] [ACP] Initialization response: Object
+ [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+ [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+ [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+ [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":1,"result":{"sessionId":"f31d8f0a-6e03-45ae-ab25-e4bd362b5de8","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+ [Extension Host] [ACP] Response for session/new: Object
+ [Extension Host] [ACP] Session created with ID: f31d8f0a-6e03-45ae-ab25-e4bd362b5de8
+ [Extension Host] [QwenAgentManager] Session created successfully
+ [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: Array(2)
+ [Extension Host] [QwenAgentManager] New session created successfully
+ [Extension Host] 
+========================================
+ [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+ [Extension Host] ========================================
+
+ [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): Array(2)
+ [useWebViewMessages] availableModels message received: Array(2)
+ [useWebViewMessages] setAvailableModels called with: Array(2)
+ [App] Rendering messages: Array(0)
+ [App] Rendering messages: Array(0)
+ [App] Rendering messages: Array(0)
+api.github.com/copilot/mcp_registry:1  Failed to load resource: the server responded with a status of 404 ()
+ [Extension Host] Summary:
+ [Extension Host]% 595 parseable documents found
+ [Extension Host]% 35934 CSS class definitions found
+ [Extension Host]% 988 unique CSS class definitions found
+ [Extension Host]% 24 failed attempts to parse. List of the documents:
+ [Extension Host] /e:/qwen/qwen-code/node_modules/@vitest/browser/dist/client/orchestrator.html
+/e:/qwen/qwen-code/node_modules/tailwindcss/components.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/variants.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/utilities.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/tailwind.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/screens.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/base.css
+/e:/qwen/qwen-code/node_modules/storybook/assets/server/base-preview-head.html
+/e:/qwen/qwen-code/node_modules/qwen-code-vscode-ide-companion/src/webview/styles/tailwind.css
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/htmlReport/index.html
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/traceViewer/uiMode.Btcz36p_.css
+/e:/qwen/qwen-code/packages/cli/assets/export-html/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/packages/cli/assets/export-html/src/index.html
+/e:/qwen/qwen-code/packages/webui/dist/styles.css
+/e:/qwen/qwen-code/packages/vscode-ide-companion/src/webview/styles/tailwind.css
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/src/index.html
+/e:/qwen/qwen-code/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/dist/assets/export-html/index.html
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/dist/index.html
+/e:/qwen/qwen-code/packages/cli/assets/export-html/dist/index.html
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/recorder/assets/index-Ri0uHF7I.css
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/traceViewer/defaultSettingsView.ConWv5KN.css
+/e:/qwen/qwen-code/packages/cli/dist/assets/export-html/index.html
+
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"f31d8f0a-6e03-45ae-ab25-e4bd362b5de8","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"f31d8f0a-6e03-45ae-ab25-e4bd362b5de8","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+ [Extension Host] Created lock file at C:\Users\ZZBuAoYe\.claude\ide\20210.lock
+ [Extension Host] Set CLAUDE_CODE_SSE_PORT=20210 in terminal environment (in-memory)
+ [Extension Host] [INFO] 2026-02-26T14:14:00.532Z - Translations initialized.
+ [Extension Host] [INFO] 2026-02-26T14:14:00.534Z - Extension activated!
+ [App] Rendering messages: Array(0)
+   ERR [Extension Host] (node:24856) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+error @ workbench.desktop.main.js:38
+ [Extension Host] (node:24856) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+gMs @ workbench.desktop.main.js:537
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Creating new session
+ [Extension Host] [QwenAgentManager] Clearing current session
+ [Extension Host] [QwenAgentManager] Session manager reset successfully
+ [Extension Host] [QwenAgentManager] Creating new session...
+ [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":2,"result":{"sessionId":"6f1a1bc6-3d27-4500-883f-64b19b80da58","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+ [Extension Host] [ACP] Response for session/new: Object
+ [Extension Host] [ACP] Session created with ID: 6f1a1bc6-3d27-4500-883f-64b19b80da58
+ [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "6f1a1bc6-3d27-4500-883f-64b19b80da58",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+ [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+ [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+ [Extension Host] [QwenAgentManager] New session created with ID: 6f1a1bc6-3d27-4500-883f-64b19b80da58
+ [useWebViewMessages] availableModels message received: Array(2)
+ [Extension Host] [SidebarWebviewProvider] New session created: 6f1a1bc6-3d27-4500-883f-64b19b80da58
+ [useWebViewMessages] setAvailableModels called with: Array(2)
+ [App] Rendering messages: Array(0)
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"6f1a1bc6-3d27-4500-883f-64b19b80da58","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"6f1a1bc6-3d27-4500-883f-64b19b80da58","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+   ERR [UriError]: Scheme contains illegal characters.: Error: [UriError]: Scheme contains illegal characters.
+    at V8 (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:64654)
+    at new Dd (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:68034)
+    at new Yr (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:69472)
+    at Dd.revive (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:69249)
+    at s9.call (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:92:108039)
+    at Xf.s (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:14894)
+    at Xf.q (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:14417)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:13819)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2398)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2615)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:5390)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2546)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:5574)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2546)
+    at N (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:8307)
+    at IpcMainImpl.i (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:36:10846)
+    at IpcMainImpl.emit (node:events:519:28)
+    at Session.<anonymous> (node:electron/js2c/browser_init:2:106626)
+    at Session.emit (node:events:519:28)
+error @ workbench.desktop.main.js:38
+ [App] Rendering messages: Array(0)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [MessageRouter] Routing message: getQwenSessions
+ [Extension Host] [ACP] Requesting session list...
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":3,"result":{"items":[{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:07:05.400Z","mtime":1772114825468.5825,"prompt":"1","gitBranch":"main","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\18e1ab55-0103-4abd-a544-e88aad5b497b.jsonl","messageCount":1},{"sessionId":"4373721a-6136-435b-aca5-4cfd17908b63","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:02:30.630Z","mtime":1772114555319.5142,"prompt":"去","gitBranch":"main","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\4373721a-6136-435b-aca5-4cfd17908b63.jsonl","messageCount":2},{"sessionId":"fa4bd332-4ddc-432f-894d-eaa72415a052","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T13:46:33.910Z","mtime":1772113609462.6458,"prompt":"你好","gitBranch":"feat/vscode-auxiliary-sidebar-support","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\fa4bd332-4ddc-432f-894d-eaa72415a052.jsonl","messageCount":5}],"hasMore":false}}
+ [Extension Host] [ACP] Response for session/list: Object
+ [Extension Host] [ACP] Session list response: {"items":[{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:07:05.400Z","mtime":1772114825468.5825,"prompt":"1","gitBranch":"main","filePath":"
+ [App] Rendering messages: Array(0)
+ [useSessionManagement] Switching to session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [App] Rendering messages: Array(0)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [MessageRouter] Routing message: switchQwenSession
+ [Extension Host] [SessionMessageHandler] Switching to session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [Extension Host] [QwenAgentManager] Getting session list with version-aware strategy
+ [Extension Host] [QwenAgentManager] Attempting to get session list via ACP method
+ [Extension Host] [ACP] Requesting session list...
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":4,"result":{"items":[{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:07:05.400Z","mtime":1772114825468.5825,"prompt":"1","gitBranch":"main","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\18e1ab55-0103-4abd-a544-e88aad5b497b.jsonl","messageCount":1},{"sessionId":"4373721a-6136-435b-aca5-4cfd17908b63","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:02:30.630Z","mtime":1772114555319.5142,"prompt":"去","gitBranch":"main","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\4373721a-6136-435b-aca5-4cfd17908b63.jsonl","messageCount":2},{"sessionId":"fa4bd332-4ddc-432f-894d-eaa72415a052","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T13:46:33.910Z","mtime":1772113609462.6458,"prompt":"你好","gitBranch":"feat/vscode-auxiliary-sidebar-support","filePath":"C:\\Users\\ZZBuAoYe\\.qwen\\projects\\e--qwen-qwen-code\\chats\\fa4bd332-4ddc-432f-894d-eaa72415a052.jsonl","messageCount":5}],"hasMore":false}}
+ [Extension Host] [ACP] Response for session/list: Object
+ [Extension Host] [ACP] Session list response: {"items":[{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","cwd":"e:\\qwen\\qwen-code","startTime":"2026-02-26T14:07:05.400Z","mtime":1772114825468.5825,"prompt":"1","gitBranch":"main","filePath":"
+ [Extension Host] [QwenAgentManager] ACP session list response: Object
+ [Extension Host] [QwenAgentManager] Sessions retrieved via ACP: Object 3
+ [Extension Host] [QwenAgentManager] Sessions retrieved via ACP: 3
+ [Extension Host] [QwenAgentManager] Rehydration start for session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [Extension Host] [QwenAgentManager] Attempting session/load via ACP for session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [Extension Host] [ACP] Sending session/load request for session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [Extension Host] [ACP] Request parameters: Object
+ [App] Rendering messages: Array(0)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [MessageRouter] Routing message: updatePanelTitle
+ [Extension Host] [MessageRouter] No handler found for message type: updatePanelTitle
+gMs @ workbench.desktop.main.js:537
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"1"},"_meta":{"timestamp":1772114825400}}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"1"},"_meta":{"timestamp":1772114825400}}}
+ [Extension Host] [QwenAgentManager] Rehydration: routing user message chunk
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":5,"result":null}
+ [Extension Host] [ACP] Response for session/load: null
+ [Extension Host] [ACP] Session load response: null
+ [Extension Host] [ACP] Session load succeeded
+ [Extension Host] [QwenAgentManager] Session load succeeded. Response: null
+ [Extension Host] [QwenAgentManager] Rehydration end for session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+ [Extension Host] [SessionMessageHandler] session/load succeeded (per ACP spec result is null; actual history comes via session/update): null
+ [App] Rendering messages: Array(1)
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+ [App] Rendering messages: Array(1)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Creating new session
+ [Extension Host] [QwenAgentManager] Clearing current session
+ [Extension Host] [QwenAgentManager] Session manager reset successfully
+ [Extension Host] [QwenAgentManager] Creating new session...
+ [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":6,"result":{"sessionId":"0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+ [Extension Host] [ACP] Response for session/new: Object
+ [Extension Host] [ACP] Session created with ID: 0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c
+ [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+ [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+ [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+ [Extension Host] [QwenAgentManager] New session created with ID: 0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c
+ [useWebViewMessages] availableModels message received: Array(2)
+ [Extension Host] [SidebarWebviewProvider] New session created: 0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c
+ [useWebViewMessages] setAvailableModels called with: Array(2)
+ [App] Rendering messages: Array(1)
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"0cbc4299-59c3-4fee-9c7d-c6ba4e4a9e4c","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+ [App] Rendering messages: Array(1)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Creating new session
+ [Extension Host] [QwenAgentManager] Clearing current session
+ [Extension Host] [QwenAgentManager] Session manager reset successfully
+ [Extension Host] [QwenAgentManager] Creating new session...
+ [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":7,"result":{"sessionId":"2c9e36a8-6018-4de5-9eaa-10ca70fbc044","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+ [Extension Host] [ACP] Response for session/new: Object
+ [Extension Host] [ACP] Session created with ID: 2c9e36a8-6018-4de5-9eaa-10ca70fbc044
+ [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "2c9e36a8-6018-4de5-9eaa-10ca70fbc044",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+ [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+ [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+ [Extension Host] [QwenAgentManager] New session created with ID: 2c9e36a8-6018-4de5-9eaa-10ca70fbc044
+ [useWebViewMessages] availableModels message received: Array(2)
+ [Extension Host] [SidebarWebviewProvider] New session created: 2c9e36a8-6018-4de5-9eaa-10ca70fbc044
+ [useWebViewMessages] setAvailableModels called with: Array(2)
+ [App] Rendering messages: Array(1)
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"2c9e36a8-6018-4de5-9eaa-10ca70fbc044","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"2c9e36a8-6018-4de5-9eaa-10ca70fbc044","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+ [App] Rendering messages: Array(1)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Creating new session
+ [Extension Host] [QwenAgentManager] Clearing current session
+ [Extension Host] [QwenAgentManager] Session manager reset successfully
+ [Extension Host] [QwenAgentManager] Creating new session...
+ [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":8,"result":{"sessionId":"3312425a-b787-4802-9c9f-f85ae5114242","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+ [Extension Host] [ACP] Response for session/new: Object
+ [Extension Host] [ACP] Session created with ID: 3312425a-b787-4802-9c9f-f85ae5114242
+ [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "3312425a-b787-4802-9c9f-f85ae5114242",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+ [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+ [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+ [Extension Host] [QwenAgentManager] New session created with ID: 3312425a-b787-4802-9c9f-f85ae5114242
+ [Extension Host] [SidebarWebviewProvider] New session created: 3312425a-b787-4802-9c9f-f85ae5114242
+ [useWebViewMessages] availableModels message received: Array(2)
+ [useWebViewMessages] setAvailableModels called with: Array(2)
+ [App] Rendering messages: Array(1)
+ [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"3312425a-b787-4802-9c9f-f85ae5114242","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+ [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"3312425a-b787-4802-9c9f-f85ae5114242","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+ [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+ [App] Rendering messages: Array(1)
+ [Extension Host] [SidebarWebviewProvider] Received message: Object
+ [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":9,"result":{"sessionId":"438312c9-570c-4a20-a578-0ffa7874a9c2","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: Object
+console.ts:139 [Extension Host] [ACP] Session created with ID: 438312c9-570c-4a20-a578-0ffa7874a9c2
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "438312c9-570c-4a20-a578-0ffa7874a9c2",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 438312c9-570c-4a20-a578-0ffa7874a9c2
+webview.js:10 [useWebViewMessages] availableModels message received: Array(2)
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 438312c9-570c-4a20-a578-0ffa7874a9c2
+webview.js:10 [useWebViewMessages] setAvailableModels called with: Array(2)
+webview.js:71 [App] Rendering messages: Array(1)
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"438312c9-570c-4a20-a578-0ffa7874a9c2","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"438312c9-570c-4a20-a578-0ffa7874a9c2","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: Array(1)
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: Object
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":10,"result":{"sessionId":"702ed5d3-8515-4688-8c03-c5f76724ebf6","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: Object
+console.ts:139 [Extension Host] [ACP] Session created with ID: 702ed5d3-8515-4688-8c03-c5f76724ebf6
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "702ed5d3-8515-4688-8c03-c5f76724ebf6",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 702ed5d3-8515-4688-8c03-c5f76724ebf6
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 702ed5d3-8515-4688-8c03-c5f76724ebf6
+webview.js:10 [useWebViewMessages] availableModels message received: Array(2)
+webview.js:10 [useWebViewMessages] setAvailableModels called with: Array(2)
+webview.js:71 [App] Rendering messages: Array(1)
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"702ed5d3-8515-4688-8c03-c5f76724ebf6","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"702ed5d3-8515-4688-8c03-c5f76724ebf6","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: Array(1)
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: Object
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":11,"result":{"sessionId":"2d9cac21-2cb0-42b7-9d77-ba6293722575","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: Object
+console.ts:139 [Extension Host] [ACP] Session created with ID: 2d9cac21-2cb0-42b7-9d77-ba6293722575
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "2d9cac21-2cb0-42b7-9d77-ba6293722575",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: Object
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: Array(2)
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 2d9cac21-2cb0-42b7-9d77-ba6293722575
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 2d9cac21-2cb0-42b7-9d77-ba6293722575
+webview.js:10 [useWebViewMessages] availableModels message received: Array(2)
+webview.js:10 [useWebViewMessages] setAvailableModels called with: Array(2)
+webview.js:71 [App] Rendering messages: Array(1)
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"2d9cac21-2cb0-42b7-9d77-ba6293722575","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"2d9cac21-2cb0-42b7-9d77-ba6293722575","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":12,"result":{"sessionId":"fe9a884c-da3d-4b70-a911-92bf86cd7d01","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: 'fe9a884c-da3d-4b70-a911-92bf86cd7d01', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: fe9a884c-da3d-4b70-a911-92bf86cd7d01
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "fe9a884c-da3d-4b70-a911-92bf86cd7d01",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: fe9a884c-da3d-4b70-a911-92bf86cd7d01
+webview.js:10 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: fe9a884c-da3d-4b70-a911-92bf86cd7d01
+webview.js:10 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fe9a884c-da3d-4b70-a911-92bf86cd7d01","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"fe9a884c-da3d-4b70-a911-92bf86cd7d01","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":13,"result":{"sessionId":"670e4e22-fee8-4c30-93eb-1b3f73ae15fd","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '670e4e22-fee8-4c30-93eb-1b3f73ae15fd', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 670e4e22-fee8-4c30-93eb-1b3f73ae15fd
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "670e4e22-fee8-4c30-93eb-1b3f73ae15fd",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 670e4e22-fee8-4c30-93eb-1b3f73ae15fd
+webview.js:10 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:10 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 670e4e22-fee8-4c30-93eb-1b3f73ae15fd
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"670e4e22-fee8-4c30-93eb-1b3f73ae15fd","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"670e4e22-fee8-4c30-93eb-1b3f73ae15fd","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":14,"result":{"sessionId":"20ad082a-1577-49c9-94be-9f62bd65cb21","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '20ad082a-1577-49c9-94be-9f62bd65cb21', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 20ad082a-1577-49c9-94be-9f62bd65cb21
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "20ad082a-1577-49c9-94be-9f62bd65cb21",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 20ad082a-1577-49c9-94be-9f62bd65cb21
+webview.js:10 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:10 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 20ad082a-1577-49c9-94be-9f62bd65cb21
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"20ad082a-1577-49c9-94be-9f62bd65cb21","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"20ad082a-1577-49c9-94be-9f62bd65cb21","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":15,"result":{"sessionId":"de54e311-34c8-4961-8cf5-f5536faf2dfb","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: 'de54e311-34c8-4961-8cf5-f5536faf2dfb', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: de54e311-34c8-4961-8cf5-f5536faf2dfb
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "de54e311-34c8-4961-8cf5-f5536faf2dfb",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: de54e311-34c8-4961-8cf5-f5536faf2dfb
+webview.js:10 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:10 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: de54e311-34c8-4961-8cf5-f5536faf2dfb
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"de54e311-34c8-4961-8cf5-f5536faf2dfb","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"de54e311-34c8-4961-8cf5-f5536faf2dfb","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Clearing current session
+console.ts:139 [Extension Host] [QwenAgentManager] Session manager reset successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":16,"result":{"sessionId":"5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: 5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8
+webview.js:10 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:10 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8
+webview.js:71 [App] Rendering messages: [{…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"5c9c0f7d-9fd3-4ffc-b01c-decb1ca410e8","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update

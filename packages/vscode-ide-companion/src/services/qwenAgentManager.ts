@@ -1250,19 +1250,9 @@ export class QwenAgentManager {
    */
   clearCurrentSession(): void {
     console.log('[QwenAgentManager] Clearing current session');
-    // Access the connection's session manager and reset it
-    // This will clear the sessionId and allow createNewSession to create a new session
-    const sessionManager = (
-      this.connection as unknown as { sessionManager: { reset: () => void } }
-    ).sessionManager;
-    if (sessionManager && typeof sessionManager.reset === 'function') {
-      sessionManager.reset();
-      console.log('[QwenAgentManager] Session manager reset successfully');
-    } else {
-      console.warn(
-        '[QwenAgentManager] Could not access session manager reset method',
-      );
-    }
+    // Reset the connection's session manager state
+    this.connection.resetSessionState();
+    console.log('[QwenAgentManager] Session state cleared successfully');
   }
 
   /**
