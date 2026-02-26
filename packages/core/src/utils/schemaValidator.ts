@@ -91,7 +91,6 @@ export class SchemaValidator {
       // Skip validation rather than blocking tool usage.
       debugLogger.warn(
         `Failed to compile schema (${
-           
           (schema as Record<string, unknown>)?.['$schema'] ?? '<no $schema>'
         }): ${error instanceof Error ? error.message : String(error)}. ` +
           'Skipping parameter validation.',
