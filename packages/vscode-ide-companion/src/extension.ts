@@ -15,6 +15,7 @@ import {
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
 import { WebViewProvider } from './webview/WebViewProvider.js';
+import { SidebarWebviewProvider } from './webview/SidebarWebviewProvider.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
 import { isWindows } from './utils/platform.js';
@@ -149,6 +150,24 @@ export async function activate(context: vscode.ExtensionContext) {
     webViewProviders.push(provider);
     return provider;
   };
+
+  // Register sidebar webview provider
+  const sidebarProvider = new SidebarWebviewProvider(
+    context,
+    context.extensionUri,
+  );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'qwen-code-chat',
+      sidebarProvider,
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      },
+    ),
+  );
+  log('Sidebar webview provider registered');
 
   // Register WebView panel serializer for persistence across reloads
   context.subscriptions.push(

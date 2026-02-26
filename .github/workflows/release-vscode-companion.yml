@@ -223,7 +223,7 @@ jobs:
           npm --workspace=qwen-code-vscode-ide-companion run prepackage
 
       - name: 'Package VSIX (platform-specific)'
-        if: '${{ matrix.target != '''' }}'
+        if: "${{ matrix.target != '' }}"
         working-directory: 'packages/vscode-ide-companion'
         run: |-
           if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
@@ -236,7 +236,7 @@ jobs:
         shell: 'bash'
 
       - name: 'Package VSIX (universal)'
-        if: '${{ matrix.target == '''' }}'
+        if: "${{ matrix.target == '' }}"
         working-directory: 'packages/vscode-ide-companion'
         run: |-
           if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
@@ -251,7 +251,7 @@ jobs:
       - name: 'Upload VSIX Artifact'
         uses: 'actions/upload-artifact@v4'
         with:
-          name: 'vsix-${{ matrix.target || ''universal'' }}'
+          name: "vsix-${{ matrix.target || 'universal' }}"
           path: 'qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
           if-no-files-found: 'error'
 
@@ -292,7 +292,7 @@ jobs:
           npm install -g ovsx
 
       - name: 'Publish to Microsoft Marketplace'
-        if: '${{ needs.prepare.outputs.is_dry_run == ''false'' && needs.prepare.outputs.is_preview != ''true'' }}'
+        if: "${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_preview != 'true' }}"
         env:
           VSCE_PAT: '${{ secrets.VSCE_PAT }}'
         run: |-
@@ -303,7 +303,7 @@ jobs:
           done
 
       - name: 'Publish to OpenVSX'
-        if: '${{ needs.prepare.outputs.is_dry_run == ''false'' }}'
+        if: "${{ needs.prepare.outputs.is_dry_run == 'false' }}"
         env:
           OVSX_TOKEN: '${{ secrets.OVSX_TOKEN }}'
         run: |-
@@ -318,7 +318,7 @@ jobs:
           done
 
       - name: 'Upload all VSIXes as release artifacts (dry run)'
-        if: '${{ needs.prepare.outputs.is_dry_run == ''true'' }}'
+        if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
         uses: 'actions/upload-artifact@v4'
         with:
           name: 'all-vsix-packages-${{ needs.prepare.outputs.release_version }}'

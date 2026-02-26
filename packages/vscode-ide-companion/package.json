@@ -31,6 +31,24 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qwen-code-sidebar",
+          "title": "Qwen Code",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "qwen-code-sidebar": [
+        {
+          "id": "qwen-code-chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "qwen-diff-editable"

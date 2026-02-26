@@ -293,7 +293,7 @@ export class TerminalCapture {
     await this.page.addScriptTag({ path: join(xtermDir, 'lib', 'xterm.js') });
 
     // 4. Create xterm Terminal instance inside the page
-     
+
     await this.page.evaluate(
       ({ cols, rows, theme, fontSize, fontFamily }) => {
         const W = window as unknown as Record<string, unknown>;
@@ -312,7 +312,7 @@ export class TerminalCapture {
         });
 
         const container = document.getElementById('xterm-container')!;
-         
+
         term.open(container);
 
         // Expose to outer scope
