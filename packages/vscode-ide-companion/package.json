@@ -31,6 +31,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.qwen/settings.json",
+        "url": "./schemas/settings.schema.json"
+      }
+    ],
     "languages": [
       {
         "id": "qwen-diff-editable"
