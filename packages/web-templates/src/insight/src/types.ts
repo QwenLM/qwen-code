@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { InsightData } from '../../../src/services/insight/types/StaticInsightTypes';
-import { QualitativeInsights as QualitativeData } from '../../../src/services/insight/types/QualitativeInsightTypes';
+import type { InsightData } from '../../../src/services/insight/types/StaticInsightTypes';
+import type { QualitativeInsights as QualitativeData } from '../../../src/services/insight/types/QualitativeInsightTypes';
 
 declare global {
   interface Window {

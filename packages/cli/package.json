@@ -19,8 +19,7 @@
     }
   },
   "scripts": {
-    "build:assets": "node ./assets/parallel-build.mjs",
-    "build": "npm run build:assets && node ../../scripts/build_package.js",
+    "build": "node ../../scripts/build_package.js",
     "start": "node dist/index.js",
     "debug": "node --inspect-brk dist/index.js",
     "lint": "eslint . --ext .ts,.tsx",
@@ -41,6 +40,7 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
     "command-exists": "^1.2.9",

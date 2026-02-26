@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState } from 'react';
 import { DashboardCards, HeatmapSection } from './Charts';
-import { InsightData, QualitativeData } from './types';
+import type { InsightData, QualitativeData } from './types';
 import { CopyButton, MarkdownText } from './Components';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
@@ -72,7 +72,7 @@ export function ProjectAreas({
 }: {
   qualitative: QualitativeData;
   topGoals?: Record<string, number>;
-  topTools?: Record<string, number> | [string, number][];
+  topTools?: Record<string, number> | Array<[string, number]>;
 }) {
   const { projectAreas } = qualitative;
 

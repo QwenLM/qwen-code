@@ -14,7 +14,7 @@ import {
 } from './Qualitative';
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
-import { InsightData } from './types';
+import type { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 

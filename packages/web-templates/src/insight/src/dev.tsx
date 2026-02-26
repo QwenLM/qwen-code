@@ -2,7 +2,7 @@
  * Dev entry point — injects mock data then mounts the app.
  * Used by `vite` dev server via index.html.
  */
-import { InsightData } from './types';
+import type { InsightData } from './types';
 
 const MOCK_DATA: InsightData = {
   heatmap: {

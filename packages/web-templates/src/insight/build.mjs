@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable no-undef */
-import { writeFile, readFile } from 'node:fs/promises';
+import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { build } from 'vite';
@@ -8,16 +8,10 @@ import { build } from 'vite';
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const distDir = join(assetsDir, 'dist');
 
-const templateModulePath = join(
-  assetsDir,
-  '..',
-  '..',
-  'src',
-  'services',
-  'insight',
-  'templates',
-  'insightTemplate.ts',
-);
+const generatedDir = join(assetsDir, '..', 'generated');
+await mkdir(generatedDir, { recursive: true });
+
+const templateModulePath = join(generatedDir, 'insightTemplate.ts');
 
 console.log('Building insight assets with Vite...');
 await build();

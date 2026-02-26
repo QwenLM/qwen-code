@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { INSIGHT_JS, INSIGHT_CSS } from '../templates/insightTemplate.js';
+import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {

@@ -1,6 +1,6 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
-import { InsightData } from './types';
+import type { InsightData } from './types';
 
 /**
  * Theme configuration for the share card
@@ -494,7 +494,7 @@ function ActiveHoursChart({
 function buildMiniHeatmap(
   heatmap: Record<string, number>,
   theme: ThemeConfig,
-): { color: string }[] {
+): Array<{ color: string }> {
   const today = new Date();
   const weeksToShow = 26;
   const totalDays = weeksToShow * 7;
@@ -504,7 +504,7 @@ function buildMiniHeatmap(
   // Align to the beginning of the week (Sunday)
   startDate.setDate(startDate.getDate() - startDate.getDay());
 
-  const cells: { color: string }[] = [];
+  const cells: Array<{ color: string }> = [];
 
   const endDate = new Date(today);
   endDate.setDate(endDate.getDate() + (6 - endDate.getDay())); // end of this week
@@ -529,7 +529,7 @@ function heatColor(val: number, theme: ThemeConfig): string {
   return theme.heatmapColors[3];
 }
 
-function MiniHeatmapGrid({ cells }: { cells: { color: string }[] }) {
+function MiniHeatmapGrid({ cells }: { cells: Array<{ color: string }> }) {
   const rows = 7;
   const cols = Math.ceil(cells.length / rows);
   const cellSize = 14;

@@ -1,6 +1,6 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
-import { InsightData } from './types';
+import type { InsightData } from './types';
 
 // Header Component
 export function Header({

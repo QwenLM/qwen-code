@@ -1,4 +1,4 @@
-import { InsightData } from './types';
+import type { InsightData } from './types';
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
@@ -198,7 +198,7 @@ function ActivityHeatmap({
   const startDayOfWeek = oneYearAgo.getDay();
 
   // Generate month labels
-  const monthLabels: { x: number; text: string }[] = [];
+  const monthLabels: Array<{ x: number; text: string }> = [];
   let lastMonth = -1;
   let lastX = -100; // Initialize with a value far to the left
 
@@ -216,7 +216,7 @@ function ActivityHeatmap({
       // Approximate width of a month label is about 25-30px
       if (x - lastX > 30) {
         monthLabels.push({
-          x: x,
+          x,
           text: months[currentMonth],
         });
         lastX = x;

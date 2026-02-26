@@ -47,6 +47,7 @@ packages/*/coverage/
 # Generated files
 packages/cli/src/generated/
 packages/core/src/generated/
+packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
