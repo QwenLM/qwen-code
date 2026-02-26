@@ -101,7 +101,8 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     });
 
     this.agentManager.onPermissionRequest(
-      async (request: AcpPermissionRequest) => new Promise<string>((resolve) => {
+      async (request: AcpPermissionRequest) =>
+        new Promise<string>((resolve) => {
           this.pendingPermissionRequest = request;
           this.pendingPermissionResolve = resolve;
           this.sendMessageToWebView({
@@ -117,6 +118,7 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
   ): Promise<void> {
+    console.log('[SidebarWebviewProvider] resolveWebviewView called');
     this.view = webviewView;
 
     webviewView.webview.options = {
@@ -132,23 +134,26 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       this.extensionUri,
     );
 
+    console.log('[SidebarWebviewProvider] Setting webview HTML');
     webviewView.webview.html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webviewView.webview.cspSource}; script-src ${webviewView.webview.cspSource}; style-src ${webviewView.webview.cspSource} 'unsafe-inline';">
-  <title>Qwen Code</title>
-</head>
-<body data-extension-uri="${extensionUriForWebview.toString()}">
-  <div id="root"></div>
-  <script src="${scriptUri.toString()}"></script>
-</body>
-</html>`;
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webviewView.webview.cspSource}; script-src ${webviewView.webview.cspSource}; style-src ${webviewView.webview.cspSource} 'unsafe-inline';">
+    <title>Qwen Code</title>
+  </head>
+  <body data-extension-uri="${extensionUriForWebview.toString()}">
+    <div id="root"></div>
+    <script src="${scriptUri.toString()}"></script>
+  </body>
+  </html>`;
 
+    console.log('[SidebarWebviewProvider] Setting up message handlers');
     // Handle messages from webview
     this.disposables.push(
       webviewView.webview.onDidReceiveMessage(async (message) => {
+        console.log('[SidebarWebviewProvider] Received message:', message);
         await this.handleWebviewMessage(message);
       }),
     );
@@ -156,16 +161,21 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     // Handle webview visibility changes
     this.disposables.push(
       webviewView.onDidChangeVisibility(() => {
+        console.log(
+          '[SidebarWebviewProvider] Visibility changed:',
+          webviewView.visible,
+        );
         if (webviewView.visible && !this.agentInitialized) {
           this.initializeAgentConnection();
         }
       }),
     );
 
-    // Initialize agent connection if view is visible
-    if (webviewView.visible) {
-      await this.initializeAgentConnection();
-    }
+    console.log(
+      '[SidebarWebviewProvider] Webview setup complete, visible:',
+      webviewView.visible,
+    );
+    // Don't initialize here - wait for webviewReady message
   }
 
   private async handleWebviewMessage(message: unknown): Promise<void> {
@@ -192,7 +202,15 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   private handleWebviewReady(): void {
+    console.log('[SidebarWebviewProvider] Webview ready event received');
+    console.log('[SidebarWebviewProvider] Auth state:', this.authState);
+    console.log(
+      '[SidebarWebviewProvider] Agent initialized:',
+      this.agentInitialized,
+    );
+
     if (this.authState !== null) {
+      console.log('[SidebarWebviewProvider] Sending auth state to webview');
       this.sendMessageToWebView({
         type: 'authState',
         data: { authenticated: this.authState },
@@ -200,6 +218,9 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     if (this.cachedAvailableModels) {
+      console.log(
+        '[SidebarWebviewProvider] Sending available models to webview',
+      );
       this.sendMessageToWebView({
         type: 'availableModels',
         data: { models: this.cachedAvailableModels },
@@ -207,7 +228,10 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     if (!this.agentInitialized) {
+      console.log('[SidebarWebviewProvider] Initializing agent connection');
       this.initializeAgentConnection();
+    } else {
+      console.log('[SidebarWebviewProvider] Agent already initialized');
     }
   }
 
@@ -229,19 +253,70 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     try {
-      // QwenAgentManager doesn't have initialize method, it auto-initializes
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      const bundledCliEntry = vscode.Uri.joinPath(
+        this.extensionUri,
+        'dist',
+        'qwen-cli',
+        'cli.js',
+      ).fsPath;
+
+      console.log('[SidebarWebviewProvider] Connecting to agent...');
+      const connectResult = await this.agentManager.connect(
+        workingDir,
+        bundledCliEntry,
+        { autoAuthenticate: false },
+      );
+
       this.agentInitialized = true;
+
+      if (connectResult.requiresAuth) {
+        console.log('[SidebarWebviewProvider] Authentication required');
+        this.authState = false;
+        this.sendMessageToWebView({
+          type: 'authState',
+          data: { authenticated: false },
+        });
+        return;
+      }
+
+      this.authState = true;
+      this.sendMessageToWebView({
+        type: 'authState',
+        data: { authenticated: true },
+      });
+
       await this.loadCurrentSessionMessages();
     } catch (error) {
+      console.error(
+        '[SidebarWebviewProvider] Failed to initialize agent:',
+        error,
+      );
       if (isAuthenticationRequiredError(error)) {
         this.authState = false;
         this.sendMessageToWebView({
           type: 'authState',
           data: { authenticated: false },
         });
+      } else {
+        // Initialize empty conversation on other errors
+        await this.initializeEmptyConversation();
       }
+    }
+  }
+
+  private async initializeEmptyConversation(): Promise<void> {
+    try {
+      console.log('[SidebarWebviewProvider] Initializing empty conversation');
+      this.sendMessageToWebView({
+        type: 'loadMessages',
+        data: { messages: [], conversationId: null },
+      });
+    } catch (error) {
       console.error(
-        '[SidebarWebviewProvider] Failed to initialize agent:',
+        '[SidebarWebviewProvider] Failed to initialize empty conversation:',
         error,
       );
     }
