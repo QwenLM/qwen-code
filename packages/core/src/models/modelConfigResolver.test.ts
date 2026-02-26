@@ -10,7 +10,7 @@ import {
   validateModelConfig,
 } from './modelConfigResolver.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
 
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
@@ -95,7 +95,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.model).toBe('coder-model');
+        expect(result.config.model).toBe(MAINLINE_CODER_MODEL);
         expect(result.sources['model'].kind).toBe('default');
       });
 

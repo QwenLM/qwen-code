@@ -6,7 +6,6 @@
 
 import {
   AuthType,
-  DEFAULT_QWEN_MODEL,
   type Config,
   type AvailableModel as CoreAvailableModel,
   QWEN_OAUTH_MODELS,
@@ -19,9 +18,6 @@ export type AvailableModel = {
   description?: string;
   isVision?: boolean;
 };
-
-// Re-export constant from core for backwards compatibility
-export { DEFAULT_QWEN_MODEL as MAINLINE_CODER };
 
 const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(
   (model) => ({

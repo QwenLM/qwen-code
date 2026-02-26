@@ -12,13 +12,10 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import {
-  getFilteredQwenModels,
-  MAINLINE_CODER,
-} from '../models/availableModels.js';
+import { getFilteredQwenModels } from '../models/availableModels.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -61,7 +58,7 @@ const renderComponent = (
 
   const mockConfig = {
     // --- Functions used by ModelDialog ---
-    getModel: vi.fn(() => MAINLINE_CODER),
+    getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
     setModel: vi.fn().mockResolvedValue(undefined),
     switchModel: vi.fn().mockResolvedValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
@@ -80,7 +77,7 @@ const renderComponent = (
     getDebugMode: vi.fn(() => false),
     getContentGeneratorConfig: vi.fn(() => ({
       authType: AuthType.QWEN_OAUTH,
-      model: MAINLINE_CODER,
+      model: DEFAULT_QWEN_MODEL,
     })),
     getUseModelRouter: vi.fn(() => false),
     getProxy: vi.fn(() => undefined),
@@ -131,13 +128,13 @@ describe('<ModelDialog />', () => {
     expect(props.items).toHaveLength(getFilteredQwenModels().length);
     // coder-model is the only model and it has vision capability
     expect(props.items[0].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
+      `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
   });
 
   it('initializes with the model from ConfigContext', () => {
-    const mockGetModel = vi.fn(() => MAINLINE_CODER);
+    const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     renderComponent(
       {},
       {
@@ -150,7 +147,9 @@ describe('<ModelDialog />', () => {
     expect(mockGetModel).toHaveBeenCalled();
     // Calculate expected index dynamically based on model list
     const qwenModels = getFilteredQwenModels();
-    const expectedIndex = qwenModels.findIndex((m) => m.id === MAINLINE_CODER);
+    const expectedIndex = qwenModels.findIndex(
+      (m) => m.id === DEFAULT_QWEN_MODEL,
+    );
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
         initialIndex: expectedIndex,
@@ -183,7 +182,7 @@ describe('<ModelDialog />', () => {
 
     expect(mockGetModel).toHaveBeenCalled();
 
-    // When getModel returns undefined, preferredModel falls back to MAINLINE_CODER
+    // When getModel returns undefined, preferredModel falls back to DEFAULT_QWEN_MODEL
     // which has index 0, so initialIndex should be 0
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -214,17 +213,17 @@ describe('<ModelDialog />', () => {
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
     expect(mockConfig?.switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
       undefined,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -256,7 +255,7 @@ describe('<ModelDialog />', () => {
       getModel: vi.fn(() => 'gpt-4'),
       getContentGeneratorConfig: vi.fn(() => ({
         authType: AuthType.QWEN_OAUTH,
-        model: MAINLINE_CODER,
+        model: DEFAULT_QWEN_MODEL,
       })),
       // Add switchModel to the mock object (not the type)
       switchModel,
@@ -270,17 +269,17 @@ describe('<ModelDialog />', () => {
     );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
       { requireCachedCredentials: true },
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -329,7 +328,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('updates initialIndex when config context changes', () => {
-    const mockGetModel = vi.fn(() => MAINLINE_CODER);
+    const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
     const mockSettings = {
       isTrusted: true,
@@ -362,10 +361,10 @@ describe('<ModelDialog />', () => {
       </SettingsContext.Provider>,
     );
 
-    // MAINLINE_CODER (qwen3.5-plus) is at index 0
+    // DEFAULT_QWEN_MODEL (coder-model) is at index 0
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
 
-    mockGetModel.mockReturnValue(MAINLINE_CODER);
+    mockGetModel.mockReturnValue(DEFAULT_QWEN_MODEL);
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
@@ -390,10 +389,10 @@ describe('<ModelDialog />', () => {
 
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
-    // Calculate expected index for MAINLINE_CODER dynamically
+    // Calculate expected index for DEFAULT_QWEN_MODEL dynamically
     const qwenModels = getFilteredQwenModels();
     const expectedCoderIndex = qwenModels.findIndex(
-      (m) => m.id === MAINLINE_CODER,
+      (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
   });
