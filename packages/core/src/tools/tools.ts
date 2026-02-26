@@ -171,6 +171,18 @@ export abstract class DeclarativeTool<
   }
 
   /**
+   * Regularize the raw tool parameters.
+   * Subclasses may override this to add custom regularization logic
+   * before the JSON schema check.
+   * @param params The raw parameters from the model.
+   * @returns The regularized parameters.
+   */
+  protected regularizeToolParams(_params: TParams): TParams {
+    // Base implementation can be extended by subclasses.
+    return _params;
+  }
+
+  /**
    * Validates the raw tool parameters.
    * Subclasses should override this to add custom validation logic
    * beyond the JSON schema check.
@@ -279,11 +291,17 @@ export abstract class BaseDeclarativeTool<
   TResult extends ToolResult,
 > extends DeclarativeTool<TParams, TResult> {
   build(params: TParams): ToolInvocation<TParams, TResult> {
+    params = this.regularizeToolParams(params);
+
     const validationError = this.validateToolParams(params);
     if (validationError) {
       throw new Error(validationError);
     }
     return this.createInvocation(params);
+  }
+
+  protected override regularizeToolParams(_params: TParams): TParams {
+    return _params;
   }
 
   override validateToolParams(params: TParams): string | null {
