@@ -55,7 +55,7 @@ export function NavToc() {
   return (
     <nav className="nav-toc">
       <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use QC</a>
+      <a href="#section-usage">How You Use Qwen Code</a>
       <a href="#section-wins">Impressive Things</a>
       <a href="#section-friction">Where Things Go Wrong</a>
       <a href="#section-features">Features to Try</a>
@@ -282,6 +282,9 @@ function HorizontalBarChart({
     entries = entries.filter(([key]) => allowedKeys.includes(key));
   }
   entries.sort((a, b) => b[1] - a[1]);
+
+  // Limit to at most 10 items
+  entries = entries.slice(0, 10);
 
   if (entries.length === 0) return null;
 
@@ -569,7 +572,7 @@ export function Improvements({
         id="section-features"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Existing QC Features to Try
+        Existing Qwen Code Features to Try
       </h2>
 
       {/* QWEN.md Additions */}

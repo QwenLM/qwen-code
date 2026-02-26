@@ -3,10 +3,62 @@ import React from 'react';
 import { InsightData } from './types';
 
 /**
+ * Theme configuration for the share card
+ */
+export type Theme = 'light' | 'dark';
+
+interface ThemeConfig {
+  background: string;
+  textPrimary: string;
+  textSecondary: string;
+  textMuted: string;
+  cardBackground: string;
+  cardBackgroundSecondary: string;
+  borderColor: string;
+  heatmapColors: string[];
+  heatmapEmpty: string;
+}
+
+const themes: Record<Theme, ThemeConfig> = {
+  light: {
+    background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+    textPrimary: '#0f172a',
+    textSecondary: '#475569',
+    textMuted: '#64748b',
+    cardBackground: 'rgba(255,255,255,0.7)',
+    cardBackgroundSecondary: 'rgba(255,255,255,0.5)',
+    borderColor: '#e2e8f0',
+    // GitHub contribution graph color palette (light mode)
+    heatmapColors: ['#9be9a8', '#40c463', '#30a14e', '#216e39'],
+    heatmapEmpty: '#ebedf0',
+  },
+  dark: {
+    background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
+    textPrimary: '#f8fafc',
+    textSecondary: '#e2e8f0',
+    textMuted: '#94a3b8',
+    cardBackground: 'rgba(255,255,255,0.05)',
+    cardBackgroundSecondary: 'rgba(255,255,255,0.04)',
+    borderColor: 'rgba(255,255,255,0.08)',
+    // GitHub contribution graph color palette (dark mode)
+    heatmapColors: ['#0e4429', '#006d32', '#26a641', '#39d353'],
+    heatmapEmpty: '#2d333b',
+  },
+};
+
+/**
  * A hidden 1200x675 card optimized for Twitter/X sharing.
  * Rendered off-screen; captured by html2canvas when the user clicks "Share as Card".
  */
-export function ShareCard({ data }: { data: InsightData }) {
+export function ShareCard({
+  data,
+  theme = 'light',
+}: {
+  data: InsightData;
+  theme?: Theme;
+}) {
+  const t = themes[theme];
+
   const {
     totalMessages = 0,
     totalSessions = 0,
@@ -38,15 +90,15 @@ export function ShareCard({ data }: { data: InsightData }) {
   const truncatedHeadline = data.qualitative?.memorableMoment?.headline ?? null;
 
   // Mini heatmap: last 52 weeks (simplified 7-row grid)
-  const miniHeatmap = buildMiniHeatmap(data.heatmap || {});
+  const miniHeatmap = buildMiniHeatmap(data.heatmap || {}, t);
 
   return (
     <div
       id="share-card"
       style={{
         width: '1200px',
-        background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
-        color: '#f8fafc',
+        background: t.background,
+        color: t.textPrimary,
         fontFamily:
           'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
         display: 'flex',
@@ -82,7 +134,7 @@ export function ShareCard({ data }: { data: InsightData }) {
           <div
             style={{
               fontSize: '14px',
-              color: '#94a3b8',
+              color: t.textMuted,
               marginTop: '6px',
             }}
           >
@@ -92,7 +144,7 @@ export function ShareCard({ data }: { data: InsightData }) {
         <div
           style={{
             fontSize: '11px',
-            color: '#64748b',
+            color: t.textMuted,
             textTransform: 'uppercase',
             letterSpacing: '0.15em',
             paddingTop: '8px',
@@ -111,16 +163,17 @@ export function ShareCard({ data }: { data: InsightData }) {
           marginBottom: '32px',
         }}
       >
-        <StatBox value={String(totalMessages)} label="Messages" />
-        <StatBox value={String(totalSessions)} label="Sessions" />
+        <StatBox value={String(totalMessages)} label="Messages" theme={t} />
+        <StatBox value={String(totalSessions)} label="Sessions" theme={t} />
         <StatBox
           value={`+${totalLinesAdded}/-${totalLinesRemoved}`}
           label="Lines Changed"
           small
+          theme={t}
         />
-        <StatBox value={String(totalFiles)} label="Files" />
-        <StatBox value={`${currentStreak}d`} label="Streak" />
-        <StatBox value={`${longestStreak}d`} label="Best Streak" />
+        <StatBox value={String(totalFiles)} label="Files" theme={t} />
+        <StatBox value={`${currentStreak}d`} label="Streak" theme={t} />
+        <StatBox value={`${longestStreak}d`} label="Best Streak" theme={t} />
       </div>
 
       {/* Body: Heatmap + Tools + Moment */}
@@ -135,7 +188,7 @@ export function ShareCard({ data }: { data: InsightData }) {
         {/* Left: Mini Heatmap */}
         <div
           style={{
-            background: 'rgba(255,255,255,0.05)',
+            background: t.cardBackground,
             borderRadius: '12px',
             padding: '20px',
             display: 'flex',
@@ -146,7 +199,7 @@ export function ShareCard({ data }: { data: InsightData }) {
             style={{
               fontSize: '12px',
               fontWeight: 600,
-              color: '#94a3b8',
+              color: t.textMuted,
               textTransform: 'uppercase',
               letterSpacing: '0.08em',
               marginBottom: '12px',
@@ -164,6 +217,7 @@ export function ShareCard({ data }: { data: InsightData }) {
           >
             <MiniHeatmapGrid cells={miniHeatmap} />
           </div>
+          <MiniHeatmapLegend theme={t} />
         </div>
 
         {/* Right: Active Hours + Moment */}
@@ -177,7 +231,7 @@ export function ShareCard({ data }: { data: InsightData }) {
           {/* Active Hours */}
           <div
             style={{
-              background: 'rgba(255,255,255,0.05)',
+              background: t.cardBackground,
               borderRadius: '12px',
               padding: '20px',
               display: 'flex',
@@ -188,7 +242,7 @@ export function ShareCard({ data }: { data: InsightData }) {
               style={{
                 fontSize: '12px',
                 fontWeight: 600,
-                color: '#94a3b8',
+                color: t.textMuted,
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 marginBottom: '12px',
@@ -205,14 +259,14 @@ export function ShareCard({ data }: { data: InsightData }) {
                 gap: '10px',
               }}
             >
-              <ActiveHoursChart activeHours={activeHours} />
+              <ActiveHoursChart activeHours={activeHours} theme={t} />
             </div>
           </div>
 
           {/* Key Pattern + Memorable Moment */}
           <div
             style={{
-              background: 'rgba(255,255,255,0.04)',
+              background: t.cardBackgroundSecondary,
               borderRadius: '12px',
               padding: '16px 16px',
               position: 'relative',
@@ -225,7 +279,10 @@ export function ShareCard({ data }: { data: InsightData }) {
                 left: '12px',
                 fontSize: '64px',
                 fontWeight: 700,
-                color: 'rgba(99,102,241,0.2)',
+                color:
+                  theme === 'light'
+                    ? 'rgba(99,102,241,0.15)'
+                    : 'rgba(99,102,241,0.2)',
                 lineHeight: 1,
                 fontFamily: 'Georgia, "Times New Roman", serif',
                 userSelect: 'none',
@@ -244,7 +301,7 @@ export function ShareCard({ data }: { data: InsightData }) {
                 <div
                   style={{
                     fontSize: '13px',
-                    color: '#e2e8f0',
+                    color: t.textSecondary,
                     lineHeight: 1.6,
                     marginBottom: truncatedHeadline ? '8px' : 0,
                   }}
@@ -256,7 +313,7 @@ export function ShareCard({ data }: { data: InsightData }) {
                 <div
                   style={{
                     fontSize: '12px',
-                    color: '#94a3b8',
+                    color: t.textMuted,
                     lineHeight: 1.5,
                     fontStyle: 'italic',
                   }}
@@ -277,14 +334,14 @@ export function ShareCard({ data }: { data: InsightData }) {
           alignItems: 'center',
           marginTop: 'auto',
           paddingTop: '24px',
-          borderTop: '1px solid rgba(255,255,255,0.08)',
+          borderTop: `1px solid ${t.borderColor}`,
           flexShrink: 0,
         }}
       >
-        <div style={{ fontSize: '12px', color: '#64748b' }}>
+        <div style={{ fontSize: '12px', color: t.textMuted }}>
           Generated by Qwen Code · {new Date().toISOString().split('T')[0]}
         </div>
-        <div style={{ fontSize: '12px', color: '#64748b' }}>
+        <div style={{ fontSize: '12px', color: t.textMuted }}>
           github.com/QwenLM/qwen-code
         </div>
       </div>
@@ -296,10 +353,12 @@ function StatBox({
   value,
   label,
   small,
+  theme,
 }: {
   value: string;
   label: string;
   small?: boolean;
+  theme: ThemeConfig;
 }) {
   return (
     <div style={{ textAlign: 'center' }}>
@@ -307,7 +366,7 @@ function StatBox({
         style={{
           fontSize: small ? '18px' : '28px',
           fontWeight: 700,
-          color: '#f8fafc',
+          color: theme.textPrimary,
           lineHeight: 1.2,
         }}
       >
@@ -316,7 +375,7 @@ function StatBox({
       <div
         style={{
           fontSize: '11px',
-          color: '#64748b',
+          color: theme.textMuted,
           textTransform: 'uppercase',
           letterSpacing: '0.05em',
           marginTop: '4px',
@@ -330,8 +389,10 @@ function StatBox({
 
 function ActiveHoursChart({
   activeHours,
+  theme,
 }: {
   activeHours: { [hour: number]: number };
+  theme: ThemeConfig;
 }) {
   const phases = [
     {
@@ -348,14 +409,14 @@ function ActiveHoursChart({
     },
     {
       label: 'Evening',
-      time: '18–00',
-      hours: [18, 19, 20, 21, 22, 23],
+      time: '18–22',
+      hours: [18, 19, 20, 21],
       color: '#6366f1',
     },
     {
       label: 'Night',
-      time: '00–06',
-      hours: [0, 1, 2, 3, 4, 5],
+      time: '22–06',
+      hours: [22, 23, 0, 1, 2, 3, 4, 5],
       color: '#475569',
     },
   ];
@@ -394,21 +455,21 @@ function ActiveHoursChart({
                     flexShrink: 0,
                   }}
                 />
-                <span style={{ color: '#e2e8f0', fontWeight: 500 }}>
+                <span style={{ color: theme.textSecondary, fontWeight: 500 }}>
                   {item.label}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '11px' }}>
+                <span style={{ color: theme.textMuted, fontSize: '11px' }}>
                   {item.time}
                 </span>
               </div>
-              <span style={{ color: '#94a3b8', fontWeight: 600 }}>
+              <span style={{ color: theme.textMuted, fontWeight: 600 }}>
                 {item.total}
               </span>
             </div>
             <div
               style={{
                 height: '6px',
-                background: 'rgba(255,255,255,0.08)',
+                background: theme.borderColor,
                 borderRadius: '3px',
                 overflow: 'hidden',
               }}
@@ -432,6 +493,7 @@ function ActiveHoursChart({
 /** Build a 7x~26 grid of intensity values for the mini heatmap (last ~6 months). */
 function buildMiniHeatmap(
   heatmap: Record<string, number>,
+  theme: ThemeConfig,
 ): { color: string }[] {
   const today = new Date();
   const weeksToShow = 26;
@@ -451,20 +513,20 @@ function buildMiniHeatmap(
   while (d <= endDate) {
     const key = d.toISOString().split('T')[0];
     const val = heatmap[key] || 0;
-    cells.push({ color: heatColor(val) });
+    cells.push({ color: heatColor(val, theme) });
     d.setDate(d.getDate() + 1);
   }
 
   return cells;
 }
 
-function heatColor(val: number): string {
-  if (val === 0) return 'rgba(255,255,255,0.06)';
-  if (val < 2) return '#1e3a5f';
-  if (val < 4) return '#2563eb';
-  if (val < 10) return '#3b82f6';
-  if (val < 20) return '#60a5fa';
-  return '#93c5fd';
+// GitHub contribution graph color palette - theme aware
+function heatColor(val: number, theme: ThemeConfig): string {
+  if (val === 0) return theme.heatmapEmpty;
+  if (val < 2) return theme.heatmapColors[0];
+  if (val < 4) return theme.heatmapColors[1];
+  if (val < 10) return theme.heatmapColors[2];
+  return theme.heatmapColors[3];
 }
 
 function MiniHeatmapGrid({ cells }: { cells: { color: string }[] }) {
@@ -497,5 +559,40 @@ function MiniHeatmapGrid({ cells }: { cells: { color: string }[] }) {
         );
       })}
     </svg>
+  );
+}
+
+// Mini Heatmap Legend Component for ShareCard (theme aware)
+function MiniHeatmapLegend({ theme }: { theme: ThemeConfig }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        marginTop: '12px',
+      }}
+    >
+      <span style={{ fontSize: '11px', color: theme.textMuted }}>Less</span>
+      {[
+        theme.heatmapEmpty,
+        theme.heatmapColors[0],
+        theme.heatmapColors[1],
+        theme.heatmapColors[2],
+        theme.heatmapColors[3],
+      ].map((color, index) => (
+        <span
+          key={index}
+          style={{
+            width: '10px',
+            height: '10px',
+            borderRadius: '2px',
+            backgroundColor: color,
+            display: 'inline-block',
+          }}
+        />
+      ))}
+      <span style={{ fontSize: '11px', color: theme.textMuted }}>More</span>
+    </div>
   );
 }

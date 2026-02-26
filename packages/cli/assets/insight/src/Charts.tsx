@@ -49,14 +49,14 @@ export function ActiveHoursChart({
     },
     {
       label: 'Evening',
-      time: '18:00 - 00:00',
-      hours: [18, 19, 20, 21, 22, 23],
+      time: '18:00 - 22:00',
+      hours: [18, 19, 20, 21],
       color: '#6366f1', // indigo-500
     },
     {
       label: 'Night',
-      time: '00:00 - 06:00',
-      hours: [0, 1, 2, 3, 4, 5],
+      time: '22:00 - 06:00',
+      hours: [22, 23, 0, 1, 2, 3, 4, 5],
       color: '#475569', // slate-600
     },
   ];
@@ -127,15 +127,16 @@ export function HeatmapSection({
 
   return (
     <div className={`${cardClass} mt-4 md:mt-6`}>
-      <div className="flex items-center justify-between">
+      <div className="mb-3">
         <h3 className={sectionTitleClass}>Activity Heatmap</h3>
-        <span className="text-xs font-semibold text-slate-500">Past year</span>
+        <p className="text-xs text-slate-500">Showing past year of activity</p>
       </div>
       <div className="heatmap-container">
         <div className="min-w-[720px] rounded-xl bg-white/70">
           <ActivityHeatmap heatmapData={heatmap} />
         </div>
       </div>
+      <HeatmapLegend />
     </div>
   );
 }
@@ -147,7 +148,7 @@ function ActivityHeatmap({
   heatmapData: Record<string, number>;
 }) {
   const width = 1000;
-  const height = 150;
+  const height = 130;
   const cellSize = 14;
   const cellPadding = 2;
 
@@ -164,7 +165,8 @@ function ActivityHeatmap({
   }
 
   const colorLevels = [0, 2, 4, 10, 20];
-  const colors = ['#e2e8f0', '#a5d8ff', '#74c0fc', '#339af0', '#1c7ed6'];
+  // GitHub contribution graph color palette (green)
+  const colors = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
 
   function getColor(value: number) {
     if (value === 0) return colors[0];
@@ -270,34 +272,29 @@ function ActivityHeatmap({
           {label.text}
         </text>
       ))}
-
-      {/* Render legend */}
-      <text x={startX} y={height - 40} fontSize="12" fill="#64748b">
-        Less
-      </text>
-      {colors.map((color, index) => {
-        const legendX = startX + 40 + index * (cellSize + 2);
-        return (
-          <rect
-            key={index}
-            x={legendX}
-            y={height - 30}
-            width="10"
-            height="10"
-            rx="2"
-            fill={color}
-          />
-        );
-      })}
-      <text
-        x={startX + 40 + colors.length * (cellSize + 2) + 5}
-        y={height - 21}
-        fontSize="12"
-        fill="#64748b"
-        width={cellSize}
-      >
-        More
-      </text>
     </svg>
+  );
+}
+
+// Heatmap Legend Component (outside SVG)
+function HeatmapLegend() {
+  const colors = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
+
+  return (
+    <div className="flex items-center gap-2 mt-4">
+      <span className="text-xs text-slate-500">Less</span>
+      {colors.map((color, index) => (
+        <span
+          key={index}
+          className="inline-block rounded"
+          style={{
+            width: '10px',
+            height: '10px',
+            backgroundColor: color,
+          }}
+        />
+      ))}
+      <span className="text-xs text-slate-500">More</span>
+    </div>
   );
 }
