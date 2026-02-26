@@ -6,24 +6,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { PolicyEngine } from '../policy/policy-engine.js';
-import { PolicyDecision, getHookSource } from '../policy/types.js';
-import {
-  MessageBusType,
-  type Message,
-  type HookExecutionRequest,
-  type HookPolicyDecision,
-} from './types.js';
+import { MessageBusType, type Message } from './types.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 export class MessageBus extends EventEmitter {
-  constructor(
-    private readonly policyEngine: PolicyEngine,
-    private readonly debug = false,
-  ) {
+  constructor(private readonly debug = false) {
     super();
     this.debug = debug;
   }
@@ -59,85 +49,15 @@ export class MessageBus extends EventEmitter {
       }
 
       if (message.type === MessageBusType.TOOL_CONFIRMATION_REQUEST) {
-        const { decision } = await this.policyEngine.check(
-          message.toolCall,
-          message.serverName,
-        );
-
-        switch (decision) {
-          case PolicyDecision.ALLOW:
-            // Directly emit the response instead of recursive publish
-            this.emitMessage({
-              type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
-              correlationId: message.correlationId,
-              confirmed: true,
-            });
-            break;
-          case PolicyDecision.DENY:
-            // Emit both rejection and response messages
-            this.emitMessage({
-              type: MessageBusType.TOOL_POLICY_REJECTION,
-              toolCall: message.toolCall,
-            });
-            this.emitMessage({
-              type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
-              correlationId: message.correlationId,
-              confirmed: false,
-            });
-            break;
-          case PolicyDecision.ASK_USER:
-            // Pass through to UI for user confirmation if any listeners exist.
-            // If no listeners are registered (e.g., headless/ACP flows),
-            // immediately request user confirmation to avoid long timeouts.
-            if (
-              this.listenerCount(MessageBusType.TOOL_CONFIRMATION_REQUEST) > 0
-            ) {
-              this.emitMessage(message);
-            } else {
-              this.emitMessage({
-                type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
-                correlationId: message.correlationId,
-                confirmed: false,
-                requiresUserConfirmation: true,
-              });
-            }
-            break;
-          default:
-            throw new Error(`Unknown policy decision: ${decision}`);
-        }
-      } else if (message.type === MessageBusType.HOOK_EXECUTION_REQUEST) {
-        // Handle hook execution requests through policy evaluation
-        const hookRequest = message as HookExecutionRequest;
-        const decision = await this.policyEngine.checkHook(hookRequest);
-
-        // Map decision to allow/deny for observability (ASK_USER treated as deny for hooks)
-        const effectiveDecision =
-          decision === PolicyDecision.ALLOW ? 'allow' : 'deny';
-
-        // Emit policy decision for observability
+        // Allow all tool confirmations by default (policy engine removed)
         this.emitMessage({
-          type: MessageBusType.HOOK_POLICY_DECISION,
-          eventName: hookRequest.eventName,
-          hookSource: getHookSource(hookRequest.input),
-          decision: effectiveDecision,
-          reason:
-            decision !== PolicyDecision.ALLOW
-              ? 'Hook execution denied by policy'
-              : undefined,
-        } as HookPolicyDecision);
-
-        // If allowed, emit the request for hook system to handle
-        if (decision === PolicyDecision.ALLOW) {
-          this.emitMessage(message);
-        } else {
-          // If denied or ASK_USER, emit error response (hooks don't support interactive confirmation)
-          this.emitMessage({
-            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-            correlationId: hookRequest.correlationId,
-            success: false,
-            error: new Error('Hook execution denied by policy'),
-          });
-        }
+          type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+          correlationId: message.correlationId,
+          confirmed: true,
+        });
+      } else if (message.type === MessageBusType.HOOK_EXECUTION_REQUEST) {
+        // Allow all hook executions by default (policy engine removed)
+        this.emitMessage(message);
       } else {
         // For all other message types, just emit them
         this.emitMessage(message);
@@ -199,7 +119,6 @@ export class MessageBus extends EventEmitter {
       this.subscribe<TResponse>(responseType, responseHandler);
 
       // Publish the request with correlation ID
-
       this.publish({ ...request, correlationId } as TRequest);
     });
   }

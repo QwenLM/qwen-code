@@ -14,16 +14,13 @@ import type { ToolCall } from '../core/coreToolScheduler.js';
 export enum MessageBusType {
   TOOL_CONFIRMATION_REQUEST = 'tool-confirmation-request',
   TOOL_CONFIRMATION_RESPONSE = 'tool-confirmation-response',
-  TOOL_POLICY_REJECTION = 'tool-policy-rejection',
   TOOL_EXECUTION_SUCCESS = 'tool-execution-success',
   TOOL_EXECUTION_FAILURE = 'tool-execution-failure',
-  UPDATE_POLICY = 'update-policy',
   TOOL_CALLS_UPDATE = 'tool-calls-update',
   ASK_USER_REQUEST = 'ask-user-request',
   ASK_USER_RESPONSE = 'ask-user-response',
   HOOK_EXECUTION_REQUEST = 'hook-execution-request',
   HOOK_EXECUTION_RESPONSE = 'hook-execution-response',
-  HOOK_POLICY_DECISION = 'hook-policy-decision',
 }
 
 export interface ToolCallsUpdateMessage {
@@ -110,20 +107,6 @@ export type SerializableConfirmationDetails =
       planPath: string;
     };
 
-export interface UpdatePolicy {
-  type: MessageBusType.UPDATE_POLICY;
-  toolName: string;
-  persist?: boolean;
-  argsPattern?: string;
-  commandPrefix?: string | string[];
-  mcpName?: string;
-}
-
-export interface ToolPolicyRejection {
-  type: MessageBusType.TOOL_POLICY_REJECTION;
-  toolCall: FunctionCall;
-}
-
 export interface ToolExecutionSuccess<T = unknown> {
   type: MessageBusType.TOOL_EXECUTION_SUCCESS;
   toolCall: FunctionCall;
@@ -149,14 +132,6 @@ export interface HookExecutionResponse {
   success: boolean;
   output?: Record<string, unknown>;
   error?: Error;
-}
-
-export interface HookPolicyDecision {
-  type: MessageBusType.HOOK_POLICY_DECISION;
-  eventName: string;
-  hookSource: 'project' | 'user' | 'system' | 'extension';
-  decision: 'allow' | 'deny';
-  reason?: string;
 }
 
 export interface QuestionOption {
@@ -200,13 +175,10 @@ export interface AskUserResponse {
 export type Message =
   | ToolConfirmationRequest
   | ToolConfirmationResponse
-  | ToolPolicyRejection
   | ToolExecutionSuccess
   | ToolExecutionFailure
-  | UpdatePolicy
   | AskUserRequest
   | AskUserResponse
   | ToolCallsUpdateMessage
   | HookExecutionRequest
-  | HookExecutionResponse
-  | HookPolicyDecision;
+  | HookExecutionResponse;

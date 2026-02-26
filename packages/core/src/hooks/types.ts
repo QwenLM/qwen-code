@@ -273,7 +273,7 @@ export interface PermissionSuggestion {
  * Input for PermissionRequest hook events
  */
 export interface PermissionRequestInput extends HookInput {
-  permission_mode: string;
+  permission_mode: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
   permission_suggestions?: PermissionSuggestion[];
@@ -377,6 +377,7 @@ export interface McpToolContext {
 }
 
 export interface PreToolUseInput extends HookInput {
+  permission_mode?: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
   mcp_context?: McpToolContext;
@@ -475,7 +476,7 @@ export enum NotificationType {
  * Notification hook input
  */
 export interface NotificationInput extends HookInput {
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   notification_type: NotificationType;
   message: string;
   title?: string;
@@ -521,11 +522,19 @@ export enum SessionStartSource {
   Compact = 'compact',
 }
 
+export enum PermissionMode {
+  Default = 'default',
+  Plan = 'plan',
+  AcceptEdit = 'accept_edit',
+  DontAsk = 'dont_ask',
+  BypassPermissions = 'bypass_permissions',
+}
+
 /**
  * SessionStart hook input
  */
 export interface SessionStartInput extends HookInput {
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   source: SessionStartSource;
   model?: string;
 }
@@ -606,7 +615,7 @@ export enum AgentType {
  * Fired when a subagent (Task tool call) is started
  */
 export interface SubagentStartInput extends HookInput {
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   agent_id: string;
   agent_type: AgentType;
 }
@@ -626,7 +635,7 @@ export interface SubagentStartOutput extends HookOutput {
  * Fired right before a subagent (Task tool call) concludes its response
  */
 export interface SubagentStopInput extends HookInput {
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   stop_hook_active: boolean;
   agent_id: string;
   agent_type: AgentType;

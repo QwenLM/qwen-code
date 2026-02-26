@@ -1,12 +1,11 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName, HooksConfigSource } from './types.js';
-import type { Config } from '../config/config.js';
+import { HookEventName } from './types.js';
 import type {
   HookConfig,
   HookInput,
@@ -39,12 +38,6 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
  * Hook runner that executes command hooks
  */
 export class HookRunner {
-  private readonly config: Config;
-
-  constructor(config: Config) {
-    this.config = config;
-  }
-
   /**
    * Execute a single hook
    */
@@ -54,23 +47,6 @@ export class HookRunner {
     input: HookInput,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
-
-    // Secondary security check: Ensure project hooks are not executed in untrusted folders
-    if (
-      hookConfig.source === HooksConfigSource.Project &&
-      !this.config.isTrustedFolder()
-    ) {
-      const errorMessage =
-        'Security: Blocked execution of project hook in untrusted folder';
-      debugLogger.warn(errorMessage);
-      return {
-        hookConfig,
-        eventName,
-        success: false,
-        error: new Error(errorMessage),
-        duration: 0,
-      };
-    }
 
     try {
       return await this.executeCommandHook(
@@ -238,45 +214,11 @@ export class HookRunner {
         shellConfig.shell,
       );
 
-      // Set up environment variables
-      // Extract hook-specific fields from input to expose as environment variables
-      const hookEnvVars: Record<string, string> = {};
-      if ('prompt' in input && typeof input.prompt === 'string') {
-        hookEnvVars['PROMPT'] = input.prompt;
-      }
-      if (
-        'prompt_response' in input &&
-        typeof input.prompt_response === 'string'
-      ) {
-        hookEnvVars['PROMPT_RESPONSE'] = input.prompt_response;
-      }
-      if ('tool_name' in input && typeof input.tool_name === 'string') {
-        hookEnvVars['TOOL_NAME'] = input.tool_name;
-      }
-      if ('session_id' in input && typeof input.session_id === 'string') {
-        hookEnvVars['SESSION_ID'] = input.session_id;
-      }
-      if (
-        'transcript_path' in input &&
-        typeof input.transcript_path === 'string'
-      ) {
-        hookEnvVars['TRANSCRIPT_PATH'] = input.transcript_path;
-      }
-      if (
-        'stop_hook_active' in input &&
-        typeof input.stop_hook_active === 'boolean'
-      ) {
-        hookEnvVars['STOP_HOOK_ACTIVE'] = input.stop_hook_active
-          ? 'true'
-          : 'false';
-      }
-
       const env = {
         ...process.env,
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
-        ...hookEnvVars,
         ...hookConfig.env,
       };
 
@@ -355,24 +297,36 @@ export class HookRunner {
         }
 
         // Parse output
+        // Exit code 2 is a blocking error - ignore stdout, use stderr only
         let output: HookOutput | undefined;
+        const isBlockingError = exitCode === 2;
 
-        const textToParse = stdout.trim() || stderr.trim();
+        // For exit code 2, only use stderr (ignore stdout)
+        const textToParse = isBlockingError
+          ? stderr.trim()
+          : stdout.trim() || stderr.trim();
+
         if (textToParse) {
-          try {
-            let parsed = JSON.parse(textToParse);
-            if (typeof parsed === 'string') {
-              parsed = JSON.parse(parsed);
+          // Only parse JSON on exit 0
+          if (!isBlockingError) {
+            try {
+              let parsed = JSON.parse(textToParse);
+              if (typeof parsed === 'string') {
+                parsed = JSON.parse(parsed);
+              }
+              if (parsed && typeof parsed === 'object') {
+                output = parsed as HookOutput;
+              }
+            } catch {
+              // Not JSON, convert plain text to structured output
+              output = this.convertPlainTextToHookOutput(
+                textToParse,
+                exitCode || EXIT_CODE_SUCCESS,
+              );
             }
-            if (parsed && typeof parsed === 'object') {
-              output = parsed as HookOutput;
-            }
-          } catch {
-            // Not JSON, convert plain text to structured output
-            output = this.convertPlainTextToHookOutput(
-              textToParse,
-              exitCode || EXIT_CODE_SUCCESS,
-            );
+          } else {
+            // Exit code 2: blocking error, use stderr as reason
+            output = this.convertPlainTextToHookOutput(textToParse, exitCode);
           }
         }
 

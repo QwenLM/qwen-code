@@ -86,7 +86,6 @@ import {
 } from '../extension/extensionManager.js';
 import { HookSystem } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
-import { PolicyEngine } from '../policy/policy-engine.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -534,7 +533,6 @@ export class Config {
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
-  private policyEngine?: PolicyEngine;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -720,9 +718,8 @@ export class Config {
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
 
-      // Initialize PolicyEngine and MessageBus for hook execution
-      this.policyEngine = new PolicyEngine();
-      this.messageBus = new MessageBus(this.policyEngine);
+      // Initialize MessageBus for hook execution
+      this.messageBus = new MessageBus();
 
       // Subscribe to HOOK_EXECUTION_REQUEST to execute hooks
       this.messageBus.subscribe<HookExecutionRequest>(
@@ -1493,22 +1490,6 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
-  }
-
-  /**
-   * Get the policy engine instance.
-   * Returns undefined if not set.
-   */
-  getPolicyEngine(): PolicyEngine | undefined {
-    return this.policyEngine;
-  }
-
-  /**
-   * Set the policy engine instance.
-   * This is called by the CLI layer to inject the PolicyEngine.
-   */
-  setPolicyEngine(policyEngine: PolicyEngine): void {
-    this.policyEngine = policyEngine;
   }
 
   /**

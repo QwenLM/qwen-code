@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  PermissionMode,
+} from './types.js';
 import type {
   HookDecision,
   CommandHookConfig,
@@ -582,7 +587,7 @@ describe('Input types', () => {
         cwd: '/workspace',
         hook_event_name: HookEventName.Notification,
         timestamp: '2026-01-01T00:00:00Z',
-        permission_mode: 'read',
+        permission_mode: PermissionMode.Default,
         notification_type: NotificationType.ToolPermission,
         message: 'Tool permission required',
         details: {},

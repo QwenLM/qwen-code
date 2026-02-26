@@ -106,7 +106,7 @@ export class HookSystem {
   constructor(config: Config) {
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(config);
+    this.hookRunner = new HookRunner();
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.hookEventHandler = new HookEventHandler(
