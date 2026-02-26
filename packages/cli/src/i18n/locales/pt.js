@@ -1203,7 +1203,6 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': 'Aguardando confirmação do usuário...',
   '(esc to cancel, {{time}})': '(esc para cancelar, {{time}})',
-  '(esc to cancel)': '(esc para cancelar)',
 
   WITTY_LOADING_PHRASES: [
     'Estou com sorte',

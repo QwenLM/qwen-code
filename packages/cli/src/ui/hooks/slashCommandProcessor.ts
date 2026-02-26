@@ -141,7 +141,6 @@ export const useSlashCommandProcessor = (
       return;
     }
     abortControllerRef.current.abort();
-    setPendingItem(null);
     addItem(
       {
         type: MessageType.INFO,
@@ -149,6 +148,7 @@ export const useSlashCommandProcessor = (
       },
       Date.now(),
     );
+    setPendingItem(null);
     setIsProcessing(false);
   }, [addItem, setIsProcessing]);
 

@@ -1184,7 +1184,6 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': 'Warten auf Benutzerbestätigung...',
   '(esc to cancel, {{time}})': '(Esc zum Abbrechen, {{time}})',
-  '(esc to cancel)': '(Esc zum Abbrechen)',
 
   // ============================================================================
   // Loading Phrases

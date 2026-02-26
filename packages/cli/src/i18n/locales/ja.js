@@ -842,7 +842,6 @@ export default {
   // Loading
   'Waiting for user confirmation...': 'ユーザーの確認を待っています...',
   '(esc to cancel, {{time}})': '(Esc でキャンセル、{{time}})',
-  '(esc to cancel)': '(Esc でキャンセル)',
   // Witty Loading Phrases
   WITTY_LOADING_PHRASES: [
     '運任せで検索中...',
