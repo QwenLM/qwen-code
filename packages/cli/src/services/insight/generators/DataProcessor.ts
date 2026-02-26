@@ -82,6 +82,26 @@ export class DataProcessor {
     return output;
   }
 
+  // Only analyze conversational sessions for facets (skip system-only logs).
+  private hasUserAndAssistantRecords(records: ChatRecord[]): boolean {
+    let hasUser = false;
+    let hasAssistant = false;
+
+    for (const record of records) {
+      if (record.type === 'user') {
+        hasUser = true;
+      } else if (record.type === 'assistant') {
+        hasAssistant = true;
+      }
+
+      if (hasUser && hasAssistant) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   // Analyze a single session using LLM
   private async analyzeSession(
     records: ChatRecord[],
@@ -975,25 +995,49 @@ None captured`;
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
   ): Promise<SessionFacets[]> {
-    // Sort files by recency (descending) and take top 50
-    const recentFiles = [...allFiles]
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 50);
+    const MAX_ELIGIBLE_SESSIONS = 50;
 
-    logger.info(`Analyzing ${recentFiles.length} recent sessions with LLM...`);
+    // Sort files by recency (descending), then select up to 50 conversational
+    // sessions (must contain both user and assistant records).
+    const sortedFiles = [...allFiles].sort((a, b) => b.mtime - a.mtime);
+    const eligibleSessions: Array<{
+      fileInfo: { path: string; mtime: number };
+      records: ChatRecord[];
+    }> = [];
+
+    for (const fileInfo of sortedFiles) {
+      if (eligibleSessions.length >= MAX_ELIGIBLE_SESSIONS) {
+        break;
+      }
+
+      try {
+        const records = await readJsonlFile<ChatRecord>(fileInfo.path);
+        if (!this.hasUserAndAssistantRecords(records)) {
+          continue;
+        }
+        eligibleSessions.push({ fileInfo, records });
+      } catch (e) {
+        logger.error(
+          `Error reading session file ${fileInfo.path} for facet eligibility:`,
+          e,
+        );
+      }
+    }
+
+    logger.info(
+      `Analyzing ${eligibleSessions.length} eligible recent sessions with LLM...`,
+    );
 
     // Create a limit function with concurrency of 4 to avoid 429 errors
     const limit = pLimit(CONCURRENCY_LIMIT);
 
     let completed = 0;
-    const total = recentFiles.length;
+    const total = eligibleSessions.length;
 
     // Analyze sessions concurrently with limit
-    const analysisPromises = recentFiles.map((fileInfo) =>
+    const analysisPromises = eligibleSessions.map(({ fileInfo, records }) =>
       limit(async () => {
         try {
-          const records = await readJsonlFile<ChatRecord>(fileInfo.path);
-
           // Check if we already have this session analyzed
           if (records.length > 0 && facetsOutputDir) {
             const sessionId = records[0].sessionId;

@@ -1126,4 +1126,82 @@ describe('DataProcessor', () => {
       expect(hasNonEmptyFrictionDetail).toBe(false);
     });
   });
+
+  describe('generateFacets', () => {
+    it('should skip non-conversational sessions', async () => {
+      const userOnlyRecords: ChatRecord[] = [
+        {
+          sessionId: 'user-only',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'conversational',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'conversational',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      // First file is user-only, second is conversational
+      mockedReadJsonlFile
+        .mockResolvedValueOnce(userOnlyRecords)
+        .mockResolvedValueOnce(conversationalRecords);
+
+      const mockFacet = {
+        underlying_goal: 'Test',
+        goal_categories: {},
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'single_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test',
+      };
+      mockGenerateJson.mockResolvedValue(mockFacet);
+
+      const files = [
+        { path: '/test/user-only.jsonl', mtime: 2000 },
+        { path: '/test/conversational.jsonl', mtime: 1000 },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files);
+
+      // Only the conversational session should be analyzed
+      expect(mockGenerateJson).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(1);
+      expect(result[0].session_id).toBe('conversational');
+    });
+  });
 });
