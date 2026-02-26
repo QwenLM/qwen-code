@@ -192,6 +192,9 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       case 'permissionResponse':
         this.handlePermissionResponse(msg);
         break;
+      case 'newQwenSession':
+        await this.handleNewSession();
+        break;
       default:
         // Use route method instead of handleMessage
         await this.messageHandler.route(
@@ -353,6 +356,41 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       console.error('[SidebarWebviewProvider] Failed to load messages:', error);
+    }
+  }
+
+  private async handleNewSession(): Promise<void> {
+    try {
+      console.log('[SidebarWebviewProvider] Creating new session');
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      // Create new session via agent manager
+      const newSessionId = await this.agentManager.createNewSession(workingDir);
+
+      // Update message handler with new session ID
+      this.messageHandler.setCurrentConversationId(newSessionId);
+
+      // Clear UI and show new empty conversation
+      this.sendMessageToWebView({
+        type: 'loadMessages',
+        data: { messages: [], conversationId: newSessionId },
+      });
+
+      console.log(
+        '[SidebarWebviewProvider] New session created:',
+        newSessionId,
+      );
+    } catch (error) {
+      console.error(
+        '[SidebarWebviewProvider] Failed to create new session:',
+        error,
+      );
+      // Show error to user
+      this.sendMessageToWebView({
+        type: 'error',
+        data: { message: 'Failed to create new session' },
+      });
     }
   }
 
