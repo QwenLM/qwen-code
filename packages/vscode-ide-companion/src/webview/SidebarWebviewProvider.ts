@@ -372,12 +372,6 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       // Clear the current conversation ID first
       this.messageHandler.setCurrentConversationId(null);
 
-      // Clear UI immediately to show we're creating a new session
-      this.sendMessageToWebView({
-        type: 'loadMessages',
-        data: { messages: [], conversationId: null },
-      });
-
       // Clear the current session in the agent manager to force creation of a new one
       this.agentManager.clearCurrentSession();
 
@@ -388,10 +382,10 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       // Update message handler with new session ID
       this.messageHandler.setCurrentConversationId(newSessionId);
 
-      // Send the new session ID to the UI
+      // Clear current conversation UI (same as WebViewProvider)
       this.sendMessageToWebView({
-        type: 'loadMessages',
-        data: { messages: [], conversationId: newSessionId },
+        type: 'conversationCleared',
+        data: {},
       });
 
       console.log(
