@@ -502,3 +502,10 @@ Always follow these standards:
 - **Access Control**: Project and user-level separation provides appropriate boundaries
 - **Sensitive Information**: Avoid including secrets or credentials in agent configurations
 - **Production Environments**: Consider separate agents for production vs development environments
+
+## Limits
+
+The following limits apply to Subagent configurations:
+
+- **Description Field**: Limited to 301 characters
+- **System Prompt**: Limited to 10,000 characters
