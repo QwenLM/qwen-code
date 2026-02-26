@@ -7,7 +7,6 @@ import process from 'node:process';
 const assetsDir = join(dirname(fileURLToPath(import.meta.url)), 'src');
 
 await mkdir(join(assetsDir, 'generated'), { recursive: true });
-const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 const assetBuilds = [
   {
