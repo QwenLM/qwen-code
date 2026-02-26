@@ -1,0 +1,629 @@
+log.ts:440  INFO Started local extension host with pid 20596.
+log.ts:460   ERR Extension 'johnny-zhao.oai-compatible-copilot CANNOT USE these API proposals 'chatProvider'. You MUST start in extension development mode or use the --enable-proposed-api command line flag
+error @ log.ts:460
+log.ts:460   ERR Extension 'ms-vsliveshare.vsliveshare' wants API proposal 'notebookCellExecutionState' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+error @ log.ts:460
+log.ts:460   ERR [xdebug.php-debug]: 属性“title”是必要属性，其类型必须是 `string` 或 `object`
+error @ log.ts:460
+log.ts:450  WARN [redhat.vscode-yaml]: 无法注册“redhat.telemetry.enabled”。此属性已注册。
+warn @ log.ts:450
+webviewElement.ts:409 Unrecognized feature: 'local-network-access'.
+gb @ webviewElement.ts:409
+webviewElement.ts:489 An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+mountTo @ webviewElement.ts:489
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.dart.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/dart/syntaxes/dart.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dart-code.dart-code-3.128.0/syntaxes/dart.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.rust.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/rust/syntaxes/rust.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dustypomerleau.rust-syntax-0.6.1/syntaxes/rust.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.python.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/python/syntaxes/MagicPython.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-python.vscode-pylance-2026.1.1/grammars/PylancePython.tmLanguage
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.cmake.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMake.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMake.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.cmakecache.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMakeCache.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMakeCache.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.java.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/java/syntaxes/java.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.java-1.53.0-win32-x64/language-support/java/java.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.yaml.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/yaml/syntaxes/yaml.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.vscode-yaml-1.20.0/syntaxes/yaml.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.groovy.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/groovy/syntaxes/groovy.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/vscjava.vscode-gradle-3.17.2/syntaxes/groovy.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.dart.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/dart/syntaxes/dart.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dart-code.dart-code-3.128.0/syntaxes/dart.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.rust.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/rust/syntaxes/rust.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/dustypomerleau.rust-syntax-0.6.1/syntaxes/rust.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.python.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/python/syntaxes/MagicPython.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-python.vscode-pylance-2026.1.1/grammars/PylancePython.tmLanguage
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.cmake.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMake.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMake.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.cmakecache.
+Old grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/josetr.cmake-language-support-vscode-0.0.9/syntaxes/CMakeCache.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/ms-vscode.cmake-tools-1.22.28/syntaxes/CMakeCache.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.java.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/java/syntaxes/java.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.java-1.53.0-win32-x64/language-support/java/java.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.yaml.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/yaml/syntaxes/yaml.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/redhat.vscode-yaml-1.20.0/syntaxes/yaml.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+TMScopeRegistry.ts:46 Overwriting grammar scope name to file mapping for scope source.groovy.
+Old grammar file: file:///d%3A/Microsoft%20VS%20Code/072586267e/resources/app/extensions/groovy/syntaxes/groovy.tmLanguage.json.
+New grammar file: file:///c%3A/Users/ZZBuAoYe/.vscode/extensions/vscjava.vscode-gradle-3.17.2/syntaxes/groovy.tmLanguage.json
+register @ TMScopeRegistry.ts:46
+log.ts:440  INFO MCP Registry configured: https://api.mcp.github.com
+console.ts:139 [Extension Host] Loaded translations for languages: ca, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt-BR, ru, tr, vi, zh-CN, zh-TW
+console.ts:139 [Extension Host] [dotenvx@1.44.2] injecting env (1) from c:\Users\ZZBuAoYe\.vscode\extensions\rooveterinaryinc.roo-cline-3.50.5\.env
+log.ts:460   ERR [Extension Host] (node:20596) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Code --trace-deprecation ...` to show where the warning was created)
+error @ log.ts:460
+console.ts:139 [Extension Host] (node:20596) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `Code --trace-deprecation ...` to show where the warning was created)
+gMs @ console.ts:139
+log.ts:460   ERR [Extension Host] (node:20596) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+error @ log.ts:460
+console.ts:139 [Extension Host] (node:20596) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+gMs @ console.ts:139
+console.ts:139 [Extension Host] Looking for parseable documents...
+log.ts:440  INFO Settings Sync: Account status changed from uninitialized to available
+console.ts:139 [Extension Host] [SidebarWebviewProvider] resolveWebviewView called
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Setting webview HTML
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Setting up message handlers
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Webview setup complete, visible: true
+index.html?id=e0df9a93-556a-4fe4-b4b8-30910db697bc&parentId=1&origin=225d53b5-a111-41f2-b676-76dfbf6c2685&swVersion=4&extensionId=qwenlm.qwen-code-vscode-ide-companion&platform=electron&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=vscode-file%3A%2F%2Fvscode-app&purpose=webviewView:1060 Unrecognized feature: 'local-network-access'.
+（匿名） @ index.html?id=e0df9a93-556a-4fe4-b4b8-30910db697bc&parentId=1&origin=225d53b5-a111-41f2-b676-76dfbf6c2685&swVersion=4&extensionId=qwenlm.qwen-code-vscode-ide-companion&platform=electron&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=vscode-file%3A%2F%2Fvscode-app&purpose=webviewView:1060
+log.ts:440  INFO [perf] Render performance baseline is 16ms
+console.ts:139 [Extension Host] CloudService not ready, deferring cloud profile sync
+webview.js:33455 [App] Rendering messages: Array(0)
+console.ts:139 [Extension Host] [auth] Using WebAuthService
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: Object
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Webview ready event received
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Auth state: null
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Agent initialized: false
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Initializing agent connection
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Connecting to agent...
+console.ts:139 [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772114816616
+console.ts:139 [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+console.ts:139 [Extension Host] [auth] changeState: initializing -> attempting-session
+console.ts:139 [Extension Host] Found all parseable documents.
+console.ts:139 [Extension Host] Parsing documents and looking for CSS class definitions...
+console.ts:139 [Extension Host] [auth] changeState: attempting-session -> active-session
+console.ts:139 [Extension Host] [CloudService] Auth state changed to: active-session, user: undefined
+console.ts:139 [Extension Host] [RetryQueue] Queue resumed
+console.ts:139 [Extension Host] [CloudService] Resuming retry queue for active session
+Connecting to 'https://file+.vscode-resource.vscode-cdn.net/c%3A/Users/ZZBuAoYe/.vscode/extensions/qwenlm.qwen-code-vscode-ide-companion-0.10.5/dist/webview.js.map' violates the following Content Security Policy directive: "default-src 'none'". The request has been blocked. Note that 'connect-src' was not explicitly set, so 'default-src' is used as a fallback.
+
+mcp_registry:1  Failed to load resource: the server responded with a status of 404 ()
+console.ts:139 [Extension Host] [ACP] Sending initialize request...
+console.ts:139 [Extension Host] [auth] User in personal account context - not setting organization info
+log.ts:440  INFO Auto updating outdated extensions. anthropic.claude-code, qwenlm.qwen-code-vscode-ide-companion
+requestImpl.ts:33  GET https://api.github.com/copilot/mcp_registry 404 (Not Found)
+IMn @ requestImpl.ts:33
+（匿名） @ requestService.ts:38
+c @ request.ts:81
+request @ requestService.ts:38
+eb @ defaultAccount.ts:705
+console.ts:139 [Extension Host] Summary:
+console.ts:139 [Extension Host]% 595 parseable documents found
+console.ts:139 [Extension Host]% 35934 CSS class definitions found
+console.ts:139 [Extension Host]% 988 unique CSS class definitions found
+console.ts:139 [Extension Host]% 24 failed attempts to parse. List of the documents:
+console.ts:139 [Extension Host] /e:/qwen/qwen-code/packages/cli/assets/export-html/src/index.html
+/e:/qwen/qwen-code/packages/vscode-ide-companion/src/webview/styles/tailwind.css
+/e:/qwen/qwen-code/packages/webui/dist/styles.css
+/e:/qwen/qwen-code/packages/cli/assets/export-html/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/src/index.html
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/node_modules/@qwen-code/webui/dist/styles.css
+/e:/qwen/qwen-code/node_modules/@vitest/browser/dist/client/orchestrator.html
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/recorder/assets/index-Ri0uHF7I.css
+/e:/qwen/qwen-code/node_modules/storybook/assets/server/base-preview-head.html
+/e:/qwen/qwen-code/node_modules/tailwindcss/components.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/base.css
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/traceViewer/defaultSettingsView.ConWv5KN.css
+/e:/qwen/qwen-code/node_modules/qwen-code-vscode-ide-companion/src/webview/styles/tailwind.css
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/htmlReport/index.html
+/e:/qwen/qwen-code/node_modules/tailwindcss/screens.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/utilities.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/tailwind.css
+/e:/qwen/qwen-code/node_modules/tailwindcss/variants.css
+/e:/qwen/qwen-code/node_modules/playwright-core/lib/vite/traceViewer/uiMode.Btcz36p_.css
+/e:/qwen/qwen-code/packages/cli/assets/export-html/dist/index.html
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/dist/assets/export-html/index.html
+/e:/qwen/qwen-code/node_modules/@qwen-code/qwen-code/assets/export-html/dist/index.html
+/e:/qwen/qwen-code/packages/cli/dist/assets/export-html/index.html
+
+requestImpl.ts:33  GET https://api.github.com/copilot/mcp_registry 404 (Not Found)
+IMn @ requestImpl.ts:33
+（匿名） @ requestService.ts:38
+c @ request.ts:81
+request @ requestService.ts:38
+eb @ defaultAccount.ts:705
+console.ts:139 [Extension Host] Created lock file at C:\Users\ZZBuAoYe\.claude\ide\31176.lock
+console.ts:139 [Extension Host] Set CLAUDE_CODE_SSE_PORT=31176 in terminal environment (in-memory)
+console.ts:139 [Extension Host] [INFO] 2026-02-26T14:06:59.802Z - Translations initialized.
+console.ts:139 [Extension Host] [INFO] 2026-02-26T14:06:59.804Z - Extension activated!
+requestImpl.ts:33  GET https://api.github.com/copilot/mcp_registry 404 (Not Found)
+IMn @ requestImpl.ts:33
+（匿名） @ requestService.ts:38
+c @ request.ts:81
+request @ requestService.ts:38
+eb @ defaultAccount.ts:705
+log.ts:460   ERR [Extension Host] (node:20596) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+mMs @ remoteConsoleUtil.ts:58
+$logExtensionHostMessage @ mainThreadConsole.ts:38
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] (node:20596) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+console.ts:139 [Extension Host] [ACP] Response for initialize: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [ACP] Initialize successful
+console.ts:139 [Extension Host] [ACP] Initialization response: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":1,"result":{"sessionId":"d20790f7-5887-4c90-8fa3-6a99ca50ba5a","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: 'd20790f7-5887-4c90-8fa3-6a99ca50ba5a', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: d20790f7-5887-4c90-8fa3-6a99ca50ba5a
+console.ts:139 [Extension Host] [QwenAgentManager] Session created successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] New session created successfully
+console.ts:139 [Extension Host] 
+========================================
+console.ts:139 [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+console.ts:139 [Extension Host] ========================================
+
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: []
+webview.js:33455 [App] Rendering messages: []
+webview.js:33455 [App] Rendering messages: []
+log.ts:460   ERR [UriError]: Scheme contains illegal characters.: Error: [UriError]: Scheme contains illegal characters.
+    at V8 (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:64654)
+    at new Dd (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:68034)
+    at new Yr (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:69472)
+    at Dd.revive (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:69249)
+    at s9.call (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:92:108039)
+    at Xf.s (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:14894)
+    at Xf.q (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:14417)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:31:13819)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2398)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2615)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:5390)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2546)
+    at ca.value (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:5574)
+    at D.C (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2328)
+    at D.fire (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:30:2546)
+    at N (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:28:8307)
+    at IpcMainImpl.i (file:///D:/Microsoft%20VS%20Code/072586267e/resources/app/out/main.js:36:10846)
+    at IpcMainImpl.emit (node:events:519:28)
+    at Session.<anonymous> (node:electron/js2c/browser_init:2:106626)
+    at Session.emit (node:events:519:28)
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+oc @ workbench.ts:128
+（匿名） @ workbench.ts:109
+onUnexpectedError @ errors.ts:65
+Dt @ errors.ts:110
+（匿名） @ workbench.ts:102
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d20790f7-5887-4c90-8fa3-6a99ca50ba5a","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"d20790f7-5887-4c90-8fa3-6a99ca50ba5a","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Clearing current session: d20790f7-5887-4c90-8fa3-6a99ca50ba5a
+console.ts:139 [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772114822410
+console.ts:139 [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+log.ts:460   ERR [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+mMs @ remoteConsoleUtil.ts:58
+$logExtensionHostMessage @ mainThreadConsole.ts:38
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP] Sending initialize request...
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":2,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+console.ts:139 [Extension Host] [ACP] Response for initialize: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [ACP] Initialize successful
+console.ts:139 [Extension Host] [ACP] Initialization response: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+webview.js:33455 [App] Rendering messages: []
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'sendMessage', data: {…}}
+console.ts:139 [Extension Host] [MessageRouter] Routing message: sendMessage
+console.ts:139 [Extension Host] [SessionMessageHandler] handleSendMessage called with: 1
+console.ts:139 [Extension Host] [SessionMessageHandler] No active conversation, creating one...
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":3,"result":{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '18e1ab55-0103-4abd-a544-e88aad5b497b', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 18e1ab55-0103-4abd-a544-e88aad5b497b
+console.ts:139 [Extension Host] [QwenAgentManager] Session created successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] New session created successfully
+console.ts:139 [Extension Host] 
+========================================
+console.ts:139 [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] ========================================
+
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: reusing existing session 18e1ab55-0103-4abd-a544-e88aad5b497b
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 18e1ab55-0103-4abd-a544-e88aad5b497b
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: []
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'updatePanelTitle', data: {…}}
+console.ts:139 [Extension Host] [MessageRouter] Routing message: updatePanelTitle
+console.ts:139 [Extension Host] [MessageRouter] No handler found for message type: updatePanelTitle
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+webview.js:33455 [App] Rendering messages: [{…}]
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"18e1ab55-0103-4abd-a544-e88aad5b497b","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Clearing current session: 18e1ab55-0103-4abd-a544-e88aad5b497b
+console.ts:139 [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772114827291
+console.ts:139 [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+log.ts:460   ERR [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+mMs @ remoteConsoleUtil.ts:58
+$logExtensionHostMessage @ mainThreadConsole.ts:38
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] Sending initialize request...
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: session creation already in flight
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":6,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+console.ts:139 [Extension Host] [ACP] Response for initialize: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [ACP] Initialize successful
+console.ts:139 [Extension Host] [ACP] Initialization response: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":5,"result":{"sessionId":"c46e29da-41e4-4eed-98a6-ade17adb28d5","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: 'c46e29da-41e4-4eed-98a6-ade17adb28d5', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: c46e29da-41e4-4eed-98a6-ade17adb28d5
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "c46e29da-41e4-4eed-98a6-ade17adb28d5",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: c46e29da-41e4-4eed-98a6-ade17adb28d5
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: c46e29da-41e4-4eed-98a6-ade17adb28d5
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: c46e29da-41e4-4eed-98a6-ade17adb28d5
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":7,"result":{"sessionId":"3e84d27b-0714-44c8-b3a5-402231ed8506","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '3e84d27b-0714-44c8-b3a5-402231ed8506', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 3e84d27b-0714-44c8-b3a5-402231ed8506
+console.ts:139 [Extension Host] [QwenAgentManager] Session created successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] New session created successfully
+console.ts:139 [Extension Host] 
+========================================
+console.ts:139 [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+console.ts:139 [Extension Host] ========================================
+
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: reusing existing session 3e84d27b-0714-44c8-b3a5-402231ed8506
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 3e84d27b-0714-44c8-b3a5-402231ed8506
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"c46e29da-41e4-4eed-98a6-ade17adb28d5","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"c46e29da-41e4-4eed-98a6-ade17adb28d5","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"3e84d27b-0714-44c8-b3a5-402231ed8506","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"3e84d27b-0714-44c8-b3a5-402231ed8506","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Clearing current session: 3e84d27b-0714-44c8-b3a5-402231ed8506
+console.ts:139 [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772114835349
+console.ts:139 [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+log.ts:460   ERR [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+mMs @ remoteConsoleUtil.ts:58
+$logExtensionHostMessage @ mainThreadConsole.ts:38
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP] Sending initialize request...
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":8,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+console.ts:139 [Extension Host] [ACP] Response for initialize: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [ACP] Initialize successful
+console.ts:139 [Extension Host] [ACP] Initialization response: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":9,"result":{"sessionId":"7620fb70-ec96-4cbc-b0d8-6127acef85f9","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '7620fb70-ec96-4cbc-b0d8-6127acef85f9', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 7620fb70-ec96-4cbc-b0d8-6127acef85f9
+console.ts:139 [Extension Host] [QwenAgentManager] Session created successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] New session created successfully
+console.ts:139 [Extension Host] 
+========================================
+console.ts:139 [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+console.ts:139 [Extension Host] ========================================
+
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: reusing existing session 7620fb70-ec96-4cbc-b0d8-6127acef85f9
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 7620fb70-ec96-4cbc-b0d8-6127acef85f9
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"7620fb70-ec96-4cbc-b0d8-6127acef85f9","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"7620fb70-ec96-4cbc-b0d8-6127acef85f9","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Clearing current session: 7620fb70-ec96-4cbc-b0d8-6127acef85f9
+console.ts:139 [Extension Host] [QwenAgentManager] 🚀 CONNECT() CALLED - ID: 1772114839280
+console.ts:139 [Extension Host] [ACP] Spawning command: D:\Microsoft VS Code\Code.exe c:\Users\ZZBuAoYe\.vscode\extensions\qwenlm.qwen-code-vscode-ide-companion-0.10.5\dist\qwen-cli\cli.js --acp --channel=VSCode
+log.ts:460   ERR [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+error @ log.ts:460
+error @ log.ts:565
+error @ logService.ts:51
+mMs @ remoteConsoleUtil.ts:58
+$logExtensionHostMessage @ mainThreadConsole.ts:38
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [ACP qwen] Process exited with code: null, signal: SIGTERM
+gMs @ console.ts:139
+$logExtensionHostMessage @ mainThreadConsole.ts:39
+S @ rpcProtocol.ts:458
+Q @ rpcProtocol.ts:443
+M @ rpcProtocol.ts:373
+L @ rpcProtocol.ts:299
+（匿名） @ rpcProtocol.ts:161
+C @ event.ts:1295
+fire @ event.ts:1326
+fire @ ipc.net.ts:652
+（匿名） @ localProcessExtensionHost.ts:385
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: session creation already in flight
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Received message: {type: 'openNewChatTab', data: {…}}
+console.ts:139 [Extension Host] [SidebarWebviewProvider] Creating new session
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: session creation already in flight
+console.ts:139 [Extension Host] [ACP] Sending initialize request...
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":11,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.10.5"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires setting the `OPENAI_API_KEY` environment variable","type":"terminal","args":["--auth-type=openai"]},{"id":"qwen-oauth","name":"Qwen OAuth","description":"OAuth authentication for Qwen models with free daily requests","type":"terminal","args":["--auth-type=qwen-oauth"]}],"modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan","description":"Analyze only, do not modify files or execute commands"},{"id":"default","name":"Default","description":"Require approval for file edits or shell commands"},{"id":"auto-edit","name":"Auto Edit","description":"Automatically approve file edits"},{"id":"yolo","name":"YOLO","description":"Automatically approve all tools"}]},"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}}
+console.ts:139 [Extension Host] [ACP] Response for initialize: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [ACP] Initialize successful
+console.ts:139 [Extension Host] [ACP] Initialization response: {protocolVersion: 1, agentInfo: {…}, authMethods: Array(2), modes: {…}, agentCapabilities: {…}}
+console.ts:139 [Extension Host] [QwenAgentManager] no sessionRestored, Creating new session...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating new session (letting CLI handle authentication)...
+console.ts:139 [Extension Host] [QwenAgentManager] Creating session (attempt 1/3)...
+console.ts:139 [Extension Host] [ACP] Sending session/new request with cwd: e:\qwen\qwen-code
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":10,"result":{"sessionId":"a82378a8-067f-414a-a4a5-37c9f21ac523","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: 'a82378a8-067f-414a-a4a5-37c9f21ac523', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: a82378a8-067f-414a-a4a5-37c9f21ac523
+console.ts:139 [Extension Host] [QwenAgentManager] newSession returned: {
+  "sessionId": "a82378a8-067f-414a-a4a5-37c9f21ac523",
+  "models": {
+    "currentModelId": "coder-model(qwen-oauth)",
+    "availableModels": [
+      {
+        "modelId": "coder-model(qwen-oauth)",
+        "name": "coder-model",
+        "description": "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+        "_meta": {
+          "contextLimit": 1048576
+        }
+      },
+      {
+        "modelId": "vision-model(qwen-oauth)",
+        "name": "vision-model",
+        "description": "The latest Qwen Vision model from Alibaba Cloud ModelStudio",
+        "_meta": {
+          "contextLimit": 131072
+        }
+      }
+    ]
+  }
+}
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted model state from session/new: {availableModels: Array(2), currentModelId: 'coder-model(qwen-oauth)'}
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [QwenAgentManager] New session created with ID: a82378a8-067f-414a-a4a5-37c9f21ac523
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: a82378a8-067f-414a-a4a5-37c9f21ac523
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: a82378a8-067f-414a-a4a5-37c9f21ac523
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: a82378a8-067f-414a-a4a5-37c9f21ac523
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","id":12,"result":{"sessionId":"7df9533a-f738-45f0-ba68-ceed768500ec","models":{"currentModelId":"coder-model(qwen-oauth)","availableModels":[{"modelId":"coder-model(qwen-oauth)","name":"coder-model","description":"Qwen 3.5 Plus — efficient hybrid model with leading coding performance","_meta":{"contextLimit":1048576}},{"modelId":"vision-model(qwen-oauth)","name":"vision-model","description":"The latest Qwen Vision model from Alibaba Cloud ModelStudio","_meta":{"contextLimit":131072}}]}}}
+console.ts:139 [Extension Host] [ACP] Response for session/new: {sessionId: '7df9533a-f738-45f0-ba68-ceed768500ec', models: {…}}
+console.ts:139 [Extension Host] [ACP] Session created with ID: 7df9533a-f738-45f0-ba68-ceed768500ec
+console.ts:139 [Extension Host] [QwenAgentManager] Session created successfully
+console.ts:139 [Extension Host] [QwenAgentManager] Extracted availableModels from session/new: (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] New session created successfully
+console.ts:139 [Extension Host] 
+========================================
+console.ts:139 [Extension Host] [QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY
+console.ts:139 [Extension Host] ========================================
+
+console.ts:139 [Extension Host] [QwenAgentManager] Emitting availableModels from connect(): (2) ['coder-model(qwen-oauth)', 'vision-model(qwen-oauth)']
+console.ts:139 [Extension Host] [QwenAgentManager] createNewSession: reusing existing session 7df9533a-f738-45f0-ba68-ceed768500ec
+webview.js:22406 [useWebViewMessages] availableModels message received: (2) [{…}, {…}]
+webview.js:22412 [useWebViewMessages] setAvailableModels called with: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [SidebarWebviewProvider] New session created: 7df9533a-f738-45f0-ba68-ceed768500ec
+webview.js:33455 [App] Rendering messages: (2) [{…}, {…}]
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"a82378a8-067f-414a-a4a5-37c9f21ac523","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"a82378a8-067f-414a-a4a5-37c9f21ac523","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update
+console.ts:139 [Extension Host] [ACP] <<< Received message: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"7df9533a-f738-45f0-ba68-ceed768500ec","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input":null},{"name":"summary","description":"生成项目摘要并保存到 .qwen/PROJECT_SUMMARY.md","input":null}]}}}
+console.ts:139 [Extension Host] [ACP] >>> Processing session_update: {"sessionId":"7df9533a-f738-45f0-ba68-ceed768500ec","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"bug","description":"提交错误报告","input":null},{"name":"compress","description":"通过用摘要替换来压缩上下文","input":null},{"name":"init","description":"分析项目并创建定制的 QWEN.md 文件","input
+console.ts:139 [Extension Host] [SessionUpdateHandler] Processing update type: available_commands_update

@@ -195,6 +195,10 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       case 'newQwenSession':
         await this.handleNewSession();
         break;
+      case 'openNewChatTab':
+        // In sidebar, create new session instead of opening new tab
+        await this.handleNewSession();
+        break;
       default:
         // Use route method instead of handleMessage
         await this.messageHandler.route(
@@ -365,13 +369,26 @@ export class SidebarWebviewProvider implements vscode.WebviewViewProvider {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
+      // Clear the current conversation ID first
+      this.messageHandler.setCurrentConversationId(null);
+
+      // Clear UI immediately to show we're creating a new session
+      this.sendMessageToWebView({
+        type: 'loadMessages',
+        data: { messages: [], conversationId: null },
+      });
+
+      // Clear the current session in the agent manager to force creation of a new one
+      this.agentManager.clearCurrentSession();
+
       // Create new session via agent manager
+      // Now it will create a fresh session instead of reusing the existing one
       const newSessionId = await this.agentManager.createNewSession(workingDir);
 
       // Update message handler with new session ID
       this.messageHandler.setCurrentConversationId(newSessionId);
 
-      // Clear UI and show new empty conversation
+      // Send the new session ID to the UI
       this.sendMessageToWebView({
         type: 'loadMessages',
         data: { messages: [], conversationId: newSessionId },
