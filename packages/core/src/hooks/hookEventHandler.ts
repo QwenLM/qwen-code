@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,19 +13,8 @@ import type {
   HookConfig,
   HookInput,
   HookExecutionResult,
-  PreToolUseInput,
-  PostToolUseInput,
   UserPromptSubmitInput,
-  NotificationInput,
   StopInput,
-  SessionStartInput,
-  SessionEndInput,
-  PreCompactInput,
-  NotificationType,
-  SessionStartSource,
-  SessionEndReason,
-  PreCompactTrigger,
-  McpToolContext,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -53,48 +42,6 @@ export class HookEventHandler {
   }
 
   /**
-   * Fire a PreToolUse event
-   * Called by handleHookExecutionRequest - executes hooks directly
-   */
-  async firePreToolUseEvent(
-    toolName: string,
-    toolInput: Record<string, unknown>,
-    mcpContext?: McpToolContext,
-  ): Promise<AggregatedHookResult> {
-    const input: PreToolUseInput = {
-      ...this.createBaseInput(HookEventName.PreToolUse),
-      tool_name: toolName,
-      tool_input: toolInput,
-      ...(mcpContext && { mcp_context: mcpContext }),
-    };
-
-    const context: HookEventContext = { toolName };
-    return this.executeHooks(HookEventName.PreToolUse, input, context);
-  }
-
-  /**
-   * Fire a PostToolUse event
-   * Called by handleHookExecutionRequest - executes hooks directly
-   */
-  async firePostToolUseEvent(
-    toolName: string,
-    toolInput: Record<string, unknown>,
-    toolResponse: Record<string, unknown>,
-    mcpContext?: McpToolContext,
-  ): Promise<AggregatedHookResult> {
-    const input: PostToolUseInput = {
-      ...this.createBaseInput(HookEventName.PostToolUse),
-      tool_name: toolName,
-      tool_input: toolInput,
-      tool_response: toolResponse,
-      ...(mcpContext && { mcp_context: mcpContext }),
-    };
-
-    const context: HookEventContext = { toolName };
-    return this.executeHooks(HookEventName.PostToolUse, input, context);
-  }
-
-  /**
    * Fire a UserPromptSubmit event
    * Called by handleHookExecutionRequest - executes hooks directly
    */
@@ -107,24 +54,6 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.UserPromptSubmit, input);
-  }
-
-  /**
-   * Fire a Notification event
-   */
-  async fireNotificationEvent(
-    type: NotificationType,
-    message: string,
-    details: Record<string, unknown>,
-  ): Promise<AggregatedHookResult> {
-    const input: NotificationInput = {
-      ...this.createBaseInput(HookEventName.Notification),
-      notification_type: type,
-      message,
-      details,
-    };
-
-    return this.executeHooks(HookEventName.Notification, input);
   }
 
   /**
@@ -142,51 +71,6 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input);
-  }
-
-  /**
-   * Fire a SessionStart event
-   */
-  async fireSessionStartEvent(
-    source: SessionStartSource,
-  ): Promise<AggregatedHookResult> {
-    const input: SessionStartInput = {
-      ...this.createBaseInput(HookEventName.SessionStart),
-      source,
-    };
-
-    const context: HookEventContext = { trigger: source };
-    return this.executeHooks(HookEventName.SessionStart, input, context);
-  }
-
-  /**
-   * Fire a SessionEnd event
-   */
-  async fireSessionEndEvent(
-    reason: SessionEndReason,
-  ): Promise<AggregatedHookResult> {
-    const input: SessionEndInput = {
-      ...this.createBaseInput(HookEventName.SessionEnd),
-      reason,
-    };
-
-    const context: HookEventContext = { trigger: reason };
-    return this.executeHooks(HookEventName.SessionEnd, input, context);
-  }
-
-  /**
-   * Fire a PreCompact event
-   */
-  async firePreCompactEvent(
-    trigger: PreCompactTrigger,
-  ): Promise<AggregatedHookResult> {
-    const input: PreCompactInput = {
-      ...this.createBaseInput(HookEventName.PreCompact),
-      trigger,
-    };
-
-    const context: HookEventContext = { trigger };
-    return this.executeHooks(HookEventName.PreCompact, input, context);
   }
 
   /**

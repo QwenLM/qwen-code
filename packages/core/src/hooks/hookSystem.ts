@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,89 +12,14 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type {
-  SessionStartSource,
-  SessionEndReason,
-  PreCompactTrigger,
-  DefaultHookOutput,
-  McpToolContext,
-} from './types.js';
-import { NotificationType, createHookOutput } from './types.js';
-import type { AggregatedHookResult } from './hookAggregator.js';
-import type { ToolCallConfirmationDetails } from '../tools/tools.js';
+import type { DefaultHookOutput } from './types.js';
+import { createHookOutput } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /**
  * Main hook system that coordinates all hook-related functionality
  */
-
-/**
- * Converts ToolCallConfirmationDetails to a serializable format for hooks.
- * Excludes function properties (onConfirm, ideConfirmation) that can't be serialized.
- */
-function toSerializableDetails(
-  details: ToolCallConfirmationDetails,
-): Record<string, unknown> {
-  const base: Record<string, unknown> = {
-    type: details.type,
-    title: details.title,
-  };
-
-  switch (details.type) {
-    case 'edit':
-      return {
-        ...base,
-        fileName: details.fileName,
-        filePath: details.filePath,
-        fileDiff: details.fileDiff,
-        originalContent: details.originalContent,
-        newContent: details.newContent,
-        isModifying: details.isModifying,
-      };
-    case 'exec':
-      return {
-        ...base,
-        command: details.command,
-        rootCommand: details.rootCommand,
-      };
-    case 'mcp':
-      return {
-        ...base,
-        serverName: details.serverName,
-        toolName: details.toolName,
-        toolDisplayName: details.toolDisplayName,
-      };
-    case 'info':
-      return {
-        ...base,
-        prompt: details.prompt,
-        urls: details.urls,
-      };
-    default:
-      return base;
-  }
-}
-
-/**
- * Gets the message to display in the notification hook for tool confirmation.
- */
-function getNotificationMessage(
-  confirmationDetails: ToolCallConfirmationDetails,
-): string {
-  switch (confirmationDetails.type) {
-    case 'edit':
-      return `Tool ${confirmationDetails.title} requires editing`;
-    case 'exec':
-      return `Tool ${confirmationDetails.title} requires execution`;
-    case 'mcp':
-      return `Tool ${confirmationDetails.title} requires MCP`;
-    case 'info':
-      return `Tool ${confirmationDetails.title} requires information`;
-    default:
-      return `Tool requires confirmation`;
-  }
-}
 
 export class HookSystem {
   private readonly hookRegistry: HookRegistry;
@@ -153,30 +78,6 @@ export class HookSystem {
     return this.hookRegistry.getAllHooks();
   }
 
-  /**
-   * Fire hook events directly
-   */
-  async fireSessionStartEvent(
-    source: SessionStartSource,
-  ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireSessionStartEvent(source);
-    return result.finalOutput
-      ? createHookOutput('SessionStart', result.finalOutput)
-      : undefined;
-  }
-
-  async fireSessionEndEvent(
-    reason: SessionEndReason,
-  ): Promise<AggregatedHookResult | undefined> {
-    return this.hookEventHandler.fireSessionEndEvent(reason);
-  }
-
-  async firePreCompactEvent(
-    trigger: PreCompactTrigger,
-  ): Promise<AggregatedHookResult | undefined> {
-    return this.hookEventHandler.firePreCompactEvent(trigger);
-  }
-
   async fireUserPromptSubmitEvent(
     prompt: string,
   ): Promise<DefaultHookOutput | undefined> {
@@ -198,71 +99,5 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('Stop', result.finalOutput)
       : undefined;
-  }
-
-  async firePreToolUseEvent(
-    toolName: string,
-    toolInput: Record<string, unknown>,
-    mcpContext?: McpToolContext,
-  ): Promise<DefaultHookOutput | undefined> {
-    try {
-      const result = await this.hookEventHandler.firePreToolUseEvent(
-        toolName,
-        toolInput,
-        mcpContext,
-      );
-      return result.finalOutput
-        ? createHookOutput('PreToolUse', result.finalOutput)
-        : undefined;
-    } catch (error) {
-      debugLogger.debug(`PreToolUseEvent failed for ${toolName}:`, error);
-      return undefined;
-    }
-  }
-
-  async firePostToolUseEvent(
-    toolName: string,
-    toolInput: Record<string, unknown>,
-    toolResponse: {
-      llmContent: unknown;
-      returnDisplay: unknown;
-      error: unknown;
-    },
-    mcpContext?: McpToolContext,
-  ): Promise<DefaultHookOutput | undefined> {
-    try {
-      const result = await this.hookEventHandler.firePostToolUseEvent(
-        toolName,
-        toolInput,
-        toolResponse as Record<string, unknown>,
-        mcpContext,
-      );
-      return result.finalOutput
-        ? createHookOutput('PostToolUse', result.finalOutput)
-        : undefined;
-    } catch (error) {
-      debugLogger.debug(`PostToolUseEvent failed for ${toolName}:`, error);
-      return undefined;
-    }
-  }
-
-  async fireToolNotificationEvent(
-    confirmationDetails: ToolCallConfirmationDetails,
-  ): Promise<void> {
-    try {
-      const message = getNotificationMessage(confirmationDetails);
-      const serializedDetails = toSerializableDetails(confirmationDetails);
-
-      await this.hookEventHandler.fireNotificationEvent(
-        NotificationType.ToolPermission,
-        message,
-        serializedDetails,
-      );
-    } catch (error) {
-      debugLogger.debug(
-        `NotificationEvent failed for ${confirmationDetails.title}:`,
-        error,
-      );
-    }
   }
 }
