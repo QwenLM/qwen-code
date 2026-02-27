@@ -49,57 +49,10 @@ import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
-import type { ImageAttachment } from './utils/imageUtils.js';
-import { usePasteHandler } from './hooks/usePasteHandler.js';
-
-interface ImagePreviewProps {
-  images: ImageAttachment[];
-  onRemove: (id: string) => void;
-}
-
-const ImagePreview: React.FC<ImagePreviewProps> = ({ images, onRemove }) => {
-  if (!images || images.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="image-preview-container flex gap-2 px-2 pb-2">
-      {images.map((image) => (
-        <div key={image.id} className="image-preview-item relative group">
-          <div className="relative">
-            <img
-              src={image.data}
-              alt={image.name}
-              className="w-14 h-14 object-cover rounded-md border border-gray-500 dark:border-gray-600"
-              title={image.name}
-            />
-            <button
-              type="button"
-              onClick={() => onRemove(image.id)}
-              className="absolute -top-2 -right-2 w-5 h-5 bg-gray-700 dark:bg-gray-600 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-gray-800 dark:hover:bg-gray-500"
-              aria-label={`Remove ${image.name}`}
-            >
-              <svg
-                className="w-3 h-3"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-};
+import { useImageAttachments } from './hooks/useImageAttachments.js';
+import { ImagePreview } from './components/messages/ImagePreview.js';
+import { ImageMessageRenderer } from './components/messages/ImageMessageRenderer.js';
+import type { WebViewImageMessage } from './utils/imageMessageUtils.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -117,7 +70,6 @@ export const App: React.FC = () => {
 
   // UI state
   const [inputText, setInputText] = useState('');
-  const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
   const [permissionRequest, setPermissionRequest] = useState<{
     options: PermissionOption[];
     toolCall: PermissionToolCall;
@@ -334,31 +286,13 @@ export const App: React.FC = () => {
   ]);
 
   // Image handling
-  const handleAddImages = useCallback((newImages: ImageAttachment[]) => {
-    if (newImages.length === 0) {
-      return;
-    }
-    setAttachedImages((prev) => [...prev, ...newImages]);
-  }, []);
-
-  const handleRemoveImage = useCallback((imageId: string) => {
-    setAttachedImages((prev) => prev.filter((img) => img.id !== imageId));
-  }, []);
-
-  const clearImages = useCallback(() => {
-    setAttachedImages([]);
-  }, []);
-
-  // Initialize paste handler
-  const { handlePaste } = usePasteHandler({
-    onImagesAdded: handleAddImages,
-    getCurrentTotalSize: () =>
-      attachedImages.reduce((sum, img) => sum + img.size, 0),
-    onError: (error) => {
-      console.error('Paste error:', error);
-      // You can show a toast/notification here if needed
-    },
-  });
+  const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
+    useImageAttachments({
+      onError: (error) => {
+        console.error('Paste error:', error);
+        // You can show a toast/notification here if needed
+      },
+    });
 
   // Message submission
   const { handleSubmit: submitMessage } = useMessageSubmit({
@@ -858,76 +792,87 @@ export const App: React.FC = () => {
   console.log('[App] Rendering messages:', allMessages);
 
   // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(
-    () =>
-      allMessages.map((item, index) => {
-        switch (item.type) {
-          case 'message': {
-            const msg = item.data as TextMessage;
-            const handleFileClick = (path: string): void => {
-              vscode.postMessage({
-                type: 'openFile',
-                data: { path },
-              });
-            };
+  const renderMessages = useCallback<() => React.ReactNode>(() => {
+    let imageIndex = 0;
+    return allMessages.map((item, index) => {
+      switch (item.type) {
+        case 'message': {
+          const msg = item.data as TextMessage;
+          const handleFileClick = (path: string): void => {
+            vscode.postMessage({
+              type: 'openFile',
+              data: { path },
+            });
+          };
 
-            if (msg.role === 'thinking') {
-              return (
-                <ThinkingMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-
-            if (msg.role === 'user') {
-              return (
-                <UserMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                  fileContext={msg.fileContext}
-                />
-              );
-            }
-
-            {
-              const content = (msg.content || '').trim();
-              if (content === 'Interrupted' || content === 'Tool interrupted') {
-                return (
-                  <InterruptedMessage key={`message-${index}`} text={content} />
-                );
-              }
-              return (
-                <AssistantMessage
-                  key={`message-${index}`}
-                  content={content}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-          }
-
-          case 'in-progress-tool-call':
-          case 'completed-tool-call': {
+          if (msg.kind === 'image' && msg.imagePath) {
+            imageIndex += 1;
             return (
-              <ToolCall
-                key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-                toolCall={item.data as ToolCallData}
+              <ImageMessageRenderer
+                key={`message-${index}`}
+                msg={msg as WebViewImageMessage}
+                imageIndex={imageIndex}
+                index={index}
               />
             );
           }
 
-          default:
-            return null;
+          if (msg.role === 'thinking') {
+            return (
+              <ThinkingMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
+
+          if (msg.role === 'user') {
+            return (
+              <UserMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+                fileContext={msg.fileContext}
+              />
+            );
+          }
+
+          {
+            const content = (msg.content || '').trim();
+            if (content === 'Interrupted' || content === 'Tool interrupted') {
+              return (
+                <InterruptedMessage key={`message-${index}`} text={content} />
+              );
+            }
+            return (
+              <AssistantMessage
+                key={`message-${index}`}
+                content={content}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
         }
-      }),
-    [allMessages, vscode],
-  );
+
+        case 'in-progress-tool-call':
+        case 'completed-tool-call': {
+          return (
+            <ToolCall
+              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
+              toolCall={item.data as ToolCallData}
+            />
+          );
+        }
+
+        default:
+          return null;
+      }
+    });
+  }, [allMessages, vscode]);
 
   const hasContent =
     messageHandling.messages.length > 0 ||

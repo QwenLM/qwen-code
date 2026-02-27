@@ -34,6 +34,26 @@ interface UseMessageSubmitProps {
   };
 }
 
+export const shouldSendMessage = ({
+  inputText,
+  attachedImages,
+  isStreaming,
+  isWaitingForResponse,
+}: {
+  inputText: string;
+  attachedImages?: ImageAttachment[];
+  isStreaming: boolean;
+  isWaitingForResponse: boolean;
+}): boolean => {
+  if (isStreaming || isWaitingForResponse) {
+    return false;
+  }
+
+  const hasText = inputText.replace(/\u200B/g, '').trim().length > 0;
+  const hasAttachments = (attachedImages?.length ?? 0) > 0;
+  return hasText || hasAttachments;
+};
+
 /**
  * Message submit Hook
  * Handles message submission logic and context parsing
@@ -55,7 +75,14 @@ export const useMessageSubmit = ({
     (e: React.FormEvent) => {
       e.preventDefault();
 
-      if (!inputText.trim() || isStreaming || isWaitingForResponse) {
+      if (
+        !shouldSendMessage({
+          inputText,
+          attachedImages,
+          isStreaming,
+          isWaitingForResponse,
+        })
+      ) {
         return;
       }
 

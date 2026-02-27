@@ -15,6 +15,15 @@ import type {
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '../../types/acpTypes.js';
+import { useImageResolution } from './useImageResolution.js';
+import type {
+  WebViewMessage,
+  WebViewMessageBase,
+} from '../utils/imageMessageUtils.js';
+import {
+  expandUserMessageWithImages,
+  applyImageResolution,
+} from '../utils/imageMessageUtils.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -69,23 +78,11 @@ interface UseWebViewMessagesProps {
   // Message handling
   messageHandling: {
     setMessages: (
-      messages: Array<{
-        role: 'user' | 'assistant' | 'thinking';
-        content: string;
-        timestamp: number;
-        fileContext?: {
-          fileName: string;
-          filePath: string;
-          startLine?: number;
-          endLine?: number;
-        };
-      }>,
+      messages:
+        | WebViewMessage[]
+        | ((prev: WebViewMessage[]) => WebViewMessage[]),
     ) => void;
-    addMessage: (message: {
-      role: 'user' | 'assistant' | 'thinking';
-      content: string;
-      timestamp: number;
-    }) => void;
+    addMessage: (message: WebViewMessage) => void;
     clearMessages: () => void;
     startStreaming: (timestamp?: number) => void;
     appendStreamChunk: (chunk: string) => void;
@@ -154,6 +151,18 @@ export const useWebViewMessages = ({
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
+
+  // Image resolution handling
+  const {
+    expandMessages,
+    requestImageResolutions,
+    handleImagePathsResolved,
+    clearImageResolutions,
+    getCurrentResolutions,
+  } = useImageResolution({
+    vscode,
+  });
+
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
@@ -407,7 +416,16 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
-          handlers.messageHandling.setMessages(conversation.messages);
+          clearImageResolutions();
+          const expanded = expandMessages(
+            conversation.messages as WebViewMessageBase[],
+          );
+          const withImages = applyImageResolution(
+            expanded.messages,
+            getCurrentResolutions(),
+          );
+          handlers.messageHandling.setMessages(withImages);
+          requestImageResolutions(expanded.imagePaths);
           break;
         }
 
@@ -416,12 +434,28 @@ export const useWebViewMessages = ({
             role?: 'user' | 'assistant' | 'thinking';
             content?: string;
             timestamp?: number;
+            fileContext?: {
+              fileName: string;
+              filePath: string;
+              startLine?: number;
+              endLine?: number;
+            };
           };
-          handlers.messageHandling.addMessage(
-            msg as unknown as Parameters<
-              typeof handlers.messageHandling.addMessage
-            >[0],
-          );
+          if (msg.role === 'user') {
+            const expanded = expandUserMessageWithImages(
+              msg as WebViewMessageBase,
+            );
+            const withImages = applyImageResolution(
+              expanded.messages,
+              getCurrentResolutions(),
+            );
+            withImages.forEach((entry) =>
+              handlers.messageHandling.addMessage(entry),
+            );
+            requestImageResolutions(expanded.imagePaths);
+          } else {
+            handlers.messageHandling.addMessage(msg as WebViewMessage);
+          }
           // Robustness: if an assistant message arrives outside the normal stream
           // pipeline (no explicit streamEnd), ensure we clear streaming/waiting states
           if (msg.role === 'assistant') {
@@ -813,7 +847,16 @@ export const useWebViewMessages = ({
             vscode.postMessage({ type: 'updatePanelTitle', data: { title } });
           }
           if (message.data.messages) {
-            handlers.messageHandling.setMessages(message.data.messages);
+            clearImageResolutions();
+            const expanded = expandMessages(
+              message.data.messages as WebViewMessageBase[],
+            );
+            const withImages = applyImageResolution(
+              expanded.messages,
+              getCurrentResolutions(),
+            );
+            handlers.messageHandling.setMessages(withImages);
+            requestImageResolutions(expanded.imagePaths);
           } else {
             handlers.messageHandling.clearMessages();
           }
@@ -850,6 +893,7 @@ export const useWebViewMessages = ({
           handlers.messageHandling.clearMessages();
           handlers.clearToolCalls();
           handlers.sessionManagement.setCurrentSessionId(null);
+          clearImageResolutions();
           handlers.sessionManagement.setCurrentSessionTitle(
             'Past Conversations',
           );
@@ -940,6 +984,21 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'imagePathsResolved': {
+          const resolved =
+            (
+              message.data as
+                | { resolved?: Array<{ path: string; src?: string | null }> }
+                | undefined
+            )?.resolved ?? [];
+          handleImagePathsResolved(resolved);
+          // Apply updated resolutions to current messages
+          handlers.messageHandling.setMessages((prevMessages) =>
+            applyImageResolution(prevMessages, getCurrentResolutions()),
+          );
+          break;
+        }
+
         case 'cancelStreaming':
           // Handle cancel streaming response from extension
           // Note: The "Interrupted" message is already added by handleCancel in App.tsx
@@ -953,7 +1012,17 @@ export const useWebViewMessages = ({
           break;
       }
     },
-    [inputFieldRef, setInputText, vscode, setEditMode],
+    [
+      inputFieldRef,
+      setInputText,
+      vscode,
+      setEditMode,
+      expandMessages,
+      requestImageResolutions,
+      handleImagePathsResolved,
+      clearImageResolutions,
+      getCurrentResolutions,
+    ],
   );
 
   useEffect(() => {

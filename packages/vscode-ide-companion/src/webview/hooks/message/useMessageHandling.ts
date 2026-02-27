@@ -10,6 +10,10 @@ export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  kind?: 'image';
+  imagePath?: string;
+  imageSrc?: string;
+  imageMissing?: boolean;
   fileContext?: {
     fileName: string;
     filePath: string;
