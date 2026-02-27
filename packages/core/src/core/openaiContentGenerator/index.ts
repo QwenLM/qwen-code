@@ -11,6 +11,7 @@ import type {
 import type { Config } from '../../config/config.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
+  AvianOpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
@@ -24,6 +25,7 @@ export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
 
 export {
   type OpenAICompatibleProvider,
+  AvianOpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
@@ -77,6 +79,11 @@ export function determineProvider(
       contentGeneratorConfig,
       cliConfig,
     );
+  }
+
+  // Check for Avian provider
+  if (AvianOpenAICompatibleProvider.isAvianProvider(config)) {
+    return new AvianOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   // Check for ModelScope provider

@@ -25,6 +25,10 @@ The `DashScopeOpenAICompatibleProvider` handles DashScope (Qwen) specific featur
 
 The `OpenRouterOpenAICompatibleProvider` handles OpenRouter specific headers and configurations.
 
+### Avian Provider
+
+The `AvianOpenAICompatibleProvider` handles Avian (https://avian.io) specific headers. Avian is an OpenAI-compatible LLM inference provider.
+
 ## Adding a New Provider
 
 To add a new provider:

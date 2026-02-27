@@ -109,6 +109,71 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+### Avian (`openai`)
+
+[Avian](https://avian.io) is an OpenAI-compatible LLM inference provider offering access to models like DeepSeek-V3.2, Kimi-K2.5, GLM-5, and MiniMax-M2.5. It uses the `openai` auth type with Bearer token authentication.
+
+```bash
+export AVIAN_API_KEY="your-avian-api-key"
+```
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek/deepseek-v3.2",
+        "name": "DeepSeek V3.2 (Avian)",
+        "envKey": "AVIAN_API_KEY",
+        "baseUrl": "https://api.avian.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 164000,
+          "samplingParams": {
+            "max_tokens": 65000
+          }
+        }
+      },
+      {
+        "id": "moonshotai/kimi-k2.5",
+        "name": "Kimi K2.5 (Avian)",
+        "envKey": "AVIAN_API_KEY",
+        "baseUrl": "https://api.avian.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 131000,
+          "samplingParams": {
+            "max_tokens": 8000
+          }
+        }
+      },
+      {
+        "id": "z-ai/glm-5",
+        "name": "GLM-5 (Avian)",
+        "envKey": "AVIAN_API_KEY",
+        "baseUrl": "https://api.avian.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 131000,
+          "samplingParams": {
+            "max_tokens": 16000
+          }
+        }
+      },
+      {
+        "id": "minimax/minimax-m2.5",
+        "name": "MiniMax M2.5 (Avian)",
+        "envKey": "AVIAN_API_KEY",
+        "baseUrl": "https://api.avian.io/v1",
+        "generationConfig": {
+          "contextWindowSize": 1000000,
+          "samplingParams": {
+            "max_tokens": 1000000
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
 ### Anthropic (`anthropic`)
 
 ```json
