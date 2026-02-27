@@ -2336,40 +2336,30 @@ describe('useGeminiStream', () => {
           result.current.pendingHistoryItems.find(
             (item) => item.type === MessageType.ERROR,
           );
-        const findCountdownItem = () =>
-          result.current.pendingHistoryItems.find(
-            (item) => item.type === 'retry_countdown',
-          );
 
         let errorItem = findErrorItem();
-        let countdownItem = findCountdownItem();
-        for (
-          let attempts = 0;
-          attempts < 5 && (!errorItem || !countdownItem);
-          attempts++
-        ) {
+        for (let attempts = 0; attempts < 5 && !errorItem; attempts++) {
           await act(async () => {
             await Promise.resolve();
           });
           errorItem = findErrorItem();
-          countdownItem = findCountdownItem();
         }
 
-        // Error line should be rendered as ERROR type (wrapped by parseAndFormatApiError)
+        // Error item should contain the error text and a retry hint
         expect(errorItem?.text).toContain('Rate limit exceeded');
-
-        // Countdown line should be rendered as retry_countdown type
-        expect(countdownItem?.text).toContain('Retrying in 3 seconds');
+        // Countdown hint should be inline on the error item (not a separate item)
+        expect((errorItem as { hint?: string })?.hint).toContain('3s');
+        expect((errorItem as { hint?: string })?.hint).toContain('attempt 1/3');
 
         await act(async () => {
           await vi.advanceTimersByTimeAsync(1000);
         });
 
-        const countdownAfterOneSecond = result.current.pendingHistoryItems.find(
-          (item) => item.type === 'retry_countdown',
+        const errorAfterOneSecond = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
         );
-        expect(countdownAfterOneSecond?.text).toContain(
-          'Retrying in 2 seconds',
+        expect((errorAfterOneSecond as { hint?: string })?.hint).toContain(
+          '2s',
         );
 
         resolveStream?.();
@@ -2379,15 +2369,11 @@ describe('useGeminiStream', () => {
           await vi.runAllTimersAsync();
         });
 
-        // Both error and countdown should be cleared after retry succeeds
+        // Error item (with hint) should be cleared after retry succeeds
         const remainingError = result.current.pendingHistoryItems.find(
           (item) => item.type === MessageType.ERROR,
         );
-        const remainingCountdown = result.current.pendingHistoryItems.find(
-          (item) => item.type === 'retry_countdown',
-        );
         expect(remainingError).toBeUndefined();
-        expect(remainingCountdown).toBeUndefined();
       } finally {
         vi.useRealTimers();
       }

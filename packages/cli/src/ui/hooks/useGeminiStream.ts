@@ -126,12 +126,10 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
-  const [pendingRetryErrorItem, setPendingRetryErrorItem] =
-    useState<HistoryItemWithoutId | null>(null);
   const [
-    pendingRetryCountdownItem,
-    pendingRetryCountdownItemRef,
-    setPendingRetryCountdownItem,
+    pendingRetryErrorItem,
+    pendingRetryErrorItemRef,
+    setPendingRetryErrorItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
@@ -210,8 +208,7 @@ export const useGeminiStream = (
   const clearRetryCountdown = useCallback(() => {
     stopRetryCountdownTimer();
     setPendingRetryErrorItem(null);
-    setPendingRetryCountdownItem(null);
-  }, [setPendingRetryCountdownItem, stopRetryCountdownTimer]);
+  }, [setPendingRetryErrorItem, stopRetryCountdownTimer]);
 
   const startRetryCountdown = useCallback(
     (retryInfo: {
@@ -226,29 +223,31 @@ export const useGeminiStream = (
       const retryReasonText =
         message ?? t('Rate limit exceeded. Please wait and try again.');
 
-      // Error line stays static (red with ✕ prefix)
-      setPendingRetryErrorItem({
-        type: MessageType.ERROR,
-        text: retryReasonText,
-      });
-
-      // Countdown line updates every second (dim/secondary color)
+      /**
+       * Builds a unified error item with an inline hint for retry countdown.
+       * The hint is displayed in secondary/dimmed color after the error text,
+       * matching the style of "(esc to cancel, 5s)" in LoadingIndicator.
+       */
       const updateCountdown = () => {
         const elapsedMs = Date.now() - startTime;
         const remainingMs = Math.max(0, delayMs - elapsedMs);
         const remainingSec = Math.ceil(remainingMs / 1000);
 
-        setPendingRetryCountdownItem({
-          type: 'retry_countdown',
-          text: t(
-            'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
-            {
-              seconds: String(remainingSec),
-              attempt: String(attempt),
-              maxRetries: String(maxRetries),
-            },
-          ),
-        } as HistoryItemWithoutId);
+        const hintText = t(
+          'retrying in {{seconds}}s, attempt {{attempt}}/{{maxRetries}}',
+          {
+            seconds: String(remainingSec),
+            attempt: String(attempt),
+            maxRetries: String(maxRetries),
+          },
+        );
+
+        // Merge error text and countdown hint into a single error item
+        setPendingRetryErrorItem({
+          type: 'error' as const,
+          text: retryReasonText,
+          hint: hintText,
+        });
 
         if (remainingMs <= 0) {
           stopRetryCountdownTimer();
@@ -258,7 +257,7 @@ export const useGeminiStream = (
       updateCountdown();
       retryCountdownTimerRef.current = setInterval(updateCountdown, 1000);
     },
-    [setPendingRetryCountdownItem, stopRetryCountdownTimer],
+    [setPendingRetryErrorItem, stopRetryCountdownTimer],
   );
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
@@ -698,16 +697,15 @@ export const useGeminiStream = (
         setPendingHistoryItem(null);
       }
       const retryHint = t('Press Ctrl+Y to retry.');
-      addItem(
-        {
-          type: MessageType.ERROR,
-          text: `${parseAndFormatApiError(
-            eventValue.error,
-            config.getContentGeneratorConfig()?.authType,
-          )} ${retryHint}`,
-        },
-        userMessageTimestamp,
-      );
+      const errorItem: HistoryItemWithoutId = {
+        type: 'error' as const,
+        text: parseAndFormatApiError(
+          eventValue.error,
+          config.getContentGeneratorConfig()?.authType,
+        ),
+        hint: retryHint,
+      };
+      addItem(errorItem, userMessageTimestamp);
       clearRetryCountdown();
       setThought(null); // Reset thought when there's an error
     },
@@ -946,7 +944,7 @@ export const useGeminiStream = (
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
-            } else if (!pendingRetryCountdownItemRef.current) {
+            } else if (!pendingRetryErrorItemRef.current) {
               clearRetryCountdown();
             }
             break;
@@ -978,7 +976,7 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
-      pendingRetryCountdownItemRef,
+      pendingRetryErrorItemRef,
     ],
   );
 
@@ -1122,16 +1120,15 @@ export const useGeminiStream = (
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
             lastPromptErroredRef.current = true;
             const retryHint = t('Press Ctrl+Y to retry.');
-            addItem(
-              {
-                type: MessageType.ERROR,
-                text: `${parseAndFormatApiError(
-                  getErrorMessage(error) || 'Unknown error',
-                  config.getContentGeneratorConfig()?.authType,
-                )} ${retryHint}`,
-              },
-              userMessageTimestamp,
-            );
+            const errorItem: HistoryItemWithoutId = {
+              type: 'error' as const,
+              text: parseAndFormatApiError(
+                getErrorMessage(error) || 'Unknown error',
+                config.getContentGeneratorConfig()?.authType,
+              ),
+              hint: retryHint,
+            };
+            addItem(errorItem, userMessageTimestamp);
           }
         } finally {
           setIsResponding(false);
@@ -1372,15 +1369,9 @@ export const useGeminiStream = (
       [
         pendingHistoryItem,
         pendingRetryErrorItem,
-        pendingRetryCountdownItem,
         pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
-    [
-      pendingHistoryItem,
-      pendingRetryErrorItem,
-      pendingRetryCountdownItem,
-      pendingToolCallGroupDisplay,
-    ],
+    [pendingHistoryItem, pendingRetryErrorItem, pendingToolCallGroupDisplay],
   );
 
   useEffect(() => {
