@@ -56,9 +56,15 @@ export interface RetryInfo {
  * @param extraCodes - Additional error codes to treat as rate-limit errors,
  *   merged with the built-in set at call time (not mutating the default set).
  */
-export function isRateLimitError(error: unknown): boolean {
+export function isRateLimitError(
+  error: unknown,
+  extraCodes?: number[],
+): boolean {
   const code = getErrorCode(error);
-  return code !== null && RATE_LIMIT_ERROR_CODES.has(code);
+  if (code === null) return false;
+  if (RATE_LIMIT_ERROR_CODES.has(code)) return true;
+  if (extraCodes?.includes(code)) return true;
+  return false;
 }
 
 /**

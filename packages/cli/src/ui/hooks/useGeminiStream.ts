@@ -1159,6 +1159,26 @@ export const useGeminiStream = (
     ],
   );
 
+  /**
+   * Retries the last failed prompt when the user presses Ctrl+Y.
+   *
+   * Activation conditions for Ctrl+Y shortcut:
+   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   *
+   * When conditions are not met:
+   * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
+   * - If no failed request exists: display "No failed request to retry." info message
+   *
+   * When conditions are met:
+   * - Clears any pending auto-retry countdown to avoid duplicate retries
+   * - Re-submits the last query with skipPreparation: true for faster retry
+   *
+   * This function is exposed via UIActionsContext and triggered by InputPrompt
+   * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
+   */
   const retryLastPrompt = useCallback(async () => {
     if (
       streamingState === StreamingState.Responding ||

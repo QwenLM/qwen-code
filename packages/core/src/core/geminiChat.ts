@@ -339,7 +339,7 @@ export class GeminiChat {
                 error instanceof Error ? error.message : String(error),
               );
               debugLogger.warn(
-                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${RATE_LIMIT_RETRY_OPTIONS.maxRetries}). ` +
+                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               yield {
@@ -347,7 +347,7 @@ export class GeminiChat {
                 retryInfo: {
                   message,
                   attempt: rateLimitRetryCount,
-                  maxRetries: RATE_LIMIT_RETRY_OPTIONS.maxRetries,
+                  maxRetries: maxRateLimitRetries,
                   delayMs,
                 },
               };
