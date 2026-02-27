@@ -11,6 +11,7 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -765,6 +766,15 @@ export class ModelsConfig {
     if (gc.contextWindowSize === undefined) {
       this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
       this.generationConfigSources['contextWindowSize'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
+
+    // modalities fallback: auto-detect from model when not set by provider
+    if (gc.modalities === undefined) {
+      this._generationConfig.modalities = defaultModalities(model.id);
+      this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
       };

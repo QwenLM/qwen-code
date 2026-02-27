@@ -13,8 +13,7 @@ import {
   logModelSlashCommand,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
-  type ContentGeneratorConfigSource,
-  type ContentGeneratorConfigSources,
+  type InputModalities,
 } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
@@ -26,55 +25,19 @@ import { MAINLINE_CODER } from '../models/availableModels.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 
+function formatModalities(modalities?: InputModalities): string {
+  if (!modalities) return 'text-only';
+  const parts: string[] = [];
+  if (modalities.image) parts.push('image');
+  if (modalities.pdf) parts.push('pdf');
+  if (modalities.audio) parts.push('audio');
+  if (modalities.video) parts.push('video');
+  if (parts.length === 0) return 'text-only';
+  return `text · ${parts.join(' · ')}`;
+}
+
 interface ModelDialogProps {
   onClose: () => void;
-}
-
-function formatSourceBadge(
-  source: ContentGeneratorConfigSource | undefined,
-): string | undefined {
-  if (!source) return undefined;
-
-  switch (source.kind) {
-    case 'cli':
-      return source.detail ? `CLI ${source.detail}` : 'CLI';
-    case 'env':
-      return source.envKey ? `ENV ${source.envKey}` : 'ENV';
-    case 'settings':
-      return source.settingsPath
-        ? `Settings ${source.settingsPath}`
-        : 'Settings';
-    case 'modelProviders': {
-      const suffix =
-        source.authType && source.modelId
-          ? `${source.authType}:${source.modelId}`
-          : source.authType
-            ? `${source.authType}`
-            : source.modelId
-              ? `${source.modelId}`
-              : '';
-      return suffix ? `ModelProviders ${suffix}` : 'ModelProviders';
-    }
-    case 'default':
-      return source.detail ? `Default ${source.detail}` : 'Default';
-    case 'computed':
-      return source.detail ? `Computed ${source.detail}` : 'Computed';
-    case 'programmatic':
-      return source.detail ? `Programmatic ${source.detail}` : 'Programmatic';
-    case 'unknown':
-    default:
-      return undefined;
-  }
-}
-
-function readSourcesFromConfig(config: unknown): ContentGeneratorConfigSources {
-  if (!config) {
-    return {};
-  }
-  const maybe = config as {
-    getContentGeneratorConfigSources?: () => ContentGeneratorConfigSources;
-  };
-  return maybe.getContentGeneratorConfigSources?.() ?? {};
 }
 
 function maskApiKey(apiKey: string | undefined): string {
@@ -143,35 +106,26 @@ function handleModelSwitchSuccess({
   );
 }
 
-function ConfigRow({
+function formatContextWindow(size?: number): string {
+  if (!size) return '(unknown)';
+  return `${size.toLocaleString('en-US')} tokens`;
+}
+
+function DetailRow({
   label,
   value,
-  badge,
 }: {
   label: string;
   value: React.ReactNode;
-  badge?: string;
 }): React.JSX.Element {
   return (
-    <Box flexDirection="column">
-      <Box>
-        <Box minWidth={12} flexShrink={0}>
-          <Text color={theme.text.secondary}>{label}:</Text>
-        </Box>
-        <Box flexGrow={1} flexDirection="row" flexWrap="wrap">
-          <Text>{value}</Text>
-        </Box>
+    <Box>
+      <Box minWidth={16} flexShrink={0}>
+        <Text color={theme.text.secondary}>{label}:</Text>
       </Box>
-      {badge ? (
-        <Box>
-          <Box minWidth={12} flexShrink={0}>
-            <Text> </Text>
-          </Box>
-          <Box flexGrow={1}>
-            <Text color={theme.text.secondary}>{badge}</Text>
-          </Box>
-        </Box>
-      ) : null}
+      <Box flexGrow={1} flexDirection="row" flexWrap="wrap">
+        <Text>{value}</Text>
+      </Box>
     </Box>
   );
 }
@@ -183,13 +137,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [highlightedValue, setHighlightedValue] = useState<string | null>(null);
 
   const authType = config?.getAuthType();
-  const effectiveConfig =
-    (config?.getContentGeneratorConfig?.() as
-      | ContentGeneratorConfig
-      | undefined) ?? undefined;
-  const sources = readSourcesFromConfig(config);
 
   const availableModelEntries = useMemo(() => {
     const allModels = config ? config.getAllConfiguredModels() : [];
@@ -319,6 +269,20 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     return index === -1 ? 0 : index;
   }, [MODEL_OPTIONS, preferredKey]);
 
+  const handleHighlight = useCallback((value: string) => {
+    setHighlightedValue(value);
+  }, []);
+
+  const highlightedEntry = useMemo(() => {
+    const key = highlightedValue ?? preferredKey;
+    return availableModelEntries.find(
+      ({ authType: t2, model, isRuntime, snapshotId }) => {
+        const v = isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+        return v === key;
+      },
+    );
+  }, [highlightedValue, preferredKey, availableModelEntries]);
+
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
@@ -413,35 +377,6 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     >
       <Text bold>{t('Select Model')}</Text>
 
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>
-          {t('Current (effective) configuration')}
-        </Text>
-        <Box flexDirection="column" marginTop={1}>
-          <ConfigRow label="AuthType" value={authType} />
-          <ConfigRow
-            label="Model"
-            value={effectiveConfig?.model ?? config?.getModel?.() ?? ''}
-            badge={formatSourceBadge(sources['model'])}
-          />
-
-          {authType !== AuthType.QWEN_OAUTH && (
-            <>
-              <ConfigRow
-                label="Base URL"
-                value={effectiveConfig?.baseUrl ?? t('(default)')}
-                badge={formatSourceBadge(sources['baseUrl'])}
-              />
-              <ConfigRow
-                label="API Key"
-                value={effectiveConfig?.apiKey ? t('(set)') : t('(not set)')}
-                badge={formatSourceBadge(sources['apiKey'])}
-              />
-            </>
-          )}
-        </Box>
-      </Box>
-
       {!hasModels ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.status.warning}>
@@ -465,9 +400,47 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
           <DescriptiveRadioButtonSelect
             items={MODEL_OPTIONS}
             onSelect={handleSelect}
+            onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
           />
+        </Box>
+      )}
+
+      {highlightedEntry && (
+        <Box marginTop={1} flexDirection="column">
+          <Box
+            borderStyle="single"
+            borderTop
+            borderBottom={false}
+            borderLeft={false}
+            borderRight={false}
+            borderColor={theme.border.default}
+          />
+          <Box flexDirection="column" marginTop={1}>
+            <DetailRow
+              label="Accepts"
+              value={formatModalities(highlightedEntry.model.modalities)}
+            />
+            <DetailRow
+              label="Context Window"
+              value={formatContextWindow(
+                highlightedEntry.model.contextWindowSize,
+              )}
+            />
+            {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
+              <>
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.model.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.model.envKey ?? t('(not set)')}
+                />
+              </>
+            )}
+          </Box>
         </Box>
       )}
 
@@ -480,7 +453,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       )}
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>{t('(Press Esc to close)')}</Text>
+        <Text color={theme.text.secondary}>
+          {t('Enter to select · Esc to close')}
+        </Text>
       </Box>
     </Box>
   );

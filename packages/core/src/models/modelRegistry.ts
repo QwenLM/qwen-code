@@ -5,6 +5,8 @@
  */
 
 import { AuthType } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   type ModelConfig,
@@ -121,7 +123,12 @@ export class ModelRegistry {
       capabilities: model.capabilities,
       authType: model.authType,
       isVision: model.capabilities?.vision ?? false,
-      contextWindowSize: model.generationConfig.contextWindowSize,
+      contextWindowSize:
+        model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
+      modalities:
+        model.generationConfig.modalities ?? defaultModalities(model.id),
+      baseUrl: model.baseUrl,
+      envKey: model.envKey,
     }));
   }
 

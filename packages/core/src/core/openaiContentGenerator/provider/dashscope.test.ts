@@ -800,7 +800,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(4096); // Should be limited to default output limit (4K)
+      expect(result.max_tokens).toBe(8192); // Should be limited to default output limit (8K)
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {
@@ -872,7 +872,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             ],
           },
         ],
-        max_tokens: 50000,
+        max_tokens: 50000, // Exceeds the 32768 limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
@@ -899,12 +899,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             ],
           },
         ],
-        max_tokens: 9000,
+        max_tokens: 50000, // Exceeds the 32768 limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(8192); // Limited to model's output limit (8K)
+      expect(result.max_tokens).toBe(32768); // Limited to model's output limit (32K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,

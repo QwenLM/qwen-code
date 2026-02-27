@@ -28,6 +28,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'contextWindowSize',
   'customHeaders',
   'extra_body',
+  'modalities',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**
@@ -107,7 +108,7 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     name: 'coder-model',
     description:
       'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
-    capabilities: { vision: false },
+    capabilities: { vision: true },
   },
   {
     id: 'vision-model',

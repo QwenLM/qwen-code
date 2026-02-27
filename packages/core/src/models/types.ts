@@ -7,6 +7,7 @@
 import type {
   AuthType,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
 
@@ -35,6 +36,7 @@ export type ModelGenerationConfig = Pick<
   | 'customHeaders'
   | 'extra_body'
   | 'contextWindowSize'
+  | 'modalities'
 >;
 
 /**
@@ -93,6 +95,9 @@ export interface AvailableModel {
   authType: AuthType;
   isVision?: boolean;
   contextWindowSize?: number;
+  modalities?: InputModalities;
+  baseUrl?: string;
+  envKey?: string;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;
