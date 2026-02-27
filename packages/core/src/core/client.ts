@@ -590,10 +590,7 @@ export class GeminiClient {
 
       const stopOutput = hookOutput as StopHookOutput | undefined;
 
-      // For AfterAgent hooks, blocking/stop execution should force continuation (like Stop Hook)
-      // This enables Ralph Loop functionality where the hook can:
-      // 1. Return {"decision": "block", "reason": "<prompt>"} to continue with a new prompt
-      // 2. Optionally include "systemMessage" to display a status message
+      // For Stop hooks, blocking/stop execution should force continuation
       if (
         stopOutput?.isBlockingDecision() ||
         stopOutput?.shouldStopExecution()

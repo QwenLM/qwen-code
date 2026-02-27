@@ -497,9 +497,8 @@ export interface NotificationOutput extends HookOutput {
  * Stop hook input
  */
 export interface StopInput extends HookInput {
-  prompt: string;
-  prompt_response: string;
   stop_hook_active: boolean;
+  last_assistant_message: string;
 }
 
 /**

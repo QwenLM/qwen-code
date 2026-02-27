@@ -40,13 +40,6 @@ export class HookEventHandler {
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
 
-  /**
-   * Track reported failures to suppress duplicate warnings during streaming.
-   * Uses a WeakMap with the original request object as a key to ensure
-   * failures are only reported once per logical model interaction.
-   */
-  private readonly reportedFailures = new WeakMap<object, Set<string>>();
-
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
@@ -139,15 +132,13 @@ export class HookEventHandler {
    * Called by handleHookExecutionRequest - executes hooks directly
    */
   async fireStopEvent(
-    prompt: string,
-    promptResponse: string,
     stopHookActive: boolean = false,
+    lastAssistantMessage: string = '',
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
       ...this.createBaseInput(HookEventName.Stop),
-      prompt,
-      prompt_response: promptResponse,
       stop_hook_active: stopHookActive,
+      last_assistant_message: lastAssistantMessage,
     };
 
     return this.executeHooks(HookEventName.Stop, input);
@@ -206,7 +197,6 @@ export class HookEventHandler {
     eventName: HookEventName,
     input: HookInput,
     context?: HookEventContext,
-    requestContext?: object,
   ): Promise<AggregatedHookResult> {
     try {
       // Create execution plan
@@ -255,15 +245,6 @@ export class HookEventHandler {
       // Process common hook output fields centrally
       this.processCommonHookOutputFields(aggregated);
 
-      // Log hook execution
-      this.logHookExecution(
-        eventName,
-        input,
-        results,
-        aggregated,
-        requestContext,
-      );
-
       return aggregated;
     } catch (error) {
       debugLogger.error(`Hook event bus error for ${eventName}: ${error}`);
@@ -291,64 +272,6 @@ export class HookEventHandler {
       hook_event_name: eventName,
       timestamp: new Date().toISOString(),
     };
-  }
-
-  /**
-   * Log hook execution for observability
-   */
-  private logHookExecution(
-    eventName: HookEventName,
-    input: HookInput,
-    results: HookExecutionResult[],
-    aggregated: AggregatedHookResult,
-    requestContext?: object,
-  ): void {
-    const failedHooks = results.filter((r) => !r.success);
-    const successCount = results.length - failedHooks.length;
-    const errorCount = failedHooks.length;
-
-    if (errorCount > 0) {
-      const failedNames = failedHooks
-        .map((r) => this.getHookNameFromResult(r))
-        .join(', ');
-
-      let shouldEmit = true;
-      if (requestContext) {
-        let reportedSet = this.reportedFailures.get(requestContext);
-        if (!reportedSet) {
-          reportedSet = new Set<string>();
-          this.reportedFailures.set(requestContext, reportedSet);
-        }
-
-        const failureKey = `${eventName}:${failedNames}`;
-        if (reportedSet.has(failureKey)) {
-          shouldEmit = false;
-        } else {
-          reportedSet.add(failureKey);
-        }
-      }
-
-      debugLogger.warn(
-        `Hook execution for ${eventName}: ${successCount} succeeded, ${errorCount} failed (${failedNames}), ` +
-          `total duration: ${aggregated.totalDuration}ms`,
-      );
-
-      if (shouldEmit) {
-        debugLogger.warn(
-          `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.`,
-        );
-      }
-    } else {
-      debugLogger.debug(
-        `Hook execution for ${eventName}: ${successCount} hooks executed successfully, ` +
-          `total duration: ${aggregated.totalDuration}ms`,
-      );
-    }
-
-    // Log individual errors
-    for (const error of aggregated.errors) {
-      debugLogger.warn(`Hook execution error: ${error.message}`);
-    }
   }
 
   /**
@@ -381,21 +304,5 @@ export class HookEventHandler {
       // as they need to interpret this signal in the context of their specific workflow
       // This is just logging the request centrally
     }
-
-    // Other common fields like decision/reason are handled by specific hook output classes
-  }
-
-  /**
-   * Get hook name from config for display or telemetry
-   */
-  private getHookName(config: HookConfig): string {
-    return config.name || config.command || 'unknown-command';
-  }
-
-  /**
-   * Get hook name from execution result for telemetry
-   */
-  private getHookNameFromResult(result: HookExecutionResult): string {
-    return this.getHookName(result.hookConfig);
   }
 }

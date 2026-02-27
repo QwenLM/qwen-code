@@ -22,7 +22,7 @@ const debugLogger = createDebugLogger('HOOK_TRIGGERS');
  * This should be called before processing a user prompt.
  *
  * The caller can use the returned DefaultHookOutput methods:
- * - isBlockingDecision() / shouldStopExecution() to check if blocked
+ * - isBlockingDecision() to check if the request is blocked
  * - getEffectiveReason() to get the blocking reason
  * - getAdditionalContext() to get additional context to add
  *
@@ -65,8 +65,9 @@ export async function fireUserPromptSubmitHook(
  * This should be called after the agent has generated a response.
  *
  * The caller can use the returned DefaultHookOutput methods:
- * - isBlockingDecision() / shouldStopExecution() to check if continuation is requested
- * - getEffectiveReason() to get the continuation reason
+ * - isBlockingDecision() to check if the request is blocked
+ * - shouldStopExecution() to check if execution should be stopped
+ * - getEffectiveReason() to get the stop/blocking reason
  *
  * @param messageBus The message bus to use for hook communication
  * @param request The original user's request (prompt)
@@ -79,8 +80,6 @@ export async function fireStopHook(
   responseText: string,
 ): Promise<DefaultHookOutput | undefined> {
   try {
-    const promptText = partToString(request);
-
     const response = await messageBus.request<
       HookExecutionRequest,
       HookExecutionResponse
@@ -89,9 +88,8 @@ export async function fireStopHook(
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
         eventName: 'Stop',
         input: {
-          prompt: promptText,
-          prompt_response: responseText,
           stop_hook_active: true,
+          last_assistant_message: responseText,
         },
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,

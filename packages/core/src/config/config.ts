@@ -748,9 +748,8 @@ export class Config {
                 break;
               case 'Stop':
                 result = await hookSystem.fireStopEvent(
-                  (input['prompt'] as string) || '',
-                  (input['prompt_response'] as string) || '',
                   (input['stop_hook_active'] as boolean) || false,
+                  (input['last_assistant_message'] as string) || '',
                 );
                 break;
               default:

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -188,14 +188,12 @@ export class HookSystem {
   }
 
   async fireStopEvent(
-    prompt: string,
-    response: string,
     stopHookActive: boolean = false,
+    lastAssistantMessage: string = '',
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireStopEvent(
-      prompt,
-      response,
       stopHookActive,
+      lastAssistantMessage,
     );
     return result.finalOutput
       ? createHookOutput('Stop', result.finalOutput)
