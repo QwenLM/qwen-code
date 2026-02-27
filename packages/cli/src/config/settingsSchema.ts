@@ -147,7 +147,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, string>,
     description:
-      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },

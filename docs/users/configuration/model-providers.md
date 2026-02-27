@@ -317,7 +317,7 @@ The region is selected during authentication and stored in `settings.json` under
 
 ### API Key Storage
 
-When you configure Coding Plan through the `/auth` command, the API key is stored using the reserved environment variable name `BAILIAN_CODING_PLAN_API_KEY`. By default, it is stored in the `settings.env` field of your `settings.json` file.
+When you configure Coding Plan through the `/auth` command, the API key is stored using the reserved environment variable name `BAILIAN_CODING_PLAN_API_KEY`. By default, it is stored in the `env` field of your `settings.json` file.
 
 > [!warning]
 >
