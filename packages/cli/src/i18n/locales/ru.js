@@ -1456,4 +1456,22 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key is stored in settings.env.':
     'Успешная аутентификация с {{region}}. API-ключ сохранён в settings.env.',
+
+  // ============================================================================
+  // Mode Command / Команда режимов
+  // ============================================================================
+  'Switch between different agent modes': 'Переключение между режимами агента',
+  'Configuration not available.': 'Конфигурация недоступна.',
+  'Mode manager not available.': 'Менеджер режимов недоступен.',
+  'List all available modes': 'Показать все доступные режимы',
+  'Show current mode': 'Показать текущий режим',
+  '**Available Modes:**': '**Доступные режимы:**',
+  '**Usage:**': '**Использование:**',
+  '- `/mode <name>` - Switch to a mode': '- `/mode <name>` - Переключить режим',
+  '- `/mode list` - Show this list': '- `/mode list` - Показать этот список',
+  '- `/mode current` - Show current mode': '- `/mode current` - Показать текущий режим',
+  'Use Cases:': 'Варианты использования:',
+  'Allowed Tools:': 'Разрешённые инструменты:',
+  'Excluded Tools:': 'Исключённые инструменты:',
+  'Safety Constraints:': 'Ограничения безопасности:',
 };

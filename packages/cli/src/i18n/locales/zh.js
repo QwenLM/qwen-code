@@ -1284,4 +1284,22 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key is stored in settings.env.':
     '成功通过 {{region}} 认证。API Key 已存储在 settings.env 中。',
+
+  // ============================================================================
+  // Mode Command / 模式命令
+  // ============================================================================
+  'Switch between different agent modes': '在不同代理模式之间切换',
+  'Configuration not available.': '配置不可用。',
+  'Mode manager not available.': '模式管理器不可用。',
+  'List all available modes': '列出所有可用模式',
+  'Show current mode': '显示当前模式',
+  '**Available Modes:**': '**可用模式:**',
+  '**Usage:**': '**用法:**',
+  '- `/mode <name>` - Switch to a mode': '- `/mode <name>` - 切换到模式',
+  '- `/mode list` - Show this list': '- `/mode list` - 显示此列表',
+  '- `/mode current` - Show current mode': '- `/mode current` - 显示当前模式',
+  'Use Cases:': '使用场景:',
+  'Allowed Tools:': '允许的工具:',
+  'Excluded Tools:': '排除的工具:',
+  'Safety Constraints:': '安全约束:',
 };

@@ -1452,4 +1452,22 @@ export default {
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
   'Authenticated successfully with {{region}}. API key is stored in settings.env.':
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel ist in settings.env gespeichert.',
+
+  // ============================================================================
+  // Mode Command / Modus-Befehl
+  // ============================================================================
+  'Switch between different agent modes': 'Zwischen verschiedenen Agenten-Modi wechseln',
+  'Configuration not available.': 'Konfiguration nicht verfügbar.',
+  'Mode manager not available.': 'Modus-Manager nicht verfügbar.',
+  'List all available modes': 'Alle verfügbaren Modi auflisten',
+  'Show current mode': 'Aktuellen Modus anzeigen',
+  '**Available Modes:**': '**Verfügbare Modi:**',
+  '**Usage:**': '**Verwendung:**',
+  '- `/mode <name>` - Switch to a mode': '- `/mode <name>` - Zu einem Modus wechseln',
+  '- `/mode list` - Show this list': '- `/mode list` - Diese Liste anzeigen',
+  '- `/mode current` - Show current mode': '- `/mode current` - Aktuellen Modus anzeigen',
+  'Use Cases:': 'Anwendungsfälle:',
+  'Allowed Tools:': 'Erlaubte Tools:',
+  'Excluded Tools:': 'Ausgeschlossene Tools:',
+  'Safety Constraints:': 'Sicherheitseinschränkungen:',
 };
