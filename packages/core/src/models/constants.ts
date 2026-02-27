@@ -22,6 +22,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
   'maxRetries',
+  'retryErrorCodes',
   'enableCacheControl',
   'schemaCompliance',
   'reasoning',

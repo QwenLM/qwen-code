@@ -52,6 +52,21 @@ describe('isRateLimitError — detection paths', () => {
     ).toBe(false);
   });
 
+  it('should detect custom error code passed via extraCodes', () => {
+    expect(
+      isRateLimitError(
+        { error: { code: 1305, message: 'Custom rate limit' } },
+        [1305],
+      ),
+    ).toBe(true);
+  });
+
+  it('should not detect custom code when extraCodes is not provided', () => {
+    expect(
+      isRateLimitError({ error: { code: 1305, message: 'Custom rate limit' } }),
+    ).toBe(false);
+  });
+
   it('should return null for invalid inputs', () => {
     expect(isRateLimitError(null)).toBe(false);
     expect(isRateLimitError(undefined)).toBe(false);

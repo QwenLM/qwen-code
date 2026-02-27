@@ -286,6 +286,12 @@ export class GeminiChat {
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
 
+        // Read per-config overrides; fall back to built-in defaults.
+        const cgConfig = self.config.getContentGeneratorConfig();
+        const maxRateLimitRetries =
+          cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+
         for (
           let attempt = 0;
           attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
@@ -316,18 +322,15 @@ export class GeminiChat {
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
-            const isRateLimit = isRateLimitError(error);
-            if (
-              isRateLimit &&
-              rateLimitRetryCount < RATE_LIMIT_RETRY_OPTIONS.maxRetries
-            ) {
+            const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
+            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
               rateLimitRetryCount++;
               const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
               const message = parseAndFormatApiError(
                 error instanceof Error ? error.message : String(error),
               );
               debugLogger.warn(
-                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${RATE_LIMIT_RETRY_OPTIONS.maxRetries}). ` +
+                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               yield {
@@ -335,7 +338,7 @@ export class GeminiChat {
                 retryInfo: {
                   message,
                   attempt: rateLimitRetryCount,
-                  maxRetries: RATE_LIMIT_RETRY_OPTIONS.maxRetries,
+                  maxRetries: maxRateLimitRetries,
                   delayMs,
                 },
               };
