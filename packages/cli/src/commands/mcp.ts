@@ -7,6 +7,8 @@
 // File for 'gemini mcp' command
 import type { CommandModule, Argv } from 'yargs';
 import { addCommand } from './mcp/add.js';
+import { disableCommand } from './mcp/disable.js';
+import { enableCommand } from './mcp/enable.js';
 import { removeCommand } from './mcp/remove.js';
 import { listCommand } from './mcp/list.js';
 
@@ -16,6 +18,8 @@ export const mcpCommand: CommandModule = {
   builder: (yargs: Argv) =>
     yargs
       .command(addCommand)
+      .command(enableCommand)
+      .command(disableCommand)
       .command(removeCommand)
       .command(listCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
