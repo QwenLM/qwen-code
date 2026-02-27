@@ -38,6 +38,7 @@ vi.mock('../contexts/UIStateContext.js', () => ({
 }));
 vi.mock('../contexts/UIActionsContext.js', () => ({
   useUIActions: vi.fn(() => ({
+    handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
   })),
 }));

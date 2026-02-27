@@ -120,6 +120,8 @@ export const useGeminiStream = (
   const abortControllerRef = useRef<AbortController | null>(null);
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
+  const lastPromptRef = useRef<PartListUnion | null>(null);
+  const lastPromptErroredRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
@@ -650,6 +652,7 @@ export const useGeminiStream = (
         return;
       }
 
+      lastPromptErroredRef.current = false;
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -689,17 +692,19 @@ export const useGeminiStream = (
 
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
+      lastPromptErroredRef.current = true;
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const retryHint = t('Press Ctrl+Y to retry.');
       addItem(
         {
           type: MessageType.ERROR,
-          text: parseAndFormatApiError(
+          text: `${parseAndFormatApiError(
             eventValue.error,
             config.getContentGeneratorConfig()?.authType,
-          ),
+          )} ${retryHint}`,
         },
         userMessageTimestamp,
       );
@@ -980,7 +985,7 @@ export const useGeminiStream = (
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
-      options?: { isContinuation: boolean },
+      options?: { isContinuation: boolean; skipPreparation?: boolean },
       prompt_id?: string,
     ) => {
       // Prevent concurrent executions of submitQuery, but allow continuations
@@ -1016,12 +1021,14 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } = await prepareQueryForGemini(
-          query,
-          userMessageTimestamp,
-          abortSignal,
-          prompt_id!,
-        );
+        const { queryToSend, shouldProceed } = options?.skipPreparation
+          ? { queryToSend: query, shouldProceed: true }
+          : await prepareQueryForGemini(
+              query,
+              userMessageTimestamp,
+              abortSignal,
+              prompt_id!,
+            );
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
@@ -1041,6 +1048,8 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
+        lastPromptRef.current = finalQueryToSend;
+        lastPromptErroredRef.current = false;
 
         if (!options?.isContinuation) {
           // trigger new prompt event for session stats in CLI
@@ -1111,13 +1120,15 @@ export const useGeminiStream = (
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
+            lastPromptErroredRef.current = true;
+            const retryHint = t('Press Ctrl+Y to retry.');
             addItem(
               {
                 type: MessageType.ERROR,
-                text: parseAndFormatApiError(
+                text: `${parseAndFormatApiError(
                   getErrorMessage(error) || 'Unknown error',
                   config.getContentGeneratorConfig()?.authType,
-                ),
+                )} ${retryHint}`,
               },
               userMessageTimestamp,
             );
@@ -1147,6 +1158,33 @@ export const useGeminiStream = (
       restoreOriginalModel,
     ],
   );
+
+  const retryLastPrompt = useCallback(async () => {
+    if (
+      streamingState === StreamingState.Responding ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      return;
+    }
+
+    const lastPrompt = lastPromptRef.current;
+    if (!lastPrompt || !lastPromptErroredRef.current) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t('No failed request to retry.'),
+        },
+        Date.now(),
+      );
+      return;
+    }
+
+    clearRetryCountdown();
+    await submitQuery(lastPrompt, {
+      isContinuation: false,
+      skipPreparation: true,
+    });
+  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
@@ -1451,6 +1489,7 @@ export const useGeminiStream = (
     pendingHistoryItems,
     thought,
     cancelOngoingRequest,
+    retryLastPrompt,
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,
     activePtyId,

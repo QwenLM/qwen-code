@@ -67,6 +67,7 @@ export interface UIActions {
   onSuggestionsVisibilityChange: (visible: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
+  handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   // Vision switch dialog
   handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;

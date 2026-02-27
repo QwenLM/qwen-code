@@ -582,6 +582,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
+      if (keyMatchers[Command.RETRY_LAST](key)) {
+        uiActions.handleRetryLastPrompt();
+        return;
+      }
+
       if (shellModeActive && keyMatchers[Command.REVERSE_SEARCH](key)) {
         setReverseSearchActive(true);
         setTextBeforeReverseSearch(buffer.text);

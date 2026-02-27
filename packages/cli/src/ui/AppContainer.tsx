@@ -668,6 +668,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
+    retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
@@ -1580,6 +1581,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onSuggestionsVisibilityChange: setHasSuggestionsVisible,
       refreshStatic,
       handleFinalSubmit,
+      handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       // Vision switch dialog
       handleVisionSwitchSelect,
@@ -1625,6 +1627,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      retryLastPrompt,
       handleClearScreen,
       handleVisionSwitchSelect,
       handleWelcomeBackSelection,
