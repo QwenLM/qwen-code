@@ -787,7 +787,7 @@ export class Config {
 
         // Register codebaseSearch tool when index is ready.
         // The tool is only available after the index has been fully built.
-        this.registerCodebaseSearchToolWhenReady(this.indexService);
+        // this.registerCodebaseSearchToolWhenReady(this.indexService);
       } catch (error) {
         console.warn(
           `[Config] Failed to initialize codebase indexing: ${error}`,
@@ -1679,9 +1679,7 @@ export class Config {
    * is registered immediately. Otherwise, a `build_complete` listener is
    * attached so the tool appears as soon as indexing finishes.
    */
-  private registerCodebaseSearchToolWhenReady(
-    indexService: IndexService,
-  ): void {
+  registerCodebaseSearchToolWhenReady(indexService: IndexService): void {
     const createAndRegister = () => {
       const tool = new CodebaseSearchTool(() =>
         indexService.getRetrievalServiceAsync(),
@@ -1747,7 +1745,7 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
-    registerCoreTool(CodebaseSearchTool, this);
+    // registerCoreTool(CodebaseSearchTool, this);
     if (this.getExperimentalSkills()) {
       registerCoreTool(SkillTool, this);
     }
