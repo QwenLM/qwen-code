@@ -8,32 +8,15 @@ import prettier from 'prettier';
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
 const assetsDistDir = join(assetsDir, 'dist');
-const packageDistDir = join(
-  assetsDir,
-  '..',
-  '..',
-  'dist',
-  'assets',
-  'export-html',
-);
-const templateModulePath = join(
-  assetsDir,
-  '..',
-  '..',
-  'src',
-  'ui',
-  'utils',
-  'export',
-  'formatters',
-  'htmlTemplate.ts',
-);
-const packageJsonPath = join(assetsDir, 'package.json');
-
+const generatedDir = join(assetsDir, '..', 'generated');
+await mkdir(generatedDir, { recursive: true });
 await mkdir(assetsDistDir, { recursive: true });
-await mkdir(packageDistDir, { recursive: true });
 
+const templateModulePath = join(generatedDir, 'exportHtmlTemplate.ts');
+const packageJsonPath = join(assetsDir, 'package.json');
 const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'));
 const dependencyVersions = packageJson?.dependencies ?? {};
+
 const getDependencyVersion = (name) => {
   const version = dependencyVersions[name];
   if (!version) {
@@ -101,5 +84,4 @@ const formattedTemplateModule = await prettier.format(templateModule, {
 });
 
 await writeFile(join(assetsDistDir, 'index.html'), htmlOutput);
-await writeFile(join(packageDistDir, 'index.html'), htmlOutput);
 await writeFile(templateModulePath, formattedTemplateModule);
