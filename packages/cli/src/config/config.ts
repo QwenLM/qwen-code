@@ -32,6 +32,7 @@ import {
   createDebugLogger,
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
+import { ModeManager } from '@qwen-code/modes';
 import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
 import {
@@ -1059,6 +1060,15 @@ export async function loadCliConfig(
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }
+
+  // Initialize Mode Manager
+  const modeManager = ModeManager.fromSettings({
+    customModes: settings.modes?.customModes,
+    globalInstructions: settings.modes?.globalInstructions,
+    defaultMode: settings.modes?.defaultMode,
+    autoSwitch: settings.modes?.autoSwitch,
+  });
+  config.setModeManager(modeManager);
 
   return config;
 }

@@ -12,6 +12,10 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import type {
+  CustomModeConfig,
+  ModesSettings,
+} from '@qwen-code/modes';
 import {
   ApprovalMode,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -1204,6 +1208,55 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  modes: {
+    type: 'object',
+    label: 'Modes',
+    category: 'General',
+    requiresRestart: false,
+    default: {} as ModesSettings,
+    description: 'Configuration for agent work modes.',
+    showInDialog: false,
+    properties: {
+      defaultMode: {
+        type: 'string',
+        label: 'Default Mode',
+        category: 'Modes',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description: 'The default mode to use when starting a session.',
+        showInDialog: false,
+      },
+      globalInstructions: {
+        type: 'string',
+        label: 'Global Instructions',
+        category: 'Modes',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Instructions that apply to all modes (e.g., coding standards, preferences).',
+        showInDialog: false,
+      },
+      customModes: {
+        type: 'array',
+        label: 'Custom Modes',
+        category: 'Modes',
+        requiresRestart: false,
+        default: undefined as CustomModeConfig[] | undefined,
+        description: 'User-defined custom modes.',
+        showInDialog: false,
+      },
+      autoSwitch: {
+        type: 'object',
+        label: 'Auto Switch',
+        category: 'Modes',
+        requiresRestart: false,
+        default: undefined as ModesSettings['autoSwitch'],
+        description: 'Automatic mode switching based on context.',
         showInDialog: false,
       },
     },

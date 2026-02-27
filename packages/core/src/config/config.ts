@@ -419,6 +419,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
+  private modeManager: import('@qwen-code/modes').ModeManager | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -1634,6 +1635,16 @@ export class Config {
 
   getSkillManager(): SkillManager | null {
     return this.skillManager;
+  }
+
+  getModeManager(): import('@qwen-code/modes').ModeManager | null {
+    return this.modeManager;
+  }
+
+  setModeManager(
+    modeManager: import('@qwen-code/modes').ModeManager,
+  ): void {
+    this.modeManager = modeManager;
   }
 
   async createToolRegistry(
