@@ -999,6 +999,11 @@ Important Rules:
  - Use tools only when necessary to obtain facts or make changes.
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
 
+    const userMemory = this.runtimeContext.getUserMemory();
+    if (userMemory && userMemory.trim().length > 0) {
+      finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
+    }
+
     return finalPrompt;
   }
 }
