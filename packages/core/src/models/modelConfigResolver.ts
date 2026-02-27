@@ -295,8 +295,13 @@ function resolveQwenOAuthConfig(
       : settingsSource('model.name');
   } else {
     if (requestedModel) {
+      const isVisionModel =
+        requestedModel.includes('vl') || requestedModel.includes('vision');
+      const extraMessage = isVisionModel
+        ? ` Note: vision-model has been removed since coder-model now supports vision capabilities.`
+        : '';
       warnings.push(
-        `Unsupported Qwen OAuth model '${requestedModel}', falling back to '${DEFAULT_QWEN_MODEL}'.`,
+        `Warning: Unsupported Qwen OAuth model '${requestedModel}', falling back to '${DEFAULT_QWEN_MODEL}'.${extraMessage}`,
       );
     }
     resolvedModel = DEFAULT_QWEN_MODEL;
