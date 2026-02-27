@@ -36,13 +36,15 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 // Build in dependency order:
 // 1. test-utils (no internal dependencies)
 // 2. core (foundation package)
-// 3. cli (depends on core, test-utils)
-// 4. webui (shared UI components - used by vscode companion)
-// 5. sdk (no internal dependencies)
-// 6. vscode-ide-companion (depends on webui)
+// 3. web-templates (embeddable web templates - used by cli)
+// 4. cli (depends on core, test-utils, web-templates)
+// 5. webui (shared UI components - used by vscode companion)
+// 6. sdk (no internal dependencies)
+// 7. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/test-utils',
   'packages/core',
+  'packages/web-templates',
   'packages/cli',
   'packages/webui',
   'packages/sdk-typescript',

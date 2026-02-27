@@ -17,7 +17,6 @@ import {
 import { type SettingScope } from '../../config/settings.js';
 import { type CodingPlanRegion } from '../../constants/codingPlan.js';
 import type { AuthState } from '../types.js';
-import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
 export interface OpenAICredentials {
   apiKey: string;
@@ -69,8 +68,6 @@ export interface UIActions {
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
-  // Vision switch dialog
-  handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
