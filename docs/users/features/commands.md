@@ -139,10 +139,10 @@ Priority Rules: Project commands > User commands (project command used when name
 
 #### File Path to Command Name Mapping Table
 
-| File Location              | Generated Command | Example Call          |
-| -------------------------- | ----------------- | --------------------- |
-| `~/.qwen/commands/test.md` | `/test`           | `/test Parameter`     |
-| `<project>/commands/git/commit.md`  | `/git:commit`     | `/git:commit Message` |
+| File Location                            | Generated Command | Example Call          |
+| ---------------------------------------- | ----------------- | --------------------- |
+| `~/.qwen/commands/test.md`               | `/test`           | `/test Parameter`     |
+| `<project>/.qwen/commands/git/commit.md` | `/git:commit`     | `/git:commit Message` |
 
 Naming Rules: Path separator (`/` or `\`) converted to colon (`:`)
 
@@ -167,7 +167,7 @@ Use {{args}} for parameter injection.
 ### TOML File Format (Deprecated)
 
 > [!warning]
-> 
+>
 > **Deprecated:** TOML format is still supported but will be removed in a future version. Please migrate to Markdown format.
 
 | Field         | Required | Description                              | Example                                    |
