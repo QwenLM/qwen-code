@@ -121,7 +121,9 @@ Environment Variables: Commands executed via `!` will set the `QWEN_CODE=1` envi
 
 Save frequently used prompts as shortcut commands to improve work efficiency and ensure consistency.
 
-> **Note:** Custom commands now use Markdown format with optional YAML frontmatter. TOML format is deprecated but still supported for backwards compatibility. When TOML files are detected, an automatic migration prompt will be displayed.
+> [!note]
+>
+> Custom commands now use Markdown format with optional YAML frontmatter. TOML format is deprecated but still supported for backwards compatibility. When TOML files are detected, an automatic migration prompt will be displayed.
 
 ### Quick Overview
 
@@ -137,10 +139,10 @@ Priority Rules: Project commands > User commands (project command used when name
 
 #### File Path to Command Name Mapping Table
 
-| File Location              | Generated Command | Example Call          |
-| -------------------------- | ----------------- | --------------------- |
-| `~/.qwen/commands/test.md` | `/test`           | `/test Parameter`     |
-| `<project>/git/commit.md`  | `/git:commit`     | `/git:commit Message` |
+| File Location                            | Generated Command | Example Call          |
+| ---------------------------------------- | ----------------- | --------------------- |
+| `~/.qwen/commands/test.md`               | `/test`           | `/test Parameter`     |
+| `<project>/.qwen/commands/git/commit.md` | `/git:commit`     | `/git:commit Message` |
 
 Naming Rules: Path separator (`/` or `\`) converted to colon (`:`)
 
@@ -164,6 +166,8 @@ Use {{args}} for parameter injection.
 
 ### TOML File Format (Deprecated)
 
+> [!warning]
+>
 > **Deprecated:** TOML format is still supported but will be removed in a future version. Please migrate to Markdown format.
 
 | Field         | Required | Description                              | Example                                    |
@@ -225,8 +229,6 @@ Please generate a Commit message based on the following diff:
 ```
 ````
 
-````
-
 #### 4. File Content Injection (`@{...}`)
 
 | File Type    | Support Status         | Processing Method           |
@@ -246,7 +248,7 @@ description: Code review based on best practices
 Review {{args}}, reference standards:
 
 @{docs/code-standards.md}
-````
+```
 
 ### Practical Creation Example
 
