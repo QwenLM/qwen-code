@@ -1460,4 +1460,22 @@ export default {
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
   'Authenticated successfully with {{region}}. API key is stored in settings.env.':
     'Autenticado com sucesso com {{region}}. A chave de API está armazenada em settings.env.',
+
+  // ============================================================================
+  // Mode Command / Comando de Modo
+  // ============================================================================
+  'Switch between different agent modes': 'Alternar entre diferentes modos de agente',
+  'Configuration not available.': 'Configuração não disponível.',
+  'Mode manager not available.': 'Gerenciador de modos não disponível.',
+  'List all available modes': 'Listar todos os modos disponíveis',
+  'Show current mode': 'Mostrar modo atual',
+  '**Available Modes:**': '**Modos Disponíveis:**',
+  '**Usage:**': '**Uso:**',
+  '- `/mode <name>` - Switch to a mode': '- `/mode <nome>` - Alternar para um modo',
+  '- `/mode list` - Show this list': '- `/mode list` - Mostrar esta lista',
+  '- `/mode current` - Show current mode': '- `/mode current` - Mostrar modo atual',
+  'Use Cases:': 'Casos de Uso:',
+  'Allowed Tools:': 'Ferramentas Permitidas:',
+  'Excluded Tools:': 'Ferramentas Excluídas:',
+  'Safety Constraints:': 'Restrições de Segurança:',
 };
