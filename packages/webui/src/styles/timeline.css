@@ -46,7 +46,9 @@
   top: var(--timeline-center-offset, 13px);
 }
 
-.qwen-message.message-item:not(.user-message-container):has(+ .user-message-container)::after,
+.qwen-message.message-item:not(.user-message-container):has(
+    + .user-message-container
+  )::after,
 .qwen-message.message-item:not(.user-message-container):has(
     + :not(.qwen-message.message-item)
   )::after,

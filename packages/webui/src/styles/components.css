@@ -180,7 +180,10 @@
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  background: var(
+    --app-input-secondary-background,
+    var(--app-background-secondary)
+  );
   border-bottom: 1px solid var(--app-input-border);
 }
 
@@ -393,7 +396,10 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   transition: border-color 0.2s;
   z-index: 1;
-  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  background: var(
+    --app-input-secondary-background,
+    var(--app-background-secondary)
+  );
   color: var(--app-input-foreground);
 }
 
@@ -424,7 +430,7 @@
 }
 
 .composer-input:empty::before,
-.composer-input[data-empty="true"]::before {
+.composer-input[data-empty='true']::before {
   content: attr(data-placeholder);
   color: var(--app-input-placeholder-foreground);
   pointer-events: none;
@@ -440,7 +446,7 @@
 }
 
 .composer-input:disabled,
-.composer-input[contenteditable="false"] {
+.composer-input[contenteditable='false'] {
   color: #999;
   cursor: not-allowed;
 }

@@ -179,4 +179,9 @@ fs.writeFileSync(
 
 console.log('\n✅ Package prepared for publishing at dist/');
 console.log('\nPackage structure:');
-execSync('ls -lh dist/', { stdio: 'inherit', cwd: rootDir });
+try {
+  const listCmd = process.platform === 'win32' ? 'dir dist' : 'ls -lh dist/';
+  execSync(listCmd, { stdio: 'inherit', cwd: rootDir, shell: true });
+} catch (_error) {
+  console.log('(Could not list directory structure)');
+}
