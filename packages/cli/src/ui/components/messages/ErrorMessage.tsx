@@ -34,7 +34,7 @@ export const ErrorMessage: React.FC<ErrorMessageProps> = ({ text, hint }) => {
           {text}
         </Text>
         {hint && (
-          <Text wrap="wrap" dimColor color={theme.text.secondary}>
+          <Text wrap="wrap" color={theme.text.secondary}>
             {' '}
             ({hint})
           </Text>

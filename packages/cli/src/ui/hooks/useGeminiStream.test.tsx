@@ -2546,14 +2546,13 @@ describe('useGeminiStream', () => {
         await result.current.submitQuery('Test query');
       });
 
-      // Verify error message was added
+      // Verify error message appears in pending history items (not via addItem,
+      // since errors with retry hints are now stored as pending items)
       await waitFor(() => {
-        expect(mockAddItem).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'error',
-          }),
-          expect.any(Number),
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
         );
+        expect(errorItem).toBeDefined();
       });
 
       // Verify parseAndFormatApiError was called
