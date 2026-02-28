@@ -10,29 +10,16 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
-  CODING_PLAN_MODELS,
+  isCodingPlanConfig,
+  getCodingPlanConfig,
+  CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-  CODING_PLAN_VERSION,
 } from '../../constants/codingPlan.js';
 import { t } from '../../i18n/index.js';
 
 export interface CodingPlanUpdateRequest {
   prompt: string;
   onConfirm: (confirmed: boolean) => void;
-}
-
-/**
- * Checks if a config is a Coding Plan configuration by matching baseUrl and envKey.
- * This ensures only configs from the Coding Plan provider are identified.
- */
-function isCodingPlanConfig(config: {
-  baseUrl?: string;
-  envKey?: string;
-}): boolean {
-  return (
-    config.envKey === CODING_PLAN_ENV_KEY &&
-    CODING_PLAN_MODELS.some((template) => template.baseUrl === config.baseUrl)
-  );
 }
 
 /**
@@ -55,134 +42,148 @@ export function useCodingPlanUpdates(
   /**
    * Execute the Coding Plan configuration update.
    * Removes old Coding Plan configs and replaces them with new ones from the template.
+   * Uses the region from settings.codingPlan.region (defaults to CHINA).
    */
-  const executeUpdate = useCallback(async () => {
-    try {
-      const persistScope = getPersistScopeForModelSelection(settings);
+  const executeUpdate = useCallback(
+    async (region: CodingPlanRegion = CodingPlanRegion.CHINA) => {
+      try {
+        const persistScope = getPersistScopeForModelSelection(settings);
 
-      // Get current configs
-      const currentConfigs =
-        (
-          settings.merged.modelProviders as
-            | Record<string, Array<Record<string, unknown>>>
-            | undefined
-        )?.[AuthType.USE_OPENAI] || [];
+        // Get current configs
+        const currentConfigs =
+          (
+            settings.merged.modelProviders as
+              | Record<string, Array<Record<string, unknown>>>
+              | undefined
+          )?.[AuthType.USE_OPENAI] || [];
 
-      // Filter out Coding Plan configs (keep user custom configs)
-      const nonCodingPlanConfigs = currentConfigs.filter(
-        (cfg) =>
-          !isCodingPlanConfig({
-            baseUrl: cfg['baseUrl'] as string | undefined,
-            envKey: cfg['envKey'] as string | undefined,
-          }),
-      );
-
-      // Generate new configs from template with the stored API key
-      const apiKey = process.env[CODING_PLAN_ENV_KEY];
-      if (!apiKey) {
-        throw new Error(
-          t(
-            'Coding Plan API key not found. Please re-authenticate with Coding Plan.',
-          ),
+        // Filter out all Coding Plan configs (since they are mutually exclusive)
+        // Keep only non-Coding-Plan user custom configs
+        const nonCodingPlanConfigs = currentConfigs.filter(
+          (cfg) =>
+            !isCodingPlanConfig(
+              cfg['baseUrl'] as string | undefined,
+              cfg['envKey'] as string | undefined,
+            ),
         );
+
+        // Get the configuration for the current region
+        const { template, version, regionName } = getCodingPlanConfig(region);
+
+        // Generate new configs from template
+        const newConfigs = template.map((templateConfig) => ({
+          ...templateConfig,
+          envKey: CODING_PLAN_ENV_KEY,
+        }));
+
+        // Combine: new Coding Plan configs at the front, user configs preserved
+        const updatedConfigs = [
+          ...newConfigs,
+          ...(nonCodingPlanConfigs as Array<Record<string, unknown>>),
+        ] as Array<Record<string, unknown>>;
+
+        // Hot-reload model providers configuration first (in-memory only)
+        const updatedModelProviders = {
+          ...(settings.merged.modelProviders as
+            | Record<string, unknown>
+            | undefined),
+          [AuthType.USE_OPENAI]: updatedConfigs,
+        };
+        config.reloadModelProvidersConfig(
+          updatedModelProviders as unknown as ModelProvidersConfig,
+        );
+
+        // Refresh auth with the new configuration
+        // This validates the configuration before persisting
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        // Persist to settings only after successful auth refresh
+        settings.setValue(
+          persistScope,
+          `modelProviders.${AuthType.USE_OPENAI}`,
+          updatedConfigs,
+        );
+
+        // Update the version (single version field for backward compatibility)
+        settings.setValue(persistScope, 'codingPlan.version', version);
+
+        // Update the region
+        settings.setValue(persistScope, 'codingPlan.region', region);
+
+        const activeModel = config.getModel();
+
+        addItem(
+          {
+            type: 'info',
+            text: t(
+              '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+              { region: regionName, model: activeModel },
+            ),
+          },
+          Date.now(),
+        );
+
+        return true;
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        addItem(
+          {
+            type: 'error',
+            text: t('Failed to update Coding Plan configuration: {{message}}', {
+              message: errorMessage,
+            }),
+          },
+          Date.now(),
+        );
+        return false;
       }
-
-      const newConfigs = CODING_PLAN_MODELS.map((templateConfig) => ({
-        ...templateConfig,
-        envKey: CODING_PLAN_ENV_KEY,
-      }));
-
-      // Combine: new Coding Plan configs at the front, user configs preserved
-      const updatedConfigs = [
-        ...newConfigs,
-        ...(nonCodingPlanConfigs as Array<Record<string, unknown>>),
-      ] as Array<Record<string, unknown>>;
-
-      // Persist updated model providers
-      settings.setValue(
-        persistScope,
-        `modelProviders.${AuthType.USE_OPENAI}`,
-        updatedConfigs,
-      );
-
-      // Update the version
-      settings.setValue(
-        persistScope,
-        'codingPlan.version',
-        CODING_PLAN_VERSION,
-      );
-
-      // Hot-reload model providers configuration
-      const updatedModelProviders = {
-        ...(settings.merged.modelProviders as
-          | Record<string, unknown>
-          | undefined),
-        [AuthType.USE_OPENAI]: updatedConfigs,
-      };
-      config.reloadModelProvidersConfig(
-        updatedModelProviders as unknown as ModelProvidersConfig,
-      );
-
-      // Refresh auth with the new configuration
-      await config.refreshAuth(AuthType.USE_OPENAI);
-
-      addItem(
-        {
-          type: 'info',
-          text: t(
-            'Coding Plan configuration updated successfully. New models are now available.',
-          ),
-        },
-        Date.now(),
-      );
-
-      return true;
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      addItem(
-        {
-          type: 'error',
-          text: t('Failed to update Coding Plan configuration: {{message}}', {
-            message: errorMessage,
-          }),
-        },
-        Date.now(),
-      );
-      return false;
-    }
-  }, [settings, config, addItem]);
+    },
+    [settings, config, addItem],
+  );
 
   /**
    * Check for version mismatch and prompt user for update if needed.
+   * Uses the region from settings.codingPlan.region (defaults to CHINA if not set).
    */
   const checkForUpdates = useCallback(() => {
-    const savedVersion = (
-      settings.merged as { codingPlan?: { version?: string } }
-    ).codingPlan?.version;
+    const mergedSettings = settings.merged as {
+      codingPlan?: {
+        version?: string;
+        region?: CodingPlanRegion;
+      };
+    };
+
+    // Get the region (default to CHINA if not set)
+    const region = mergedSettings.codingPlan?.region ?? CodingPlanRegion.CHINA;
+
+    // Get the saved version for the current region
+    const savedVersion = mergedSettings.codingPlan?.version;
 
     // If no version is stored, user hasn't used Coding Plan yet - skip check
     if (!savedVersion) {
       return;
     }
 
-    // If versions match, no update needed
-    if (savedVersion === CODING_PLAN_VERSION) {
-      return;
-    }
+    // Get current version for the region
+    const currentVersion = getCodingPlanConfig(region).version;
 
-    // Version mismatch - prompt user for update
-    setUpdateRequest({
-      prompt: t(
-        'New model configurations are available for Bailian Coding Plan. Update now?',
-      ),
-      onConfirm: async (confirmed: boolean) => {
-        setUpdateRequest(undefined);
-        if (confirmed) {
-          await executeUpdate();
-        }
-      },
-    });
+    // Check if version matches
+    if (savedVersion !== currentVersion) {
+      const { regionName } = getCodingPlanConfig(region);
+      setUpdateRequest({
+        prompt: t(
+          'New model configurations are available for {{region}}. Update now?',
+          { region: regionName },
+        ),
+        onConfirm: async (confirmed: boolean) => {
+          setUpdateRequest(undefined);
+          if (confirmed) {
+            await executeUpdate(region);
+          }
+        },
+      });
+    }
   }, [settings, executeUpdate]);
 
   // Check for updates on mount

@@ -29,7 +29,7 @@ export const InfoMessage: React.FC<InfoMessageProps> = ({ text }) => {
       </Box>
       <Box flexGrow={1}>
         <Text wrap="wrap" color={theme.status.warning}>
-          <RenderInline text={text} />
+          <RenderInline text={text} textColor={theme.status.warning} />
         </Text>
       </Box>
     </Box>

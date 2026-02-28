@@ -337,7 +337,7 @@ export async function start_sandbox(
 
   writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);
 
-  // determine full path for gemini-cli to distinguish linked vs installed setting
+  // determine full path for qwen-code to distinguish linked vs installed setting
   const gcPath = fs.realpathSync(process.argv[1]);
 
   const projectSandboxDockerfile = path.join(
@@ -350,9 +350,9 @@ export async function start_sandbox(
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 
-  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under gemini-cli repo
+  // if BUILD_SANDBOX is set, then call scripts/build_sandbox.js under qwen-code repo
   //
-  // note this can only be done with binary linked from gemini-cli repo
+  // note this can only be done with binary linked from qwen-code repo
   if (process.env['BUILD_SANDBOX']) {
     if (!gcPath.includes('qwen-code/packages/')) {
       throw new FatalSandboxError(
@@ -389,8 +389,8 @@ export async function start_sandbox(
   if (!(await ensureSandboxImageIsPresent(config.command, image))) {
     const remedy =
       image === LOCAL_DEV_SANDBOX_IMAGE_NAME
-        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the gemini-cli repo to build it locally, or check the image name and your network connection.'
-        : 'Please check the image name, your network connection, or notify gemini-cli-dev@google.com if the issue persists.';
+        ? 'Try running `npm run build:all` or `npm run build:sandbox` under the qwen-code repo to build it locally, or check the image name and your network connection.'
+        : 'Please check the image name, your network connection, or notify qwen-code-dev@service.alibaba.com if the issue persists.';
     throw new FatalSandboxError(
       `Sandbox image '${image}' is missing or could not be pulled. ${remedy}`,
     );
@@ -541,10 +541,10 @@ export async function start_sandbox(
   // name container after image, plus random suffix to avoid conflicts
   const imageName = parseImageName(image);
   const isIntegrationTest =
-    process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true';
+    process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
   if (isIntegrationTest) {
-    containerName = `gemini-cli-integration-test-${randomBytes(4).toString(
+    containerName = `qwen-code-integration-test-${randomBytes(4).toString(
       'hex',
     )}`;
     writeStderrLine(`ContainerName: ${containerName}`);
@@ -716,10 +716,15 @@ export async function start_sandbox(
   let userFlag = '';
   const finalEntrypoint = entrypoint(workdir, cliArgs);
 
-  if (process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true') {
-    args.push('--user', 'root');
-    userFlag = '--user root';
-  } else if (await shouldUseCurrentUserInSandbox()) {
+  // Check if we should use current user's UID/GID in sandbox
+  // In integration test mode, we still respect SANDBOX_SET_UID_GID to allow
+  // tests that need to access host's ~/.qwen (e.g., --resume functionality)
+  const useCurrentUser = await shouldUseCurrentUserInSandbox();
+
+  if (useCurrentUser) {
+    // SANDBOX_SET_UID_GID is enabled: create user with host's UID/GID
+    // This includes integration test mode with SANDBOX_SET_UID_GID=true,
+    // allowing tests that need to access host's ~/.qwen (e.g., --resume) to work.
     // For the user-creation logic to work, the container must start as root.
     // The entrypoint script then handles dropping privileges to the correct user.
     args.push('--user', 'root');
@@ -729,10 +734,10 @@ export async function start_sandbox(
 
     // Instead of passing --user to the main sandbox container, we let it
     // start as root, then create a user with the host's UID/GID, and
-    // finally switch to that user to run the gemini process. This is
+    // finally switch to that user to run the qwen process. This is
     // necessary on Linux to ensure the user exists within the
     // container's /etc/passwd file, which is required by os.userInfo().
-    const username = 'gemini';
+    const username = 'qwen';
     const homeDir = getContainerPath(os.homedir());
 
     const setupUserCommands = [
@@ -755,7 +760,12 @@ export async function start_sandbox(
     userFlag = `--user ${uid}:${gid}`;
     // When forcing a UID in the sandbox, $HOME can be reset to '/', so we copy $HOME as well.
     args.push('--env', `HOME=${os.homedir()}`);
+  } else if (isIntegrationTest) {
+    // Integration test mode with UID/GID matching disabled: use root
+    args.push('--user', 'root');
+    userFlag = '--user root';
   }
+  // else: non-IT mode with UID/GID matching disabled - use image default user (node)
 
   // push container image name
   args.push(image);

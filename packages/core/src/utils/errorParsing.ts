@@ -60,7 +60,10 @@ export function parseAndFormatApiError(
         } catch (_e) {
           // It's not a nested JSON error, so we just use the message as is.
         }
-        let text = `[API Error: ${finalMessage} (Status: ${parsedError.error.status})]`;
+        const statusText = parsedError.error.status
+          ? ` (Status: ${parsedError.error.status})`
+          : '';
+        let text = `[API Error: ${finalMessage}${statusText}]`;
         if (parsedError.error.code === 429) {
           text += getRateLimitMessage(authType);
         }

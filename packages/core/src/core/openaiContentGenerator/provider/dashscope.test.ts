@@ -884,9 +884,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
-    it('should set high resolution flag for the vision-model alias', () => {
+    it('should set high resolution flag for the coder-model model', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'vision-model',
+        model: 'coder-model',
         messages: [
           {
             role: 'user',
@@ -899,12 +899,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             ],
           },
         ],
-        max_tokens: 9000,
+        max_tokens: 100000, // Exceeds the 64K limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(8192); // Limited to model's output limit (8K)
+      // coder-model has 64K output limit, so max_tokens should be capped
+      expect(result.max_tokens).toBe(65536);
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,

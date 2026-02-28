@@ -254,9 +254,12 @@ export default tseslint.config(
       'no-console': 'off',
     },
   },
-  // Settings for export-html assets
+  // Settings for web-templates assets
   {
-    files: ['packages/cli/assets/export-html/**/*.{js,jsx,ts,tsx}'],
+    files: [
+      'packages/web-templates/src/**/*.{js,jsx,ts,tsx}',
+      'packages/web-templates/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.browser,
@@ -271,6 +274,8 @@ export default tseslint.config(
     rules: {
       'react/react-in-jsx-scope': 'off',
       'react/prop-types': 'off',
+      'no-console': 'off',
+      'no-undef': 'off',
     },
   },
   // Prettier config must be last

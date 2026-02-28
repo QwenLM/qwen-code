@@ -35,6 +35,8 @@ import {
   ToolConfirmationOutcome,
   logApiCancel,
   ApiCancelEvent,
+  isSupportedImageMimeType,
+  getUnsupportedImageFormatWarning,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -46,7 +48,6 @@ import type {
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
 import { isAtCommand, isSlashCommand } from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { useVisionAutoSwitch } from './useVisionAutoSwitch.js';
 import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
@@ -63,10 +64,64 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
-import { useKeypress } from './useKeypress.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Checks if image parts have supported formats and returns unsupported ones
+ */
+function checkImageFormatsSupport(parts: PartListUnion): {
+  hasImages: boolean;
+  hasUnsupportedFormats: boolean;
+  unsupportedMimeTypes: string[];
+} {
+  const unsupportedMimeTypes: string[] = [];
+  let hasImages = false;
+
+  if (typeof parts === 'string') {
+    return {
+      hasImages: false,
+      hasUnsupportedFormats: false,
+      unsupportedMimeTypes: [],
+    };
+  }
+
+  const partsArray = Array.isArray(parts) ? parts : [parts];
+
+  for (const part of partsArray) {
+    if (typeof part === 'string') continue;
+
+    let mimeType: string | undefined;
+
+    // Check inlineData
+    if (
+      'inlineData' in part &&
+      part.inlineData?.mimeType?.startsWith('image/')
+    ) {
+      hasImages = true;
+      mimeType = part.inlineData.mimeType;
+    }
+
+    // Check fileData
+    if ('fileData' in part && part.fileData?.mimeType?.startsWith('image/')) {
+      hasImages = true;
+      mimeType = part.fileData.mimeType;
+    }
+
+    // Check if the mime type is supported
+    if (mimeType && !isSupportedImageMimeType(mimeType)) {
+      unsupportedMimeTypes.push(mimeType);
+    }
+  }
+
+  return {
+    hasImages,
+    hasUnsupportedFormats: unsupportedMimeTypes.length > 0,
+    unsupportedMimeTypes,
+  };
+}
 
 enum StreamProcessingStatus {
   Completed,
@@ -106,16 +161,9 @@ export const useGeminiStream = (
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
   onCancelSubmit: () => void,
-  visionModelPreviewEnabled: boolean,
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  onVisionSwitchRequired?: (query: PartListUnion) => Promise<{
-    modelOverride?: string;
-    persistSessionModel?: string;
-    showGuidance?: boolean;
-  }>,
-  isShellFocused?: boolean,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -125,6 +173,16 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
+  const [pendingRetryErrorItem, setPendingRetryErrorItem] =
+    useState<HistoryItemWithoutId | null>(null);
+  const [
+    pendingRetryCountdownItem,
+    pendingRetryCountdownItemRef,
+    setPendingRetryCountdownItem,
+  ] = useStateAndRef<HistoryItemWithoutId | null>(null);
+  const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const {
     startNewPrompt,
@@ -189,6 +247,69 @@ export const useGeminiStream = (
     onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
   } | null>(null);
 
+  const stopRetryCountdownTimer = useCallback(() => {
+    if (retryCountdownTimerRef.current) {
+      clearInterval(retryCountdownTimerRef.current);
+      retryCountdownTimerRef.current = null;
+    }
+  }, []);
+
+  const clearRetryCountdown = useCallback(() => {
+    stopRetryCountdownTimer();
+    setPendingRetryErrorItem(null);
+    setPendingRetryCountdownItem(null);
+  }, [setPendingRetryCountdownItem, stopRetryCountdownTimer]);
+
+  const startRetryCountdown = useCallback(
+    (retryInfo: {
+      message?: string;
+      attempt: number;
+      maxRetries: number;
+      delayMs: number;
+    }) => {
+      stopRetryCountdownTimer();
+      const startTime = Date.now();
+      const { message, attempt, maxRetries, delayMs } = retryInfo;
+      const retryReasonText =
+        message ?? t('Rate limit exceeded. Please wait and try again.');
+
+      // Error line stays static (red with ✕ prefix)
+      setPendingRetryErrorItem({
+        type: MessageType.ERROR,
+        text: retryReasonText,
+      });
+
+      // Countdown line updates every second (dim/secondary color)
+      const updateCountdown = () => {
+        const elapsedMs = Date.now() - startTime;
+        const remainingMs = Math.max(0, delayMs - elapsedMs);
+        const remainingSec = Math.ceil(remainingMs / 1000);
+
+        setPendingRetryCountdownItem({
+          type: 'retry_countdown',
+          text: t(
+            'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+            {
+              seconds: String(remainingSec),
+              attempt: String(attempt),
+              maxRetries: String(maxRetries),
+            },
+          ),
+        } as HistoryItemWithoutId);
+
+        if (remainingMs <= 0) {
+          stopRetryCountdownTimer();
+        }
+      };
+
+      updateCountdown();
+      retryCountdownTimerRef.current = setInterval(updateCountdown, 1000);
+    },
+    [setPendingRetryCountdownItem, stopRetryCountdownTimer],
+  );
+
+  useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
+
   const onExec = useCallback(async (done: Promise<void>) => {
     setIsResponding(true);
     await done;
@@ -206,12 +327,6 @@ export const useGeminiStream = (
     terminalHeight,
   );
 
-  const { handleVisionSwitch, restoreOriginalModel } = useVisionAutoSwitch(
-    config,
-    addItem,
-    visionModelPreviewEnabled,
-    onVisionSwitchRequired,
-  );
   const activePtyId = activeShellPtyId || activeToolPtyId;
 
   useEffect(() => {
@@ -295,6 +410,7 @@ export const useGeminiStream = (
       Date.now(),
     );
     setPendingHistoryItem(null);
+    clearRetryCountdown();
     onCancelSubmit();
     setIsResponding(false);
     setShellInputFocused(false);
@@ -305,18 +421,10 @@ export const useGeminiStream = (
     onCancelSubmit,
     pendingHistoryItemRef,
     setShellInputFocused,
+    clearRetryCountdown,
     config,
     getPromptCount,
   ]);
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape' && !isShellFocused) {
-        cancelOngoingRequest();
-      }
-    },
-    { isActive: streamingState === StreamingState.Responding },
-  );
 
   const prepareQueryForGemini = useCallback(
     async (
@@ -609,10 +717,17 @@ export const useGeminiStream = (
         { type: MessageType.INFO, text: 'User cancelled the request.' },
         userMessageTimestamp,
       );
+      clearRetryCountdown();
       setIsResponding(false);
       setThought(null); // Reset thought when user cancels
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, setThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      setThought,
+      clearRetryCountdown,
+    ],
   );
 
   const handleErrorEvent = useCallback(
@@ -631,9 +746,17 @@ export const useGeminiStream = (
         },
         userMessageTimestamp,
       );
+      clearRetryCountdown();
       setThought(null); // Reset thought when there's an error
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, config, setThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      config,
+      setThought,
+      clearRetryCountdown,
+    ],
   );
 
   const handleCitationEvent = useCallback(
@@ -693,8 +816,9 @@ export const useGeminiStream = (
           userMessageTimestamp,
         );
       }
+      clearRetryCountdown();
     },
-    [addItem],
+    [addItem, clearRetryCountdown],
   );
 
   const handleChatCompressionEvent = useCallback(
@@ -853,7 +977,16 @@ export const useGeminiStream = (
             loopDetectedRef.current = true;
             break;
           case ServerGeminiEventType.Retry:
-            // Will add the missing logic later
+            // Clear any pending partial content from the failed attempt
+            if (pendingHistoryItemRef.current) {
+              setPendingHistoryItem(null);
+            }
+            // Show retry info if available (rate-limit / throttling errors)
+            if (event.retryInfo) {
+              startRetryCountdown(event.retryInfo);
+            } else if (!pendingRetryCountdownItemRef.current) {
+              clearRetryCountdown();
+            }
             break;
           default: {
             // enforces exhaustive switch-case
@@ -878,7 +1011,12 @@ export const useGeminiStream = (
       handleMaxSessionTurnsEvent,
       handleSessionTokenLimitExceededEvent,
       handleCitationEvent,
+      startRetryCountdown,
+      clearRetryCountdown,
       setThought,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      pendingRetryCountdownItemRef,
     ],
   );
 
@@ -933,16 +1071,18 @@ export const useGeminiStream = (
           return;
         }
 
-        // Handle vision switch requirement
-        const visionSwitchResult = await handleVisionSwitch(
-          queryToSend,
-          userMessageTimestamp,
-          options?.isContinuation || false,
-        );
-
-        if (!visionSwitchResult.shouldProceed) {
-          isSubmittingQueryRef.current = false;
-          return;
+        // Check image format support for non-continuations
+        if (!options?.isContinuation) {
+          const formatCheck = checkImageFormatsSupport(queryToSend);
+          if (formatCheck.hasUnsupportedFormats) {
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              userMessageTimestamp,
+            );
+          }
         }
 
         const finalQueryToSend = queryToSend;
@@ -986,10 +1126,6 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
-            // Restore original model if it was temporarily overridden
-            restoreOriginalModel().catch((error) => {
-              debugLogger.error('Failed to restore original model:', error);
-            });
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1002,17 +1138,7 @@ export const useGeminiStream = (
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
-
-          // Restore original model if it was temporarily overridden
-          restoreOriginalModel().catch((error) => {
-            debugLogger.error('Failed to restore original model:', error);
-          });
         } catch (error: unknown) {
-          // Restore original model if it was temporarily overridden
-          restoreOriginalModel().catch((error) => {
-            debugLogger.error('Failed to restore original model:', error);
-          });
-
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -1048,8 +1174,6 @@ export const useGeminiStream = (
       startNewPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
-      handleVisionSwitch,
-      restoreOriginalModel,
     ],
   );
 
@@ -1216,10 +1340,18 @@ export const useGeminiStream = (
 
   const pendingHistoryItems = useMemo(
     () =>
-      [pendingHistoryItem, pendingToolCallGroupDisplay].filter(
-        (i) => i !== undefined && i !== null,
-      ),
-    [pendingHistoryItem, pendingToolCallGroupDisplay],
+      [
+        pendingHistoryItem,
+        pendingRetryErrorItem,
+        pendingRetryCountdownItem,
+        pendingToolCallGroupDisplay,
+      ].filter((i) => i !== undefined && i !== null),
+    [
+      pendingHistoryItem,
+      pendingRetryErrorItem,
+      pendingRetryCountdownItem,
+      pendingToolCallGroupDisplay,
+    ],
   );
 
   useEffect(() => {
