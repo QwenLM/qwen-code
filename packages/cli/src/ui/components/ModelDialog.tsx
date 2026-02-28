@@ -26,14 +26,14 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { t } from '../../i18n/index.js';
 
 function formatModalities(modalities?: InputModalities): string {
-  if (!modalities) return 'text-only';
+  if (!modalities) return t('text-only');
   const parts: string[] = [];
-  if (modalities.image) parts.push('image');
-  if (modalities.pdf) parts.push('pdf');
-  if (modalities.audio) parts.push('audio');
-  if (modalities.video) parts.push('video');
-  if (parts.length === 0) return 'text-only';
-  return `text · ${parts.join(' · ')}`;
+  if (modalities.image) parts.push(t('image'));
+  if (modalities.pdf) parts.push(t('pdf'));
+  if (modalities.audio) parts.push(t('audio'));
+  if (modalities.video) parts.push(t('video'));
+  if (parts.length === 0) return t('text-only');
+  return `${t('text')} · ${parts.join(' · ')}`;
 }
 
 interface ModelDialogProps {
@@ -41,9 +41,9 @@ interface ModelDialogProps {
 }
 
 function maskApiKey(apiKey: string | undefined): string {
-  if (!apiKey) return '(not set)';
+  if (!apiKey) return `(${t('not set')})`;
   const trimmed = apiKey.trim();
-  if (trimmed.length === 0) return '(not set)';
+  if (trimmed.length === 0) return `(${t('not set')})`;
   if (trimmed.length <= 6) return '***';
   const head = trimmed.slice(0, 3);
   const tail = trimmed.slice(-4);
@@ -94,7 +94,7 @@ function handleModelSwitchSuccess({
     {
       type: 'info',
       text:
-        `authType: ${effectiveAuthType ?? '(none)'}` +
+        `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
         `\n` +
         `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}` +
         `\n` +
@@ -107,7 +107,7 @@ function handleModelSwitchSuccess({
 }
 
 function formatContextWindow(size?: number): string {
-  if (!size) return '(unknown)';
+  if (!size) return `(${t('unknown')})`;
   return `${size.toLocaleString('en-US')} tokens`;
 }
 
@@ -417,30 +417,28 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             borderRight={false}
             borderColor={theme.border.default}
           />
-          <Box flexDirection="column" marginTop={1}>
-            <DetailRow
-              label="Accepts"
-              value={formatModalities(highlightedEntry.model.modalities)}
-            />
-            <DetailRow
-              label="Context Window"
-              value={formatContextWindow(
-                highlightedEntry.model.contextWindowSize,
-              )}
-            />
-            {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
-              <>
-                <DetailRow
-                  label="Base URL"
-                  value={highlightedEntry.model.baseUrl ?? t('(default)')}
-                />
-                <DetailRow
-                  label="API Key"
-                  value={highlightedEntry.model.envKey ?? t('(not set)')}
-                />
-              </>
+          <DetailRow
+            label={t('Modality')}
+            value={formatModalities(highlightedEntry.model.modalities)}
+          />
+          <DetailRow
+            label={t('Context Window')}
+            value={formatContextWindow(
+              highlightedEntry.model.contextWindowSize,
             )}
-          </Box>
+          />
+          {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
+            <>
+              <DetailRow
+                label="Base URL"
+                value={highlightedEntry.model.baseUrl ?? t('(default)')}
+              />
+              <DetailRow
+                label="API Key"
+                value={highlightedEntry.model.envKey ?? t('(not set)')}
+              />
+            </>
+          )}
         </Box>
       )}
 
@@ -454,7 +452,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.text.secondary}>
-          {t('Enter to select · Esc to close')}
+          {t('Enter to select, ↑↓ to navigate, Esc to close')}
         </Text>
       </Box>
     </Box>
