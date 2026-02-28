@@ -1506,9 +1506,10 @@ export class Config {
    * This is used by the HookRegistry to filter out disabled hooks.
    */
   getDisabledHooks(): string[] {
-    // This will be populated from settings by the CLI layer
-    // The core Config doesn't have direct access to settings
-    return [];
+    const hooks = this.hooks;
+    if (!hooks) return [];
+    const disabled = hooks['disabled'];
+    return Array.isArray(disabled) ? (disabled as string[]) : [];
   }
 
   /**
