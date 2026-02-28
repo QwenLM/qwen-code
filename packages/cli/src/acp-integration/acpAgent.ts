@@ -250,18 +250,12 @@ class GeminiAgent {
     });
 
     return {
-      items: result.items.map((item) => ({
+      sessions: result.items.map((item) => ({
         sessionId: item.sessionId,
         cwd: item.cwd,
-        startTime: item.startTime,
-        mtime: item.mtime,
-        prompt: item.prompt,
-        gitBranch: item.gitBranch,
-        filePath: item.filePath,
-        messageCount: item.messageCount,
+        title: item.prompt || '(session)',
+        updatedAt: new Date(item.mtime).toISOString(),
       })),
-      nextCursor: result.nextCursor,
-      hasMore: result.hasMore,
     };
   }
 
