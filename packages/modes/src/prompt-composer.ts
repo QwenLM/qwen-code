@@ -138,9 +138,7 @@ ${this.mode.customInstructions}
   /**
    * Построить блок пользовательских инструкций из контекста
    */
-  private buildUserCustomInstructionsBlock(
-    customInstructions: string,
-  ): string {
+  private buildUserCustomInstructionsBlock(customInstructions: string): string {
     return `[USER BLOCK: CUSTOM INSTRUCTIONS]
 --- НАЧАЛО ПОЛЬЗОВАТЕЛЬСКИХ ИНСТРУКЦИЙ ---
 ${customInstructions}
@@ -173,8 +171,13 @@ ${customInstructions}
   /**
    * Получить краткую информацию о режиме для UI
    */
-  getModeSummary(): string {
-    return `Режим: ${this.mode.name} | ${this.mode.description} | Инструменты: ${this.mode.allowedTools.length}`;
+  getModeSummary(locale: 'en' | 'ru' = 'ru'): string {
+    const labels = {
+      ru: { mode: 'Режим', tools: 'Инструменты' },
+      en: { mode: 'Mode', tools: 'Tools' },
+    };
+    const label = labels[locale];
+    return `${label.mode}: ${this.mode.name} | ${this.mode.description} | ${label.tools}: ${this.mode.allowedTools.length}`;
   }
 
   /**
