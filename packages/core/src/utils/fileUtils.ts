@@ -340,11 +340,12 @@ export async function processSingleFileContent(
     }
 
     const fileSizeInMB = stats.size / (1024 * 1024);
-    if (fileSizeInMB > 20) {
+    // Use 9.9MB instead of 10MB to leave margin for encoding overhead (#1880)
+    if (fileSizeInMB > 9.9) {
       return {
-        llmContent: 'File size exceeds the 20MB limit.',
-        returnDisplay: 'File size exceeds the 20MB limit.',
-        error: `File size exceeds the 20MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        llmContent: 'File size exceeds the 10MB limit.',
+        returnDisplay: 'File size exceeds the 10MB limit.',
+        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -353,21 +354,6 @@ export async function processSingleFileContent(
     const relativePathForDisplay = path
       .relative(rootDirectory, filePath)
       .replace(/\\/g, '/');
-
-    // Per-type size limits (conservative defaults based on provider API limits)
-    const FILE_TYPE_SIZE_LIMITS_MB: Partial<Record<typeof fileType, number>> = {
-      image: 5,
-      pdf: 10,
-    };
-    const typeLimitMB = FILE_TYPE_SIZE_LIMITS_MB[fileType];
-    if (typeLimitMB !== undefined && fileSizeInMB > typeLimitMB) {
-      return {
-        llmContent: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files.`,
-        returnDisplay: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files.`,
-        error: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
-        errorType: ToolErrorType.FILE_TOO_LARGE,
-      };
-    }
 
     const displayName = path.basename(filePath);
     switch (fileType) {
@@ -480,6 +466,16 @@ export async function processSingleFileContent(
       case 'pdf': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
+        const base64SizeInMB = base64Data.length / (1024 * 1024);
+        // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
+        if (base64SizeInMB > 9.9) {
+          return {
+            llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
+            returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            errorType: ToolErrorType.FILE_TOO_LARGE,
+          };
+        }
         return {
           llmContent: {
             inlineData: {

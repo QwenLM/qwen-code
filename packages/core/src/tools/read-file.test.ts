@@ -231,8 +231,8 @@ describe('ReadFileTool', () => {
 
     it('should return error for a file that is too large', async () => {
       const filePath = path.join(tempRootDir, 'largefile.txt');
-      // 21MB of content exceeds 20MB limit
-      const largeContent = 'x'.repeat(21 * 1024 * 1024);
+      // 11MB of content exceeds 10MB limit
+      const largeContent = 'x'.repeat(11 * 1024 * 1024);
       await fsp.writeFile(filePath, largeContent, 'utf-8');
       const params: ReadFileToolParams = { absolute_path: filePath };
       const invocation = tool.build(params) as ToolInvocation<
@@ -244,34 +244,8 @@ describe('ReadFileTool', () => {
       expect(result).toHaveProperty('error');
       expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.error?.message).toContain(
-        'File size exceeds the 20MB limit',
+        'File size exceeds the 10MB limit',
       );
-    });
-
-    it('should enforce per-type size limits for image and pdf files', async () => {
-      // 6MB image exceeds 5MB image limit
-      const imgPath = path.join(tempRootDir, 'large.png');
-      await fsp.writeFile(imgPath, Buffer.alloc(6 * 1024 * 1024));
-      const imgParams: ReadFileToolParams = { absolute_path: imgPath };
-      const imgInvocation = tool.build(imgParams) as ToolInvocation<
-        ReadFileToolParams,
-        ToolResult
-      >;
-      const imgResult = await imgInvocation.execute(abortSignal);
-      expect(imgResult.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(imgResult.error?.message).toContain('5MB limit for image files');
-
-      // 11MB PDF exceeds 10MB pdf limit
-      const pdfPath = path.join(tempRootDir, 'large.pdf');
-      await fsp.writeFile(pdfPath, Buffer.alloc(11 * 1024 * 1024));
-      const pdfParams: ReadFileToolParams = { absolute_path: pdfPath };
-      const pdfInvocation = tool.build(pdfParams) as ToolInvocation<
-        ReadFileToolParams,
-        ToolResult
-      >;
-      const pdfResult = await pdfInvocation.execute(abortSignal);
-      expect(pdfResult.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(pdfResult.error?.message).toContain('10MB limit for pdf files');
     });
 
     it('should handle text file with lines exceeding maximum length', async () => {
