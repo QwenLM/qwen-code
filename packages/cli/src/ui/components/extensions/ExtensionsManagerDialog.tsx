@@ -41,9 +41,12 @@ export function ExtensionsManagerDialog({
   const [navigationStack, setNavigationStack] = useState<string[]>([
     MANAGEMENT_STEPS.EXTENSION_LIST,
   ]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [updateInProgress, setUpdateInProgress] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Load extensions
   const loadExtensions = useCallback(async () => {
@@ -52,15 +55,23 @@ export function ExtensionsManagerDialog({
     const extensionManager = config.getExtensionManager();
     if (!extensionManager) {
       debugLogger.error('ExtensionManager not available');
+      setLoadError(t('ExtensionManager not available'));
       return;
     }
 
+    setIsLoading(true);
+    setLoadError(null);
     try {
       await extensionManager.refreshCache();
       const loadedExtensions = extensionManager.getLoadedExtensions();
       setExtensions(loadedExtensions);
     } catch (error) {
       debugLogger.error('Failed to load extensions:', error);
+      setLoadError(
+        error instanceof Error ? error.message : t('Failed to load extensions'),
+      );
+    } finally {
+      setIsLoading(false);
     }
   }, [config]);
 
@@ -94,6 +105,7 @@ export function ExtensionsManagerDialog({
   const handleSelectExtension = useCallback((extensionIndex: number) => {
     setSelectedExtensionIndex(extensionIndex);
     setSuccessMessage(null); // Clear success message when navigating
+    setActionError(null); // Clear action error when navigating
     setNavigationStack((prev) => [...prev, MANAGEMENT_STEPS.ACTION_SELECTION]);
   }, []);
 
@@ -199,10 +211,11 @@ export function ExtensionsManagerDialog({
     async (scope: 'user' | 'workspace') => {
       if (!config || !selectedExtension) return;
 
+      setActionError(null);
       try {
         const extensionManager = config.getExtensionManager();
         if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
+          throw new Error(t('ExtensionManager not available'));
         }
 
         const settingScope =
@@ -233,6 +246,11 @@ export function ExtensionsManagerDialog({
         setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
       } catch (error) {
         debugLogger.error('Failed to disable extension:', error);
+        setActionError(
+          error instanceof Error
+            ? error.message
+            : t('Failed to disable extension'),
+        );
       }
     },
     [config, selectedExtension],
@@ -242,10 +260,11 @@ export function ExtensionsManagerDialog({
     async (scope: 'user' | 'workspace') => {
       if (!config || !selectedExtension) return;
 
+      setActionError(null);
       try {
         const extensionManager = config.getExtensionManager();
         if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
+          throw new Error(t('ExtensionManager not available'));
         }
 
         const settingScope =
@@ -276,6 +295,11 @@ export function ExtensionsManagerDialog({
         setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
       } catch (error) {
         debugLogger.error('Failed to enable extension:', error);
+        setActionError(
+          error instanceof Error
+            ? error.message
+            : t('Failed to enable extension'),
+        );
       }
     },
     [config, selectedExtension],
@@ -285,10 +309,11 @@ export function ExtensionsManagerDialog({
     async (extension: Extension) => {
       if (!config) return;
 
+      setActionError(null);
       try {
         const extensionManager = config.getExtensionManager();
         if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
+          throw new Error(t('ExtensionManager not available'));
         }
 
         await extensionManager.uninstallExtension(extension.name, false);
@@ -301,6 +326,11 @@ export function ExtensionsManagerDialog({
         setSelectedExtensionIndex(-1);
       } catch (error) {
         debugLogger.error('Failed to uninstall extension:', error);
+        setActionError(
+          error instanceof Error
+            ? error.message
+            : t('Failed to uninstall extension'),
+        );
         throw error;
       }
     },
@@ -353,11 +383,12 @@ export function ExtensionsManagerDialog({
     };
 
     return (
-      <Box>
+      <Box flexDirection="column">
         <Text bold>{getStepHeaderText()}</Text>
+        {actionError && <Text color={theme.status.error}>{actionError}</Text>}
       </Box>
     );
-  }, [getCurrentStep, selectedExtension]);
+  }, [getCurrentStep, selectedExtension, actionError]);
 
   const renderStepFooter = useCallback(() => {
     const currentStep = getCurrentStep();
@@ -393,6 +424,27 @@ export function ExtensionsManagerDialog({
 
   const renderStepContent = useCallback(() => {
     const currentStep = getCurrentStep();
+
+    // Show loading state
+    if (isLoading && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color={theme.text.secondary}>{t('Loading extensions...')}</Text>
+        </Box>
+      );
+    }
+
+    // Show load error
+    if (loadError && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color={theme.status.error}>
+            {t('Failed to load extensions:')}
+          </Text>
+          <Text>{loadError}</Text>
+        </Box>
+      );
+    }
 
     // Show success message if present (only on extension list step)
     if (successMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
@@ -489,6 +541,8 @@ export function ExtensionsManagerDialog({
     updateInProgress,
     updateError,
     successMessage,
+    isLoading,
+    loadError,
     handleSelectExtension,
     handleNavigateToStep,
     handleNavigateBack,

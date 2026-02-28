@@ -338,6 +338,12 @@ export default {
   'checking...': '检查中...',
   'not updatable': '不可更新',
   error: '错误',
+  'Loading extensions...': '正在加载扩展...',
+  'Failed to load extensions:': '加载扩展失败：',
+  'Failed to load extensions': '加载扩展失败',
+  'Failed to disable extension': '禁用扩展失败',
+  'Failed to enable extension': '启用扩展失败',
+  'Failed to uninstall extension': '卸载扩展失败',
 
   // ============================================================================
   // Commands - General (continued)

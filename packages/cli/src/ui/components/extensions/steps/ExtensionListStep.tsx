@@ -14,7 +14,7 @@ import { ExtensionUpdateState } from '../../../state/extensions.js';
 
 interface ExtensionListStepProps {
   extensions: Extension[];
-  extensionsUpdateState: Map<string, string>;
+  extensionsUpdateState: Map<string, ExtensionUpdateState>;
   onExtensionSelect: (extensionIndex: number) => void;
 }
 
@@ -65,7 +65,9 @@ export const ExtensionListStep = ({
     );
   }
 
-  const getUpdateStateColor = (state: string | undefined): string => {
+  const getUpdateStateColor = (
+    state: ExtensionUpdateState | undefined,
+  ): string => {
     if (!state) return theme.text.secondary;
 
     switch (state) {
@@ -86,17 +88,23 @@ export const ExtensionListStep = ({
     }
   };
 
-  const getLocalizedUpdateState = (state: string | undefined): string => {
+  const getLocalizedUpdateState = (
+    state: ExtensionUpdateState | undefined,
+  ): string => {
     if (!state) return '';
     // Map internal state values to translation keys
-    const stateMap: Record<string, string> = {
-      'up to date': t('up to date'),
-      'update available': t('update available'),
-      'checking...': t('checking...'),
-      'not updatable': t('not updatable'),
-      error: t('error'),
+    const stateMap: Record<ExtensionUpdateState, string> = {
+      [ExtensionUpdateState.UP_TO_DATE]: t('up to date'),
+      [ExtensionUpdateState.UPDATE_AVAILABLE]: t('update available'),
+      [ExtensionUpdateState.CHECKING_FOR_UPDATES]: t('checking...'),
+      [ExtensionUpdateState.NOT_UPDATABLE]: t('not updatable'),
+      [ExtensionUpdateState.ERROR]: t('error'),
+      [ExtensionUpdateState.UPDATING]: t('checking...'),
+      [ExtensionUpdateState.UPDATED]: t('up to date'),
+      [ExtensionUpdateState.UPDATED_NEEDS_RESTART]: t('update available'),
+      [ExtensionUpdateState.UNKNOWN]: '',
     };
-    return stateMap[state] || state;
+    return stateMap[state as ExtensionUpdateState] || state;
   };
 
   const renderExtensionItem = (

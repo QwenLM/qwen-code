@@ -354,6 +354,12 @@ export default {
   'checking...': 'checking...',
   'not updatable': 'not updatable',
   error: 'error',
+  'Loading extensions...': 'Loading extensions...',
+  'Failed to load extensions:': 'Failed to load extensions:',
+  'Failed to load extensions': 'Failed to load extensions',
+  'Failed to disable extension': 'Failed to disable extension',
+  'Failed to enable extension': 'Failed to enable extension',
+  'Failed to uninstall extension': 'Failed to uninstall extension',
 
   // ============================================================================
   // Commands - General (continued)
