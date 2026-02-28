@@ -458,6 +458,103 @@ describe('subagent.ts', () => {
         ]);
       });
 
+      it('should append userMemory to the system prompt when available', async () => {
+        const { config } = await createMockConfig();
+        const userMemoryContent =
+          '# Output language preference: English\nRespond in English.';
+        vi.spyOn(config, 'getUserMemory').mockReturnValue(userMemoryContent);
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        expect(generationConfig.systemInstruction).toContain(
+          'You are a test agent.',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          'Important Rules:',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          '# Output language preference: English',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          'Respond in English.',
+        );
+      });
+
+      it('should not append userMemory separator when userMemory is empty', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).toContain('You are a test agent.');
+        expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should not append userMemory separator when userMemory is whitespace-only', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).not.toContain('---');
+      });
+
       it('should use initialMessages instead of systemPrompt if provided', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
