@@ -147,7 +147,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, string>,
     description:
-      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
@@ -1198,28 +1198,6 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
-      PreToolUse: {
-        type: 'array',
-        label: 'PreTool Use Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute before tool invocations. Can validate, modify, or block tool calls.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
-      PostToolUse: {
-        type: 'array',
-        label: 'PostTool Use Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute after tool invocations. Can process results or trigger follow-up actions.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
       UserPromptSubmit: {
         type: 'array',
         label: 'Before Agent Hooks',
@@ -1239,50 +1217,6 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
-      SessionStart: {
-        type: 'array',
-        label: 'Session Start Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute when a session starts. Can initialize state or load context.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
-      SessionEnd: {
-        type: 'array',
-        label: 'Session End Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute when a session ends. Can perform cleanup or persist session data.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
-      PreCompact: {
-        type: 'array',
-        label: 'PreCompact Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute before chat history compression. Can back up or analyze conversation before compression.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.CONCAT,
-      },
-      Notification: {
-        type: 'array',
-        label: 'Notification Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [],
-        description:
-          'Hooks that execute when notifications are triggered. Can handle alerts or status updates.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },

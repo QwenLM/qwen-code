@@ -35,6 +35,26 @@ export function getFunctionCalls(
   const functionCallParts = parts
     .filter((part) => !!part.functionCall)
     .map((part) => part.functionCall as FunctionCall);
+
+  // Handle special case: model returns two tool_calls where first has name but no args,
+  // and second has no name but has args. Merge them together.
+  if (functionCallParts.length === 2) {
+    const [first, second] = functionCallParts;
+    const firstHasNameOnly =
+      first.name && (!first.args || Object.keys(first.args).length === 0);
+    const secondHasArgsOnly =
+      !second.name && second.args && Object.keys(second.args).length > 0;
+
+    if (firstHasNameOnly && secondHasArgsOnly) {
+      return [
+        {
+          name: first.name,
+          args: second.args,
+        },
+      ];
+    }
+  }
+
   return functionCallParts.length > 0 ? functionCallParts : undefined;
 }
 

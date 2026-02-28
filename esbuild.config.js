@@ -33,6 +33,13 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
+  '@teddyzhu/clipboard',
+  '@teddyzhu/clipboard-darwin-arm64',
+  '@teddyzhu/clipboard-darwin-x64',
+  '@teddyzhu/clipboard-linux-x64-gnu',
+  '@teddyzhu/clipboard-linux-arm64-gnu',
+  '@teddyzhu/clipboard-win32-x64-msvc',
+  '@teddyzhu/clipboard-win32-arm64-msvc',
 ];
 
 esbuild

@@ -15,8 +15,8 @@ import {
   type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
+import { type CodingPlanRegion } from '../../constants/codingPlan.js';
 import type { AuthState } from '../types.js';
-import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
 export interface OpenAICredentials {
   apiKey: string;
@@ -40,7 +40,10 @@ export interface UIActions {
     authType: AuthType | undefined,
     credentials?: OpenAICredentials,
   ) => Promise<void>;
-  handleCodingPlanSubmit: (apiKey: string) => Promise<void>;
+  handleCodingPlanSubmit: (
+    apiKey: string,
+    region?: CodingPlanRegion,
+  ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
@@ -64,8 +67,6 @@ export interface UIActions {
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleClearScreen: () => void;
-  // Vision switch dialog
-  handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

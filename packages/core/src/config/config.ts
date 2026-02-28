@@ -371,7 +371,6 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
-  vlmSwitchMode?: string;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
   enableToolOutputTruncation?: boolean;
@@ -389,6 +388,8 @@ export interface ConfigParameters {
   enableHooks?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
+  /** Warnings generated during configuration resolution */
+  warnings?: string[];
 }
 
 function normalizeConfigOutputFormat(
@@ -519,7 +520,7 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
-  private readonly vlmSwitchMode: string | undefined;
+  private readonly warnings: string[];
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
@@ -625,6 +626,7 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.warnings = params.warnings ?? [];
 
     // Web search
     this.webSearch = params.webSearch;
@@ -647,7 +649,6 @@ export class Config {
     this.channel = params.channel;
     this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
     this.storage = new Storage(this.targetDir);
-    this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
@@ -926,6 +927,15 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /**
+   * Returns warnings generated during configuration resolution.
+   * These warnings are collected from model configuration resolution
+   * and should be displayed to the user during startup.
+   */
+  getWarnings(): string[] {
+    return this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -1705,10 +1715,6 @@ export class Config {
 
   getSkipStartupContext(): boolean {
     return this.skipStartupContext;
-  }
-
-  getVlmSwitchMode(): string | undefined {
-    return this.vlmSwitchMode;
   }
 
   getEnableToolOutputTruncation(): boolean {

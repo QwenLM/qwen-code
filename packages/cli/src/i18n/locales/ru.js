@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ управление вложениями',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → выбрать, Delete удалить, ↓ выйти',
+  'Attachments: ': 'Вложения: ',
+
   'Basics:': 'Основы:',
   'Add context': 'Добавить контекст',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -1421,8 +1427,13 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, Китай)',
+  'Coding Plan (Bailian, Global/Intl)':
+    'Coding Plan (Bailian, Глобальный/Международный)',
   "Paste your api key of Bailian Coding Plan and you're all set!":
     'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    'Вставьте ваш API-ключ Coding Plan (Bailian, Глобальный/Международный) и всё готово!',
   Custom: 'Пользовательский',
   'More instructions about configuring `modelProviders` manually.':
     'Дополнительные инструкции по ручной настройке `modelProviders`.',
@@ -1431,4 +1442,18 @@ export default {
   '(Press Enter to submit, Escape to cancel)':
     '(Нажмите Enter для отправки, Escape для отмены)',
   'More instructions please check:': 'Дополнительные инструкции см.:',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Доступны новые конфигурации моделей для {{region}}. Обновить сейчас?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'Доступны новые конфигурации моделей для Bailian Coding Plan (Китай). Обновить сейчас?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'Доступны новые конфигурации моделей для Coding Plan (Bailian, Глобальный/Международный). Обновить сейчас?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
 };

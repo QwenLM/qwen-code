@@ -100,7 +100,6 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
-  hooks?: Record<string, unknown[]>;
 }
 
 export interface ExtensionConfig {

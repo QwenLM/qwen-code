@@ -11,6 +11,7 @@ import {
   AuthType,
   ModelSlashCommandEvent,
   logModelSlashCommand,
+  MAINLINE_CODER_MODEL,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSource,
@@ -22,7 +23,6 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { MAINLINE_CODER } from '../models/availableModels.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 
@@ -293,7 +293,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     [availableModelEntries],
   );
 
-  const preferredModelId = config?.getModel() || MAINLINE_CODER;
+  const preferredModelId = config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot = config?.getActiveRuntimeModelSnapshot?.();

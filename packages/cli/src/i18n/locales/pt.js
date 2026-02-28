@@ -1431,8 +1431,12 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
+  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
   "Paste your api key of Bailian Coding Plan and you're all set!":
     'Cole sua chave de API do Bailian Coding Plan e pronto!',
+  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
+    'Cole sua chave de API do Coding Plan (Bailian, Global/Intl) e pronto!',
   Custom: 'Personalizado',
   'More instructions about configuring `modelProviders` manually.':
     'Mais instruções sobre como configurar `modelProviders` manualmente.',
@@ -1442,4 +1446,18 @@ export default {
   '(Press Enter to submit, Escape to cancel)':
     '(Pressione Enter para enviar, Escape para cancelar)',
   'More instructions please check:': 'Mais instruções, consulte:',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
+  'New model configurations are available for Bailian Coding Plan (China). Update now?':
+    'Novas configurações de modelo estão disponíveis para o Bailian Coding Plan (China). Atualizar agora?',
+  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
+    'Novas configurações de modelo estão disponíveis para o Coding Plan (Bailian, Global/Intl). Atualizar agora?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
 };
