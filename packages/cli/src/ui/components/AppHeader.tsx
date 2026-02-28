@@ -27,6 +27,10 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
   const showBanner = !config.getScreenReader();
   const showTips = !(settings.merged.ui?.hideTips || config.getScreenReader());
 
+  // Get current mode for display
+  const modeManager = config.getModeManager();
+  const currentMode = modeManager?.getCurrentMode();
+
   return (
     <Box flexDirection="column">
       {showBanner && (
@@ -35,6 +39,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           authType={authType}
           model={model}
           workingDirectory={targetDir}
+          currentMode={currentMode}
         />
       )}
       {showTips && <Tips />}

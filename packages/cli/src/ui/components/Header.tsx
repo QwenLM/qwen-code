@@ -13,12 +13,15 @@ import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
+import type { ModeDefinition } from '@qwen-code/modes';
+
 interface HeaderProps {
   customAsciiArt?: string; // For user-defined ASCII art
   version: string;
   authType?: AuthType;
   model: string;
   workingDirectory: string;
+  currentMode?: ModeDefinition; // Current active mode
 }
 
 function titleizeAuthType(value: string): string {
@@ -62,6 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
   authType,
   model,
   workingDirectory,
+  currentMode,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
@@ -111,6 +115,15 @@ export const Header: React.FC<HeaderProps> = ({
     infoPanelContentWidth > 0 &&
     getCachedStringWidth(authModelText + modelHintText) <=
       infoPanelContentWidth;
+
+  // Mode display
+  const modeDisplay = currentMode
+    ? `${currentMode.icon} ${currentMode.name}`
+    : '';
+  const modeHintText = ' (/mode to switch)';
+  const showModeHint =
+    infoPanelContentWidth > 0 &&
+    getCachedStringWidth(modeDisplay + modeHintText) <= infoPanelContentWidth;
 
   // Now shorten the path to fit the available space
   const tildeifiedPath = tildeifyPath(workingDirectory);
@@ -174,6 +187,17 @@ export const Header: React.FC<HeaderProps> = ({
             <Text color={theme.text.secondary}>{modelHintText}</Text>
           )}
         </Text>
+        {/* Current Mode line */}
+        {modeDisplay && (
+          <Text>
+            <Text color={currentMode?.color || theme.text.primary}>
+              {modeDisplay}
+            </Text>
+            {showModeHint && (
+              <Text color={theme.text.secondary}>{modeHintText}</Text>
+            )}
+          </Text>
+        )}
         {/* Directory line */}
         <Text color={theme.text.secondary}>{displayPath}</Text>
       </Box>

@@ -39,6 +39,7 @@
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@qwen-code/prompt-enhancer": "file:../prompt-enhancer",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",

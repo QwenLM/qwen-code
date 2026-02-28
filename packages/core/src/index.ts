@@ -98,6 +98,15 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+
+// ============================================================================
+// Middleware
+// ============================================================================
+
+export {
+  createPromptEnhancementMiddleware,
+  type PromptMiddlewareContext,
+} from './middleware/prompt-enhancement-middleware.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/yaml-parser.js';
 

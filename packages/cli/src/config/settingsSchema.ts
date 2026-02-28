@@ -12,10 +12,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
-import type {
-  CustomModeConfig,
-  ModesSettings,
-} from '@qwen-code/modes';
+import type { CustomModeConfig, ModesSettings } from '@qwen-code/modes';
 import {
   ApprovalMode,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
@@ -1257,6 +1254,70 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as ModesSettings['autoSwitch'],
         description: 'Automatic mode switching based on context.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  promptEnhancer: {
+    type: 'object',
+    label: 'Prompt Enhancer',
+    category: 'General',
+    requiresRestart: false,
+    default: {},
+    description: 'Configuration for automatic prompt enhancement.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Prompt Enhancer',
+        category: 'Prompt Enhancer',
+        requiresRestart: false,
+        default: false,
+        description: 'Automatically enhance prompts before sending to AI.',
+        showInDialog: false,
+      },
+      level: {
+        type: 'string',
+        label: 'Enhancement Level',
+        category: 'Prompt Enhancer',
+        requiresRestart: false,
+        default: 'standard' as 'minimal' | 'standard' | 'maximal',
+        description:
+          'How much enhancement to apply: minimal (quick cleanup), standard (full enhancement), maximal (comprehensive with examples).',
+        showInDialog: false,
+      },
+      autoEnhance: {
+        type: 'boolean',
+        label: 'Auto Enhance',
+        category: 'Prompt Enhancer',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Automatically enhance prompts without manual /enhance command.',
+        showInDialog: false,
+      },
+      customTemplates: {
+        type: 'object',
+        label: 'Custom Templates',
+        category: 'Prompt Enhancer',
+        requiresRestart: false,
+        default: {} as Record<string, unknown>,
+        description: 'Custom enhancement templates for specific intents.',
+        showInDialog: false,
+      },
+      teamConventions: {
+        type: 'object',
+        label: 'Team Conventions',
+        category: 'Prompt Enhancer',
+        requiresRestart: false,
+        default: {} as {
+          naming?: 'camelCase' | 'snake_case' | 'PascalCase';
+          testing?: string;
+          documentation?: 'jsdoc' | 'tsdoc';
+        },
+        description:
+          'Team-specific conventions to include in enhanced prompts.',
         showInDialog: false,
       },
     },
