@@ -767,19 +767,24 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
-      const retryHint = t('Press Ctrl+Y to retry.');
-      // Store error with hint as a pending item (not in history).
-      // This allows the hint to be removed when the user retries with Ctrl+Y,
-      // since pending items are in the dynamic rendering area (not <Static>).
+      // Only show Ctrl+Y hint if not already showing an auto-retry countdown
+      // (auto-retry countdown is shown when retryCountdownTimerRef is active)
+      const isShowingAutoRetry = retryCountdownTimerRef.current !== null;
       clearRetryCountdown();
-      setPendingRetryErrorItem({
-        type: 'error' as const,
-        text: parseAndFormatApiError(
-          eventValue.error,
-          config.getContentGeneratorConfig()?.authType,
-        ),
-        hint: retryHint,
-      });
+      if (!isShowingAutoRetry) {
+        const retryHint = t('Press Ctrl+Y to retry.');
+        // Store error with hint as a pending item (not in history).
+        // This allows the hint to be removed when the user retries with Ctrl+Y,
+        // since pending items are in the dynamic rendering area (not <Static>).
+        setPendingRetryErrorItem({
+          type: 'error' as const,
+          text: parseAndFormatApiError(
+            eventValue.error,
+            config.getContentGeneratorConfig()?.authType,
+          ),
+          hint: retryHint,
+        });
+      }
       setThought(null); // Reset thought when there's an error
     },
     [
