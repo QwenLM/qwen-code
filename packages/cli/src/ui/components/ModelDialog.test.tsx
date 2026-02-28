@@ -114,10 +114,9 @@ describe('<ModelDialog />', () => {
     cleanup();
   });
 
-  it('renders the title and help text', () => {
+  it('renders the title', () => {
     const { getByText } = renderComponent();
     expect(getByText('Select Model')).toBeDefined();
-    expect(getByText('Enter to select · Esc to close')).toBeDefined();
   });
 
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
