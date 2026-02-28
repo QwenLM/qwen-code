@@ -12,8 +12,8 @@ import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { theme } from '../../semantic-colors.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { getToolGroupBorderAppearance } from '../../utils/borderStyles.js';
 
 interface ToolGroupMessageProps {
   groupId: number;
@@ -26,7 +26,8 @@ interface ToolGroupMessageProps {
   onShellInputSubmit?: (input: string) => void;
 }
 
-// Main component renders the border and maps the tools using ToolMessage
+const TOOL_MESSAGE_HORIZONTAL_MARGIN = 4;
+
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   toolCalls,
   availableTerminalHeight,
@@ -35,34 +36,21 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
 }) => {
-  const isEmbeddedShellFocused =
-    embeddedShellFocused &&
-    toolCalls.some(
-      (t) =>
-        t.ptyId === activeShellPtyId && t.status === ToolCallStatus.Executing,
-    );
-
-  const hasPending = !toolCalls.every(
-    (t) => t.status === ToolCallStatus.Success,
-  );
-
   const config = useConfig();
-  const isShellCommand = toolCalls.some(
-    (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
+
+  const { borderColor, borderDimColor } = useMemo(
+    () =>
+      getToolGroupBorderAppearance(
+        toolCalls,
+        activeShellPtyId,
+        embeddedShellFocused,
+      ),
+    [toolCalls, activeShellPtyId, embeddedShellFocused],
   );
-  const borderColor =
-    isShellCommand || isEmbeddedShellFocused
-      ? theme.ui.symbol
-      : hasPending
-        ? theme.status.warning
-        : theme.border.default;
 
-  const staticHeight = /* border */ 2 + /* marginBottom */ 1;
-  // account for border (2 chars) and padding (2 chars)
-  const innerWidth = contentWidth - 4;
+  const staticHeight = 2;
+  const contentWidthCalculated = contentWidth - TOOL_MESSAGE_HORIZONTAL_MARGIN;
 
-  // only prompt for tool approval on the first 'confirming' tool in the list
-  // note, after the CTA, this automatically moves over to the next 'confirming' tool
   const toolAwaitingApproval = useMemo(
     () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
     [toolCalls],
@@ -89,16 +77,9 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     <Box
       flexDirection="column"
       borderStyle="round"
-      /*
-        This width constraint is highly important and protects us from an Ink rendering bug.
-        Since the ToolGroup can typically change rendering states frequently, it can cause
-        Ink to render the border of the box incorrectly and span multiple lines and even
-        cause tearing.
-      */
       width={contentWidth}
-      borderDimColor={
-        hasPending && (!isShellCommand || !isEmbeddedShellFocused)
-      }
+      paddingRight={TOOL_MESSAGE_HORIZONTAL_MARGIN}
+      borderDimColor={borderDimColor}
       borderColor={borderColor}
       gap={1}
     >
@@ -110,7 +91,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                contentWidth={innerWidth}
+                contentWidth={contentWidthCalculated}
                 emphasis={
                   isConfirming
                     ? 'high'
@@ -133,11 +114,22 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
-                  contentWidth={innerWidth}
+                  contentWidth={contentWidthCalculated}
                 />
               )}
             {tool.outputFile && (
-              <Box marginX={1}>
+              <Box
+                borderLeft={true}
+                borderRight={true}
+                borderTop={false}
+                borderBottom={false}
+                borderColor={borderColor}
+                borderDimColor={borderDimColor}
+                flexDirection="column"
+                borderStyle="round"
+                paddingLeft={1}
+                paddingRight={1}
+              >
                 <Text color={theme.text.primary}>
                   Output too long and was saved to: {tool.outputFile}
                 </Text>

@@ -69,7 +69,7 @@ exports[`<ToolGroupMessage /> > Golden Snapshots > renders single successful too
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders tool call awaiting confirmation 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────╮
 │MockTool[tool-confirm]: ? confirmation-tool - This tool needs confirmation    │
-│(high)                                                                        │
+│ (high)                                                                       │
 │MockConfirmation: Are you sure you want to proceed?                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -90,10 +90,10 @@ exports[`<ToolGroupMessage /> > Golden Snapshots > renders with limited terminal
 
 exports[`<ToolGroupMessage /> > Golden Snapshots > renders with narrow terminal width 1`] = `
 "╭──────────────────────────────────────╮
-│MockTool[tool-123]: ✓                 │
-│very-long-tool-name-that-might-wrap - │
-│This is a very long description that  │
-│might cause wrapping issues (medium)  │
+│MockTool[tool-123]: ✓ very-long-to    │
+│ol-name-that-might-wrap - This is     │
+│a very long description that might    │
+│ cause wrapping issues (medium)       │
 ╰──────────────────────────────────────╯"
 `;
 
