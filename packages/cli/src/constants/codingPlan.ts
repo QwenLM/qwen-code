@@ -53,48 +53,188 @@ export function generateCodingPlanTemplate(
     // This ensures existing users don't get prompted for unnecessary updates
     return [
       {
-        id: 'qwen3-coder-plus',
-        name: 'qwen3-coder-plus',
-        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-        description: 'qwen3-coder-plus model from Bailian Coding Plan',
-        envKey: CODING_PLAN_ENV_KEY,
-      },
-      {
-        id: 'qwen3-max-2026-01-23',
-        name: 'qwen3-max-2026-01-23',
-        description:
-          'qwen3-max model with thinking enabled from Bailian Coding Plan',
+        id: 'qwen3.5-plus',
+        name: '[Bailian Coding Plan] qwen3.5-plus',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
           extra_body: {
             enable_thinking: true,
           },
+          contextWindowSize: 1000000,
+        },
+      },
+      {
+        id: 'qwen3-coder-plus',
+        name: '[Bailian Coding Plan] qwen3-coder-plus',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          contextWindowSize: 1000000,
+        },
+      },
+      {
+        id: 'qwen3-coder-next',
+        name: '[Bailian Coding Plan] qwen3-coder-next',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          contextWindowSize: 262144,
+        },
+      },
+      {
+        id: 'qwen3-max-2026-01-23',
+        name: '[Bailian Coding Plan] qwen3-max-2026-01-23',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 262144,
+        },
+      },
+      {
+        id: 'glm-4.7',
+        name: '[Bailian Coding Plan] glm-4.7',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 202752,
+        },
+      },
+      {
+        id: 'glm-5',
+        name: '[Bailian Coding Plan] glm-5',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 202752,
+        },
+      },
+      {
+        id: 'MiniMax-M2.5',
+        name: '[Bailian Coding Plan] MiniMax-M2.5',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 1000000,
+        },
+      },
+      {
+        id: 'kimi-k2.5',
+        name: '[Bailian Coding Plan] kimi-k2.5',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 262144,
         },
       },
     ];
   }
 
-  // Global region uses new description with region indicator
+  // Global region uses Bailian Coding Plan branding for Global/Intl
   return [
     {
-      id: 'qwen3-coder-plus',
-      name: 'qwen3-coder-plus',
-      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
-      description: 'qwen3-coder-plus model from Coding Plan (Global/Intl)',
-      envKey: CODING_PLAN_ENV_KEY,
-    },
-    {
-      id: 'qwen3-max-2026-01-23',
-      name: 'qwen3-max-2026-01-23',
-      description:
-        'qwen3-max model with thinking enabled from Coding Plan (Global/Intl)',
+      id: 'qwen3.5-plus',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3.5-plus',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
         extra_body: {
           enable_thinking: true,
         },
+        contextWindowSize: 1000000,
+      },
+    },
+    {
+      id: 'qwen3-coder-plus',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-plus',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        contextWindowSize: 1000000,
+      },
+    },
+    {
+      id: 'qwen3-coder-next',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-next',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        contextWindowSize: 262144,
+      },
+    },
+    {
+      id: 'qwen3-max-2026-01-23',
+      name: '[Bailian Coding Plan for Global/Intl] qwen3-max-2026-01-23',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 262144,
+      },
+    },
+    {
+      id: 'glm-4.7',
+      name: '[Bailian Coding Plan for Global/Intl] glm-4.7',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 202752,
+      },
+    },
+    {
+      id: 'glm-5',
+      name: '[Bailian Coding Plan for Global/Intl] glm-5',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 202752,
+      },
+    },
+    {
+      id: 'MiniMax-M2.5',
+      name: '[Bailian Coding Plan for Global/Intl] MiniMax-M2.5',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 1000000,
+      },
+    },
+    {
+      id: 'kimi-k2.5',
+      name: '[Bailian Coding Plan for Global/Intl] kimi-k2.5',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 262144,
       },
     },
   ];

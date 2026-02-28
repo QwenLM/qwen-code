@@ -149,9 +149,6 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-vl-plus$/, LIMITS['256k']], // Qwen3-VL-Plus: 256K input
   [/^qwen-vl-max.*$/, LIMITS['128k']],
 
-  // Generic vision-model: same as qwen-vl-max (128K token context)
-  [/^vision-model$/, LIMITS['128k']],
-
   // -------------------
   // ByteDance Seed-OSS (512K)
   // -------------------
@@ -213,9 +210,6 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // Qwen-VL-Max-Latest: 8,192 max output tokens
   [/^qwen-vl-max-latest$/, LIMITS['8k']],
-
-  // Generic vision-model: same as qwen-vl-max-latest (8K max output tokens)
-  [/^vision-model$/, LIMITS['8k']],
 
   // Qwen3-VL-Plus: 32K max output tokens
   [/^qwen3-vl-plus$/, LIMITS['32k']],

@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ управление вложениями',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → выбрать, Delete удалить, ↓ выйти',
+  'Attachments: ': 'Вложения: ',
+
   'Basics:': 'Основы:',
   'Add context': 'Добавить контекст',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -1378,10 +1384,26 @@ export default {
     'Открываем страницу расширений в браузере: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Используйте /compress, когда разговор становится длинным, чтобы подвести итог и освободить контекст.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Начните новую идею с /clear или /new; предыдущая сессия останется в истории.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Используйте /bug, чтобы сообщить о проблемах разработчикам.',
+  'Switch auth type quickly with /auth.':
+    'Быстро переключите тип аутентификации с помощью /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Вы можете выполнять любые shell-команды в Qwen Code с помощью ! (например, !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Введите /, чтобы открыть меню команд; Tab автодополняет слэш-команды и сохранённые промпты.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'Вы можете продолжить предыдущий разговор, запустив qwen --continue или qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
 
   // ============================================================================
   // Custom API-KEY Configuration
@@ -1448,6 +1470,6 @@ export default {
     'Доступны новые конфигурации моделей для Coding Plan (Bailian, Глобальный/Международный). Обновить сейчас?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    'Успешная аутентификация с {{region}}. API-ключ сохранён в settings.env.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
 };

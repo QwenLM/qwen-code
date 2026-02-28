@@ -104,6 +104,15 @@ export const setupGithubCommand: SlashCommand = {
   ): Promise<SlashCommandActionReturn> => {
     const abortController = new AbortController();
 
+    // If we have a context abort signal (from ESC cancellation), link it to our controller
+    if (context.abortSignal) {
+      context.abortSignal.addEventListener(
+        'abort',
+        () => abortController.abort(),
+        { once: true },
+      );
+    }
+
     if (!isGitHubRepository()) {
       throw new Error(
         'Unable to determine the GitHub repository. /setup-github must be run from a git repository.',

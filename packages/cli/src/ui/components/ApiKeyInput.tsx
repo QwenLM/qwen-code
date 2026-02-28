@@ -24,7 +24,7 @@ const CODING_PLAN_API_KEY_URL =
   'https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan';
 
 const CODING_PLAN_INTL_API_KEY_URL =
-  'https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=globalset#/efm/api_key';
+  'https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan';
 
 export function ApiKeyInput({
   onSubmit,

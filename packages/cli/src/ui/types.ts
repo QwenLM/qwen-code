@@ -293,6 +293,14 @@ export type HistoryItemArenaSessionComplete = HistoryItemBase & {
   agents: ArenaAgentCardData[];
 };
 
+/**
+ * Insight progress message.
+ */
+export type HistoryItemInsightProgress = HistoryItemBase & {
+  type: 'insight_progress';
+  progress: InsightProgressProps;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -324,7 +332,8 @@ export type HistoryItemWithoutId =
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
   | HistoryItemArenaAgentComplete
-  | HistoryItemArenaSessionComplete;
+  | HistoryItemArenaSessionComplete
+  | HistoryItemInsightProgress;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -350,6 +359,15 @@ export enum MessageType {
   MCP_STATUS = 'mcp_status',
   ARENA_AGENT_COMPLETE = 'arena_agent_complete',
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
+  INSIGHT_PROGRESS = 'insight_progress',
+}
+
+export interface InsightProgressProps {
+  stage: string;
+  progress: number;
+  detail?: string;
+  isComplete?: boolean;
+  error?: string;
 }
 
 // Simplified message structure for internal feedback
@@ -415,6 +433,11 @@ export type Message =
   | {
       type: MessageType.SUMMARY;
       summary: SummaryProps;
+      timestamp: Date;
+    }
+  | {
+      type: MessageType.INSIGHT_PROGRESS;
+      progress: InsightProgressProps;
       timestamp: Date;
     };
 

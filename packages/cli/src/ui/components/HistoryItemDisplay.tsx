@@ -40,6 +40,7 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
+import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -206,6 +207,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           agents={itemForDisplay.agents}
           width={boxWidth}
         />
+      )}
+      {itemForDisplay.type === 'insight_progress' && (
+        <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
     </Box>
   );

@@ -18,6 +18,7 @@ export {
   DEFAULT_QWEN_MODEL,
   DEFAULT_QWEN_FLASH_MODEL,
   DEFAULT_QWEN_EMBEDDING_MODEL,
+  MAINLINE_CODER_MODEL,
 } from './config/models.js';
 export {
   type AvailableModel,
@@ -288,6 +289,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/jsonl-utils.js';
 
 // ============================================================================
 // OAuth & Authentication

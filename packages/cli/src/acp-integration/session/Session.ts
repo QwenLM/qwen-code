@@ -516,6 +516,18 @@ export class Session implements SessionContext {
           ? await invocation.shouldConfirmExecute(abortSignal)
           : false;
 
+      // Check for plan mode enforcement - block non-read-only tools
+      const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
+      if (isPlanMode && !isExitPlanModeTool && confirmationDetails) {
+        // In plan mode, block any tool that requires confirmation (write operations)
+        return errorResponse(
+          new Error(
+            `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
+              'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+          ),
+        );
+      }
+
       if (confirmationDetails) {
         const content: acp.ToolCallContent[] = [];
 
