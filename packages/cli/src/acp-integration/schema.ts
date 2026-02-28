@@ -59,7 +59,7 @@ export type CancelNotification = z.infer<typeof cancelNotificationSchema>;
 
 export type AuthenticateRequest = z.infer<typeof authenticateRequestSchema>;
 
-export type NewSessionResponse = z.infer<typeof newSessionResponseSchema>;
+// Note: NewSessionResponse type is defined later after newSessionResponseSchema
 
 export type LoadSessionResponse = z.infer<typeof loadSessionResponseSchema>;
 
@@ -285,10 +285,7 @@ export const sessionModelStateSchema = z.object({
   currentModelId: modelIdSchema,
 });
 
-export const newSessionResponseSchema = z.object({
-  sessionId: z.string(),
-  models: sessionModelStateSchema,
-});
+// Note: newSessionResponseSchema is defined later in the file after modesDataSchema
 
 export const loadSessionResponseSchema = z.null();
 
@@ -450,6 +447,34 @@ export const modesDataSchema = z.object({
   currentModeId: approvalModeValueSchema,
   availableModes: z.array(modeInfoSchema),
 });
+
+export const configOptionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  category: z.string(),
+  type: z.string(),
+  currentValue: z.string(),
+  options: z.array(
+    z.object({
+      value: z.string(),
+      name: z.string(),
+      description: z.string(),
+    }),
+  ),
+});
+
+export type ConfigOption = z.infer<typeof configOptionSchema>;
+
+// newSessionResponseSchema includes modes and configOptions for ACP/Zed integration
+export const newSessionResponseSchema = z.object({
+  sessionId: z.string(),
+  models: sessionModelStateSchema,
+  modes: modesDataSchema,
+  configOptions: z.array(configOptionSchema),
+});
+
+export type NewSessionResponse = z.infer<typeof newSessionResponseSchema>;
 
 export const agentInfoSchema = z.object({
   name: z.string(),

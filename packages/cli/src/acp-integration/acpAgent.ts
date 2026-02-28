@@ -153,10 +153,14 @@ class GeminiAgent {
 
     const session = await this.createAndStoreSession(config);
     const availableModels = this.buildAvailableModels(config);
+    const modesData = this.buildModesData(config);
+    const configOptions = this.buildConfigOptions(config);
 
     return {
       sessionId: session.getId(),
       models: availableModels,
+      modes: modesData,
+      configOptions,
     };
   }
 
@@ -447,6 +451,70 @@ class GeminiAgent {
       currentModelId,
       availableModels: mappedAvailableModels,
     };
+  }
+
+  private buildModesData(config: Config): acp.ModesData {
+    const currentApprovalMode = config.getApprovalMode();
+
+    const availableModes = APPROVAL_MODES.map((mode) => ({
+      id: mode as ApprovalModeValue,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    return {
+      currentModeId: currentApprovalMode as ApprovalModeValue,
+      availableModes,
+    };
+  }
+
+  private buildConfigOptions(config: Config): acp.ConfigOption[] {
+    const currentApprovalMode = config.getApprovalMode();
+    const currentModelId = this.formatCurrentModelId(
+      config.getModel() || this.config.getModel() || '',
+      config.getAuthType(),
+    );
+
+    const modeOptions = APPROVAL_MODES.map((mode) => ({
+      value: mode,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    const allConfiguredModels = config.getAllConfiguredModels();
+    const modelOptions = allConfiguredModels.map((model) => {
+      const effectiveModelId =
+        model.isRuntimeModel && model.runtimeSnapshotId
+          ? model.runtimeSnapshotId
+          : model.id;
+
+      return {
+        value: formatAcpModelId(effectiveModelId, model.authType),
+        name: model.label,
+        description: model.description ?? '',
+      };
+    });
+
+    return [
+      {
+        id: 'mode',
+        name: 'Mode',
+        description: 'Session permission mode',
+        category: 'mode',
+        type: 'select',
+        currentValue: currentApprovalMode,
+        options: modeOptions,
+      },
+      {
+        id: 'model',
+        name: 'Model',
+        description: 'AI model to use',
+        category: 'model',
+        type: 'select',
+        currentValue: currentModelId,
+        options: modelOptions,
+      },
+    ];
   }
 
   private formatCurrentModelId(
