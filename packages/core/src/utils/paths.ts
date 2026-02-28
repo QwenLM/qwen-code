@@ -203,6 +203,25 @@ export function getProjectHash(projectRoot: string): string {
 }
 
 /**
+ * Sanitizes a directory path to create a safe project ID.
+ *
+ * - On Windows: normalizes to lowercase for case-insensitive matching
+ * - Replaces all non-alphanumeric characters with hyphens
+ *
+ * This is used for:
+ * - Creating project-specific directories
+ * - Generating session IDs for debug logging during startup
+ *
+ * @param cwd - The directory path to sanitize
+ * @returns A sanitized string safe for use as a project identifier
+ */
+export function sanitizeCwd(cwd: string): string {
+  // On Windows, normalize to lowercase for case-insensitive matching
+  const normalizedCwd = os.platform() === 'win32' ? cwd.toLowerCase() : cwd;
+  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
  * Checks if a path is a subpath of another path.
  * @param parentPath The parent path.
  * @param childPath The child path.

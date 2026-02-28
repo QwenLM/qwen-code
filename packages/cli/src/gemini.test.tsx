@@ -190,6 +190,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     try {
       await main();
@@ -322,6 +323,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -452,6 +454,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
