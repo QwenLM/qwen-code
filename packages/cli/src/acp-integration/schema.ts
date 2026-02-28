@@ -302,7 +302,7 @@ export const listSessionsResponseSchema = z.object({
 
 export const listSessionsRequestSchema = z.object({
   cursor: z.number().optional(),
-  cwd: z.string(),
+  cwd: z.string().optional(),
   size: z.number().optional(),
 });
 
@@ -398,7 +398,6 @@ export const agentCapabilitiesSchema = z.object({
   promptCapabilities: promptCapabilitiesSchema.optional(),
   sessionCapabilities: z
     .object({
-      fork: z.object({}).optional(),
       list: z.object({}).optional(),
       resume: z.object({}).optional(),
     })

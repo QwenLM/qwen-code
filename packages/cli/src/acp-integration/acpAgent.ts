@@ -108,7 +108,6 @@ class GeminiAgent {
           embeddedContext: true,
         },
         sessionCapabilities: {
-          fork: {},
           list: {},
           resume: {},
         },
@@ -248,7 +247,8 @@ class GeminiAgent {
   async listSessions(
     params: acp.ListSessionsRequest,
   ): Promise<acp.ListSessionsResponse> {
-    const sessionService = new SessionService(params.cwd);
+    const cwd = params.cwd || process.cwd();
+    const sessionService = new SessionService(cwd);
     const result = await sessionService.listSessions({
       cursor: params.cursor,
       size: params.size,
