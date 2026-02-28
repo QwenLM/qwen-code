@@ -396,6 +396,13 @@ export const promptCapabilitiesSchema = z.object({
 export const agentCapabilitiesSchema = z.object({
   loadSession: z.boolean().optional(),
   promptCapabilities: promptCapabilitiesSchema.optional(),
+  sessionCapabilities: z
+    .object({
+      fork: z.object({}).optional(),
+      list: z.object({}).optional(),
+      resume: z.object({}).optional(),
+    })
+    .optional(),
 });
 
 export const authMethodSchema = z.object({

@@ -107,6 +107,11 @@ class GeminiAgent {
           audio: true,
           embeddedContext: true,
         },
+        sessionCapabilities: {
+          fork: {},
+          list: {},
+          resume: {},
+        },
       },
     };
   }
