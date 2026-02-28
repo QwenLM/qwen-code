@@ -32,6 +32,7 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
+import { tryParseJSON } from '../../utils/jsonoutput.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 const STATIC_HEIGHT = 1;
@@ -196,6 +197,22 @@ const StringResultRenderer: React.FC<{
   // Truncate if too long
   if (displayData.length > MAXIMUM_RESULT_DISPLAY_CHARACTERS) {
     displayData = '...' + displayData.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS);
+  }
+
+  // Check if content is valid JSON and pretty-print it
+  const prettyJSON = tryParseJSON(displayData);
+  const formattedJSON = prettyJSON ? JSON.stringify(prettyJSON, null, 2) : null;
+
+  if (formattedJSON) {
+    return (
+      <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
+        <Box>
+          <Text wrap="wrap" color={theme.text.primary}>
+            {formattedJSON}
+          </Text>
+        </Box>
+      </MaxSizedBox>
+    );
   }
 
   if (renderAsMarkdown) {

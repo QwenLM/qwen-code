@@ -24,13 +24,16 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
 
-  const { promptTokenCount, showAutoAcceptIndicator } = {
+  const { promptTokenCount, showAutoAcceptIndicator, branchName } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
+    branchName: uiState.branchName,
   };
 
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
+
+  const targetDir = config.getTargetDir();
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -77,6 +80,16 @@ export const Footer: React.FC = () => {
     rightItems.push({
       key: 'debug',
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
+    });
+  }
+  if (branchName) {
+    rightItems.push({
+      key: 'branch',
+      node: (
+        <Text color={theme.text.secondary}>
+          {targetDir} ({branchName}*)
+        </Text>
+      ),
     });
   }
   if (promptTokenCount > 0 && contextWindowSize) {
