@@ -354,6 +354,21 @@ export async function processSingleFileContent(
       .relative(rootDirectory, filePath)
       .replace(/\\/g, '/');
 
+    // Per-type size limits (conservative defaults based on provider API limits)
+    const FILE_TYPE_SIZE_LIMITS_MB: Partial<Record<typeof fileType, number>> = {
+      image: 5,
+      pdf: 10,
+    };
+    const typeLimitMB = FILE_TYPE_SIZE_LIMITS_MB[fileType];
+    if (typeLimitMB !== undefined && fileSizeInMB > typeLimitMB) {
+      return {
+        llmContent: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files.`,
+        returnDisplay: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files.`,
+        error: `File size exceeds the ${typeLimitMB}MB limit for ${fileType} files: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
+
     const displayName = path.basename(filePath);
     switch (fileType) {
       case 'binary': {

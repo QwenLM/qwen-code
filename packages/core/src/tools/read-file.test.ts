@@ -248,6 +248,32 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it('should enforce per-type size limits for image and pdf files', async () => {
+      // 6MB image exceeds 5MB image limit
+      const imgPath = path.join(tempRootDir, 'large.png');
+      await fsp.writeFile(imgPath, Buffer.alloc(6 * 1024 * 1024));
+      const imgParams: ReadFileToolParams = { absolute_path: imgPath };
+      const imgInvocation = tool.build(imgParams) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+      const imgResult = await imgInvocation.execute(abortSignal);
+      expect(imgResult.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(imgResult.error?.message).toContain('5MB limit for image files');
+
+      // 11MB PDF exceeds 10MB pdf limit
+      const pdfPath = path.join(tempRootDir, 'large.pdf');
+      await fsp.writeFile(pdfPath, Buffer.alloc(11 * 1024 * 1024));
+      const pdfParams: ReadFileToolParams = { absolute_path: pdfPath };
+      const pdfInvocation = tool.build(pdfParams) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+      const pdfResult = await pdfInvocation.execute(abortSignal);
+      expect(pdfResult.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(pdfResult.error?.message).toContain('10MB limit for pdf files');
+    });
+
     it('should handle text file with lines exceeding maximum length', async () => {
       const filePath = path.join(tempRootDir, 'longlines.txt');
       const longLine = 'a'.repeat(2500); // Exceeds MAX_LINE_LENGTH_TEXT_FILE (2000)
