@@ -20,7 +20,9 @@ import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageCont
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import { WarningMessage } from './messages/WarningMessage.js';
-import { RetryCountdownMessage } from './messages/RetryCountdownMessage.js';
+// RetryCountdownMessage is no longer rendered as a separate item;
+// retry countdown is now displayed inline as a hint in ErrorMessage.
+// Import kept for backward compatibility if needed elsewhere.
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
@@ -126,11 +128,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <WarningMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'error' && (
-        <ErrorMessage text={itemForDisplay.text} />
+        <ErrorMessage text={itemForDisplay.text} hint={itemForDisplay.hint} />
       )}
-      {itemForDisplay.type === 'retry_countdown' && (
-        <RetryCountdownMessage text={itemForDisplay.text} />
-      )}
+      {/* retry_countdown is now rendered inline as a hint in ErrorMessage */}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
       )}

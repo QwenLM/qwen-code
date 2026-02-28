@@ -169,17 +169,19 @@ export const useGeminiStream = (
   const abortControllerRef = useRef<AbortController | null>(null);
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
+  const lastPromptRef = useRef<PartListUnion | null>(null);
+  const lastPromptErroredRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
-  const [pendingRetryErrorItem, setPendingRetryErrorItem] =
-    useState<HistoryItemWithoutId | null>(null);
   const [
-    pendingRetryCountdownItem,
-    pendingRetryCountdownItemRef,
-    setPendingRetryCountdownItem,
+    pendingRetryErrorItem,
+    pendingRetryErrorItemRef,
+    setPendingRetryErrorItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
+  const [pendingRetryCountdownItem, setPendingRetryCountdownItem] =
+    useState<HistoryItemWithoutId | null>(null);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
@@ -258,7 +260,11 @@ export const useGeminiStream = (
     stopRetryCountdownTimer();
     setPendingRetryErrorItem(null);
     setPendingRetryCountdownItem(null);
-  }, [setPendingRetryCountdownItem, stopRetryCountdownTimer]);
+  }, [
+    setPendingRetryCountdownItem,
+    setPendingRetryErrorItem,
+    stopRetryCountdownTimer,
+  ]);
 
   const startRetryCountdown = useCallback(
     (retryInfo: {
@@ -285,17 +291,21 @@ export const useGeminiStream = (
         const remainingMs = Math.max(0, delayMs - elapsedMs);
         const remainingSec = Math.ceil(remainingMs / 1000);
 
-        setPendingRetryCountdownItem({
-          type: 'retry_countdown',
-          text: t(
-            'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
-            {
-              seconds: String(remainingSec),
-              attempt: String(attempt),
-              maxRetries: String(maxRetries),
-            },
-          ),
-        } as HistoryItemWithoutId);
+        const hintText = t(
+          'retrying in {{seconds}}s, attempt {{attempt}}/{{maxRetries}}',
+          {
+            seconds: String(remainingSec),
+            attempt: String(attempt),
+            maxRetries: String(maxRetries),
+          },
+        );
+
+        // Update error item with countdown hint
+        setPendingRetryErrorItem({
+          type: MessageType.ERROR,
+          text: retryReasonText,
+          hint: hintText,
+        });
 
         if (remainingMs <= 0) {
           stopRetryCountdownTimer();
@@ -305,7 +315,7 @@ export const useGeminiStream = (
       updateCountdown();
       retryCountdownTimerRef.current = setInterval(updateCountdown, 1000);
     },
-    [setPendingRetryCountdownItem, stopRetryCountdownTimer],
+    [setPendingRetryErrorItem, stopRetryCountdownTimer],
   );
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
@@ -732,27 +742,28 @@ export const useGeminiStream = (
 
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
+      lastPromptErroredRef.current = true;
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
-      addItem(
-        {
-          type: MessageType.ERROR,
-          text: parseAndFormatApiError(
-            eventValue.error,
-            config.getContentGeneratorConfig()?.authType,
-          ),
-        },
-        userMessageTimestamp,
-      );
       clearRetryCountdown();
+      // Store error as pending item with retry hint
+      setPendingRetryErrorItem({
+        type: 'error' as const,
+        text: parseAndFormatApiError(
+          eventValue.error,
+          config.getContentGeneratorConfig()?.authType,
+        ),
+        hint: t('Press Ctrl+Y to retry.'),
+      });
       setThought(null); // Reset thought when there's an error
     },
     [
       addItem,
       pendingHistoryItemRef,
       setPendingHistoryItem,
+      setPendingRetryErrorItem,
       config,
       setThought,
       clearRetryCountdown,
@@ -984,7 +995,7 @@ export const useGeminiStream = (
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
-            } else if (!pendingRetryCountdownItemRef.current) {
+            } else if (!pendingRetryErrorItemRef.current) {
               clearRetryCountdown();
             }
             break;
@@ -1016,14 +1027,14 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
-      pendingRetryCountdownItemRef,
+      pendingRetryErrorItemRef,
     ],
   );
 
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
-      options?: { isContinuation: boolean },
+      options?: { isContinuation: boolean; skipPreparation?: boolean },
       prompt_id?: string,
     ) => {
       // Prevent concurrent executions of submitQuery, but allow continuations
@@ -1059,12 +1070,14 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } = await prepareQueryForGemini(
-          query,
-          userMessageTimestamp,
-          abortSignal,
-          prompt_id!,
-        );
+        const { queryToSend, shouldProceed } = options?.skipPreparation
+          ? { queryToSend: query, shouldProceed: true }
+          : await prepareQueryForGemini(
+              query,
+              userMessageTimestamp,
+              abortSignal,
+              prompt_id!,
+            );
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
@@ -1086,6 +1099,8 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
+        lastPromptRef.current = finalQueryToSend;
+        lastPromptErroredRef.current = false;
 
         if (!options?.isContinuation) {
           // trigger new prompt event for session stats in CLI
@@ -1142,16 +1157,16 @@ export const useGeminiStream = (
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
-            addItem(
-              {
-                type: MessageType.ERROR,
-                text: parseAndFormatApiError(
-                  getErrorMessage(error) || 'Unknown error',
-                  config.getContentGeneratorConfig()?.authType,
-                ),
-              },
-              userMessageTimestamp,
-            );
+            lastPromptErroredRef.current = true;
+            // Store error as pending item with retry hint
+            setPendingRetryErrorItem({
+              type: 'error' as const,
+              text: parseAndFormatApiError(
+                getErrorMessage(error) || 'Unknown error',
+                config.getContentGeneratorConfig()?.authType,
+              ),
+              hint: t('Press Ctrl+Y to retry.'),
+            });
           }
         } finally {
           setIsResponding(false);
@@ -1174,8 +1189,47 @@ export const useGeminiStream = (
       startNewPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
+      setPendingRetryErrorItem,
     ],
   );
+
+  /**
+   * Retries the last failed prompt when user presses Ctrl+Y.
+   */
+  const retryLastPrompt = useCallback(async () => {
+    if (
+      streamingState === StreamingState.Responding ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      return;
+    }
+
+    const lastPrompt = lastPromptRef.current;
+    if (!lastPrompt || !lastPromptErroredRef.current) {
+      addItem(
+        { type: MessageType.INFO, text: t('No failed request to retry.') },
+        Date.now(),
+      );
+      return;
+    }
+
+    // Commit the error message to history (without hint), then clear pending item
+    const errorItem = pendingRetryErrorItemRef.current;
+    if (errorItem) {
+      addItem({ type: errorItem.type, text: errorItem.text }, Date.now());
+    }
+    clearRetryCountdown();
+    await submitQuery(lastPrompt, {
+      isContinuation: false,
+      skipPreparation: true,
+    });
+  }, [
+    streamingState,
+    addItem,
+    submitQuery,
+    clearRetryCountdown,
+    pendingRetryErrorItemRef,
+  ]);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
@@ -1480,6 +1534,7 @@ export const useGeminiStream = (
     pendingHistoryItems,
     thought,
     cancelOngoingRequest,
+    retryLastPrompt,
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,
     activePtyId,

@@ -1382,6 +1382,9 @@ export default {
   'Rate limit error: {{reason}}': 'Rate limit error: {{reason}}',
   'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
     'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+  'Press Ctrl+Y to retry.': 'Press Ctrl+Y to retry.',
+  'No failed request to retry.': 'No failed request to retry.',
+  'to retry last request': 'to retry last request',
 
   // ============================================================================
   // Coding Plan Authentication

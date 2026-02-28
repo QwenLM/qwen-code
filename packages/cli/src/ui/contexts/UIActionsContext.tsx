@@ -66,6 +66,7 @@ export interface UIActions {
   onSuggestionsVisibilityChange: (visible: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
+  handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
