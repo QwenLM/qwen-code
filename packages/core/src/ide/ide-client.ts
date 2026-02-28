@@ -135,13 +135,29 @@ export class IdeClient {
   }
 
   async connect(): Promise<void> {
-    if (!this.currentIde) {
+    // Check if we're in a cloud IDE environment
+    const isInCloudIde =
+      process.env['CODESPACES'] === 'true' ||
+      process.env['CLOUD_SHELL'] === 'true' ||
+      process.env['DEVCONTAINER'] === 'true';
+
+    if (!this.currentIde && !isInCloudIde) {
       this.setState(
         IDEConnectionStatus.Disconnected,
         `IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks`,
         false,
       );
       return;
+    }
+
+    // In cloud IDE environments, we still try to connect even if currentIde is undefined
+    // because the IDE extension might be running on the host
+    if (!this.currentIde && isInCloudIde) {
+      // Set a default IDE info for cloud environments
+      this.currentIde = {
+        name: 'cloud-ide',
+        displayName: 'Cloud IDE',
+      };
     }
 
     this.setState(IDEConnectionStatus.Connecting);
@@ -201,7 +217,7 @@ export class IdeClient {
 
     this.setState(
       IDEConnectionStatus.Disconnected,
-      `Failed to connect to IDE companion extension in ${this.currentIde.displayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      `Failed to connect to IDE companion extension in ${this.currentIde?.displayName ?? 'your IDE'}. Please ensure the extension is running. To install the extension, run /ide install.`,
       true,
     );
   }
@@ -673,13 +689,16 @@ export class IdeClient {
   }
 
   private createProxyAwareFetch(ideHost: string) {
-    // ignore proxy for '127.0.0.1' and the actual IDE host by default
+    // ignore proxy for '127.0.0.1' and 'host.docker.internal' by default
     // to allow connecting to the ide mcp server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
+    const noProxyHosts = [existingNoProxy, '127.0.0.1'];
+    // Add the IDE host to no_proxy if it's host.docker.internal
+    if (ideHost === 'host.docker.internal') {
+      noProxyHosts.push(ideHost);
+    }
     const agent = new EnvHttpProxyAgent({
-      noProxy: [existingNoProxy, '127.0.0.1', ideHost]
-        .filter(Boolean)
-        .join(','),
+      noProxy: noProxyHosts.filter(Boolean).join(','),
     });
     const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
@@ -917,13 +936,23 @@ function checkHostReachable(hostname: string): Promise<boolean> {
  * exist in Linux Docker or other container runtimes (e.g. code-server remote).
  *
  * This function:
- * 1. Detects if we are inside a container (via `/.dockerenv` or `/run/.containerenv`).
+ * 1. Detects if we are inside a container (via `/.dockerenv`, `/run/.containerenv`,
+ *    or cloud IDE environment variables like CODESPACES, CLOUD_SHELL, DEVCONTAINER).
  * 2. If so, performs an async DNS check to verify `host.docker.internal` is resolvable.
  * 3. Falls back to `127.0.0.1` if the hostname is not reachable.
  */
 async function doLookup(): Promise<string> {
-  const isInContainer =
+  // Check for Docker container
+  const isInDocker =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
+
+  // Check for cloud IDE environments
+  const isInCodespaces = process.env['CODESPACES'] === 'true';
+  const isInCloudShell = process.env['CLOUD_SHELL'] === 'true';
+  const isInDevContainer = process.env['DEVCONTAINER'] === 'true';
+
+  const isInContainer =
+    isInDocker || isInCodespaces || isInCloudShell || isInDevContainer;
 
   if (isInContainer) {
     const reachable = await checkHostReachable('host.docker.internal');

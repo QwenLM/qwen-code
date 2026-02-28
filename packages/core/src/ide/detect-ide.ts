@@ -83,6 +83,25 @@ export function detectIde(
     };
   }
 
+  // Check for cloud IDE environments first
+  if (process.env['CODESPACES'] === 'true') {
+    return IDE_DEFINITIONS.codespaces;
+  }
+  if (
+    process.env['CLOUD_SHELL'] === 'true' ||
+    process.env['EDITOR_IN_CLOUD_SHELL']
+  ) {
+    return IDE_DEFINITIONS.cloudshell;
+  }
+  if (process.env['DEVCONTAINER'] === 'true') {
+    // Dev container could be VS Code based
+    if (process.env['TERM_PROGRAM'] === 'vscode') {
+      const ide = detectIdeFromEnv();
+      return verifyVSCode(ide, ideProcessInfo);
+    }
+    return undefined;
+  }
+
   // Only VSCode-based integrations are currently supported.
   if (process.env['TERM_PROGRAM'] !== 'vscode') {
     return undefined;
