@@ -20,13 +20,8 @@ import { createUserContent } from '@google/genai';
 import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
-import {
-  isRateLimitError,
-  isNetworkError,
-  type RetryInfo,
-} from '../utils/rateLimit.js';
+import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/config.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -291,13 +286,6 @@ export class GeminiChat {
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
 
-        // Read per-config overrides; fall back to built-in defaults.
-        const cgConfig = self.config.getContentGeneratorConfig();
-        const maxRateLimitRetries =
-          cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
-        const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
-        const isYolo = self.config.getApprovalMode() === ApprovalMode.YOLO;
-
         for (
           let attempt = 0;
           attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
@@ -328,18 +316,18 @@ export class GeminiChat {
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
-            // In yolo mode, transient network errors are also retried.
-            const shouldRetry =
-              isRateLimitError(error, extraRetryErrorCodes) ||
-              (isYolo && isNetworkError(error));
-            if (shouldRetry && rateLimitRetryCount < maxRateLimitRetries) {
+            const isRateLimit = isRateLimitError(error);
+            if (
+              isRateLimit &&
+              rateLimitRetryCount < RATE_LIMIT_RETRY_OPTIONS.maxRetries
+            ) {
               rateLimitRetryCount++;
               const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
               const message = parseAndFormatApiError(
                 error instanceof Error ? error.message : String(error),
               );
               debugLogger.warn(
-                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
+                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${RATE_LIMIT_RETRY_OPTIONS.maxRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               yield {
@@ -347,7 +335,7 @@ export class GeminiChat {
                 retryInfo: {
                   message,
                   attempt: rateLimitRetryCount,
-                  maxRetries: maxRateLimitRetries,
+                  maxRetries: RATE_LIMIT_RETRY_OPTIONS.maxRetries,
                   delayMs,
                 },
               };
@@ -410,7 +398,6 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const isYolo = this.config.getApprovalMode() === ApprovalMode.YOLO;
     const apiCall = () =>
       this.config.getContentGenerator().generateContentStream(
         {
@@ -431,9 +418,6 @@ export class GeminiChat {
         if (status === 400) return false;
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
-
-        // In yolo mode, also retry transient network errors
-        if (isYolo && isNetworkError(error)) return true;
 
         return false;
       },

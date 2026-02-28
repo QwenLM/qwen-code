@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isRateLimitError, isNetworkError } from './rateLimit.js';
+import { isRateLimitError } from './rateLimit.js';
 import type { StructuredError } from '../core/turn.js';
 import type { HttpError } from './retry.js';
 
@@ -52,23 +52,6 @@ describe('isRateLimitError — detection paths', () => {
     ).toBe(false);
   });
 
-  it('should detect custom error code passed via extraCodes', () => {
-    // Use a code NOT in the built-in RATE_LIMIT_ERROR_CODES set (429, 503, 1302, 1305)
-    // to ensure we are truly exercising the extraCodes branch.
-    expect(
-      isRateLimitError(
-        { error: { code: 8888, message: 'Custom rate limit' } },
-        [8888],
-      ),
-    ).toBe(true);
-  });
-
-  it('should not detect custom code when extraCodes is not provided', () => {
-    // 9999 is not a built-in rate-limit code, so it should not be detected without extraCodes
-    expect(
-      isRateLimitError({ error: { code: 9999, message: 'Custom rate limit' } }),
-    ).toBe(false);
-  });
   it('should return null for invalid inputs', () => {
     expect(isRateLimitError(null)).toBe(false);
     expect(isRateLimitError(undefined)).toBe(false);
@@ -92,44 +75,6 @@ describe('isRateLimitError — return shape', () => {
   });
 
   it('should return null for non-rate-limit errors', () => {
-    expect(isRateLimitError(new Error('Some random error'))).toBe(false);
-  });
-});
-
-describe('isNetworkError — transient network failure detection', () => {
-  it('should detect ECONNREFUSED', () => {
-    const error = new Error('connect ECONNREFUSED 127.0.0.1:3000');
-    (error as { code?: string }).code = 'ECONNREFUSED';
-    expect(isNetworkError(error)).toBe(true);
-  });
-
-  it('should detect ETIMEDOUT', () => {
-    const error = new Error('connect ETIMEDOUT');
-    (error as { code?: string }).code = 'ETIMEDOUT';
-    expect(isNetworkError(error)).toBe(true);
-  });
-
-  it('should detect ECONNRESET', () => {
-    const error = new Error('read ECONNRESET');
-    (error as { code?: string }).code = 'ECONNRESET';
-    expect(isNetworkError(error)).toBe(true);
-  });
-
-  it('should NOT match by message alone (requires .code property)', () => {
-    const error = new Error('connection refused by server');
-    expect(isNetworkError(error)).toBe(false);
-  });
-
-  it('should NOT match non-Error values', () => {
-    expect(isNetworkError('ECONNREFUSED')).toBe(false);
-    expect(isNetworkError(null)).toBe(false);
-    expect(isNetworkError({ code: 'ECONNREFUSED' })).toBe(false);
-  });
-
-  it('should NOT be detected by isRateLimitError (separate concerns)', () => {
-    const error = new Error('connect ECONNREFUSED 127.0.0.1:3000');
-    (error as { code?: string }).code = 'ECONNREFUSED';
-    // isRateLimitError only checks numeric error codes, not network errors
-    expect(isRateLimitError(error)).toBe(false);
+    expect(isRateLimitError(new Error('Connection refused'))).toBe(false);
   });
 });

@@ -32,10 +32,10 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 };
 
 /**
- * Default predicate: retries on 429, 5xx server errors.
- * Network errors are NOT retried by default — callers that want yolo-style
- * resilience should pass a custom shouldRetryOnError that also calls
- * {@link import('./rateLimit.js').isNetworkError isNetworkError}.
+ * Default predicate function to determine if a retry should be attempted.
+ * Retries on 429 (Too Many Requests) and 5xx server errors.
+ * @param error The error object.
+ * @returns True if the error is a transient error, false otherwise.
  */
 function defaultShouldRetry(error: Error | unknown): boolean {
   const status = getErrorStatus(error);
