@@ -98,6 +98,8 @@ export type ContentGeneratorConfig = {
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body
   extra_body?: Record<string, unknown>;
+  // Additional error codes to treat as rate-limit errors for retry logic
+  retryErrorCodes?: number[];
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

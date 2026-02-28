@@ -10,7 +10,29 @@ import { isApiError, isStructuredError } from './quotaErrorDetection.js';
 // 429  - Standard HTTP "Too Many Requests" (DashScope TPM, OpenAI, etc.)
 // 503  - Provider throttling/overload (treated as rate-limit for retry UI)
 // 1302 - Z.AI GLM rate limit (https://docs.z.ai/api-reference/api-code)
-const RATE_LIMIT_ERROR_CODES = new Set([429, 503, 1302]);
+// 1305 - DashScope rate limit (https://help.aliyun.com/zh/model-studio/developer-reference/error-code)
+const RATE_LIMIT_ERROR_CODES = new Set([429, 503, 1302, 1305]);
+
+/** Node.js error codes that indicate a transient network/connection failure. */
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNREFUSED', // Connection refused
+  'ECONNRESET', // Connection reset by peer
+  'ETIMEDOUT', // Connection timed out
+  'ENOTFOUND', // DNS lookup failed
+  'EPIPE', // Broken pipe
+  'EHOSTUNREACH', // Host unreachable
+  'ECONNABORTED', // Connection aborted
+]);
+
+/**
+ * Returns true if the error is a transient network/connection failure.
+ * Detection is based solely on Node.js error codes — no message matching.
+ */
+export function isNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code;
+  return code !== undefined && NETWORK_ERROR_CODES.has(code);
+}
 
 export interface RetryInfo {
   /** Formatted error message for display, produced by parseAndFormatApiError. */
@@ -24,11 +46,25 @@ export interface RetryInfo {
 }
 
 /**
- * Detects rate-limit / throttling errors and returns retry info.
+ * Detects rate-limit / throttling errors based on numeric error codes.
+ *
+ * This function only checks rate-limit error codes. For transient network
+ * errors (ECONNREFUSED, ETIMEDOUT, etc.), use {@link isNetworkError} directly
+ * and compose the check at the call site.
+ *
+ * @param error - The error to check.
+ * @param extraCodes - Additional error codes to treat as rate-limit errors,
+ *   merged with the built-in set at call time (not mutating the default set).
  */
-export function isRateLimitError(error: unknown): boolean {
+export function isRateLimitError(
+  error: unknown,
+  extraCodes?: number[],
+): boolean {
   const code = getErrorCode(error);
-  return code !== null && RATE_LIMIT_ERROR_CODES.has(code);
+  if (code === null) return false;
+  if (RATE_LIMIT_ERROR_CODES.has(code)) return true;
+  if (extraCodes?.includes(code)) return true;
+  return false;
 }
 
 /**

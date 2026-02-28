@@ -180,8 +180,6 @@ export const useGeminiStream = (
     pendingRetryErrorItemRef,
     setPendingRetryErrorItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
-  const [pendingRetryCountdownItem, setPendingRetryCountdownItem] =
-    useState<HistoryItemWithoutId | null>(null);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
@@ -256,15 +254,38 @@ export const useGeminiStream = (
     }
   }, []);
 
-  const clearRetryCountdown = useCallback(() => {
-    stopRetryCountdownTimer();
-    setPendingRetryErrorItem(null);
-    setPendingRetryCountdownItem(null);
-  }, [
-    setPendingRetryCountdownItem,
-    setPendingRetryErrorItem,
-    stopRetryCountdownTimer,
-  ]);
+  /**
+   * Clears the retry countdown timer and pending retry error item.
+   * When clearHint is true (default), the error is committed to history
+   * without the hint, so the hint disappears from the UI.
+   * When clearHint is false, the full error (with hint) is committed as-is.
+   */
+  const clearRetryCountdown = useCallback(
+    (options?: { clearHint?: boolean }) => {
+      stopRetryCountdownTimer();
+      const currentItem = pendingRetryErrorItemRef.current;
+      if (currentItem && currentItem.type === 'error') {
+        const clearHint = options?.clearHint ?? true;
+        if (clearHint) {
+          // Commit error to history without hint
+          addItem(
+            { ...currentItem, hint: undefined } as HistoryItemWithoutId,
+            Date.now(),
+          );
+        } else {
+          // Commit error to history with hint intact
+          addItem(currentItem, Date.now());
+        }
+      }
+      setPendingRetryErrorItem(null);
+    },
+    [
+      addItem,
+      pendingRetryErrorItemRef,
+      setPendingRetryErrorItem,
+      stopRetryCountdownTimer,
+    ],
+  );
 
   const startRetryCountdown = useCallback(
     (retryInfo: {
@@ -279,13 +300,11 @@ export const useGeminiStream = (
       const retryReasonText =
         message ?? t('Rate limit exceeded. Please wait and try again.');
 
-      // Error line stays static (red with ✕ prefix)
-      setPendingRetryErrorItem({
-        type: MessageType.ERROR,
-        text: retryReasonText,
-      });
-
-      // Countdown line updates every second (dim/secondary color)
+      /**
+       * Builds a unified error item with an inline hint for retry countdown.
+       * The hint is displayed in secondary/dimmed color after the error text,
+       * matching the style of "(esc to cancel, 5s)" in LoadingIndicator.
+       */
       const updateCountdown = () => {
         const elapsedMs = Date.now() - startTime;
         const remainingMs = Math.max(0, delayMs - elapsedMs);
@@ -300,9 +319,9 @@ export const useGeminiStream = (
           },
         );
 
-        // Update error item with countdown hint
+        // Merge error text and countdown hint into a single error item
         setPendingRetryErrorItem({
-          type: MessageType.ERROR,
+          type: 'error' as const,
           text: retryReasonText,
           hint: hintText,
         });
@@ -703,6 +722,7 @@ export const useGeminiStream = (
         return;
       }
 
+      lastPromptErroredRef.current = false;
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -747,15 +767,18 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const retryHint = t('Press Ctrl+Y to retry.');
+      // Store error with hint as a pending item (not in history).
+      // This allows the hint to be removed when the user retries with Ctrl+Y,
+      // since pending items are in the dynamic rendering area (not <Static>).
       clearRetryCountdown();
-      // Store error as pending item with retry hint
       setPendingRetryErrorItem({
         type: 'error' as const,
         text: parseAndFormatApiError(
           eventValue.error,
           config.getContentGeneratorConfig()?.authType,
         ),
-        hint: t('Press Ctrl+Y to retry.'),
+        hint: retryHint,
       });
       setThought(null); // Reset thought when there's an error
     },
@@ -827,7 +850,10 @@ export const useGeminiStream = (
           userMessageTimestamp,
         );
       }
-      clearRetryCountdown();
+      // Only clear auto-retry countdown errors (those with active timer)
+      if (retryCountdownTimerRef.current) {
+        clearRetryCountdown();
+      }
     },
     [addItem, clearRetryCountdown],
   );
@@ -1058,7 +1084,11 @@ export const useGeminiStream = (
       // Reset quota error flag when starting a new query (not a continuation)
       if (!options?.isContinuation) {
         setModelSwitchedFromQuotaError(false);
-        // No quota-error / fallback routing mechanism currently; keep state minimal.
+        // Commit any pending retry error to history (without hint) since the
+        // user is starting a new conversation turn
+        if (pendingRetryErrorItemRef.current) {
+          clearRetryCountdown({ clearHint: true });
+        }
       }
 
       abortControllerRef.current = new AbortController();
@@ -1149,6 +1179,12 @@ export const useGeminiStream = (
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
           }
+          // Only clear auto-retry countdown errors (those with an active timer).
+          // Do NOT clear static error+hint from handleErrorEvent — those should
+          // remain visible until the user presses Ctrl+Y to retry.
+          if (retryCountdownTimerRef.current) {
+            clearRetryCountdown({ clearHint: true });
+          }
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
@@ -1158,14 +1194,15 @@ export const useGeminiStream = (
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
             lastPromptErroredRef.current = true;
-            // Store error as pending item with retry hint
+            const retryHint = t('Press Ctrl+Y to retry.');
+            // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,
               text: parseAndFormatApiError(
                 getErrorMessage(error) || 'Unknown error',
                 config.getContentGeneratorConfig()?.authType,
               ),
-              hint: t('Press Ctrl+Y to retry.'),
+              hint: retryHint,
             });
           }
         } finally {
@@ -1189,12 +1226,31 @@ export const useGeminiStream = (
       startNewPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
+      clearRetryCountdown,
+      pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
     ],
   );
 
   /**
-   * Retries the last failed prompt when user presses Ctrl+Y.
+   * Retries the last failed prompt when the user presses Ctrl+Y.
+   *
+   * Activation conditions for Ctrl+Y shortcut:
+   * 1. ✅ The last request must have failed (lastPromptErroredRef.current === true)
+   * 2. ✅ Current streaming state must NOT be "Responding" (avoid interrupting ongoing stream)
+   * 3. ✅ Current streaming state must NOT be "WaitingForConfirmation" (avoid conflicting with tool confirmation flow)
+   * 4. ✅ There must be a stored lastPrompt in lastPromptRef.current
+   *
+   * When conditions are not met:
+   * - If streaming is active (Responding/WaitingForConfirmation): silently return without action
+   * - If no failed request exists: display "No failed request to retry." info message
+   *
+   * When conditions are met:
+   * - Clears any pending auto-retry countdown to avoid duplicate retries
+   * - Re-submits the last query with skipPreparation: true for faster retry
+   *
+   * This function is exposed via UIActionsContext and triggered by InputPrompt
+   * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
    */
   const retryLastPrompt = useCallback(async () => {
     if (
@@ -1207,29 +1263,24 @@ export const useGeminiStream = (
     const lastPrompt = lastPromptRef.current;
     if (!lastPrompt || !lastPromptErroredRef.current) {
       addItem(
-        { type: MessageType.INFO, text: t('No failed request to retry.') },
+        {
+          type: MessageType.INFO,
+          text: t('No failed request to retry.'),
+        },
         Date.now(),
       );
       return;
     }
 
-    // Commit the error message to history (without hint), then clear pending item
-    const errorItem = pendingRetryErrorItemRef.current;
-    if (errorItem) {
-      addItem({ type: errorItem.type, text: errorItem.text }, Date.now());
-    }
-    clearRetryCountdown();
+    // clearRetryCountdown commits the error (without hint) to history
+    // and clears the pending retry error item
+    clearRetryCountdown({ clearHint: true });
+
     await submitQuery(lastPrompt, {
       isContinuation: false,
       skipPreparation: true,
     });
-  }, [
-    streamingState,
-    addItem,
-    submitQuery,
-    clearRetryCountdown,
-    pendingRetryErrorItemRef,
-  ]);
+  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
@@ -1397,15 +1448,9 @@ export const useGeminiStream = (
       [
         pendingHistoryItem,
         pendingRetryErrorItem,
-        pendingRetryCountdownItem,
         pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
-    [
-      pendingHistoryItem,
-      pendingRetryErrorItem,
-      pendingRetryCountdownItem,
-      pendingToolCallGroupDisplay,
-    ],
+    [pendingHistoryItem, pendingRetryErrorItem, pendingToolCallGroupDisplay],
   );
 
   useEffect(() => {
