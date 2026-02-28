@@ -27,23 +27,6 @@ const EXTENSION_EXPLORE_URL = {
 
 type ExtensionExploreSource = keyof typeof EXTENSION_EXPLORE_URL;
 
-function showMessageIfNoExtensions(
-  context: CommandContext,
-  extensions: unknown[],
-): boolean {
-  if (extensions.length === 0) {
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: t('No extensions installed.'),
-      },
-      Date.now(),
-    );
-    return true;
-  }
-  return false;
-}
-
 async function exploreAction(context: CommandContext, args: string) {
   const source = args.trim();
   const extensionsUrl = source
@@ -109,15 +92,7 @@ async function exploreAction(context: CommandContext, args: string) {
   }
 }
 
-async function listAction(context: CommandContext, _args: string) {
-  const extensions = context.services.config
-    ? context.services.config.getExtensions()
-    : [];
-
-  if (showMessageIfNoExtensions(context, extensions)) {
-    return;
-  }
-
+async function listAction(_context: CommandContext, _args: string) {
   return {
     type: 'dialog' as const,
     dialog: 'extensions_manage' as const,
