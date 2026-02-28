@@ -738,7 +738,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
 
-    it('should process a PDF file', async () => {
+    it('should reject PDF files with error message', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
@@ -746,21 +746,10 @@ describe('fileUtils', () => {
         testPdfFilePath,
         mockConfig,
       );
-      expect(
-        (result.llmContent as { inlineData: unknown }).inlineData,
-      ).toBeDefined();
-      expect(
-        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
-          .mimeType,
-      ).toBe('application/pdf');
-      expect(
-        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
-      ).toBe(fakePdfData.toString('base64'));
-      expect(
-        (result.llmContent as { inlineData: { displayName?: string } })
-          .inlineData.displayName,
-      ).toBe('document.pdf');
-      expect(result.returnDisplay).toContain('Read pdf file: document.pdf');
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('PDF files cannot be read directly');
+      expect(result.returnDisplay).toContain('Skipped PDF file');
+      expect(result.error).toContain('PDF files are not supported');
     });
 
     it('should read an SVG file as text when under 1MB', async () => {
