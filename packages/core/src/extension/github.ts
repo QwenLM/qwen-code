@@ -167,6 +167,7 @@ export async function checkForExtensionUpdate(
   }
   if (
     !installMetadata ||
+    installMetadata.originSource === 'Claude' ||
     (installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release')
   ) {

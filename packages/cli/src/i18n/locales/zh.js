@@ -33,7 +33,7 @@ export default {
   '!': '!',
   '!npm run start': '!npm run start',
   'start server': 'start server',
-  'Commands:': '命令:',
+  'Commands:': '命令：',
   'shell command': 'shell 命令',
   'Model Context Protocol command (from external servers)':
     '模型上下文协议命令（来自外部服务器）',
@@ -276,6 +276,68 @@ export default {
   'Failed to launch editor: {{error}}': '启动编辑器失败: {{error}}',
   'Failed to save and edit subagent: {{error}}':
     '保存并编辑子智能体失败: {{error}}',
+
+  // ============================================================================
+  // Extensions - Management Dialog
+  // ============================================================================
+  'Manage Extensions': '管理扩展',
+  'Extension Details': '扩展详情',
+  'View Extension': '查看扩展',
+  'Update Extension': '更新扩展',
+  'Disable Extension': '禁用扩展',
+  'Enable Extension': '启用扩展',
+  'Uninstall Extension': '卸载扩展',
+  'Select Scope': '选择作用域',
+  'User Scope': '用户作用域',
+  'Workspace Scope': '工作区作用域',
+  'No extensions found.': '未找到扩展。',
+  Active: '已启用',
+  Disabled: '已禁用',
+  'Update available': '有可用更新',
+  'Up to date': '已是最新',
+  'Checking...': '检查中...',
+  'Updating...': '更新中...',
+  Unknown: '未知',
+  Error: '错误',
+  'Version:': '版本：',
+  'Status:': '状态：',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    '确定要卸载扩展 "{{name}}" 吗？',
+  'This action cannot be undone.': '此操作无法撤销。',
+  'Extension "{{name}}" disabled successfully.': '扩展 "{{name}}" 禁用成功。',
+  'Extension "{{name}}" enabled successfully.': '扩展 "{{name}}" 启用成功。',
+  'Extension "{{name}}" updated successfully.': '扩展 "{{name}}" 更新成功。',
+  'Failed to update extension "{{name}}": {{error}}':
+    '更新扩展 "{{name}}" 失败：{{error}}',
+  'Select the scope for this action:': '选择此操作的作用域：',
+  'User - Applies to all projects': '用户 - 应用于所有项目',
+  'Workspace - Applies to current project only': '工作区 - 仅应用于当前项目',
+  // Extension dialog - missing keys
+  'Name:': '名称：',
+  'MCP Servers:': 'MCP 服务器：',
+  'Settings:': '设置：',
+  active: '已启用',
+  disabled: '已禁用',
+  'View Details': '查看详情',
+  'Update failed:': '更新失败：',
+  'Updating {{name}}...': '正在更新 {{name}}...',
+  'Update complete!': '更新完成！',
+  'User (global)': '用户（全局）',
+  'Workspace (project-specific)': '工作区（项目特定）',
+  'Disable "{{name}}" - Select Scope': '禁用 "{{name}}" - 选择作用域',
+  'Enable "{{name}}" - Select Scope': '启用 "{{name}}" - 选择作用域',
+  'No extension selected': '未选择扩展',
+  'Press Y/Enter to confirm, N/Esc to cancel': '按 Y/Enter 确认，N/Esc 取消',
+  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter 确认，N/Esc 取消',
+  '{{count}} extensions installed': '已安装 {{count}} 个扩展',
+  "Use '/extensions install' to install your first extension.":
+    "使用 '/extensions install' 安装您的第一个扩展。",
+  // Update status values
+  'up to date': '已是最新',
+  'update available': '有可用更新',
+  'checking...': '检查中...',
+  'not updatable': '不可更新',
+  error: '错误',
 
   // ============================================================================
   // Commands - General (continued)
