@@ -1215,7 +1215,7 @@ export default {
   'Rate limit error: {{reason}}': '触发限流：{{reason}}',
   'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
     '将于 {{seconds}} 秒后重试…（第 {{attempt}}/{{maxRetries}} 次）',
-  'Press Ctrl+Y to retry.': '按 Ctrl+Y 重试。',
+  'Press Ctrl+Y to retry': '按 Ctrl+Y 重试。',
   'No failed request to retry.': '没有可重试的失败请求。',
   'to retry last request': '重试上一次请求',
 

@@ -759,7 +759,7 @@ export const useGeminiStream = (
       const isShowingAutoRetry = retryCountdownTimerRef.current !== null;
       clearRetryCountdown();
       if (!isShowingAutoRetry) {
-        const retryHint = t('Press Ctrl+Y to retry.');
+        const retryHint = t('Press Ctrl+Y to retry');
         // Store error with hint as a pending item (not in history).
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
@@ -1186,7 +1186,7 @@ export const useGeminiStream = (
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
             lastPromptErroredRef.current = true;
-            const retryHint = t('Press Ctrl+Y to retry.');
+            const retryHint = t('Press Ctrl+Y to retry');
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
               type: 'error' as const,
