@@ -461,8 +461,7 @@ export async function processSingleFileContent(
       }
       case 'image':
       case 'audio':
-      case 'video':
-      case 'pdf': {
+      case 'video': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         return {
@@ -474,6 +473,13 @@ export async function processSingleFileContent(
             },
           },
           returnDisplay: `Read ${fileType} file: ${relativePathForDisplay}`,
+        };
+      }
+      case 'pdf': {
+        return {
+          llmContent: `PDF files cannot be read directly. Use an external tool to extract text from: ${relativePathForDisplay}`,
+          returnDisplay: `Skipped PDF file: ${relativePathForDisplay}`,
+          error: `PDF files are not supported. Extract text externally and paste it instead.`,
         };
       }
       default: {
