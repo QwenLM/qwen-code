@@ -593,7 +593,7 @@ describe('Input types', () => {
         details: {},
       };
 
-      expect(input.permission_mode).toBe('read');
+      expect(input.permission_mode).toBe('default');
     });
   });
 
