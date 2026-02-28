@@ -1282,6 +1282,6 @@ export default {
     'Coding Plan (百炼, 全球/国际) 有新的模型配置可用。是否立即更新？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    '成功通过 {{region}} 认证。API Key 已存储在 settings.env 中。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
 };

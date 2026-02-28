@@ -167,7 +167,6 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen-turbo')).toBe(262144);
       expect(tokenLimit('qwen2.5')).toBe(262144);
       expect(tokenLimit('qwen-vl-max-latest')).toBe(262144);
-      expect(tokenLimit('vision-model')).toBe(262144);
     });
   });
 
@@ -270,14 +269,15 @@ describe('tokenLimit with output type', () => {
 
   describe('Qwen output limits', () => {
     it('should return correct output limits for Qwen models', () => {
-      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-coder-next', 'output')).toBe(65536);
       expect(tokenLimit('qwen3.5-plus', 'output')).toBe(65536);
       expect(tokenLimit('qwen3-max', 'output')).toBe(65536);
       expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(32768);
+      expect(tokenLimit('coder-model', 'output')).toBe(65536);
+      // Models without specific output limits fall back to default
+      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(8192);
+      expect(tokenLimit('qwen3-coder-next', 'output')).toBe(8192);
+      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(8192);
       expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192);
-      expect(tokenLimit('vision-model', 'output')).toBe(32768);
     });
   });
 
@@ -311,8 +311,8 @@ describe('tokenLimit with output type', () => {
 
   describe('input vs output comparison', () => {
     it('should return different limits for input vs output', () => {
-      expect(tokenLimit('qwen3-coder-plus', 'input')).toBe(1000000);
-      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3-max', 'input')).toBe(262144);
+      expect(tokenLimit('qwen3-max', 'output')).toBe(65536);
     });
 
     it('should default to input type when no type is specified', () => {
@@ -323,8 +323,8 @@ describe('tokenLimit with output type', () => {
 
   describe('normalization with output limits', () => {
     it('should handle normalized model names for output limits', () => {
-      expect(tokenLimit('QWEN3-CODER-PLUS', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-coder-plus-20250601', 'output')).toBe(65536);
+      expect(tokenLimit('QWEN3-MAX', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3-max-20250601', 'output')).toBe(65536);
       expect(tokenLimit('QWEN-VL-MAX-LATEST', 'output')).toBe(8192);
     });
   });

@@ -103,16 +103,13 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-coder-plus/, LIMITS['1m']],
   [/^qwen3-coder-flash/, LIMITS['1m']],
   [/^qwen3\.5-plus/, LIMITS['1m']],
+  [/^qwen-plus-latest$/, LIMITS['1m']],
+  [/^qwen-flash-latest$/, LIMITS['1m']],
   [/^coder-model$/, LIMITS['1m']],
   // Commercial API models (256K context)
   [/^qwen3-max/, LIMITS['256k']],
-  [/^qwen3-vl-plus$/, LIMITS['256k']],
-  [/^vision-model$/, LIMITS['256k']],
   // Open-source Qwen3 variants: 256K native
   [/^qwen3-coder-/, LIMITS['256k']],
-  // Studio commercial Qwen-Plus / Qwen-Flash
-  [/^qwen-plus-latest$/, LIMITS['1m']],
-  [/^qwen-flash-latest$/, LIMITS['1m']],
   // Qwen fallback (VL, turbo, plus, 2.5, etc.): 128K
   [/^qwen/, LIMITS['256k']],
 
@@ -139,7 +136,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
-  // Other
+  // ByteDance Seed-OSS (512K)
   // -------------------
   [/^seed-oss/, LIMITS['512k']],
 ];
@@ -167,9 +164,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Alibaba / Qwen
   [/^qwen3\.5/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen3-vl-plus$/, LIMITS['32k']],
-  [/^vision-model$/, LIMITS['32k']],
-  [/^qwen3-/, LIMITS['64k']],
+  [/^qwen3-max/, LIMITS['64k']],
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],

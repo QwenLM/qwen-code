@@ -1449,6 +1449,6 @@ export default {
     'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    'Authenticated successfully with {{region}}. API key is stored in settings.env.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
 };

@@ -120,12 +120,6 @@ describe('defaultModalities', () => {
       expect(m.video).toBe(true);
     });
 
-    it('returns image + video for vision-model', () => {
-      const m = defaultModalities('vision-model');
-      expect(m.image).toBe(true);
-      expect(m.video).toBe(true);
-    });
-
     it('returns text-only for qwen3-coder-plus', () => {
       expect(defaultModalities('qwen3-coder-plus')).toEqual({});
     });
