@@ -1132,6 +1132,8 @@ export default {
     'Você pode retomar uma conversa anterior executando qwen --continue ou qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
 
   // ============================================================================
   // Exit Screen / Stats
