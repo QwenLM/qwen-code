@@ -6,8 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { HookAggregator } from './hookAggregator.js';
-import { HookEventName, HookType } from './types.js';
-import type { HookExecutionResult, HookOutput } from './types.js';
+import { HookEventName, HookType, createHookOutput } from './types.js';
+import type {
+  HookExecutionResult,
+  HookOutput,
+  PermissionRequestHookOutput,
+} from './types.js';
 
 describe('HookAggregator', () => {
   const aggregator = new HookAggregator();
@@ -218,7 +222,13 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PermissionRequest,
       );
-      expect(result.finalOutput?.hookSpecificOutput?.['behavior']).toBe('deny');
+
+      // Use accessor to verify - this ensures output is consumable by PermissionRequestHookOutput
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(hookOutput.isPermissionDenied()).toBe(true);
     });
 
     it('should concatenate messages', () => {
@@ -247,9 +257,12 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PermissionRequest,
       );
-      expect(result.finalOutput?.hookSpecificOutput?.['message']).toBe(
-        'msg1\nmsg2',
-      );
+
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(hookOutput.getDenyMessage()).toBe('msg1\nmsg2');
     });
 
     it('should use last updatedInput', () => {
@@ -278,9 +291,12 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PermissionRequest,
       );
-      expect(result.finalOutput?.hookSpecificOutput?.['updatedInput']).toEqual({
-        arg: '2',
-      });
+
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(hookOutput.getUpdatedToolInput()).toEqual({ arg: '2' });
     });
 
     it('should concatenate updatedPermissions', () => {
@@ -315,9 +331,15 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PermissionRequest,
       );
-      expect(
-        result.finalOutput?.hookSpecificOutput?.['updatedPermissions'],
-      ).toEqual([{ type: 'read' }, { type: 'write' }]);
+
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(hookOutput.getUpdatedPermissions()).toEqual([
+        { type: 'read' },
+        { type: 'write' },
+      ]);
     });
 
     it('should set interrupt true if any hook sets it', () => {
@@ -346,7 +368,58 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PermissionRequest,
       );
-      expect(result.finalOutput?.hookSpecificOutput?.['interrupt']).toBe(true);
+
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(hookOutput.shouldInterrupt()).toBe(true);
+    });
+
+    it('should produce output consumable by PermissionRequestHookOutput accessors', () => {
+      const outputs: HookOutput[] = [
+        {
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'allow',
+              message: 'first msg',
+              updatedInput: { arg: '1' },
+            },
+          },
+        },
+        {
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'deny',
+              message: 'second msg',
+              updatedInput: { arg: '2' },
+            },
+          },
+        },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PermissionRequest,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PermissionRequest,
+      );
+
+      // Verify the output can be consumed by PermissionRequestHookOutput accessors
+      const hookOutput = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+
+      expect(hookOutput.isPermissionDenied()).toBe(true);
+      expect(hookOutput.getUpdatedToolInput()).toEqual({ arg: '2' });
+      expect(hookOutput.getDenyMessage()).toBe('first msg\nsecond msg');
     });
   });
 

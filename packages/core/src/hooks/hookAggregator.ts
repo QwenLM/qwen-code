@@ -296,7 +296,7 @@ export class HookAggregator {
 
     merged.hookSpecificOutput = {
       ...merged.hookSpecificOutput,
-      ...mergedDecision,
+      decision: mergedDecision,
     };
 
     return merged;
