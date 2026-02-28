@@ -256,36 +256,11 @@ export const useGeminiStream = (
 
   /**
    * Clears the retry countdown timer and pending retry error item.
-   * When clearHint is true (default), the error is committed to history
-   * without the hint, so the hint disappears from the UI.
-   * When clearHint is false, the full error (with hint) is committed as-is.
    */
-  const clearRetryCountdown = useCallback(
-    (options?: { clearHint?: boolean }) => {
-      stopRetryCountdownTimer();
-      const currentItem = pendingRetryErrorItemRef.current;
-      if (currentItem && currentItem.type === 'error') {
-        const clearHint = options?.clearHint ?? true;
-        if (clearHint) {
-          // Commit error to history without hint
-          addItem(
-            { ...currentItem, hint: undefined } as HistoryItemWithoutId,
-            Date.now(),
-          );
-        } else {
-          // Commit error to history with hint intact
-          addItem(currentItem, Date.now());
-        }
-      }
-      setPendingRetryErrorItem(null);
-    },
-    [
-      addItem,
-      pendingRetryErrorItemRef,
-      setPendingRetryErrorItem,
-      stopRetryCountdownTimer,
-    ],
-  );
+  const clearRetryCountdown = useCallback(() => {
+    stopRetryCountdownTimer();
+    setPendingRetryErrorItem(null);
+  }, [setPendingRetryErrorItem, stopRetryCountdownTimer]);
 
   const startRetryCountdown = useCallback(
     (retryInfo: {
@@ -1092,7 +1067,7 @@ export const useGeminiStream = (
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn
         if (pendingRetryErrorItemRef.current) {
-          clearRetryCountdown({ clearHint: true });
+          clearRetryCountdown();
         }
       }
 
@@ -1188,7 +1163,7 @@ export const useGeminiStream = (
           // Do NOT clear static error+hint from handleErrorEvent — those should
           // remain visible until the user presses Ctrl+Y to retry.
           if (retryCountdownTimerRef.current) {
-            clearRetryCountdown({ clearHint: true });
+            clearRetryCountdown();
           }
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
@@ -1279,7 +1254,7 @@ export const useGeminiStream = (
 
     // clearRetryCountdown commits the error (without hint) to history
     // and clears the pending retry error item
-    clearRetryCountdown({ clearHint: true });
+    clearRetryCountdown();
 
     await submitQuery(lastPrompt, {
       isContinuation: false,
