@@ -5,6 +5,7 @@
  */
 
 import type { IBufferCell, Terminal } from '@xterm/headless';
+import { sanitizeTerminalOutput } from './controlCharSanitizer.js';
 export interface AnsiToken {
   text: string;
   bold: boolean;
@@ -193,7 +194,16 @@ export function serializeTerminalToObject(terminal: Terminal): AnsiOutput {
     result.push(currentLine);
   }
 
-  return result;
+  // Sanitize all text tokens to remove problematic control characters
+  const sanitizedResult: import('./terminalSerializer').AnsiOutput = result.map(
+    (line) =>
+      line.map((token) => ({
+        ...token,
+        text: sanitizeTerminalOutput(token.text),
+      })),
+  );
+
+  return sanitizedResult;
 }
 
 // ANSI color palette from https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit
