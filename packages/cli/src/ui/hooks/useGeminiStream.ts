@@ -175,8 +175,11 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
-  const [pendingRetryErrorItem, setPendingRetryErrorItem] =
-    useState<HistoryItemWithoutId | null>(null);
+  const [
+    pendingRetryErrorItem,
+    pendingRetryErrorItemRef,
+    setPendingRetryErrorItem,
+  ] = useStateAndRef<HistoryItemWithoutId | null>(null);
   const [
     pendingRetryCountdownItem,
     pendingRetryCountdownItemRef,
@@ -1261,15 +1264,24 @@ export const useGeminiStream = (
       return;
     }
 
-    // clearRetryCountdown commits the error (without hint) to history
-    // and clears the pending retry error item
+    // Commit the error to history (without hint) before clearing
+    const errorItem = pendingRetryErrorItemRef.current;
+    if (errorItem) {
+      addItem({ type: errorItem.type, text: errorItem.text }, Date.now());
+    }
     clearRetryCountdown();
 
     await submitQuery(lastPrompt, {
       isContinuation: false,
       skipPreparation: true,
     });
-  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
+  }, [
+    streamingState,
+    addItem,
+    clearRetryCountdown,
+    submitQuery,
+    pendingRetryErrorItemRef,
+  ]);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
