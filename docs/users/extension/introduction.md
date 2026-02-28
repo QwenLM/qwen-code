@@ -12,17 +12,11 @@ We offer a suite of extension management tools using both `qwen extensions` CLI 
 
 You can manage extensions at runtime within the interactive CLI using `/extensions` slash commands. These commands support hot-reloading, meaning changes take effect immediately without restarting the application.
 
-| Command                                                | Description                                                       |
-| ------------------------------------------------------ | ----------------------------------------------------------------- |
-| `/extensions` or `/extensions list`                    | List all installed extensions with their status                   |
-| `/extensions install <source>`                         | Install an extension from a git URL, local path, or marketplace   |
-| `/extensions uninstall <name>`                         | Uninstall an extension                                            |
-| `/extensions enable <name> --scope <user\|workspace>`  | Enable an extension                                               |
-| `/extensions disable <name> --scope <user\|workspace>` | Disable an extension                                              |
-| `/extensions update <name>`                            | Update a specific extension                                       |
-| `/extensions update --all`                             | Update all extensions with available updates                      |
-| `/extensions detail <name>`                            | Show details of an extension                                      |
-| `/extensions explore [source]`                         | Open extensions source page(Gemini or ClaudeCode) in your browser |
+| Command                               | Description                                                       |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| `/extensions` or `/extensions manage` | Manage all installed extensions                                   |
+| `/extensions install <source>`        | Install an extension from a git URL, local path, or marketplace   |
+| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser |
 
 ### CLI Extension Management
 

@@ -34,6 +34,7 @@ import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 
 interface DialogManagerProps {
@@ -287,6 +288,15 @@ export const DialogManager = ({
     return (
       <AgentsManagerDialog
         onClose={uiActions.closeAgentsManagerDialog}
+        config={config}
+      />
+    );
+  }
+
+  if (uiState.isExtensionsManagerDialogOpen) {
+    return (
+      <ExtensionsManagerDialog
+        onClose={uiActions.closeExtensionsManagerDialog}
         config={config}
       />
     );

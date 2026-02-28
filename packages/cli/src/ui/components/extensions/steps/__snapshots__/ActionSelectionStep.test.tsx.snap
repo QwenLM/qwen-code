@@ -1,0 +1,166 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ActionSelectionStep Snapshots > should render for active extension without update 1`] = `
+"
+  ERROR  useKeypressContext must be used within a KeypressProvider
+
+ src/ui/contexts/KeypressContext.tsx:77:11
+
+ 74: export function useKeypressContext() {
+ 75:   const context = useContext(KeypressContext);
+ 76:   if (!context) {
+ 77:     throw new Error(
+ 78:       'useKeypressContext must be used within a KeypressProvider',
+ 79:     );
+ 80:   }
+
+ - useKeypressContext (src/ui/contexts/KeypressContext.tsx:77:11)
+ - useKeypress (src/ui/hooks/useKeypress.ts:24:38)
+ - useSelectionList (src/ui/hooks/useSelectionList.ts:287:3)
+ - BaseSelectionList (src/ui/components/shared/BaseSelectionList.tsx:64:27)
+ -Object.react-stack-bott (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reco
+  m-frame                nciler.development.js:15859:20)
+ -renderWithHoo (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.dev
+  s            elopment.js:3221:22)
+ -updateFunctionComp (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconcile
+  nent              r.development.js:6475:19)
+ -beginWor (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.developm
+          ent.js:8009:18)
+ -runWithFiberIn (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  EV            velopment.js:1738:13)
+ -performUnitOfW (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  rk            velopment.js:12834:22)
+"
+`;
+
+exports[`ActionSelectionStep Snapshots > should render for disabled extension 1`] = `
+"
+  ERROR  useKeypressContext must be used within a KeypressProvider
+
+ src/ui/contexts/KeypressContext.tsx:77:11
+
+ 74: export function useKeypressContext() {
+ 75:   const context = useContext(KeypressContext);
+ 76:   if (!context) {
+ 77:     throw new Error(
+ 78:       'useKeypressContext must be used within a KeypressProvider',
+ 79:     );
+ 80:   }
+
+ - useKeypressContext (src/ui/contexts/KeypressContext.tsx:77:11)
+ - useKeypress (src/ui/hooks/useKeypress.ts:24:38)
+ - useSelectionList (src/ui/hooks/useSelectionList.ts:287:3)
+ - BaseSelectionList (src/ui/components/shared/BaseSelectionList.tsx:64:27)
+ -Object.react-stack-bott (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reco
+  m-frame                nciler.development.js:15859:20)
+ -renderWithHoo (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.dev
+  s            elopment.js:3221:22)
+ -updateFunctionComp (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconcile
+  nent              r.development.js:6475:19)
+ -beginWor (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.developm
+          ent.js:8009:18)
+ -runWithFiberIn (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  EV            velopment.js:1738:13)
+ -performUnitOfW (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  rk            velopment.js:12834:22)
+"
+`;
+
+exports[`ActionSelectionStep Snapshots > should render for disabled extension with update 1`] = `
+"
+  ERROR  useKeypressContext must be used within a KeypressProvider
+
+ src/ui/contexts/KeypressContext.tsx:77:11
+
+ 74: export function useKeypressContext() {
+ 75:   const context = useContext(KeypressContext);
+ 76:   if (!context) {
+ 77:     throw new Error(
+ 78:       'useKeypressContext must be used within a KeypressProvider',
+ 79:     );
+ 80:   }
+
+ - useKeypressContext (src/ui/contexts/KeypressContext.tsx:77:11)
+ - useKeypress (src/ui/hooks/useKeypress.ts:24:38)
+ - useSelectionList (src/ui/hooks/useSelectionList.ts:287:3)
+ - BaseSelectionList (src/ui/components/shared/BaseSelectionList.tsx:64:27)
+ -Object.react-stack-bott (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reco
+  m-frame                nciler.development.js:15859:20)
+ -renderWithHoo (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.dev
+  s            elopment.js:3221:22)
+ -updateFunctionComp (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconcile
+  nent              r.development.js:6475:19)
+ -beginWor (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.developm
+          ent.js:8009:18)
+ -runWithFiberIn (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  EV            velopment.js:1738:13)
+ -performUnitOfW (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  rk            velopment.js:12834:22)
+"
+`;
+
+exports[`ActionSelectionStep Snapshots > should render for extension with update available 1`] = `
+"
+  ERROR  useKeypressContext must be used within a KeypressProvider
+
+ src/ui/contexts/KeypressContext.tsx:77:11
+
+ 74: export function useKeypressContext() {
+ 75:   const context = useContext(KeypressContext);
+ 76:   if (!context) {
+ 77:     throw new Error(
+ 78:       'useKeypressContext must be used within a KeypressProvider',
+ 79:     );
+ 80:   }
+
+ - useKeypressContext (src/ui/contexts/KeypressContext.tsx:77:11)
+ - useKeypress (src/ui/hooks/useKeypress.ts:24:38)
+ - useSelectionList (src/ui/hooks/useSelectionList.ts:287:3)
+ - BaseSelectionList (src/ui/components/shared/BaseSelectionList.tsx:64:27)
+ -Object.react-stack-bott (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reco
+  m-frame                nciler.development.js:15859:20)
+ -renderWithHoo (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.dev
+  s            elopment.js:3221:22)
+ -updateFunctionComp (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconcile
+  nent              r.development.js:6475:19)
+ -beginWor (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.developm
+          ent.js:8009:18)
+ -runWithFiberIn (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  EV            velopment.js:1738:13)
+ -performUnitOfW (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  rk            velopment.js:12834:22)
+"
+`;
+
+exports[`ActionSelectionStep Snapshots > should render with no extension selected 1`] = `
+"
+  ERROR  useKeypressContext must be used within a KeypressProvider
+
+ src/ui/contexts/KeypressContext.tsx:77:11
+
+ 74: export function useKeypressContext() {
+ 75:   const context = useContext(KeypressContext);
+ 76:   if (!context) {
+ 77:     throw new Error(
+ 78:       'useKeypressContext must be used within a KeypressProvider',
+ 79:     );
+ 80:   }
+
+ - useKeypressContext (src/ui/contexts/KeypressContext.tsx:77:11)
+ - useKeypress (src/ui/hooks/useKeypress.ts:24:38)
+ - useSelectionList (src/ui/hooks/useSelectionList.ts:287:3)
+ - BaseSelectionList (src/ui/components/shared/BaseSelectionList.tsx:64:27)
+ -Object.react-stack-bott (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reco
+  m-frame                nciler.development.js:15859:20)
+ -renderWithHoo (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.dev
+  s            elopment.js:3221:22)
+ -updateFunctionComp (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconcile
+  nent              r.development.js:6475:19)
+ -beginWor (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.developm
+          ent.js:8009:18)
+ -runWithFiberIn (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  EV            velopment.js:1738:13)
+ -performUnitOfW (/Users/mochi/code/qwen-code/node_modules/react-reconciler/cjs/react-reconciler.de
+  rk            velopment.js:12834:22)
+"
+`;

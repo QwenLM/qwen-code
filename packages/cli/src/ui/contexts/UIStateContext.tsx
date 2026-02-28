@@ -125,6 +125,8 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Extensions manager dialog
+  isExtensionsManagerDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
 }
