@@ -64,6 +64,9 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
           "maxRetries": 3,
           "enableCacheControl": true,
           "contextWindowSize": 128000,
+          "modalities": {
+            "image": true
+          },
           "customHeaders": {
             "X-Client-Request-ID": "req-123"
           },

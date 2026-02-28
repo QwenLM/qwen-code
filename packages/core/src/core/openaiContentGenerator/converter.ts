@@ -737,14 +737,13 @@ export class OpenAIContentConverter {
     let hint: string;
     if (modality === 'pdf') {
       hint =
-        'The content cannot be accessed by the read_file tool. Try using other tools or commands that can extract text from PDF files.';
+        'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or any tools installed at system wide.';
     } else {
-      hint =
-        'The content cannot be accessed by the read_file tool. If you cannot find an alternative approach, let the user know you are unable to process this type of file.';
+      hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
     }
     return {
       type: 'text' as const,
-      text: `[The ${modality} file "${displayName}" was not provided to you. ${hint}]`,
+      text: `[Unsupported ${modality} file: "${displayName}". ${hint}]`,
     };
   }
 

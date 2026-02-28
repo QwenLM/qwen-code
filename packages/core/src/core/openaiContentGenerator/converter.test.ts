@@ -2003,7 +2003,7 @@ describe('modality filtering', () => {
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
     expect(parts[0].text).toContain('image file');
-    expect(parts[0].text).toContain('was not provided to you');
+    expect(parts[0].text).toContain('does not support image input');
   });
 
   it('keeps image when image modality is enabled', () => {
@@ -2037,7 +2037,7 @@ describe('modality filtering', () => {
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('text');
     expect(parts[0].text).toContain('pdf file');
-    expect(parts[0].text).toContain('was not provided to you');
+    expect(parts[0].text).toContain('does not support PDF input');
   });
 
   it('keeps PDF when pdf modality is enabled', () => {
