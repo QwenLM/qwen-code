@@ -175,10 +175,12 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
+  const [pendingRetryErrorItem, setPendingRetryErrorItem] =
+    useState<HistoryItemWithoutId | null>(null);
   const [
-    pendingRetryErrorItem,
-    pendingRetryErrorItemRef,
-    setPendingRetryErrorItem,
+    pendingRetryCountdownItem,
+    pendingRetryCountdownItemRef,
+    setPendingRetryCountdownItem,
   ] = useStateAndRef<HistoryItemWithoutId | null>(null);
   const retryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
@@ -255,12 +257,17 @@ export const useGeminiStream = (
   }, []);
 
   /**
-   * Clears the retry countdown timer and pending retry error item.
+   * Clears the retry countdown timer and pending retry items.
    */
   const clearRetryCountdown = useCallback(() => {
     stopRetryCountdownTimer();
     setPendingRetryErrorItem(null);
-  }, [setPendingRetryErrorItem, stopRetryCountdownTimer]);
+    setPendingRetryCountdownItem(null);
+  }, [
+    setPendingRetryErrorItem,
+    setPendingRetryCountdownItem,
+    stopRetryCountdownTimer,
+  ]);
 
   const startRetryCountdown = useCallback(
     (retryInfo: {
@@ -275,31 +282,29 @@ export const useGeminiStream = (
       const retryReasonText =
         message ?? t('Rate limit exceeded. Please wait and try again.');
 
-      /**
-       * Builds a unified error item with an inline hint for retry countdown.
-       * The hint is displayed in secondary/dimmed color after the error text,
-       * matching the style of "(esc to cancel, 5s)" in LoadingIndicator.
-       */
+      // Error line stays static (red with ✕ prefix)
+      setPendingRetryErrorItem({
+        type: MessageType.ERROR,
+        text: retryReasonText,
+      });
+
+      // Countdown line updates every second (dim/secondary color)
       const updateCountdown = () => {
         const elapsedMs = Date.now() - startTime;
         const remainingMs = Math.max(0, delayMs - elapsedMs);
         const remainingSec = Math.ceil(remainingMs / 1000);
 
-        const hintText = t(
-          'retrying in {{seconds}}s, attempt {{attempt}}/{{maxRetries}}',
-          {
-            seconds: String(remainingSec),
-            attempt: String(attempt),
-            maxRetries: String(maxRetries),
-          },
-        );
-
-        // Merge error text and countdown hint into a single error item
-        setPendingRetryErrorItem({
-          type: 'error' as const,
-          text: retryReasonText,
-          hint: hintText,
-        });
+        setPendingRetryCountdownItem({
+          type: 'retry_countdown',
+          text: t(
+            'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+            {
+              seconds: String(remainingSec),
+              attempt: String(attempt),
+              maxRetries: String(maxRetries),
+            },
+          ),
+        } as HistoryItemWithoutId);
 
         if (remainingMs <= 0) {
           stopRetryCountdownTimer();
@@ -309,7 +314,11 @@ export const useGeminiStream = (
       updateCountdown();
       retryCountdownTimerRef.current = setInterval(updateCountdown, 1000);
     },
-    [setPendingRetryErrorItem, stopRetryCountdownTimer],
+    [
+      setPendingRetryErrorItem,
+      setPendingRetryCountdownItem,
+      stopRetryCountdownTimer,
+    ],
   );
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
@@ -1001,7 +1010,7 @@ export const useGeminiStream = (
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
-            } else if (!pendingRetryErrorItemRef.current) {
+            } else if (!pendingRetryCountdownItemRef.current) {
               clearRetryCountdown();
             }
             break;
@@ -1033,7 +1042,7 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
-      pendingRetryErrorItemRef,
+      pendingRetryCountdownItemRef,
     ],
   );
 
@@ -1066,7 +1075,7 @@ export const useGeminiStream = (
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn
-        if (pendingRetryErrorItemRef.current) {
+        if (pendingRetryCountdownItemRef.current) {
           clearRetryCountdown();
         }
       }
@@ -1207,7 +1216,7 @@ export const useGeminiStream = (
       getPromptCount,
       handleLoopDetectedEvent,
       clearRetryCountdown,
-      pendingRetryErrorItemRef,
+      pendingRetryCountdownItemRef,
       setPendingRetryErrorItem,
     ],
   );
@@ -1428,9 +1437,15 @@ export const useGeminiStream = (
       [
         pendingHistoryItem,
         pendingRetryErrorItem,
+        pendingRetryCountdownItem,
         pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
-    [pendingHistoryItem, pendingRetryErrorItem, pendingToolCallGroupDisplay],
+    [
+      pendingHistoryItem,
+      pendingRetryErrorItem,
+      pendingRetryCountdownItem,
+      pendingToolCallGroupDisplay,
+    ],
   );
 
   useEffect(() => {
