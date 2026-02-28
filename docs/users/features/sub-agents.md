@@ -507,5 +507,5 @@ Always follow these standards:
 
 The following limits apply to Subagent configurations:
 
-- **Description Field**: Limited to 301 characters
+- **Description Field**: Limited to 300 characters
 - **System Prompt**: Limited to 10,000 characters
