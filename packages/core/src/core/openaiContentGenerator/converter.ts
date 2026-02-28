@@ -911,7 +911,14 @@ export class OpenAIContentConverter {
       }
 
       // Only emit function calls when streaming is complete (finish_reason is present)
+      let toolCallsTruncated = false;
       if (choice.finish_reason) {
+        // Detect truncation the provider may not report correctly.
+        // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
+        // even when output was cut off mid-JSON due to max_tokens.
+        toolCallsTruncated =
+          this.streamingToolCallParser.hasIncompleteToolCalls();
+
         const completedToolCalls =
           this.streamingToolCallParser.getCompletedToolCalls();
 
@@ -933,6 +940,13 @@ export class OpenAIContentConverter {
         this.streamingToolCallParser.reset();
       }
 
+      // If tool call JSON was truncated, override to "length" so downstream
+      // (turn.ts) correctly sets wasOutputTruncated=true.
+      const effectiveFinishReason =
+        toolCallsTruncated && choice.finish_reason !== 'length'
+          ? 'length'
+          : choice.finish_reason;
+
       // Only include finishReason key if finish_reason is present
       const candidate: Candidate = {
         content: {
@@ -942,9 +956,9 @@ export class OpenAIContentConverter {
         index: 0,
         safetyRatings: [],
       };
-      if (choice.finish_reason) {
+      if (effectiveFinishReason) {
         candidate.finishReason = this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason,
+          effectiveFinishReason,
         );
       }
       response.candidates = [candidate];

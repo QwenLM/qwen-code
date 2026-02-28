@@ -9,6 +9,7 @@ import { OpenAIContentConverter } from './converter.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import {
   Type,
+  FinishReason,
   type GenerateContentParameters,
   type Content,
   type Part,
@@ -1955,5 +1956,239 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
     expect(contentArray[0].text).toContain('node details');
     expect(contentArray[1].type).toBe('image_url');
     expect(contentArray[1].image_url?.url).toContain('data:image/png');
+  });
+});
+
+describe('Truncated tool call detection in streaming', () => {
+  let converter: OpenAIContentConverter;
+
+  beforeEach(() => {
+    converter = new OpenAIContentConverter('test-model');
+  });
+
+  /**
+   * Helper: feed streaming chunks then a final chunk with finish_reason,
+   * and return the Gemini response for the final chunk.
+   */
+  function feedToolCallChunks(
+    conv: OpenAIContentConverter,
+    toolCallChunks: Array<{
+      index: number;
+      id?: string;
+      name?: string;
+      arguments: string;
+    }>,
+    finishReason: string,
+  ) {
+    // Feed argument chunks (no finish_reason yet)
+    for (const tc of toolCallChunks) {
+      conv.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-stream',
+        created: 100,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: tc.index,
+                  id: tc.id,
+                  type: 'function' as const,
+                  function: {
+                    name: tc.name,
+                    arguments: tc.arguments,
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+    }
+
+    // Final chunk with finish_reason
+    return conv.convertOpenAIChunkToGemini({
+      object: 'chat.completion.chunk',
+      id: 'chunk-final',
+      created: 101,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: finishReason,
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+  }
+
+  it('should override finishReason to MAX_TOKENS when tool call JSON is truncated and provider reports "stop"', () => {
+    // Simulate: write_file call truncated mid-JSON, provider says "stop"
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+          // Missing closing brace and content field — truncated
+        },
+      ],
+      'stop',
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should override finishReason to MAX_TOKENS when provider reports "tool_calls" but JSON is truncated', () => {
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp", "content": "partial content',
+          // Truncated mid-string
+        },
+      ],
+      'tool_calls',
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should preserve finishReason STOP when tool call JSON is complete', () => {
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp", "content": "hello"}',
+        },
+      ],
+      'stop',
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+  });
+
+  it('should preserve finishReason MAX_TOKENS when provider already reports "length"', () => {
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'length',
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should still emit the (repaired) function call even when truncated', () => {
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+    );
+
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p: Part) => p.functionCall);
+    expect(fnCall).toBeDefined();
+    expect(fnCall?.functionCall?.name).toBe('write_file');
+    expect(fnCall?.functionCall?.args).toEqual({
+      file_path: '/tmp/test.cpp',
+    });
+  });
+
+  it('should detect truncation with multi-chunk streaming arguments', () => {
+    // Feed arguments in multiple small chunks like real streaming
+    const conv = new OpenAIContentConverter('test-model');
+
+    // Chunk 1: start of JSON with tool metadata
+    conv.convertOpenAIChunkToGemini({
+      object: 'chat.completion.chunk',
+      id: 'c1',
+      created: 100,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function' as const,
+                function: { name: 'write_file', arguments: '{"file_' },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+    // Chunk 2: more arguments
+    conv.convertOpenAIChunkToGemini({
+      object: 'chat.completion.chunk',
+      id: 'c2',
+      created: 100,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                function: { arguments: 'path": "/tmp/f.txt", "conten' },
+              },
+            ],
+          },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+    // Final chunk: finish_reason "stop" but JSON is still incomplete
+    const result = conv.convertOpenAIChunkToGemini({
+      object: 'chat.completion.chunk',
+      id: 'c3',
+      created: 101,
+      model: 'test-model',
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+          logprobs: null,
+        },
+      ],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
 });

@@ -411,4 +411,32 @@ export class StreamingToolCallParser {
       escape: this.escapes.get(index) || false,
     };
   }
+
+  /**
+   * Checks whether any buffered tool call has incomplete JSON at stream end.
+   *
+   * A tool call is considered incomplete when its JSON parsing state indicates
+   * the buffer was truncated mid-stream:
+   * - depth > 0: unclosed braces/brackets remain
+   * - inString === true: still inside a string literal
+   *
+   * This is critical for detecting output truncation that the LLM provider
+   * may not report correctly via finish_reason (e.g. reporting "stop" or
+   * "tool_calls" instead of "length" when output was actually cut off).
+   *
+   * @returns true if at least one tool call buffer has incomplete JSON
+   */
+  hasIncompleteToolCalls(): boolean {
+    for (const [index] of this.buffers.entries()) {
+      const meta = this.toolCallMeta.get(index);
+      if (!meta?.name) continue;
+
+      const depth = this.depths.get(index) || 0;
+      const inString = this.inStrings.get(index) || false;
+      if (depth > 0 || inString) {
+        return true;
+      }
+    }
+    return false;
+  }
 }
