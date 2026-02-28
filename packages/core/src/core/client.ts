@@ -69,11 +69,14 @@ import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
-// Hook triggers
+// Hook types and utilities
 import {
-  fireUserPromptSubmitHook,
-  fireStopHook,
-} from './clientHookTriggers.js';
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
+import { partToString } from '../utils/partUtils.js';
+import { createHookOutput } from '../hooks/types.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
@@ -418,7 +421,23 @@ export class GeminiClient {
     const hooksEnabled = this.config.getEnableHooks();
     const messageBus = this.config.getMessageBus();
     if (hooksEnabled && messageBus) {
-      const hookOutput = await fireUserPromptSubmitHook(messageBus, request);
+      const promptText = partToString(request);
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'UserPromptSubmit',
+          input: {
+            prompt: promptText,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+      const hookOutput = response.output
+        ? createHookOutput('UserPromptSubmit', response.output)
+        : undefined;
 
       if (
         hookOutput?.isBlockingDecision() ||
@@ -586,7 +605,23 @@ export class GeminiClient {
           .map((p) => p.text)
           .join('') || '[no response text]';
 
-      const hookOutput = await fireStopHook(messageBus, request, responseText);
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
 
       const stopOutput = hookOutput as StopHookOutput | undefined;
 
