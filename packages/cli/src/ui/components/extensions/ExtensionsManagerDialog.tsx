@@ -21,6 +21,7 @@ import { t } from '../../../i18n/index.js';
 import type { Extension, Config } from '@qwen-code/qwen-code-core';
 import { SettingScope, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { ExtensionUpdateState } from '../../state/extensions.js';
+import { getErrorMessage } from '../../../utils/errors.js';
 
 interface ExtensionsManagerDialogProps {
   onClose: () => void;
@@ -44,6 +45,7 @@ export function ExtensionsManagerDialog({
   const [updateInProgress, setUpdateInProgress] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Load extensions
   const loadExtensions = useCallback(async () => {
@@ -94,6 +96,7 @@ export function ExtensionsManagerDialog({
   const handleSelectExtension = useCallback((extensionIndex: number) => {
     setSelectedExtensionIndex(extensionIndex);
     setSuccessMessage(null); // Clear success message when navigating
+    setErrorMessage(null); // Clear error message when navigating
     setNavigationStack((prev) => [...prev, MANAGEMENT_STEPS.ACTION_SELECTION]);
   }, []);
 
@@ -108,6 +111,8 @@ export function ExtensionsManagerDialog({
       }
       return prev.slice(0, -1);
     });
+    // Clear messages when navigating back
+    setErrorMessage(null);
   }, []);
 
   const handleUpdateExtension = useCallback(async () => {
@@ -195,8 +200,9 @@ export function ExtensionsManagerDialog({
     [handleNavigateToStep, handleUpdateExtension],
   );
 
-  const handleDisableExtension = useCallback(
-    async (scope: 'user' | 'workspace') => {
+  // Unified handler for toggling extension state (enable/disable)
+  const handleToggleExtensionState = useCallback(
+    async (scope: 'user' | 'workspace', newState: boolean) => {
       if (!config || !selectedExtension) return;
 
       try {
@@ -208,77 +214,68 @@ export function ExtensionsManagerDialog({
         const settingScope =
           scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 
-        await extensionManager.disableExtension(
-          selectedExtension.name,
-          settingScope,
-        );
+        if (newState) {
+          await extensionManager.enableExtension(
+            selectedExtension.name,
+            settingScope,
+          );
+        } else {
+          await extensionManager.disableExtension(
+            selectedExtension.name,
+            settingScope,
+          );
+        }
 
         // Update local state
         setExtensions((prev) =>
           prev.map((ext) =>
             ext.name === selectedExtension.name
-              ? { ...ext, isActive: false }
+              ? { ...ext, isActive: newState }
               : ext,
           ),
         );
 
         // Show success message
+        const actionKey = newState ? 'enabled' : 'disabled';
         setSuccessMessage(
-          t('Extension "{{name}}" disabled successfully.', {
+          t(`Extension "{{name}}" ${actionKey} successfully.`, {
             name: selectedExtension.name,
           }),
         );
+        setErrorMessage(null);
 
         // Go back to extension list to show success message
         setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
       } catch (error) {
-        debugLogger.error('Failed to disable extension:', error);
+        debugLogger.error(
+          `Failed to ${newState ? 'enable' : 'disable'} extension:`,
+          error,
+        );
+        setErrorMessage(
+          t('Failed to {{action}} extension "{{name}}": {{error}}', {
+            action: newState ? 'enable' : 'disable',
+            name: selectedExtension.name,
+            error: getErrorMessage(error),
+          }),
+        );
+        setSuccessMessage(null);
       }
     },
     [config, selectedExtension],
   );
 
+  const handleDisableExtension = useCallback(
+    async (scope: 'user' | 'workspace') => {
+      await handleToggleExtensionState(scope, false);
+    },
+    [handleToggleExtensionState],
+  );
+
   const handleEnableExtension = useCallback(
     async (scope: 'user' | 'workspace') => {
-      if (!config || !selectedExtension) return;
-
-      try {
-        const extensionManager = config.getExtensionManager();
-        if (!extensionManager) {
-          throw new Error('ExtensionManager not available');
-        }
-
-        const settingScope =
-          scope === 'user' ? SettingScope.User : SettingScope.Workspace;
-
-        await extensionManager.enableExtension(
-          selectedExtension.name,
-          settingScope,
-        );
-
-        // Update local state
-        setExtensions((prev) =>
-          prev.map((ext) =>
-            ext.name === selectedExtension.name
-              ? { ...ext, isActive: true }
-              : ext,
-          ),
-        );
-
-        // Show success message
-        setSuccessMessage(
-          t('Extension "{{name}}" enabled successfully.', {
-            name: selectedExtension.name,
-          }),
-        );
-
-        // Go back to extension list to show success message
-        setNavigationStack([MANAGEMENT_STEPS.EXTENSION_LIST]);
-      } catch (error) {
-        debugLogger.error('Failed to enable extension:', error);
-      }
+      await handleToggleExtensionState(scope, true);
     },
-    [config, selectedExtension],
+    [handleToggleExtensionState],
   );
 
   const handleUninstallExtension = useCallback(
@@ -394,6 +391,15 @@ export function ExtensionsManagerDialog({
   const renderStepContent = useCallback(() => {
     const currentStep = getCurrentStep();
 
+    // Show error message if present (only on extension list step)
+    if (errorMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text color={theme.status.error}>{errorMessage}</Text>
+        </Box>
+      );
+    }
+
     // Show success message if present (only on extension list step)
     if (successMessage && currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
       return (
@@ -489,6 +495,7 @@ export function ExtensionsManagerDialog({
     updateInProgress,
     updateError,
     successMessage,
+    errorMessage,
     handleSelectExtension,
     handleNavigateToStep,
     handleNavigateBack,

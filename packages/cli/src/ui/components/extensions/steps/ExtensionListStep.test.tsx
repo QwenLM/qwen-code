@@ -7,6 +7,7 @@
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi } from 'vitest';
 import { ExtensionListStep } from './ExtensionListStep.js';
+import { KeypressProvider } from '../../../contexts/KeypressContext.js';
 import type { Extension } from '@qwen-code/qwen-code-core';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 
@@ -41,11 +42,13 @@ describe('ExtensionListStep Snapshots', () => {
 
   it('should render empty state', () => {
     const { lastFrame } = render(
-      <ExtensionListStep
-        extensions={[]}
-        extensionsUpdateState={new Map()}
-        {...baseProps}
-      />,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ExtensionListStep
+          extensions={[]}
+          extensionsUpdateState={new Map()}
+          {...baseProps}
+        />
+      </KeypressProvider>,
     );
 
     expect(lastFrame()).toMatchSnapshot();
@@ -54,11 +57,13 @@ describe('ExtensionListStep Snapshots', () => {
   it('should render list with single extension', () => {
     const extensions = [createMockExtension('test-extension', true)];
     const { lastFrame } = render(
-      <ExtensionListStep
-        extensions={extensions}
-        extensionsUpdateState={new Map()}
-        {...baseProps}
-      />,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ExtensionListStep
+          extensions={extensions}
+          extensionsUpdateState={new Map()}
+          {...baseProps}
+        />
+      </KeypressProvider>,
     );
 
     expect(lastFrame()).toMatchSnapshot();
@@ -77,11 +82,13 @@ describe('ExtensionListStep Snapshots', () => {
     ]);
 
     const { lastFrame } = render(
-      <ExtensionListStep
-        extensions={extensions}
-        extensionsUpdateState={updateState}
-        {...baseProps}
-      />,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ExtensionListStep
+          extensions={extensions}
+          extensionsUpdateState={updateState}
+          {...baseProps}
+        />
+      </KeypressProvider>,
     );
 
     expect(lastFrame()).toMatchSnapshot();
@@ -94,11 +101,13 @@ describe('ExtensionListStep Snapshots', () => {
     ]);
 
     const { lastFrame } = render(
-      <ExtensionListStep
-        extensions={extensions}
-        extensionsUpdateState={updateState}
-        {...baseProps}
-      />,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ExtensionListStep
+          extensions={extensions}
+          extensionsUpdateState={updateState}
+          {...baseProps}
+        />
+      </KeypressProvider>,
     );
 
     expect(lastFrame()).toMatchSnapshot();
@@ -111,11 +120,13 @@ describe('ExtensionListStep Snapshots', () => {
     ]);
 
     const { lastFrame } = render(
-      <ExtensionListStep
-        extensions={extensions}
-        extensionsUpdateState={updateState}
-        {...baseProps}
-      />,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ExtensionListStep
+          extensions={extensions}
+          extensionsUpdateState={updateState}
+          {...baseProps}
+        />
+      </KeypressProvider>,
     );
 
     expect(lastFrame()).toMatchSnapshot();
