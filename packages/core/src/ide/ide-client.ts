@@ -672,11 +672,14 @@ export class IdeClient {
       .map(({ parsed }) => parsed);
   }
 
-  private createProxyAwareFetch() {
-    // ignore proxy for '127.0.0.1' by deafult to allow connecting to the ide mcp server
+  private createProxyAwareFetch(ideHost: string) {
+    // ignore proxy for '127.0.0.1' and the actual IDE host by default
+    // to allow connecting to the ide mcp server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
     const agent = new EnvHttpProxyAgent({
-      noProxy: [existingNoProxy, '127.0.0.1'].filter(Boolean).join(','),
+      noProxy: [existingNoProxy, '127.0.0.1', ideHost]
+        .filter(Boolean)
+        .join(','),
     });
     const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
@@ -792,7 +795,7 @@ export class IdeClient {
       transport = new StreamableHTTPClientTransport(
         new URL(`http://${ideHost}:${port}/mcp`),
         {
-          fetch: this.createProxyAwareFetch(),
+          fetch: this.createProxyAwareFetch(ideHost),
           requestInit: {
             headers: this.authToken
               ? { Authorization: `Bearer ${this.authToken}` }
@@ -861,11 +864,19 @@ export class IdeClient {
 let cachedIdeServerHost: string | undefined;
 
 /**
+ * In-flight promise for concurrent lookups to prevent redundant DNS queries.
+ */
+let lookupPromise: Promise<string> | undefined;
+
+const IDE_HOST_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
  * Reset the cached IDE server host. Exported for testing only.
  * @internal
  */
 export function _resetCachedIdeServerHost(): void {
   cachedIdeServerHost = undefined;
+  lookupPromise = undefined;
 }
 
 /**
@@ -873,7 +884,25 @@ export function _resetCachedIdeServerHost(): void {
  */
 function checkHostReachable(hostname: string): Promise<boolean> {
   return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      debugLogger.debug(
+        `DNS lookup timed out for ${hostname} after ${IDE_HOST_LOOKUP_TIMEOUT_MS}ms`,
+      );
+      resolve(false);
+    }, IDE_HOST_LOOKUP_TIMEOUT_MS);
+    timeout.unref?.();
+
     dns.lookup(hostname, (err) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
       resolve(!err);
     });
   });
@@ -892,11 +921,7 @@ function checkHostReachable(hostname: string): Promise<boolean> {
  * 2. If so, performs an async DNS check to verify `host.docker.internal` is resolvable.
  * 3. Falls back to `127.0.0.1` if the hostname is not reachable.
  */
-export async function getIdeServerHost(): Promise<string> {
-  if (cachedIdeServerHost !== undefined) {
-    return cachedIdeServerHost;
-  }
-
+async function doLookup(): Promise<string> {
   const isInContainer =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
 
@@ -918,4 +943,27 @@ export async function getIdeServerHost(): Promise<string> {
   }
 
   return cachedIdeServerHost;
+}
+
+export async function getIdeServerHost(): Promise<string> {
+  // Return cached result if available
+  if (cachedIdeServerHost !== undefined) {
+    return cachedIdeServerHost;
+  }
+
+  // If a lookup is already in progress, wait for it to complete
+  if (lookupPromise !== undefined) {
+    return lookupPromise;
+  }
+
+  // Start a new lookup and store the promise for concurrent callers
+  lookupPromise = doLookup();
+
+  try {
+    const result = await lookupPromise;
+    return result;
+  } finally {
+    // Clear the in-flight promise so future calls use the cache
+    lookupPromise = undefined;
+  }
 }

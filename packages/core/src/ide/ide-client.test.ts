@@ -108,6 +108,7 @@ describe('IdeClient', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -531,7 +532,9 @@ describe('getIdeServerHost', () => {
   });
 
   it('should return host.docker.internal when in a container and the host is reachable', async () => {
-    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => filePath === '/.dockerenv');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
     mockDnsLookup(true);
 
     const host = await getIdeServerHost();
@@ -544,7 +547,9 @@ describe('getIdeServerHost', () => {
   });
 
   it('should fall back to 127.0.0.1 when in a container but host.docker.internal is not reachable', async () => {
-    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => filePath === '/.dockerenv');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
     mockDnsLookup(false);
 
     const host = await getIdeServerHost();
@@ -557,7 +562,9 @@ describe('getIdeServerHost', () => {
   });
 
   it('should detect container via /run/.containerenv', async () => {
-    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => filePath === '/run/.containerenv');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/run/.containerenv',
+    );
     mockDnsLookup(true);
 
     const host = await getIdeServerHost();
@@ -566,7 +573,9 @@ describe('getIdeServerHost', () => {
   });
 
   it('should cache the result and not perform DNS lookup again', async () => {
-    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => filePath === '/.dockerenv');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
     mockDnsLookup(true);
 
     const host1 = await getIdeServerHost();
@@ -578,9 +587,32 @@ describe('getIdeServerHost', () => {
     expect(dns.lookup).toHaveBeenCalledTimes(1);
   });
 
+  it('should fall back to 127.0.0.1 when DNS lookup times out in a container', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    const lookupMock = dns.lookup as unknown as Mock;
+    lookupMock.mockImplementation(() => {
+      // Simulate dns.lookup hanging without invoking callback.
+    });
+
+    const hostPromise = getIdeServerHost();
+    await vi.advanceTimersByTimeAsync(3000);
+    const host = await hostPromise;
+
+    expect(host).toBe('127.0.0.1');
+    expect(dns.lookup).toHaveBeenCalledWith(
+      'host.docker.internal',
+      expect.any(Function),
+    );
+  });
+
   it('should use host.docker.internal in HTTP connection URL when in container', async () => {
     _resetCachedIdeServerHost();
-    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => filePath === '/.dockerenv');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
     mockDnsLookup(true);
 
     // Reset singleton for this test
@@ -621,5 +653,32 @@ describe('getIdeServerHost', () => {
     );
 
     delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+  });
+
+  it('should perform only one DNS lookup when called concurrently', async () => {
+    vi.useRealTimers();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    const lookupMock = dns.lookup as unknown as Mock;
+    let lookupCount = 0;
+
+    // Create a delayed DNS lookup to simulate slow network
+    lookupMock.mockImplementation(
+      (_hostname: string, callback: (err: Error | null) => void) => {
+        lookupCount++;
+        setTimeout(() => callback(null), 50);
+      },
+    );
+
+    // Call getIdeServerHost concurrently 5 times
+    const promises = Array.from({ length: 5 }, () => getIdeServerHost());
+    const results = await Promise.all(promises);
+
+    // All should return the same result
+    expect(results.every((r) => r === 'host.docker.internal')).toBe(true);
+    // DNS lookup should only be called once
+    expect(lookupCount).toBe(1);
+    expect(dns.lookup).toHaveBeenCalledTimes(1);
   });
 });
