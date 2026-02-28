@@ -1088,12 +1088,25 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
-        await this.executeSingleToolCall(toolCall, signal);
-      }
+      // Execute all scheduled tool calls in parallel.
+      // When the model returns multiple tool calls in a single response,
+      // they are inherently independent — no tool call can reference
+      // another's output within the same response turn. This makes
+      // parallel execution safe and aligns with the LLM tool calling
+      // protocol. Node.js single-threaded event loop ensures that
+      // synchronous state mutations (e.g. setStatusInternal) do not race.
+      await Promise.allSettled(
+        callsToExecute.map((toolCall) =>
+          this.executeSingleToolCall(toolCall, signal),
+        ),
+      );
     }
   }
 
+  /**
+   * Executes a single scheduled tool call.
+   * Extracted to support parallel execution via Promise.allSettled.
+   */
   private async executeSingleToolCall(
     toolCall: ToolCall,
     signal: AbortSignal,
