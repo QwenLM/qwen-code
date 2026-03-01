@@ -11,6 +11,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
+import { useWorkMode } from '../contexts/WorkModeContext.js';
 
 // Fallback mode if mode manager is not available
 const DEFAULT_FALLBACK_MODE: ModeDefinition = {
@@ -62,7 +63,8 @@ export function useWorkModeCycle({
   shouldBlockTab,
 }: UseWorkModeCycleArgs): ModeDefinition {
   const modeManager = config.getModeManager();
-  const [currentWorkMode, setCurrentWorkMode] = useState<ModeDefinition>(
+  const { currentWorkMode: contextWorkMode, setCurrentWorkMode } = useWorkMode();
+  const [currentWorkMode, setCurrentWorkModeLocal] = useState<ModeDefinition>(
     () => modeManager?.getCurrentMode() || DEFAULT_FALLBACK_MODE,
   );
   // Track whether we're currently in an approval mode or work mode
@@ -72,19 +74,21 @@ export function useWorkModeCycle({
     return currentApprovalMode !== ApprovalMode.YOLO ? 'approval' : 'work';
   });
 
+  // Use context value if available
+  const effectiveWorkMode = contextWorkMode || currentWorkMode;
+
   // Update local state when mode changes externally
   useEffect(() => {
     const manager = config.getModeManager();
-    if (manager) {
-      const currentWork = manager.getCurrentMode();
-      setCurrentWorkMode(currentWork);
+    if (manager && contextWorkMode) {
+      setCurrentWorkModeLocal(contextWorkMode);
       
       // Sync lastModeType with actual state
       const workModes = manager.getAvailableModes();
-      const isInWorkMode = workModes.some(m => m.id === currentWork.id);
+      const isInWorkMode = workModes.some(m => m.id === contextWorkMode.id);
       setLastModeType(isInWorkMode ? 'work' : 'approval');
     }
-  }, [config]);
+  }, [config, contextWorkMode]);
 
   useKeypress(
     (key) => {
@@ -113,7 +117,7 @@ export function useWorkModeCycle({
         try {
           // Determine current position in unified cycle
           const currentApprovalMode = config.getApprovalMode();
-          const currentWorkModeState = modeManager.getCurrentMode();
+          const currentWorkModeState = effectiveWorkMode;
 
           // Find current index in unified cycle
           // Use lastModeType to determine which type of mode we should look for
@@ -158,6 +162,12 @@ export function useWorkModeCycle({
           } else {
             // Switch work mode
             modeManager.switchMode(nextModeConfig.id);
+            // Update context
+            const nextModeDef =
+              modeManager.getAvailableModes().find(
+                (m) => m.id === nextModeConfig.id,
+              ) || DEFAULT_FALLBACK_MODE;
+            setCurrentWorkMode(nextModeDef);
           }
 
           // Update local state immediately for responsiveness
@@ -166,7 +176,7 @@ export function useWorkModeCycle({
               modeManager.getAvailableModes().find(
                 (m) => m.id === nextModeConfig.id,
               ) || DEFAULT_FALLBACK_MODE;
-            setCurrentWorkMode(nextModeDef);
+            setCurrentWorkModeLocal(nextModeDef);
 
             // Notify the central handler about the work mode change
             onWorkModeChange?.(nextModeDef);

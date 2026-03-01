@@ -18,12 +18,13 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { useWorkModeCycle } from '../hooks/useWorkModeCycle.js';
+import { useWorkMode } from '../contexts/WorkModeContext.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const { currentWorkMode } = useWorkMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -32,12 +33,6 @@ export const Footer: React.FC = () => {
 
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
-
-  // Get current work mode for display
-  const currentWorkMode = useWorkModeCycle({
-    config,
-    shouldBlockTab: () => false,
-  });
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
