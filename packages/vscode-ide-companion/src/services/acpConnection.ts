@@ -430,6 +430,15 @@ export class AcpConnection {
   }
 
   /**
+   * Reset session manager state to allow creating a new session
+   * This clears the current session ID so that newSession() will create a fresh session
+   */
+  resetSessionState(): void {
+    console.log('[ACP] Resetting session state');
+    this.sessionManager.reset();
+  }
+
+  /**
    * Check if connected
    */
   get isConnected(): boolean {

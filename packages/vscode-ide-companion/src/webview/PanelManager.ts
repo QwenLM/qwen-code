@@ -224,8 +224,16 @@ export class PanelManager {
       return;
     }
 
+    const scheduledPanel = this.panel;
+
     // Defer slightly so the tab model is updated after create/reveal
     setTimeout(() => {
+      // The panel may have been disposed/replaced before this callback runs.
+      if (!this.panel || this.panel !== scheduledPanel) {
+        return;
+      }
+
+      const panelTitle = this.panel.title;
       const allTabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs);
       const match = allTabs.find((t) => {
         // Type guard for webview tab input
@@ -234,7 +242,7 @@ export class PanelManager {
           !!inp && typeof inp === 'object' && 'viewType' in inp;
         const isWebview = isWebviewInput(input);
         const sameViewType = isWebview && input.viewType === 'qwenCode.chat';
-        const sameLabel = t.label === this.panel!.title;
+        const sameLabel = t.label === panelTitle;
         return !!(sameViewType || sameLabel);
       });
       this.panelTab = match ?? null;
