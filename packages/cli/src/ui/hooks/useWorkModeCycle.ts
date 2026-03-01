@@ -159,8 +159,10 @@ export function useWorkModeCycle({
             config.setApprovalMode(nextModeConfig.id as ApprovalMode);
             console.log('[useWorkModeCycle] Approval mode after set:', config.getApprovalMode());
           } else {
-            // Switch work mode
+            // Switch work mode - reset approval mode to DEFAULT
             console.log('[useWorkModeCycle] Switching work mode to:', nextModeConfig.id);
+            console.log('[useWorkModeCycle] Resetting approval mode from', config.getApprovalMode(), 'to DEFAULT');
+            config.setApprovalMode(ApprovalMode.DEFAULT);
             await modeManager.switchMode(nextModeConfig.id);
             console.log('[useWorkModeCycle] Work mode after switch:', modeManager.getCurrentMode().id);
           }
