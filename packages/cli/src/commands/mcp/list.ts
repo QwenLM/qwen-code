@@ -22,9 +22,13 @@ const COLOR_YELLOW = '\u001b[33m';
 const COLOR_RED = '\u001b[31m';
 const RESET_COLOR = '\u001b[0m';
 
-async function getMcpServersFromConfig(): Promise<
-  Record<string, MCPServerConfig>
-> {
+interface McpServersWithFilters {
+  mcpServers: Record<string, MCPServerConfig>;
+  allowedServerNames?: Set<string>;
+  excludedServerNames?: Set<string>;
+}
+
+async function getMcpServersFromConfig(): Promise<McpServersWithFilters> {
   const settings = loadSettings();
   const extensionManager = new ExtensionManager({
     isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
@@ -48,7 +52,16 @@ async function getMcpServersFromConfig(): Promise<
       );
     }
   }
-  return mcpServers;
+
+  return {
+    mcpServers,
+    allowedServerNames: settings.merged.mcp?.allowed
+      ? new Set(settings.merged.mcp.allowed.filter(Boolean))
+      : undefined,
+    excludedServerNames: settings.merged.mcp?.excluded
+      ? new Set(settings.merged.mcp.excluded.filter(Boolean))
+      : undefined,
+  };
 }
 
 async function testMCPConnection(
@@ -92,8 +105,19 @@ async function getServerStatus(
   return await testMCPConnection(serverName, server);
 }
 
+function isServerEnabled(
+  serverName: string,
+  allowedServerNames?: Set<string>,
+  excludedServerNames?: Set<string>,
+): boolean {
+  const isAllowed = !allowedServerNames || allowedServerNames.has(serverName);
+  const isExcluded = !!excludedServerNames && excludedServerNames.has(serverName);
+  return isAllowed && !isExcluded;
+}
+
 export async function listMcpServers(): Promise<void> {
-  const mcpServers = await getMcpServersFromConfig();
+  const { mcpServers, allowedServerNames, excludedServerNames } =
+    await getMcpServersFromConfig();
   const serverNames = Object.keys(mcpServers);
 
   if (serverNames.length === 0) {
@@ -105,25 +129,34 @@ export async function listMcpServers(): Promise<void> {
 
   for (const serverName of serverNames) {
     const server = mcpServers[serverName];
-
-    const status = await getServerStatus(serverName, server);
+    const enabled = isServerEnabled(
+      serverName,
+      allowedServerNames,
+      excludedServerNames,
+    );
 
     let statusIndicator = '';
     let statusText = '';
-    switch (status) {
-      case MCPServerStatus.CONNECTED:
-        statusIndicator = COLOR_GREEN + '✓' + RESET_COLOR;
-        statusText = 'Connected';
-        break;
-      case MCPServerStatus.CONNECTING:
-        statusIndicator = COLOR_YELLOW + '…' + RESET_COLOR;
-        statusText = 'Connecting';
-        break;
-      case MCPServerStatus.DISCONNECTED:
-      default:
-        statusIndicator = COLOR_RED + '✗' + RESET_COLOR;
-        statusText = 'Disconnected';
-        break;
+    if (!enabled) {
+      statusIndicator = COLOR_YELLOW + '○' + RESET_COLOR;
+      statusText = 'disabled';
+    } else {
+      const status = await getServerStatus(serverName, server);
+      switch (status) {
+        case MCPServerStatus.CONNECTED:
+          statusIndicator = COLOR_GREEN + '✓' + RESET_COLOR;
+          statusText = 'Connected';
+          break;
+        case MCPServerStatus.CONNECTING:
+          statusIndicator = COLOR_YELLOW + '…' + RESET_COLOR;
+          statusText = 'Connecting';
+          break;
+        case MCPServerStatus.DISCONNECTED:
+        default:
+          statusIndicator = COLOR_RED + '✗' + RESET_COLOR;
+          statusText = 'Disconnected';
+          break;
+      }
     }
 
     let serverInfo = `${serverName}: `;

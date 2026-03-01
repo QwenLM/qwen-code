@@ -836,7 +836,9 @@ qwen mcp add --transport sse secure-sse https://api.example.com/sse/ --header "A
 
 ### Listing Servers (`qwen mcp list`)
 
-To view all MCP servers currently configured, use the `list` command. It displays each server's name, configuration details, and connection status.
+To view all MCP servers currently configured, use the `list` command. It displays each server's name, configuration details, and status.
+
+If a server is disabled by `mcp.allowed`/`mcp.excluded`, the CLI shows it as `disabled` and does not run a connectivity check for that server.
 
 **Command:**
 
@@ -850,6 +852,7 @@ qwen mcp list
 ✓ stdio-server: command: python3 server.py (stdio) - Connected
 ✓ http-server: https://api.example.com/mcp (http) - Connected
 ✗ sse-server: https://api.example.com/sse (sse) - Disconnected
+○ github-server: command: npx -y @modelcontextprotocol/server-github (stdio) - disabled
 ```
 
 ### Removing a Server (`qwen mcp remove`)

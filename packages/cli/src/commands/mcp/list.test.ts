@@ -183,4 +183,76 @@ describe('mcp list command', () => {
       ),
     );
   });
+
+  it('should show excluded servers as disabled without testing them', async () => {
+    mockedLoadSettings.mockReturnValue({
+      merged: {
+        mcp: {
+          excluded: ['disabled-server'],
+        },
+        mcpServers: {
+          'enabled-server': { command: '/enabled/server' },
+          'disabled-server': { command: '/disabled/server' },
+        },
+      },
+    });
+
+    mockClient.connect.mockResolvedValue(undefined);
+    mockClient.ping.mockResolvedValue(undefined);
+
+    await listMcpServers();
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'enabled-server: /enabled/server  (stdio) - Connected',
+      ),
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'disabled-server: /disabled/server  (stdio) - disabled',
+      ),
+    );
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(1);
+    expect(mockedCreateTransport).toHaveBeenCalledWith(
+      'enabled-server',
+      expect.any(Object),
+      false,
+    );
+  });
+
+  it('should not test servers that are not in mcp.allowed', async () => {
+    mockedLoadSettings.mockReturnValue({
+      merged: {
+        mcp: {
+          allowed: ['enabled-server'],
+        },
+        mcpServers: {
+          'enabled-server': { command: '/enabled/server' },
+          'not-allowed-server': { command: '/not-allowed/server' },
+        },
+      },
+    });
+
+    mockClient.connect.mockResolvedValue(undefined);
+    mockClient.ping.mockResolvedValue(undefined);
+
+    await listMcpServers();
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'enabled-server: /enabled/server  (stdio) - Connected',
+      ),
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'not-allowed-server: /not-allowed/server  (stdio) - disabled',
+      ),
+    );
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(1);
+    expect(mockedCreateTransport).toHaveBeenCalledWith(
+      'enabled-server',
+      expect.any(Object),
+      false,
+    );
+  });
 });
