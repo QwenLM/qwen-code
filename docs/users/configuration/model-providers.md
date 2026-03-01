@@ -4,11 +4,11 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, `vertex-ai`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
-> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, Vertex AI, etc., must be defined via `modelProviders`. The `/auth` command intentionally lists only the built-in Qwen OAuth and OpenAI flows.
+> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists Qwen OAuth, Alibaba Cloud Coding Plan, and API Key as the built-in authentication options.
 
 > [!warning]
 >
@@ -27,7 +27,6 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 | `openai`     | OpenAI-compatible APIs (OpenAI, Azure OpenAI, local inference servers like vLLM/Ollama) |
 | `anthropic`  | Anthropic Claude API                                                                    |
 | `gemini`     | Google Gemini API                                                                       |
-| `vertex-ai`  | Google Vertex AI                                                                        |
 | `qwen-oauth` | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                       |
 
 > [!warning]
@@ -37,12 +36,12 @@ The `modelProviders` object keys must be valid `authType` values. Currently supp
 
 Qwen Code uses the following official SDKs to send requests to each provider:
 
-| Auth Type              | SDK Package                                                                                     |
-| ---------------------- | ----------------------------------------------------------------------------------------------- |
-| `openai`               | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                  |
-| `anthropic`            | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK |
-| `gemini` / `vertex-ai` | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
-| `qwen-oauth`           | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)    |
+| Auth Type    | SDK Package                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------- |
+| `openai`     | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                  |
+| `anthropic`  | [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) - Official Anthropic SDK |
+| `gemini`     | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK      |
+| `qwen-oauth` | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)    |
 
 This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
 
@@ -183,31 +182,6 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
-### Google Vertex AI (`vertex-ai`)
-
-```json
-{
-  "modelProviders": {
-    "vertex-ai": [
-      {
-        "id": "gemini-1.5-pro-vertex",
-        "name": "Gemini 1.5 Pro (Vertex AI)",
-        "envKey": "GOOGLE_API_KEY",
-        "baseUrl": "https://generativelanguage.googleapis.com",
-        "generationConfig": {
-          "timeout": 90000,
-          "contextWindowSize": 2000000,
-          "samplingParams": {
-            "temperature": 0.2,
-            "max_tokens": 8192
-          }
-        }
-      }
-    ]
-  }
-}
-```
-
 ### Local Self-Hosted Models (via OpenAI-compatible API)
 
 Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-compatible API endpoint. Configure them using the `openai` auth type with a local `baseUrl`:
@@ -275,16 +249,16 @@ export VLLM_API_KEY="not-needed"
 ```
 
 > [!note]
-> 
-> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, Gemini, and Vertex AI providers.
+>
+> The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers.
 
-## Bailian Coding Plan
+## Alibaba Cloud Coding Plan
 
-Bailian Coding Plan provides a pre-configured set of Qwen models optimized for coding tasks. This feature is available for users with Bailian API access and offers a simplified setup experience with automatic model configuration updates.
+Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized for coding tasks. This feature is available for users with Alibaba Cloud Coding Plan API access and offers a simplified setup experience with automatic model configuration updates.
 
 ### Overview
 
-When you authenticate with a Bailian Coding Plan API key using the `/auth` command, Qwen Code automatically configures the following models:
+When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth` command, Qwen Code automatically configures the following models:
 
 | Model ID               | Name                 | Description                            |
 | ---------------------- | -------------------- | -------------------------------------- |
@@ -294,19 +268,19 @@ When you authenticate with a Bailian Coding Plan API key using the `/auth` comma
 
 ### Setup
 
-1. Obtain a Bailian Coding Plan API key:
+1. Obtain an Alibaba Cloud Coding Plan API key:
    - **China**: <https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan>
    - **International**: <https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan>
 2. Run the `/auth` command in Qwen Code
-3. Select the API-KEY authentication method
-4. Select your region (China or Global/International)
+3. Select **Alibaba Cloud Coding Plan**
+4. Select your region
 5. Enter your API key when prompted
 
 The models will be automatically configured and added to your `/model` picker.
 
 ### Regions
 
-Bailian Coding Plan supports two regions:
+Alibaba Cloud Coding Plan supports two regions:
 
 | Region               | Endpoint                                        | Description             |
 | -------------------- | ----------------------------------------------- | ----------------------- |
@@ -351,7 +325,7 @@ If you prefer to manually configure Coding Plan models, you can add them to your
       {
         "id": "qwen3-coder-plus",
         "name": "qwen3-coder-plus",
-        "description": "Qwen3-Coder via Bailian Coding Plan",
+        "description": "Qwen3-Coder via Alibaba Cloud Coding Plan",
         "envKey": "YOUR_CUSTOM_ENV_KEY",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
       }
@@ -388,7 +362,7 @@ The effective auth/model/credential values are chosen per field using the follow
 \*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
 
 > [!warning]
-> 
+>
 > **Deprecation of `security.auth.apiKey` and `security.auth.baseUrl`:** Directly configuring API credentials via `security.auth.apiKey` and `security.auth.baseUrl` in `settings.json` is deprecated. These settings were used in historical versions for credentials entered through the UI, but the credential input flow was removed in version 0.10.1. These fields will be fully removed in a future release. **It is strongly recommended to migrate to `modelProviders`** for all model and credential configurations. Use `envKey` in `modelProviders` to reference environment variables for secure credential management instead of hardcoding credentials in settings files.
 
 ## Generation Config Layering: The Impermeable Provider Layer
@@ -522,7 +496,7 @@ The snapshot:
 ## Selection Persistence and Recommendations
 
 > [!important]
-> 
+>
 > Define `modelProviders` in the user-scope `~/.qwen/settings.json` whenever possible and avoid persisting credential overrides in any scope. Keeping the provider catalog in user settings prevents merge/override conflicts between project and user scopes and ensures `/auth` and `/model` updates always write back to a consistent scope.
 
 - `/model` and `/auth` persist `model.name` (where applicable) and `security.auth.selectedType` to the closest writable scope that already defines `modelProviders`; otherwise they fall back to the user scope. This keeps workspace/user files in sync with the active provider catalog.

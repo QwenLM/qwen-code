@@ -178,6 +178,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter to confirm, Esc to cancel',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter to select, ↑↓ to navigate, Esc to go back',
+  'Enter to submit, Esc to go back': 'Enter to submit, Esc to go back',
   'Invalid step: {{step}}': 'Invalid step: {{step}}',
   'No subagents found.': 'No subagents found.',
   "Use '/agents create' to create your first subagent.":
@@ -935,18 +936,22 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Get started',
-  'How would you like to authenticate for this project?':
-    'How would you like to authenticate for this project?',
+  'Select Authentication Method': 'Select Authentication Method',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI API key is required to use OpenAI authentication.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'You must select an auth method to proceed. Press Ctrl+C again to exit.',
-  '(Use Enter to Set Auth)': '(Use Enter to Set Auth)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Terms of Services and Privacy Notice for Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
   'Login with QwenChat account to use daily free quota.':
     'Login with QwenChat account to use daily free quota.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax and more':
+    'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax and more',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Bring your own API key',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use coding plan credentials or your own api-keys/providers.',
@@ -974,6 +979,8 @@ export default {
     'Waiting for Qwen OAuth authentication...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Note: Your existing API key will not be cleared when using Qwen OAuth.',
   'Authentication timed out. Please try again.':
     'Authentication timed out. Please try again.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1388,14 +1395,13 @@ export default {
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'Please enter your API key:',
   'API key cannot be empty.': 'API key cannot be empty.',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'You can get your exclusive Coding Plan API-KEY here:',
+  'You can get your Coding Plan API key here':
+    'You can get your Coding Plan API key here',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API key is stored in settings.env. You can migrate it to a .env file for better security.',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'New model configurations are available for Bailian Coding Plan. Update now?',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'New model configurations are available for Alibaba Cloud Coding Plan. Update now?',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Coding Plan configuration updated successfully. New models are now available.',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1404,51 +1410,26 @@ export default {
     'Failed to update Coding Plan configuration: {{message}}',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'For advanced users who want to configure models manually.',
-  'Please configure your models in settings.json:':
-    'Please configure your models in settings.json:',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    'Set API key via environment variable (e.g., OPENAI_API_KEY)',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "Add model configuration to modelProviders['openai'] (or other auth types)",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig',
-  'Use /model command to select your preferred model from the configured list':
-    'Use /model command to select your preferred model from the configured list',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.',
-  'More instructions please check:': 'More instructions please check:',
+  'You can configure your API key and models in settings.json':
+    'You can configure your API key and models in settings.json',
+  'Refer to the documentation for setup instructions':
+    'Refer to the documentation for setup instructions',
 
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'Coding Plan': 'Coding Plan',
-  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
-  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    "Paste your api key of Bailian Coding Plan and you're all set!",
-  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
-    "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!",
-  Custom: 'Custom',
-  'More instructions about configuring `modelProviders` manually.':
-    'More instructions about configuring `modelProviders` manually.',
-  'Select API-KEY configuration mode:': 'Select API-KEY configuration mode:',
-  '(Press Escape to go back)': '(Press Escape to go back)',
-  '(Press Enter to submit, Escape to cancel)':
-    '(Press Enter to submit, Escape to cancel)',
+  'Select Region for Coding Plan': 'Select Region for Coding Plan',
+  'Choose based on where your account is registered':
+    'Choose based on where your account is registered',
+  'Enter Coding Plan API Key': 'Enter Coding Plan API Key',
 
   // ============================================================================
   // Coding Plan International Updates
   // ============================================================================
   'New model configurations are available for {{region}}. Update now?':
     'New model configurations are available for {{region}}. Update now?',
-  'New model configurations are available for Bailian Coding Plan (China). Update now?':
-    'New model configurations are available for Bailian Coding Plan (China). Update now?',
-  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
-    'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':

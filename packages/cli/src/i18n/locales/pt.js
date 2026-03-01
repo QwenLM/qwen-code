@@ -173,6 +173,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter para confirmar, Esc para cancelar',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter para selecionar, ↑↓ para navegar, Esc para voltar',
+  'Enter to submit, Esc to go back': 'Enter para enviar, Esc para voltar',
   'Invalid step: {{step}}': 'Etapa inválida: {{step}}',
   'No subagents found.': 'Nenhum subagente encontrado.',
   "Use '/agents create' to create your first subagent.":
@@ -950,18 +951,22 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Começar',
-  'How would you like to authenticate for this project?':
-    'Como você gostaria de se autenticar para este projeto?',
+  'Select Authentication Method': 'Selecionar Método de Autenticação',
   'OpenAI API key is required to use OpenAI authentication.':
     'A chave da API do OpenAI é necessária para usar a autenticação do OpenAI.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'Você deve selecionar um método de autenticação para prosseguir. Pressione Ctrl+C novamente para sair.',
-  '(Use Enter to Set Auth)': '(Use Enter para Definir Autenticação)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Termos de Serviço e Aviso de Privacidade do Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Gratuito \u00B7 Até 1.000 solicitações/dia \u00B7 Modelos Qwen mais recentes',
   'Login with QwenChat account to use daily free quota.':
     'Faça login com sua conta QwenChat para usar a cota gratuita diária.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax and more':
+    'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax e mais',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Traga sua própria chave API',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use credenciais do Coding Plan ou suas próprias chaves API/provedores.',
@@ -989,6 +994,8 @@ export default {
     'Aguardando autenticação Qwen OAuth...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Nota: Sua chave de API existente no settings.json não será limpa ao usar o Qwen OAuth. Você pode voltar para a autenticação do OpenAI mais tarde, se necessário.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Nota: Sua chave de API existente não será limpa ao usar o Qwen OAuth.',
   'Authentication timed out. Please try again.':
     'A autenticação expirou. Tente novamente.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1396,32 +1403,21 @@ export default {
     'Falha ao abrir o navegador. Confira a galeria de extensões em {{url}}',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'Para usuários avançados que desejam configurar modelos manualmente.',
-  'Please configure your models in settings.json:':
-    'Por favor, configure seus modelos em settings.json:',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    'Defina a chave de API via variável de ambiente (ex: OPENAI_API_KEY)',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "Adicione a configuração do modelo a modelProviders['openai'] (ou outros tipos de autenticação)",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    'Cada provedor precisa de: id, envKey (obrigatório), além de baseUrl e generationConfig opcionais',
-  'Use /model command to select your preferred model from the configured list':
-    'Use o comando /model para selecionar seu modelo preferido da lista configurada',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'Tipos de autenticação suportados: openai, anthropic, gemini, vertex-ai, etc.',
+  'You can configure your API key and models in settings.json':
+    'Você pode configurar sua chave de API e modelos em settings.json',
+  'Refer to the documentation for setup instructions':
+    'Consulte a documentação para instruções de configuração',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'Por favor, digite sua chave de API:',
   'API key cannot be empty.': 'A chave de API não pode estar vazia.',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'Você pode obter sua chave de API exclusiva do Coding Plan aqui:',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'Novas configurações de modelo estão disponíveis para o Bailian Coding Plan. Atualizar agora?',
+  'You can get your Coding Plan API key here':
+    'Você pode obter sua chave de API do Coding Plan aqui',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Novas configurações de modelo estão disponíveis para o Alibaba Cloud Coding Plan. Atualizar agora?',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Configuração do Coding Plan atualizada com sucesso. Novos modelos agora estão disponíveis.',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1432,32 +1428,16 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'Coding Plan': 'Coding Plan',
-  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
-  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Cole sua chave de API do Bailian Coding Plan e pronto!',
-  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
-    'Cole sua chave de API do Coding Plan (Bailian, Global/Intl) e pronto!',
-  Custom: 'Personalizado',
-  'More instructions about configuring `modelProviders` manually.':
-    'Mais instruções sobre como configurar `modelProviders` manualmente.',
-  'Select API-KEY configuration mode:':
-    'Selecione o modo de configuração da API-KEY:',
-  '(Press Escape to go back)': '(Pressione Escape para voltar)',
-  '(Press Enter to submit, Escape to cancel)':
-    '(Pressione Enter para enviar, Escape para cancelar)',
-  'More instructions please check:': 'Mais instruções, consulte:',
+  'Select Region for Coding Plan': 'Selecionar região do Coding Plan',
+  'Choose based on where your account is registered':
+    'Escolha com base em onde sua conta está registrada',
+  'Enter Coding Plan API Key': 'Inserir chave de API do Coding Plan',
 
   // ============================================================================
   // Coding Plan International Updates
   // ============================================================================
   'New model configurations are available for {{region}}. Update now?':
     'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
-  'New model configurations are available for Bailian Coding Plan (China). Update now?':
-    'Novas configurações de modelo estão disponíveis para o Bailian Coding Plan (China). Atualizar agora?',
-  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
-    'Novas configurações de modelo estão disponíveis para o Coding Plan (Bailian, Global/Intl). Atualizar agora?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':

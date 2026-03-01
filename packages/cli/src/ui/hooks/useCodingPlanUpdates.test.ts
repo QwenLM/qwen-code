@@ -112,7 +112,7 @@ describe('useCodingPlanUpdates', () => {
 
       // Should prompt for China region since it defaults to China
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        chinaConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
 
@@ -135,7 +135,7 @@ describe('useCodingPlanUpdates', () => {
       });
 
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        chinaConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
 
@@ -158,7 +158,7 @@ describe('useCodingPlanUpdates', () => {
       });
 
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        globalConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
   });
@@ -228,7 +228,7 @@ describe('useCodingPlanUpdates', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',
-          text: expect.stringContaining(chinaConfig.regionName),
+          text: expect.stringContaining('Alibaba Cloud Coding Plan'),
         }),
         expect.any(Number),
       );
@@ -297,7 +297,7 @@ describe('useCodingPlanUpdates', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',
-          text: expect.stringContaining(globalConfig.regionName),
+          text: expect.stringContaining('Alibaba Cloud Coding Plan'),
         }),
         expect.any(Number),
       );

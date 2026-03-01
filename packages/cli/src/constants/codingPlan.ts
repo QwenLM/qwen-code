@@ -251,15 +251,9 @@ export function getCodingPlanConfig(region: CodingPlanRegion) {
     region === CodingPlanRegion.CHINA
       ? 'https://coding.dashscope.aliyuncs.com/v1'
       : 'https://coding-intl.dashscope.aliyuncs.com/v1';
-  const regionName =
-    region === CodingPlanRegion.CHINA
-      ? 'Coding Plan (Bailian, China)'
-      : 'Coding Plan (Bailian, Global/Intl)';
-
   return {
     template,
     baseUrl,
-    regionName,
     version: computeCodingPlanVersion(template),
   };
 }

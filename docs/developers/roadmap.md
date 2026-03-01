@@ -18,7 +18,7 @@
 
 | Feature                 | Version   | Description                                             | Category                        | Phase |
 | ----------------------- | --------- | ------------------------------------------------------- | ------------------------------- | ----- |
-| **Coding Plan**         | `V0.10.0` | Bailian Coding Plan authentication & models             | User Experience                 | 2     |
+| **Coding Plan**         | `V0.10.0` | Alibaba Cloud Coding Plan authentication & models       | User Experience                 | 2     |
 | Unified WebUI           | `V0.9.0`  | Shared WebUI component library for VSCode/CLI           | User Experience                 | 2     |
 | Export Chat             | `V0.8.0`  | Export sessions to Markdown/HTML/JSON/JSONL             | User Experience                 | 2     |
 | Extension System        | `V0.8.0`  | Full extension management with slash commands           | Building Open Capabilities      | 2     |
