@@ -56,6 +56,8 @@ export const ToolDisplayNames = {
 export const ToolNamesMigration = {
   search_file_content: ToolNames.GREP, // Legacy name from grep tool
   replace: ToolNames.EDIT, // Legacy name from edit tool
+  bash: ToolNames.SHELL, // Common alias for shell command (models often use "bash" instead of "run_shell_command")
+  sh: ToolNames.SHELL, // Another common shell alias
 } as const;
 
 // Migration from old tool display names to new tool display names
