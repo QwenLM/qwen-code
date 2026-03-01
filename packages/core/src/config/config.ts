@@ -112,6 +112,10 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import {
+  RedactionManager,
+  type RedactionConfig,
+} from '../security/redaction.js';
 
 import {
   ModelsConfig,
@@ -377,6 +381,11 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /**
+   * Client-side redaction configuration (default off).
+   * This is applied right before any provider request is sent.
+   */
+  redaction?: RedactionConfig;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
 }
@@ -519,6 +528,7 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType;
+  private readonly redactionManager: RedactionManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -633,6 +643,7 @@ export class Config {
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.channel = params.channel;
     this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
+    this.redactionManager = new RedactionManager(params.redaction);
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
@@ -1260,6 +1271,14 @@ export class Config {
 
   getAccessibility(): AccessibilitySettings {
     return this.accessibility;
+  }
+
+  getRedactionManager(): RedactionManager {
+    return this.redactionManager;
+  }
+
+  setRedactionEnabled(enabled: boolean): void {
+    this.redactionManager.setEnabled(enabled);
   }
 
   getTelemetryEnabled(): boolean {

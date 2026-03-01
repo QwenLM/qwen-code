@@ -241,12 +241,20 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 
 #### security
 
-| Setting                        | Type    | Description                                       | Default     |
-| ------------------------------ | ------- | ------------------------------------------------- | ----------- |
-| `security.folderTrust.enabled` | boolean | Setting to track whether Folder trust is enabled. | `false`     |
-| `security.auth.selectedType`   | string  | The currently selected authentication type.       | `undefined` |
-| `security.auth.enforcedType`   | string  | The required auth type (useful for enterprises).  | `undefined` |
-| `security.auth.useExternal`    | boolean | Whether to use an external authentication flow.   | `undefined` |
+| Setting                                | Type             | Description                                                                    | Default     |
+| -------------------------------------- | ---------------- | ------------------------------------------------------------------------------ | ----------- |
+| `security.folderTrust.enabled`         | boolean          | Setting to track whether Folder trust is enabled.                              | `false`     |
+| `security.auth.selectedType`           | string           | The currently selected authentication type.                                    | `undefined` |
+| `security.auth.enforcedType`           | string           | The required auth type (useful for enterprises).                               | `undefined` |
+| `security.auth.useExternal`            | boolean          | Whether to use an external authentication flow.                                | `undefined` |
+| `security.redaction.enabled`           | boolean          | Enable client-side redaction before provider requests.                         | `false`     |
+| `security.redaction.placeholderPrefix` | string           | Placeholder prefix (keep `__VG_` for compatibility).                           | `__VG_`     |
+| `security.redaction.keywords`          | object           | Exact substring matches: `{ "secretValue": "CATEGORY" }`.                      | `{}`        |
+| `security.redaction.patterns`          | object           | Regex matches (JavaScript syntax): `{ "regexPattern": "CATEGORY" }`.           | `{}`        |
+| `security.redaction.builtins`          | array of strings | Built-in detectors: `email`, `china_phone`, `china_id`, `uuid`, `ipv4`, `mac`. | `[]`        |
+| `security.redaction.exclude`           | array of strings | Exact values that should not be redacted.                                      | `[]`        |
+| `security.redaction.ttlMinutes`        | number           | How long placeholder ↔ original mappings are kept in memory.                  | `60`        |
+| `security.redaction.maxSize`           | number           | Maximum number of in-memory mappings to keep.                                  | `10000`     |
 
 #### advanced
 
