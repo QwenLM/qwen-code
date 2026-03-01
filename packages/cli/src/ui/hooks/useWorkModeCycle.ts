@@ -155,10 +155,14 @@ export function useWorkModeCycle({
           // Switch to the next mode based on type
           if (nextModeConfig.type === 'approval') {
             // Switch approval mode
+            console.log('[useWorkModeCycle] Setting approval mode to:', nextModeConfig.id);
             config.setApprovalMode(nextModeConfig.id as ApprovalMode);
+            console.log('[useWorkModeCycle] Approval mode after set:', config.getApprovalMode());
           } else {
             // Switch work mode
+            console.log('[useWorkModeCycle] Switching work mode to:', nextModeConfig.id);
             await modeManager.switchMode(nextModeConfig.id);
+            console.log('[useWorkModeCycle] Work mode after switch:', modeManager.getCurrentMode().id);
           }
 
           // Update local state immediately for responsiveness
