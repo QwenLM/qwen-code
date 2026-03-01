@@ -12,10 +12,17 @@ import { t } from '../../i18n/index.js';
 
 interface AutoAcceptIndicatorProps {
   approvalMode: ApprovalMode;
+  workMode?: {
+    id: string;
+    name: string;
+    icon: string;
+    color: string;
+  };
 }
 
 export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   approvalMode,
+  workMode,
 }) => {
   let textColor = '';
   let textContent = '';
@@ -26,25 +33,35 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
       ? ` ${t('(tab to cycle)')}`
       : ` ${t('(shift + tab to cycle)')}`;
 
-  switch (approvalMode) {
-    case ApprovalMode.PLAN:
-      textColor = theme.status.success;
-      textContent = t('plan mode');
-      subText = cycleText;
-      break;
-    case ApprovalMode.AUTO_EDIT:
-      textColor = theme.status.warning;
-      textContent = t('auto-accept edits');
-      subText = cycleText;
-      break;
-    case ApprovalMode.YOLO:
-      textColor = theme.status.error;
-      textContent = t('YOLO mode');
-      subText = cycleText;
-      break;
-    case ApprovalMode.DEFAULT:
-    default:
-      break;
+  // Check if we're in a work mode
+  if (workMode) {
+    textColor = workMode.color || theme.text.primary;
+    textContent = `${workMode.icon} ${workMode.name} mode`;
+    subText = cycleText;
+  } else {
+    // Approval modes
+    switch (approvalMode) {
+      case ApprovalMode.PLAN:
+        textColor = '#9333EA'; // Purple
+        textContent = `📋 ${t('plan mode')}`;
+        subText = cycleText;
+        break;
+      case ApprovalMode.AUTO_EDIT:
+        textColor = '#F59E0B'; // Amber/Orange
+        textContent = `✅ ${t('auto-accept edits')}`;
+        subText = cycleText;
+        break;
+      case ApprovalMode.YOLO:
+        textColor = '#EF4444'; // Red
+        textContent = `🚀 ${t('YOLO mode')}`;
+        subText = cycleText;
+        break;
+      case ApprovalMode.DEFAULT:
+      default:
+        textColor = theme.text.secondary;
+        textContent = t('? for shortcuts');
+        break;
+    }
   }
 
   return (
