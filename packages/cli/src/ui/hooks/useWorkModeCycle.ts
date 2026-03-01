@@ -87,7 +87,7 @@ export function useWorkModeCycle({
   }, [config]);
 
   useKeypress(
-    (key) => {
+    async (key) => {
       // Handle Shift+Tab to cycle through all modes (approval + work)
       // On Windows and macOS, Shift+Tab may be indistinguishable from Tab in some terminals,
       // so we allow Tab to switch modes as well to support the shortcut.
@@ -157,7 +157,7 @@ export function useWorkModeCycle({
             config.setApprovalMode(nextModeConfig.id as ApprovalMode);
           } else {
             // Switch work mode
-            modeManager.switchMode(nextModeConfig.id);
+            await modeManager.switchMode(nextModeConfig.id);
           }
 
           // Update local state immediately for responsiveness
