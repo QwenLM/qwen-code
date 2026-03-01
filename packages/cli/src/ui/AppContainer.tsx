@@ -86,6 +86,7 @@ import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
+import { useWorkModeCycle } from './hooks/useWorkModeCycle.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
 import {
@@ -702,6 +703,16 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
+    shouldBlockTab: () => hasSuggestionsVisible,
+  });
+
+  // Work mode cycling (Shift+Tab)
+  const currentWorkMode = useWorkModeCycle({
+    config,
+    addItem: historyManager.addItem,
+    onWorkModeChange: (mode) => {
+      // Optional: Add custom logic when work mode changes
+    },
     shouldBlockTab: () => hasSuggestionsVisible,
   });
 
@@ -1424,6 +1435,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
+      currentWorkMode,
       currentModel,
       contextFileNames,
       availableTerminalHeight,
@@ -1515,6 +1527,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
+      currentWorkMode,
       contextFileNames,
       availableTerminalHeight,
       mainAreaWidth,

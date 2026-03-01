@@ -52,6 +52,8 @@ import type {
   SetModeResponse,
   SetModelRequest,
   SetModelResponse,
+  SetWorkModeRequest,
+  SetWorkModeResponse,
   ApprovalModeValue,
   CurrentModeUpdate,
 } from '../schema.js';
@@ -60,6 +62,7 @@ import {
   formatAcpModelId,
   parseAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import type { ModeManager } from '@qwen-code/modes';
 
 // Import modular session components
 import type { SessionContext, ToolCallStartParams } from './types.js';
@@ -106,6 +109,63 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+  }
+
+  /**
+   * Get the ModeManager from config to access current Work Mode
+   */
+  private getModeManager(): ModeManager | null {
+    return this.config.getModeManager();
+  }
+
+  /**
+   * Get the current Work Mode definition
+   */
+  private getCurrentWorkMode() {
+    const modeManager = this.getModeManager();
+    return modeManager?.getCurrentMode();
+  }
+
+  /**
+   * Maps internal tool names to Work Mode tool names.
+   * Work modes use standardized tool names, but internal implementations may differ.
+   */
+  private mapToolNameToWorkMode(internalToolName: string): string {
+    // Map internal tool names to Work Mode tool names
+    const toolNameMap: Record<string, string> = {
+      // Read tools
+      read_file: 'read_file',
+      list_dir: 'list_dir',
+      glob: 'glob',
+      grep: 'grep',
+      
+      // Write tools
+      write_file: 'write_file',
+      edit: 'edit',
+      
+      // Shell and process
+      shell: 'shell',
+      
+      // Memory and todos
+      memory: 'memory',
+      todo_write: 'todo_write',
+      
+      // Web tools
+      web_search: 'web_search',
+      web_fetch: 'web_fetch',
+      
+      // Development tools
+      lsp: 'lsp',
+      run_tests: 'run_tests',
+      
+      // Task delegation
+      task: 'task',
+      
+      // Plan mode
+      exit_plan_mode: 'exit_plan_mode',
+    };
+
+    return toolNameMap[internalToolName] || internalToolName;
   }
 
   getId(): string {
@@ -208,12 +268,17 @@ export class Session implements SessionContext {
       const streamStartTime = Date.now();
 
       try {
+        // Get work mode system prompt if available
+        const workMode = this.getCurrentWorkMode();
+        const systemInstruction = workMode?.roleSystemPrompt;
+
         const responseStream = await chat.sendMessageStream(
           this.config.getModel(),
           {
             message: nextMessage?.parts ?? [],
             config: {
               abortSignal: pendingSend.signal,
+              systemInstruction,
             },
           },
           promptId,
@@ -355,6 +420,26 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Sets the work mode for the current session.
+   * Switches the Work Mode (agent role) via ModeManager.
+   */
+  async setWorkMode(params: SetWorkModeRequest): Promise<SetWorkModeResponse> {
+    const modeManager = this.getModeManager();
+    if (!modeManager) {
+      throw acp.RequestError.internalError('ModeManager not available');
+    }
+
+    try {
+      await modeManager.switchMode(params.workModeId);
+      return { workModeId: params.workModeId };
+    } catch (error) {
+      throw acp.RequestError.invalidParams(
+        error instanceof Error ? error.message : `Failed to switch to work mode: ${params.workModeId}`,
+      );
+    }
+  }
+
+  /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
    */
@@ -471,6 +556,36 @@ export class Session implements SessionContext {
       return errorResponse(
         new Error(`Tool "${fc.name}" not found in registry.`),
       );
+    }
+
+    // Check Work Mode tool restrictions
+    const workMode = this.getCurrentWorkMode();
+    if (workMode) {
+      const toolName = fc.name as string;
+
+      // Check if tool is explicitly excluded
+      if (workMode.excludedTools && (workMode.excludedTools as string[]).includes(toolName)) {
+        return errorResponse(
+          new Error(
+            `Tool "${toolName}" is not allowed in ${workMode.name} mode. ` +
+            `Excluded tools: ${workMode.excludedTools.join(', ')}`,
+          ),
+        );
+      }
+
+      // Check if tool is in allowed list (if list is defined and not empty)
+      if (workMode.allowedTools && workMode.allowedTools.length > 0) {
+        // Map tool names - some tools may have different internal names
+        const mappedToolName = this.mapToolNameToWorkMode(toolName);
+        if (!(workMode.allowedTools as string[]).includes(mappedToolName)) {
+          return errorResponse(
+            new Error(
+              `Tool "${toolName}" is not allowed in ${workMode.name} mode. ` +
+              `Allowed tools: ${workMode.allowedTools.join(', ')}`,
+            ),
+          );
+        }
+      }
     }
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events

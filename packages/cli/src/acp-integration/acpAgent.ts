@@ -86,6 +86,11 @@ class GeminiAgent {
       description: APPROVAL_MODE_INFO[mode].description,
     }));
 
+    // Get work modes from ModeManager
+    const modeManager = this.config.getModeManager();
+    const availableWorkModes = modeManager?.getAvailableModes() ?? [];
+    const currentWorkMode = modeManager?.getCurrentMode();
+
     const version = process.env['CLI_VERSION'] || process.version;
 
     return {
@@ -99,6 +104,21 @@ class GeminiAgent {
       modes: {
         currentModeId: currentApprovalMode as ApprovalModeValue,
         availableModes,
+      },
+      workModes: {
+        currentWorkModeId: currentWorkMode?.id ?? 'code',
+        availableWorkModes: availableWorkModes.map((mode) => ({
+          id: mode.id,
+          name: mode.name,
+          description: mode.description,
+          icon: mode.icon,
+          color: mode.color,
+          roleSystemPrompt: mode.roleSystemPrompt,
+          allowedTools: mode.allowedTools,
+          excludedTools: mode.excludedTools,
+          useCases: mode.useCases,
+          safetyConstraints: mode.safetyConstraints,
+        })),
       },
       agentCapabilities: {
         loadSession: true,
@@ -269,6 +289,16 @@ class GeminiAgent {
       );
     }
     return session.setMode(params);
+  }
+
+  async setWorkMode(params: acp.SetWorkModeRequest): Promise<acp.SetWorkModeResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) {
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${params.sessionId}`,
+      );
+    }
+    return session.setWorkMode(params);
   }
 
   async setModel(params: acp.SetModelRequest): Promise<acp.SetModelResponse> {

@@ -15,6 +15,7 @@ export const AGENT_METHODS = {
   session_prompt: 'session/prompt',
   session_list: 'session/list',
   session_set_mode: 'session/set_mode',
+  session_set_work_mode: 'session/set_work_mode',
   session_set_model: 'session/set_model',
 };
 
@@ -92,6 +93,14 @@ export type AuthMethod = z.infer<typeof authMethodSchema>;
 export type ModeInfo = z.infer<typeof modeInfoSchema>;
 
 export type ModesData = z.infer<typeof modesDataSchema>;
+
+export type WorkModeInfo = z.infer<typeof workModeInfoSchema>;
+
+export type WorkModesData = z.infer<typeof workModesDataSchema>;
+
+export type SetWorkModeRequest = z.infer<typeof setWorkModeRequestSchema>;
+
+export type SetWorkModeResponse = z.infer<typeof setWorkModeResponseSchema>;
 
 export type AgentInfo = z.infer<typeof agentInfoSchema>;
 export type ModelInfo = z.infer<typeof modelInfoSchema>;
@@ -242,6 +251,18 @@ export const setModeRequestSchema = z.object({
 
 export const setModeResponseSchema = z.object({
   modeId: approvalModeValueSchema,
+});
+
+// Work Mode (agent role) - controls system prompt and allowed tools
+export const workModeIdSchema = z.string();
+
+export const setWorkModeRequestSchema = z.object({
+  sessionId: z.string(),
+  workModeId: workModeIdSchema,
+});
+
+export const setWorkModeResponseSchema = z.object({
+  workModeId: workModeIdSchema,
 });
 
 export const authenticateRequestSchema = z.object({
@@ -440,6 +461,7 @@ export const loadSessionRequestSchema = z.object({
   sessionId: z.string(),
 });
 
+// Approval Mode (permission level) - controls tool execution permissions
 export const modeInfoSchema = z.object({
   id: approvalModeValueSchema,
   name: z.string(),
@@ -449,6 +471,25 @@ export const modeInfoSchema = z.object({
 export const modesDataSchema = z.object({
   currentModeId: approvalModeValueSchema,
   availableModes: z.array(modeInfoSchema),
+});
+
+// Work Mode (agent role) - controls system prompt and allowed tools
+export const workModeInfoSchema = z.object({
+  id: workModeIdSchema,
+  name: z.string(),
+  description: z.string(),
+  icon: z.string().optional(),
+  color: z.string().optional(),
+  roleSystemPrompt: z.string(),
+  allowedTools: z.array(z.string()),
+  excludedTools: z.array(z.string()).optional(),
+  useCases: z.array(z.string()),
+  safetyConstraints: z.array(z.string()),
+});
+
+export const workModesDataSchema = z.object({
+  currentWorkModeId: workModeIdSchema,
+  availableWorkModes: z.array(workModeInfoSchema),
 });
 
 export const agentInfoSchema = z.object({
@@ -462,6 +503,7 @@ export const initializeResponseSchema = z.object({
   agentInfo: agentInfoSchema,
   authMethods: z.array(authMethodSchema),
   modes: modesDataSchema,
+  workModes: workModesDataSchema,
   protocolVersion: z.number(),
 });
 
@@ -649,6 +691,7 @@ export const agentRequestSchema = z.union([
   promptRequestSchema,
   listSessionsRequestSchema,
   setModeRequestSchema,
+  setWorkModeRequestSchema,
   setModelRequestSchema,
 ]);
 

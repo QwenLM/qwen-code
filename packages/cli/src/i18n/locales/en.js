@@ -53,6 +53,7 @@ export default {
   'for file paths': 'for file paths',
   'to clear input': 'to clear input',
   'to cycle approvals': 'to cycle approvals',
+  'to cycle work modes': 'to cycle work modes',
   'to quit': 'to quit',
   'for newline': 'for newline',
   'to clear screen': 'to clear screen',
@@ -1115,6 +1116,10 @@ export default {
     'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'You can switch permission mode quickly with Tab or /approval-mode.',
+  'You can switch work mode quickly with Shift+Tab or /mode.':
+    'You can switch work mode quickly with Shift+Tab or /mode.',
+  'Cycle work modes': 'Cycle work modes',
+  'Switch work mode': 'Switch work mode',
 
   // ============================================================================
   // Exit Screen / Stats

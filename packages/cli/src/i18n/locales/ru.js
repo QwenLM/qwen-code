@@ -82,6 +82,7 @@ export default {
   'for file paths': 'пути к файлам',
   'to clear input': 'очистить ввод',
   'to cycle approvals': 'переключить режим',
+  'to cycle work modes': 'переключить рабочий режим',
   'to quit': 'выход',
   'for newline': 'новая строка',
   'to clear screen': 'очистить экран',
@@ -1388,6 +1389,10 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
+  'You can switch work mode quickly with Shift+Tab or /mode.':
+    'Вы можете быстро переключать рабочий режим с помощью Shift+Tab или /mode.',
+  'Cycle work modes': 'Переключение рабочих режимов',
+  'Switch work mode': 'Переключить рабочий режим',
 
   // ============================================================================
   // Custom API-KEY Configuration

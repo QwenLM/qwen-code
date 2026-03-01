@@ -160,6 +160,12 @@ export const Help: React.FC<Help> = ({ commands, width }) => (
     </Text>
     <Text color={theme.text.primary}>
       <Text bold color={theme.text.accent}>
+        Shift+Tab
+      </Text>{' '}
+      - {t('Cycle work modes')}
+    </Text>
+    <Text color={theme.text.primary}>
+      <Text bold color={theme.text.accent}>
         Up/Down
       </Text>{' '}
       - {t('Cycle through your prompt history')}
