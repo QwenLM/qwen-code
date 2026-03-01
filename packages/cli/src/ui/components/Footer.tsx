@@ -18,13 +18,11 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { useWorkMode } from '../contexts/WorkModeContext.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
-  const { currentWorkMode } = useWorkMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -63,15 +61,7 @@ export const Footer: React.FC = () => {
     <ShellModeIndicator />
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
-    <AutoAcceptIndicator 
-      approvalMode={showAutoAcceptIndicator}
-      workMode={currentWorkMode && currentWorkMode.icon && currentWorkMode.color ? {
-        id: currentWorkMode.id,
-        name: currentWorkMode.name,
-        icon: currentWorkMode.icon,
-        color: currentWorkMode.color,
-      } : undefined}
-    />
+    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
