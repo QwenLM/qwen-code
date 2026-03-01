@@ -62,16 +62,13 @@ export const Footer: React.FC = () => {
     <ShellModeIndicator />
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+    // Approval mode is active (Plan, Auto-edit, YOLO)
     <AutoAcceptIndicator 
       approvalMode={showAutoAcceptIndicator}
-      workMode={currentWorkMode?.icon && currentWorkMode?.color ? {
-        id: currentWorkMode.id,
-        name: currentWorkMode.name,
-        icon: currentWorkMode.icon,
-        color: currentWorkMode.color,
-      } : undefined}
+      workMode={undefined}
     />
   ) : currentWorkMode?.icon && currentWorkMode?.color ? (
+    // Work mode is active (Architect, Code, Ask, Debug, Review, Orchestrator)
     <AutoAcceptIndicator
       approvalMode={ApprovalMode.DEFAULT}
       workMode={{
