@@ -659,7 +659,13 @@ function setupAcpTest(
     }> = [];
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
-      permissionHandler: () => ({ optionId: 'proceed_once' }),
+      permissionHandler: (request) => {
+        // Cancel exit_plan_mode to keep plan mode active
+        if (request.toolCall?.kind === 'switch_mode') {
+          return { outcome: 'cancelled' };
+        }
+        return { optionId: 'proceed_once' };
+      },
     });
 
     try {

@@ -1380,10 +1380,26 @@ export default {
     'Erweiterungsseite wird im Browser geöffnet: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Browser konnte nicht geöffnet werden. Besuchen Sie die Erweiterungsgalerie unter {{url}}',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Verwenden Sie /compress, wenn die Unterhaltung lang wird, um den Verlauf zusammenzufassen und Kontext freizugeben.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Starten Sie eine neue Idee mit /clear oder /new; die vorherige Sitzung bleibt im Verlauf verfügbar.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Verwenden Sie /bug, um Probleme an die Betreuer zu melden, wenn etwas schiefgeht.',
+  'Switch auth type quickly with /auth.':
+    'Wechseln Sie den Authentifizierungstyp schnell mit /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Sie können beliebige Shell-Befehle in Qwen Code mit ! ausführen (z. B. !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Geben Sie / ein, um das Befehlsmenü zu öffnen; Tab vervollständigt Slash-Befehle und gespeicherte Prompts.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'Sie können eine frühere Unterhaltung mit qwen --continue oder qwen --resume fortsetzen.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Sie können den Berechtigungsmodus schnell mit Shift+Tab oder /approval-mode wechseln.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
 
   // ============================================================================
   // Custom API-KEY Configuration
@@ -1450,6 +1466,6 @@ export default {
     'Neue Modellkonfigurationen sind für Coding Plan (Bailian, Global/Intl) verfügbar. Jetzt aktualisieren?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel ist in settings.env gespeichert.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
 };
