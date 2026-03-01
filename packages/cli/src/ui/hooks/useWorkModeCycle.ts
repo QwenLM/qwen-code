@@ -65,29 +65,41 @@ export function useWorkModeCycle({
   const [currentWorkMode, setCurrentWorkMode] = useState<ModeDefinition>(
     () => modeManager?.getCurrentMode() || DEFAULT_FALLBACK_MODE,
   );
+  // Track whether we're currently in an approval mode or work mode
+  const [lastModeType, setLastModeType] = useState<'approval' | 'work'>(() => {
+    const currentApprovalMode = config.getApprovalMode();
+    // If approval mode is not YOLO, we're likely in approval mode
+    return currentApprovalMode !== ApprovalMode.YOLO ? 'approval' : 'work';
+  });
 
   // Update local state when mode changes externally
   useEffect(() => {
     const manager = config.getModeManager();
     if (manager) {
-      setCurrentWorkMode(manager.getCurrentMode());
+      const currentWork = manager.getCurrentMode();
+      setCurrentWorkMode(currentWork);
+      
+      // Sync lastModeType with actual state
+      const workModes = manager.getAvailableModes();
+      const isInWorkMode = workModes.some(m => m.id === currentWork.id);
+      setLastModeType(isInWorkMode ? 'work' : 'approval');
     }
   }, [config]);
 
   useKeypress(
     (key) => {
       // Handle Shift+Tab to cycle through all modes (approval + work)
-      // On Windows, Shift+Tab is indistinguishable from Tab (\t) in some terminals,
+      // On Windows and macOS, Shift+Tab may be indistinguishable from Tab in some terminals,
       // so we allow Tab to switch modes as well to support the shortcut.
       const isShiftTab = key.shift && key.name === 'tab';
       const isWindowsTab =
-        process.platform === 'win32' &&
+        (process.platform === 'win32' || process.platform === 'darwin') &&
         key.name === 'tab' &&
         !key.ctrl &&
         !key.meta;
 
       if (isShiftTab || isWindowsTab) {
-        // On Windows, check if we should block Tab key when autocomplete is active
+        // On Windows/macOS, check if we should block Tab key when autocomplete is active
         if (isWindowsTab && shouldBlockTab?.()) {
           // Don't cycle work mode when autocomplete is showing
           return;
@@ -101,35 +113,43 @@ export function useWorkModeCycle({
         try {
           // Determine current position in unified cycle
           const currentApprovalMode = config.getApprovalMode();
-          const currentWorkMode = modeManager.getCurrentMode();
+          const currentWorkModeState = modeManager.getCurrentMode();
 
-          // Find current index in unified cycle - check approval modes first, then work modes
+          // Find current index in unified cycle
+          // Use lastModeType to determine which type of mode we should look for
           let currentIndex = -1;
           
-          // First check approval modes
-          for (let i = 0; i < UNIFIED_MODE_CYCLE.length; i++) {
-            const mode = UNIFIED_MODE_CYCLE[i];
-            if (mode.type === 'approval' && mode.id === currentApprovalMode) {
-              currentIndex = i;
-              break;
-            }
-          }
-          
-          // If not in approval mode, check work modes
-          if (currentIndex === -1) {
+          if (lastModeType === 'approval') {
+            // Look for current approval mode
             for (let i = 0; i < UNIFIED_MODE_CYCLE.length; i++) {
               const mode = UNIFIED_MODE_CYCLE[i];
-              if (mode.type === 'work' && mode.id === currentWorkMode.id) {
+              if (mode.type === 'approval' && mode.id === currentApprovalMode) {
+                currentIndex = i;
+                break;
+              }
+            }
+          } else {
+            // Look for current work mode
+            for (let i = 0; i < UNIFIED_MODE_CYCLE.length; i++) {
+              const mode = UNIFIED_MODE_CYCLE[i];
+              if (mode.type === 'work' && mode.id === currentWorkModeState.id) {
                 currentIndex = i;
                 break;
               }
             }
           }
+          
+          // If we couldn't find the current mode, start from beginning
+          if (currentIndex === -1) {
+            currentIndex = 0;
+          }
 
           // Calculate next mode index (cycle through all modes)
-          const nextIndex =
-            currentIndex === -1 ? 0 : (currentIndex + 1) % UNIFIED_MODE_CYCLE.length;
+          const nextIndex = (currentIndex + 1) % UNIFIED_MODE_CYCLE.length;
           const nextModeConfig = UNIFIED_MODE_CYCLE[nextIndex];
+
+          // Update the mode type tracker
+          setLastModeType(nextModeConfig.type as 'approval' | 'work');
 
           // Switch to the next mode based on type
           if (nextModeConfig.type === 'approval') {
