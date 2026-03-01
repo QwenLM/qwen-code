@@ -323,7 +323,7 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -343,7 +343,7 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -414,7 +414,7 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);

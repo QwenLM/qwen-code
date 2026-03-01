@@ -95,9 +95,12 @@ export function AuthDialog(): React.JSX.Element {
       title: '阿里云百炼 (aliyun.com)',
       label: '阿里云百炼 (aliyun.com)',
       description: (
-        <Link url="https://bailian.console.aliyun.com" fallback={false}>
+        <Link
+          url="https://help.aliyun.com/zh/model-studio/coding-plan"
+          fallback={false}
+        >
           <Text color={theme.text.secondary}>
-            https://bailian.console.aliyun.com
+            https://help.aliyun.com/zh/model-studio/coding-plan
           </Text>
         </Link>
       ),
@@ -108,9 +111,12 @@ export function AuthDialog(): React.JSX.Element {
       title: 'Alibaba Cloud (alibabacloud.com)',
       label: 'Alibaba Cloud (alibabacloud.com)',
       description: (
-        <Link url="https://bailian.console.alibabacloud.com" fallback={false}>
+        <Link
+          url="https://www.alibabacloud.com/help/en/model-studio/coding-plan"
+          fallback={false}
+        >
           <Text color={theme.text.secondary}>
-            https://bailian.console.alibabacloud.com
+            https://www.alibabacloud.com/help/en/model-studio/coding-plan
           </Text>
         </Link>
       ),
