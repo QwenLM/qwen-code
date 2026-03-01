@@ -110,12 +110,6 @@ export function useWorkModeCycle({
           const currentApprovalMode = config.getApprovalMode();
           const currentWorkModeState = currentWorkMode;
 
-          // Debug logging
-          console.log('[useWorkModeCycle] Tab pressed, cycling mode...');
-          console.log('[useWorkModeCycle] Current approval mode:', currentApprovalMode);
-          console.log('[useWorkModeCycle] Current work mode:', currentWorkModeState?.id);
-          console.log('[useWorkModeCycle] Last mode type:', lastModeType);
-
           // Find current index in unified cycle
           // Use lastModeType to determine which type of mode we should look for
           let currentIndex = -1;
@@ -155,16 +149,11 @@ export function useWorkModeCycle({
           // Switch to the next mode based on type
           if (nextModeConfig.type === 'approval') {
             // Switch approval mode
-            console.log('[useWorkModeCycle] Setting approval mode to:', nextModeConfig.id);
             config.setApprovalMode(nextModeConfig.id as ApprovalMode);
-            console.log('[useWorkModeCycle] Approval mode after set:', config.getApprovalMode());
           } else {
             // Switch work mode - reset approval mode to DEFAULT
-            console.log('[useWorkModeCycle] Switching work mode to:', nextModeConfig.id);
-            console.log('[useWorkModeCycle] Resetting approval mode from', config.getApprovalMode(), 'to DEFAULT');
             config.setApprovalMode(ApprovalMode.DEFAULT);
             await modeManager.switchMode(nextModeConfig.id);
-            console.log('[useWorkModeCycle] Work mode after switch:', modeManager.getCurrentMode().id);
           }
 
           // Update local state immediately for responsiveness
@@ -180,7 +169,6 @@ export function useWorkModeCycle({
           }
 
           // Show notification about mode change
-          console.log('[useWorkModeCycle] Switched to:', nextModeConfig.id, nextModeConfig.name);
           addItem?.(
             {
               type: MessageType.INFO,
