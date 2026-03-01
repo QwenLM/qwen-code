@@ -89,18 +89,13 @@ export function useWorkModeCycle({
   useKeypress(
     async (key) => {
       // Handle Shift+Tab to cycle through all modes (approval + work)
-      // On Windows and macOS, Shift+Tab may be indistinguishable from Tab in some terminals,
-      // so we allow Tab to switch modes as well to support the shortcut.
+      // On macOS, Shift+Tab may not be detected reliably, so we also check for just Tab
       const isShiftTab = key.shift && key.name === 'tab';
-      const isWindowsTab =
-        (process.platform === 'win32' || process.platform === 'darwin') &&
-        key.name === 'tab' &&
-        !key.ctrl &&
-        !key.meta;
+      const isMacTab = process.platform === 'darwin' && key.name === 'tab';
 
-      if (isShiftTab || isWindowsTab) {
-        // On Windows/macOS, check if we should block Tab key when autocomplete is active
-        if (isWindowsTab && shouldBlockTab?.()) {
+      if (isShiftTab || isMacTab) {
+        // On macOS, check if we should block Tab key when autocomplete is active
+        if (isMacTab && shouldBlockTab?.()) {
           // Don't cycle work mode when autocomplete is showing
           return;
         }
@@ -114,6 +109,12 @@ export function useWorkModeCycle({
           // Determine current position in unified cycle
           const currentApprovalMode = config.getApprovalMode();
           const currentWorkModeState = currentWorkMode;
+
+          // Debug logging
+          console.log('[useWorkModeCycle] Tab pressed, cycling mode...');
+          console.log('[useWorkModeCycle] Current approval mode:', currentApprovalMode);
+          console.log('[useWorkModeCycle] Current work mode:', currentWorkModeState?.id);
+          console.log('[useWorkModeCycle] Last mode type:', lastModeType);
 
           // Find current index in unified cycle
           // Use lastModeType to determine which type of mode we should look for
@@ -173,6 +174,7 @@ export function useWorkModeCycle({
           }
 
           // Show notification about mode change
+          console.log('[useWorkModeCycle] Switched to:', nextModeConfig.id, nextModeConfig.name);
           addItem?.(
             {
               type: MessageType.INFO,
