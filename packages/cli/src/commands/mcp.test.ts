@@ -28,7 +28,7 @@ describe('mcp command', () => {
     expect(options.key).toHaveProperty('help');
   });
 
-  it('should register add, remove, and list subcommands', () => {
+  it('should register add, enable, disable, remove, and list subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -37,13 +37,15 @@ describe('mcp command', () => {
 
     mcpCommand.builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(3);
+    expect(mockYargs.command).toHaveBeenCalledTimes(5);
 
     // Verify that the specific subcommands are registered
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
 
     expect(commandNames).toContain('add <name> <commandOrUrl> [args...]');
+    expect(commandNames).toContain('enable <name>');
+    expect(commandNames).toContain('disable <name>');
     expect(commandNames).toContain('remove <name>');
     expect(commandNames).toContain('list');
 

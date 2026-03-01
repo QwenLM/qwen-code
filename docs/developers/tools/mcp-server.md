@@ -869,3 +869,39 @@ qwen mcp remove my-server
 ```
 
 This will find and delete the "my-server" entry from the `mcpServers` object in the appropriate `settings.json` file based on the scope (`-s, --scope`).
+
+### Enabling a Server (`qwen mcp enable`)
+
+To re-enable a server that was previously excluded, use `enable`. This removes the server name from `mcp.excluded` in either user or project settings.
+
+**Command:**
+
+```bash
+qwen mcp enable [options] <name>
+```
+
+- `-s, --scope`: Configuration scope (user or project). [default: "user"]
+
+**Example:**
+
+```bash
+qwen mcp enable github --scope user
+```
+
+### Disabling a Server (`qwen mcp disable`)
+
+To disable a configured server without removing its configuration, use `disable`. This adds the server name to `mcp.excluded` in either user or project settings.
+
+**Command:**
+
+```bash
+qwen mcp disable [options] <name>
+```
+
+- `-s, --scope`: Configuration scope (user or project). [default: "user"]
+
+**Example:**
+
+```bash
+qwen mcp disable github --scope user
+```
