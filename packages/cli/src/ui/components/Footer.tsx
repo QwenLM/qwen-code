@@ -18,6 +18,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import type { ModeDefinition } from '@qwen-code/modes';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
@@ -31,6 +32,10 @@ export const Footer: React.FC = () => {
 
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
+
+  // Get current work mode for display (read-only, no key handling)
+  const modeManager = config.getModeManager();
+  const currentWorkMode: ModeDefinition | null = modeManager?.getCurrentMode() || null;
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -61,7 +66,25 @@ export const Footer: React.FC = () => {
     <ShellModeIndicator />
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+    <AutoAcceptIndicator 
+      approvalMode={showAutoAcceptIndicator}
+      workMode={currentWorkMode && currentWorkMode.icon && currentWorkMode.color ? {
+        id: currentWorkMode.id,
+        name: currentWorkMode.name,
+        icon: currentWorkMode.icon,
+        color: currentWorkMode.color,
+      } : undefined}
+    />
+  ) : currentWorkMode ? (
+    <AutoAcceptIndicator 
+      approvalMode={ApprovalMode.DEFAULT}
+      workMode={{
+        id: currentWorkMode.id,
+        name: currentWorkMode.name,
+        icon: currentWorkMode.icon,
+        color: currentWorkMode.color,
+      }}
+    />
   ) : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
