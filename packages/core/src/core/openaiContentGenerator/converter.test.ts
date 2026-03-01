@@ -296,7 +296,7 @@ describe('OpenAIContentConverter', () => {
       expect(userMessage).toBeUndefined();
     });
 
-    it('should convert PDF inlineData to tool message with embedded input_file', () => {
+    it('should convert PDF inlineData to text description for compatibility (fix for #2020)', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -338,23 +338,20 @@ describe('OpenAIContentConverter', () => {
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
 
-      // Should have tool message with both text and file content
+      // Should have tool message with text content and PDF description
+      // Note: PDF is converted to text description because not all OpenAI-compatible APIs support 'file' type
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
       expect(Array.isArray(toolMessage?.content)).toBe(true);
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
-        file?: { filename: string; file_data: string };
       }>;
       expect(contentArray).toHaveLength(2);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'data:application/pdf;base64,base64pdfdata',
-      );
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toBe('[PDF file: document.pdf (0KB)]');
 
       // No separate user message should be created
       const userMessage = messages.find((message) => message.role === 'user');
@@ -485,7 +482,7 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
-    it('should convert PDF fileData URL to tool message with embedded file', () => {
+    it('should convert PDF fileData URL to text description for compatibility (fix for #2020)', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -528,21 +525,21 @@ describe('OpenAIContentConverter', () => {
 
       const messages = converter.convertGeminiRequestToOpenAI(request);
 
+      // Should have tool message with text content and PDF description
+      // Note: PDF is converted to text description because not all OpenAI-compatible APIs support 'file' type
       const toolMessage = messages.find((message) => message.role === 'tool');
       expect(toolMessage).toBeDefined();
       expect(Array.isArray(toolMessage?.content)).toBe(true);
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
-        file?: { filename: string; file_data: string };
       }>;
       expect(contentArray).toHaveLength(2);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('PDF content');
-      expect(contentArray[1].type).toBe('file');
-      expect(contentArray[1].file?.filename).toBe('document.pdf');
-      expect(contentArray[1].file?.file_data).toBe(
-        'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
+      expect(contentArray[1].type).toBe('text');
+      expect(contentArray[1].text).toBe(
+        '[PDF file: document.pdf (https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf)]',
       );
     });
 

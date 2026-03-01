@@ -40,7 +40,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -726,11 +726,19 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = requestsToProcess.map(
         (reqInfo): ToolCall => {
+          // Migrate legacy tool names to current names (e.g., "bash" -> "run_shell_command")
+          // This handles cases where models use common aliases instead of registered tool names
+          const migratedToolName =
+            ToolNamesMigration[
+              reqInfo.name as keyof typeof ToolNamesMigration
+            ] || reqInfo.name;
+          const effectiveToolName = migratedToolName;
+
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
           const excludeTools = this.config.getExcludeTools?.() ?? undefined;
           if (excludeTools && excludeTools.length > 0) {
-            const normalizedToolName = reqInfo.name.toLowerCase().trim();
+            const normalizedToolName = effectiveToolName.toLowerCase().trim();
             const excludedMatch = excludeTools.find(
               (excludedTool) =>
                 excludedTool.toLowerCase().trim() === normalizedToolName,
@@ -752,7 +760,7 @@ export class CoreToolScheduler {
             }
           }
 
-          const toolInstance = this.toolRegistry.getTool(reqInfo.name);
+          const toolInstance = this.toolRegistry.getTool(effectiveToolName);
           if (!toolInstance) {
             // Tool is not in registry and not excluded - likely hallucinated or typo
             const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
