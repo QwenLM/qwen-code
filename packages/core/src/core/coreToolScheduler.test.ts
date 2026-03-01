@@ -32,6 +32,7 @@ import {
   truncateAndSaveToFile,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import {
   MockModifiableTool,
   MockTool,
@@ -2339,5 +2340,14 @@ describe('truncateAndSaveToFile', () => {
       expectedPath,
       expectedFileContent,
     );
+  });
+});
+
+describe('Tool name migration (fix for #2012)', () => {
+  it('should have bash and sh in ToolNamesMigration mapping to SHELL', () => {
+    // Verify the migration map has the aliases
+    expect(ToolNamesMigration['bash']).toBe(ToolNames.SHELL);
+    expect(ToolNamesMigration['sh']).toBe(ToolNames.SHELL);
+    expect(ToolNames.SHELL).toBe('run_shell_command');
   });
 });
