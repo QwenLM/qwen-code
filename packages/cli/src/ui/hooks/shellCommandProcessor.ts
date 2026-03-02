@@ -30,6 +30,10 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { themeManager } from '../../ui/themes/theme-manager.js';
+import {
+  sanitizeTerminalOutput,
+  sanitizeAnsiOutput,
+} from '../../../../core/src/utils/controlCharSanitizer.js';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const MAX_OUTPUT_LENGTH = 10000;
@@ -201,7 +205,11 @@ export const useShellCommandProcessor = (
                     '[Binary output detected. Halting stream...]';
                 }
               } else {
-                currentDisplayOutput = cumulativeStdout;
+                // Sanitize control characters to prevent rendering issues
+                currentDisplayOutput =
+                  typeof cumulativeStdout === 'string'
+                    ? sanitizeTerminalOutput(cumulativeStdout)
+                    : { ansiOutput: sanitizeAnsiOutput(cumulativeStdout) };
               }
 
               // Throttle pending UI updates, but allow forced updates.
@@ -220,7 +228,10 @@ export const useShellCommandProcessor = (
                               resultDisplay:
                                 typeof currentDisplayOutput === 'string'
                                   ? currentDisplayOutput
-                                  : { ansiOutput: currentDisplayOutput },
+                                  : {
+                                      ansiOutput:
+                                        currentDisplayOutput as AnsiOutput,
+                                    },
                             }
                           : tool,
                       ),
@@ -264,8 +275,10 @@ export const useShellCommandProcessor = (
                 mainContent =
                   '[Command produced binary output, which is not shown.]';
               } else {
+                // Sanitize control characters in final output
                 mainContent =
-                  result.output.trim() || '(Command produced no output)';
+                  sanitizeTerminalOutput(result.output).trim() ||
+                  '(Command produced no output)';
               }
 
               let finalOutput = mainContent;

@@ -42,6 +42,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { sanitizeTerminalOutput } from '../utils/controlCharSanitizer.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -323,7 +324,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         llmContent = [
           `Command: ${this.params.command}`,
           `Directory: ${this.params.directory || '(root)'}`,
-          `Output: ${result.output || '(empty)'}`,
+          `Output: ${sanitizeTerminalOutput(result.output) || '(empty)'}`,
           `Error: ${finalError}`, // Use the cleaned error string.
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
@@ -338,8 +339,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (this.config.getDebugMode()) {
         returnDisplayMessage = llmContent;
       } else {
-        if (result.output.trim()) {
-          returnDisplayMessage = result.output;
+        const sanitizedOutput = sanitizeTerminalOutput(result.output);
+        if (sanitizedOutput.trim()) {
+          returnDisplayMessage = sanitizedOutput;
         } else {
           if (result.aborted) {
             // Check if it was a timeout or user cancellation
