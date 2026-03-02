@@ -731,6 +731,17 @@ export default {
   // Dialogs - Model
   'Select Model': 'モデルを選択',
   '(Press Esc to close)': '(Esc で閉じる)',
+  Modality: 'モダリティ',
+  'Context Window': 'コンテキストウィンドウ',
+  text: 'テキスト',
+  'text-only': 'テキストのみ',
+  image: '画像',
+  pdf: 'PDF',
+  audio: '音声',
+  video: '動画',
+  'not set': '未設定',
+  none: 'なし',
+  unknown: '不明',
   'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
     'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
@@ -783,6 +794,27 @@ export default {
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "MCPサーバー '{{name}}' のOAuth認証を開始中...",
   // Startup Tips
+  'Tips:': 'ヒント：',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    '会話が長くなったら /compress で履歴を要約し、コンテキストを解放できます。',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    '/clear または /new で新しいアイデアを始められます。前のセッションは履歴に残ります。',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    '問題が発生したら /bug でメンテナーに報告できます。',
+  'Switch auth type quickly with /auth.':
+    '/auth で認証タイプをすばやく切り替えられます。',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Qwen Code から ! を使って任意のシェルコマンドを実行できます（例: !ls）。',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    '/ を入力してコマンドポップアップを開きます。Tab でスラッシュコマンドと保存済みプロンプトを補完できます。',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'qwen --continue または qwen --resume で前の会話を再開できます。',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Shift+Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'Try /insight to generate personalized insights from your chat history.':
+    '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -955,6 +987,6 @@ export default {
     'Coding Plan (Bailian, グローバル/国際) の新しいモデル設定が利用可能です。今すぐ更新しますか？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    '{{region}} での認証に成功しました。APIキーは settings.env に保存されています。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
 };

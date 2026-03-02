@@ -94,7 +94,7 @@ After entering, select `Coding Plan`:
 
 ![](https://gw.alicdn.com/imgextra/i4/O1CN01Irk0AD1ebfop69o0r_!!6000000003890-2-tps-2308-830.png)
 
-Enter your `sk-sp-xxxxxxxxx` key, then use the `/model` command to switch between all Bailian `Coding Plan` supported models:
+Enter your `sk-sp-xxxxxxxxx` key, then use the `/model` command to switch between all Bailian `Coding Plan` supported models (including qwen3.5-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max, glm-4.7, and kimi-k2.5):
 
 ![](https://gw.alicdn.com/imgextra/i4/O1CN01fWArmf1kaCEgSmPln_!!6000000004699-2-tps-2304-1374.png)
 
@@ -205,7 +205,7 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multip
 >
 > When using the `env` field in `settings.json`, credentials are stored in plain text. For better security, prefer `.env` files or shell `export` — see [Step 2](#step-2-set-environment-variables).
 
-For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Settings Reference → modelProviders](settings.md#modelproviders).
+For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Model Providers Reference](model-providers.md).
 
 #### Step 2: Set environment variables
 
@@ -266,12 +266,12 @@ This is the approach used in the [one-file setup example](#recommended-one-file-
 
 **Priority summary:**
 
-| Priority    | Source                         | Override behavior                        |
-| ----------- | ------------------------------ | ---------------------------------------- |
-| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                              |
-| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.env`      |
-| 3           | `.env` file                    | Only sets if not in system env           |
-| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env` |
+| Priority    | Source                         | Override behavior                            |
+| ----------- | ------------------------------ | -------------------------------------------- |
+| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                                  |
+| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.json` → `env` |
+| 3           | `.env` file                    | Only sets if not in system env               |
+| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env`     |
 
 #### Step 3: Switch models with `/model`
 
@@ -292,7 +292,7 @@ qwen --model "qwen3-coder-plus"
 
 # In another terminal
 
-qwen --model "qwen3-coder-next"
+qwen --model "qwen3.5-plus"
 ```
 
 ## Security notes

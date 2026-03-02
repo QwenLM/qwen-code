@@ -1,0 +1,18 @@
+{
+  "name": "@qwen-code/terminal-capture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Terminal UI screenshot automation for CLI visual testing",
+  "type": "module",
+  "scripts": {
+    "capture": "npx tsx run.ts scenarios/",
+    "capture:about": "npx tsx run.ts scenarios/about.ts",
+    "capture:all": "npx tsx run.ts scenarios/all.ts"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "1.1.0",
+    "@xterm/xterm": "^5.5.0",
+    "playwright": "^1.50.0",
+    "strip-ansi": "^7.1.2"
+  }
+}

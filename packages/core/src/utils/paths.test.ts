@@ -17,6 +17,7 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  getProjectHash,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
@@ -768,5 +769,82 @@ describe('shortenPath', () => {
       new RegExp(`^${sepForRegex}path${sepForRegex}\\.\\.\\..+file\\.txt$`),
     );
     expect(result.length).toBeLessThanOrEqual(35);
+  });
+});
+
+describe('getProjectHash', () => {
+  it('should generate consistent hashes for the same path', () => {
+    const projectRoot = '/test/project';
+    const hash1 = getProjectHash(projectRoot);
+    const hash2 = getProjectHash(projectRoot);
+
+    expect(hash1).toBe(hash2);
+    expect(hash1).toHaveLength(64); // SHA256 produces 64 hex characters
+  });
+
+  it('should generate different hashes for different paths', () => {
+    const hash1 = getProjectHash('/test/project1');
+    const hash2 = getProjectHash('/test/project2');
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('should generate case-insensitive hashes on Windows', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+
+    // Simulate Windows platform
+    platformSpy.mockReturnValue('win32');
+
+    const lowerCasePath = 'c:\\users\\test\\project';
+    const upperCasePath = 'C:\\Users\\Test\\Project';
+    const mixedCasePath = 'c:\\Users\\TEST\\project';
+
+    const hash1 = getProjectHash(lowerCasePath);
+    const hash2 = getProjectHash(upperCasePath);
+    const hash3 = getProjectHash(mixedCasePath);
+
+    // On Windows, all different case variations should produce the same hash
+    expect(hash1).toBe(hash2);
+    expect(hash2).toBe(hash3);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should generate case-sensitive hashes on non-Windows platforms', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+
+    // Simulate Unix/Linux platform
+    platformSpy.mockReturnValue('linux');
+
+    const lowerCasePath = '/home/user/project';
+    const upperCasePath = '/HOME/USER/PROJECT';
+
+    const hash1 = getProjectHash(lowerCasePath);
+    const hash2 = getProjectHash(upperCasePath);
+
+    // On non-Windows platforms, different case should produce different hashes
+    expect(hash1).not.toBe(hash2);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should handle Windows drive letter variations', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+    platformSpy.mockReturnValue('win32');
+
+    // Common Windows scenarios where users might have different drive letter cases
+    const scenarios = [
+      ['e:\\work', 'E:\\work'],
+      ['e:\\work', 'E:\\WORK'],
+      ['c:\\projects\\myapp', 'C:\\Projects\\MyApp'],
+    ];
+
+    for (const [path1, path2] of scenarios) {
+      const hash1 = getProjectHash(path1);
+      const hash2 = getProjectHash(path2);
+      expect(hash1).toBe(hash2);
+    }
+
+    platformSpy.mockRestore();
   });
 });

@@ -48,6 +48,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    getWarnings: vi.fn(() => []),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -177,6 +178,7 @@ describe('gemini.tsx main function', () => {
         getGeminiMdFileCount: () => 0,
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
+        getWarnings: () => [],
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -341,6 +343,7 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
+      getWarnings: () => [],
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
@@ -438,6 +441,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -483,7 +487,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       googleSearchEngineId: undefined,
       webSearchDefault: undefined,
       screenReader: undefined,
-      vlmSwitchMode: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
       includePartialMessages: undefined,

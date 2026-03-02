@@ -31,5 +31,9 @@
       ]
     }
   ],
-  "models": ["claude-3-5-sonnet-20241022", "qwen3-coder-plus"]
+  "models": [
+    "qwen3-coder-plus",
+    { "name": "glm-4.7", "auth_type": "anthropic" },
+    { "name": "claude-4-5-sonnet-20260219", "auth_type": "anthropic" }
+  ]
 }

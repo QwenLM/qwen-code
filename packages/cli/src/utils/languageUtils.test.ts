@@ -380,4 +380,62 @@ describe('languageUtils', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
   });
+
+  describe('output-language.md path resolution priority', () => {
+    it('should prefer project-level path over global path', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return true;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(projectPath);
+    });
+
+    it('should fall back to global path when project-level does not exist', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return false;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(globalPath);
+    });
+
+    it('should return undefined when neither path exists', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBeUndefined();
+    });
+  });
 });

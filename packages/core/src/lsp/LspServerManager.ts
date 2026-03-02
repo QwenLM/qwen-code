@@ -523,7 +523,7 @@ export class LspServerManager {
           codeAction: { dynamicRegistration: true },
         },
         workspace: {
-          workspaceFolders: { supported: true },
+          workspaceFolders: true,
         },
       },
       initializationOptions: config.initializationOptions,

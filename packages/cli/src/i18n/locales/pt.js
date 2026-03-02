@@ -1037,6 +1037,17 @@ export default {
   '(default)': '(padrão)',
   '(set)': '(definido)',
   '(not set)': '(não definido)',
+  Modality: 'Modalidade',
+  'Context Window': 'Janela de Contexto',
+  text: 'texto',
+  'text-only': 'somente texto',
+  image: 'imagem',
+  pdf: 'PDF',
+  audio: 'áudio',
+  video: 'vídeo',
+  'not set': 'não definido',
+  none: 'nenhum',
+  unknown: 'desconhecido',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Falha ao trocar o modelo para '{{modelId}}'.\n\n{{error}}",
   'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
@@ -1132,6 +1143,8 @@ export default {
     'Você pode retomar uma conversa anterior executando qwen --continue ou qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1458,6 +1471,6 @@ export default {
     'Novas configurações de modelo estão disponíveis para o Coding Plan (Bailian, Global/Intl). Atualizar agora?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
-  'Authenticated successfully with {{region}}. API key is stored in settings.env.':
-    'Autenticado com sucesso com {{region}}. A chave de API está armazenada em settings.env.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
 };

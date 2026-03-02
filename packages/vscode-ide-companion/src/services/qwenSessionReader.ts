@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import * as crypto from 'crypto';
+import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
 
 export interface QwenMessage {
   id: string;
@@ -58,7 +58,7 @@ export class QwenSessionReader {
 
       if (!allProjects && workingDir) {
         // Current project only
-        const projectHash = await this.getProjectHash(workingDir);
+        const projectHash = getProjectHash(workingDir);
         const chatsDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
         const projectSessions = await this.readSessionsFromDir(chatsDir);
         sessions.push(...projectSessions);
@@ -178,14 +178,6 @@ export class QwenSessionReader {
   }
 
   /**
-   * Calculate project hash (needs to be consistent with Qwen CLI)
-   * Qwen CLI uses SHA256 hash of project path
-   */
-  private async getProjectHash(workingDir: string): Promise<string> {
-    return crypto.createHash('sha256').update(workingDir).digest('hex');
-  }
-
-  /**
    * Get session title (based on first user message)
    */
   getSessionTitle(session: QwenSession): string {
@@ -289,7 +281,7 @@ export class QwenSessionReader {
       }
 
       const projectHash = cwd
-        ? await this.getProjectHash(cwd)
+        ? getProjectHash(cwd)
         : path.basename(path.dirname(path.dirname(filePath)));
 
       return {
