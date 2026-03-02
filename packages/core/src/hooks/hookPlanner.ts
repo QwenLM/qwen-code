@@ -7,6 +7,9 @@
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, type HookEventName } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /**
  * Hook planner that selects matching hooks and creates execution plans
@@ -98,8 +101,11 @@ export class HookPlanner {
       // Attempt to treat the matcher as a regular expression.
       const regex = new RegExp(matcher);
       return regex.test(toolName);
-    } catch {
+    } catch (error) {
       // If it's not a valid regex, treat it as a literal string for an exact match.
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
+      );
       return matcher === toolName;
     }
   }

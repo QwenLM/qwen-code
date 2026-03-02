@@ -11,7 +11,12 @@ import { HookRunner } from './hookRunner.js';
 import { HookAggregator } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
-import { HookType, HooksConfigSource, HookEventName } from './types.js';
+import {
+  HookType,
+  HooksConfigSource,
+  HookEventName,
+  type HookDecision,
+} from './types.js';
 import type { Config } from '../config/config.js';
 
 vi.mock('./hookRegistry.js');
@@ -211,6 +216,113 @@ describe('HookSystem', () => {
       const result = await hookSystem.fireStopEvent();
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('fireUserPromptSubmitEvent', () => {
+    it('should fire UserPromptSubmit event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptSubmitEvent('test prompt');
+
+      expect(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).toHaveBeenCalledWith('test prompt');
+      expect(result).toBeDefined();
+    });
+
+    it('should pass prompt to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+
+      await hookSystem.fireUserPromptSubmitEvent('my custom prompt');
+
+      expect(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).toHaveBeenCalledWith('my custom prompt');
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptSubmitEvent('test');
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with blocking decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Blocked by policy',
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptSubmitEvent('test');
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
+    it('should return DefaultHookOutput with additional context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Some additional context',
+          },
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptSubmitEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptSubmitEvent('test');
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('Some additional context');
     });
   });
 });

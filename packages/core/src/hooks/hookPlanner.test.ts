@@ -309,5 +309,58 @@ describe('HookPlanner', () => {
 
       expect(result).not.toBeNull();
     });
+
+    it('should fallback to exact match when regex is invalid', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: '[invalid(regex', // Invalid regex
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      // Should fallback to exact match - should NOT match 'bash'
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'bash',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match using fallback exact match when regex is invalid', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: '[invalid(regex', // Invalid regex
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      // Should fallback to exact match - should match '[invalid(regex'
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: '[invalid(regex',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should handle complex invalid regex gracefully', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreToolUse,
+        matcher: '(unclosed',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+        toolName: 'bash',
+      });
+
+      expect(result).toBeNull();
+    });
   });
 });

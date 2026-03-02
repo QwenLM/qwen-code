@@ -29,6 +29,12 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 const DEFAULT_HOOK_TIMEOUT = 60000;
 
 /**
+ * Maximum length for stdout/stderr output (1MB)
+ * Prevents memory issues from unbounded output
+ */
+const MAX_OUTPUT_LENGTH = 1024 * 1024;
+
+/**
  * Exit code constants for hook execution
  */
 const EXIT_CODE_SUCCESS = 0;
@@ -270,12 +276,28 @@ export class HookRunner {
 
       // Collect stdout
       child.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString();
+        if (stdout.length < MAX_OUTPUT_LENGTH) {
+          const remaining = MAX_OUTPUT_LENGTH - stdout.length;
+          stdout += data.slice(0, remaining).toString();
+          if (data.length > remaining) {
+            debugLogger.warn(
+              `Hook stdout exceeded max length (${MAX_OUTPUT_LENGTH} bytes), truncating`,
+            );
+          }
+        }
       });
 
       // Collect stderr
       child.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
+        if (stderr.length < MAX_OUTPUT_LENGTH) {
+          const remaining = MAX_OUTPUT_LENGTH - stderr.length;
+          stderr += data.slice(0, remaining).toString();
+          if (data.length > remaining) {
+            debugLogger.warn(
+              `Hook stderr exceeded max length (${MAX_OUTPUT_LENGTH} bytes), truncating`,
+            );
+          }
+        }
       });
 
       // Handle process exit

@@ -448,4 +448,237 @@ describe('HookRunner', () => {
       expect(onHookEnd).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('output truncation', () => {
+    it('should truncate stdout when exceeding MAX_OUTPUT_LENGTH', async () => {
+      // Create a process that outputs more than 1MB of data
+      const largeOutput = 'x'.repeat(2 * 1024 * 1024); // 2MB
+      const mockProcess = createMockProcess(0, largeOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo large',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      // stdout should be truncated to MAX_OUTPUT_LENGTH (1MB)
+      expect(result.stdout?.length).toBeLessThanOrEqual(1024 * 1024);
+    });
+
+    it('should truncate stderr when exceeding MAX_OUTPUT_LENGTH', async () => {
+      const largeOutput = 'x'.repeat(2 * 1024 * 1024); // 2MB
+      const mockProcess = createMockProcess(0, '', largeOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo large',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      // stderr should be truncated to MAX_OUTPUT_LENGTH (1MB)
+      expect(result.stderr?.length).toBeLessThanOrEqual(1024 * 1024);
+    });
+
+    it('should handle partial truncation gracefully', async () => {
+      // Output exactly at the limit
+      const exactOutput = 'x'.repeat(1024 * 1024); // 1MB exactly
+      const mockProcess = createMockProcess(0, exactOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo exact',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.stdout?.length).toBe(1024 * 1024);
+    });
+  });
+
+  describe('expandCommand', () => {
+    it('should expand GEMINI_PROJECT_DIR placeholder', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $GEMINI_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with expanded command
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][1]; // Second arg after shell args
+      expect(command).toContain('/test/project');
+    });
+
+    it('should expand CLAUDE_PROJECT_DIR placeholder for compatibility', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo $CLAUDE_PROJECT_DIR',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][1];
+      expect(command).toContain('/test/project');
+    });
+
+    it('should not modify command without placeholders', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo hello',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput({ cwd: '/test/project' });
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      const command = spawnCall[1][1];
+      expect(command).toBe('echo hello');
+    });
+  });
+
+  describe('convertPlainTextToHookOutput', () => {
+    it('should convert plain text to allow output on success', async () => {
+      const mockProcess = createMockProcess(0, 'plain text response');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo text',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output?.decision).toBe('allow');
+      expect(result.output?.systemMessage).toBe('plain text response');
+    });
+
+    it('should convert non-zero exit code to deny output', async () => {
+      const mockProcess = createMockProcess(3, '', 'error message');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 3',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('error message');
+    });
+
+    it('should use stderr when stdout is empty on success', async () => {
+      const mockProcess = createMockProcess(0, '', 'stderr output');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.output?.systemMessage).toBe('stderr output');
+    });
+
+    it('should handle empty output gracefully', async () => {
+      const mockProcess = createMockProcess(0, '', '');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.output).toBeUndefined();
+    });
+
+    it('should parse nested JSON strings', async () => {
+      const nestedJson = JSON.stringify(JSON.stringify({ decision: 'allow' }));
+      const mockProcess = createMockProcess(0, nestedJson);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo json',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.output?.decision).toBe('allow');
+    });
+  });
 });

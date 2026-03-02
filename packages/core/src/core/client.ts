@@ -417,7 +417,7 @@ export class GeminiClient {
     options?: { isContinuation: boolean },
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    // Fire BeforeAgent hook through MessageBus (only if hooks are enabled)
+    // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
     const hooksEnabled = this.config.getEnableHooks();
     const messageBus = this.config.getMessageBus();
     if (hooksEnabled && messageBus) {
@@ -591,7 +591,7 @@ export class GeminiClient {
         return turn;
       }
     }
-    // Fire AfterAgent hook through MessageBus (only if hooks are enabled)
+    // Fire Stop hook through MessageBus (only if hooks are enabled)
     // This must be done before any early returns to ensure hooks are always triggered
     if (hooksEnabled && messageBus && !turn.pendingToolCalls.length) {
       // Get response text from the chat history
