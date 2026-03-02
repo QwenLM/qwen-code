@@ -162,26 +162,14 @@ class ExportSessionContext implements SessionContext {
     const uuid = this.getMessageUuid();
     const timestamp = this.getMessageTimestamp();
 
-    // Format entries as markdown checklist text for UpdatedPlanToolCall.parsePlanEntries
-    const todoText = update.entries
-      .map((entry) => {
-        const checkbox =
-          entry.status === 'completed'
-            ? '[x]'
-            : entry.status === 'in_progress'
-              ? '[-]'
-              : '[ ]';
-        return `- ${checkbox} ${entry.content}`;
-      })
-      .join('\n');
-
+    // Pass entries as structured data for direct consumption by UpdatedPlanToolCall
     const todoContent = [
       {
-        type: 'content' as const,
-        content: {
-          type: 'text',
-          text: todoText,
-        },
+        type: 'entries' as const,
+        entries: update.entries.map((entry) => ({
+          content: entry.content,
+          status: entry.status,
+        })),
       },
     ];
 

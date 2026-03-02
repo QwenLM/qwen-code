@@ -6,7 +6,7 @@
 
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { useState } from 'react';
-import PermissionDrawer from './PermissionDrawer.js';
+import { PermissionDrawer } from './PermissionDrawer.js';
 import type {
   PermissionOption,
   PermissionToolCall,
