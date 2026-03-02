@@ -79,3 +79,7 @@ integration-tests/terminal-capture/scenarios/screenshots/
 # storybook
 *storybook.log
 storybook-static
+
+# BMAD & AGENTS
+_bmad*
+.opencode*
