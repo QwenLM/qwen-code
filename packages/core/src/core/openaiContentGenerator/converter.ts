@@ -600,13 +600,15 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        // Note: Not all OpenAI-compatible APIs support 'file' type.
+        // Convert PDF to a text description to ensure compatibility across providers.
+        // This prevents "Invalid value: file" errors that can corrupt the session.
         const filename = part.inlineData.displayName || 'document.pdf';
+        const dataSize = Math.round((part.inlineData.data.length * 3) / 4); // Approximate base64 decoded size
+        const sizeInKB = Math.round(dataSize / 1024);
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: `data:${mimeType};base64,${part.inlineData.data}`,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${filename} (${sizeInKB}KB)]`,
         };
       }
 
@@ -655,12 +657,11 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        // Note: Not all OpenAI-compatible APIs support 'file' type.
+        // Convert PDF to a text description to ensure compatibility across providers.
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: fileUri,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${filename} (${fileUri})]`,
         };
       }
 

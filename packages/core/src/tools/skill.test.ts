@@ -228,6 +228,29 @@ describe('SkillTool', () => {
       );
     });
 
+    it('should trim whitespace from skill name (fix for #2025)', () => {
+      // Test leading space
+      const result1 = skillTool.validateToolParams({ skill: ' code-review' });
+      expect(result1).toBeNull();
+
+      // Test trailing space
+      const result2 = skillTool.validateToolParams({ skill: 'code-review ' });
+      expect(result2).toBeNull();
+
+      // Test both leading and trailing spaces
+      const result3 = skillTool.validateToolParams({ skill: ' code-review ' });
+      expect(result3).toBeNull();
+
+      // Test with Chinese skill name (as reported in issue)
+      const result4 = skillTool.validateToolParams({ skill: ' testing ' });
+      expect(result4).toBeNull();
+    });
+
+    it('should still reject skill with only whitespace', () => {
+      const result = skillTool.validateToolParams({ skill: '   ' });
+      expect(result).toBe('Parameter "skill" must be a non-empty string.');
+    });
+
     it('should show appropriate message when no skills available', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
 

@@ -693,6 +693,110 @@ describe('CoreToolScheduler', () => {
         expect(errorMessage).not.toContain('requires permission');
       }
     });
+
+    it('should migrate legacy tool names like "bash" to "run_shell_command" (fix for #2012)', async () => {
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+
+      // Track if execute was called
+      let executeCalled = false;
+
+      // Mock shell tool that should be called when using "bash" alias
+      const mockShellTool = new MockTool({
+        name: 'run_shell_command',
+        displayName: 'Shell',
+        description: 'Run shell commands',
+        execute: async () => {
+          executeCalled = true;
+          return {
+            llmContent: 'Command executed successfully',
+            returnDisplay: 'Executed',
+          };
+        },
+      });
+
+      const mockToolRegistry = {
+        getTool: (name: string) => {
+          // Should receive migrated name "run_shell_command" not "bash"
+          if (name === 'run_shell_command') {
+            return mockShellTool;
+          }
+          return undefined;
+        },
+        getAllToolNames: () => ['run_shell_command', 'read_file'],
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => undefined,
+        getToolByDisplayName: () => undefined,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: () => ApprovalMode.YOLO, // YOLO mode to auto-approve
+        getAllowedTools: () => [],
+        getExcludeTools: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
+        },
+        getTruncateToolOutputThreshold: () =>
+          DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getChatRecordingService: () => undefined,
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const abortController = new AbortController();
+      const request = {
+        callId: '1',
+        name: 'bash', // Legacy name that should be migrated to "run_shell_command"
+        args: { command: 'echo hello', description: 'Test command' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-bash',
+      };
+
+      await scheduler.schedule([request], abortController.signal);
+
+      // Wait for completion
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(1);
+      const completedCall = completedCalls[0];
+
+      // Should succeed, not error
+      expect(completedCall.status).toBe('success');
+      // The shell tool should have been executed
+      expect(executeCalled).toBe(true);
+    });
   });
 });
 

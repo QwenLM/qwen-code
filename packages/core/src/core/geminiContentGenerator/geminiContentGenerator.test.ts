@@ -368,4 +368,46 @@ describe('GeminiContentGenerator', () => {
       'Unsupported media type for Gemini: video/mp4.',
     );
   });
+
+  it('should convert PDF to text in functionResponse parts (fix for #2020)', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'ReadFile',
+                response: { output: 'PDF content read' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'application/pdf',
+                      data: 'base64pdfdata',
+                      displayName: 'document.pdf',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await generator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+    const functionResponseParts =
+      calledWith.contents[0].parts[0].functionResponse.parts;
+
+    // PDF should be converted to text (not sent as inlineData)
+    expect(functionResponseParts).toHaveLength(1);
+    expect(functionResponseParts[0].text).toBe(
+      'Unsupported media type for Gemini: application/pdf (document.pdf).',
+    );
+    expect(functionResponseParts[0].inlineData).toBeUndefined();
+  });
 });

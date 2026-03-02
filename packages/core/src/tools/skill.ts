@@ -159,18 +159,24 @@ ${skillDescriptions}
       return 'Parameter "skill" must be a non-empty string.';
     }
 
+    // Trim the skill name to handle cases where model adds extra whitespace
+    const trimmedSkillName = params.skill.trim();
+
     // Validate that the skill exists
     const skillExists = this.availableSkills.some(
-      (skill) => skill.name === params.skill,
+      (skill) => skill.name === trimmedSkillName,
     );
 
     if (!skillExists) {
       const availableNames = this.availableSkills.map((s) => s.name);
       if (availableNames.length === 0) {
-        return `Skill "${params.skill}" not found. No skills are currently available.`;
+        return `Skill "${trimmedSkillName}" not found. No skills are currently available.`;
       }
-      return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
+      return `Skill "${trimmedSkillName}" not found. Available skills: ${availableNames.join(', ')}`;
     }
+
+    // Update params.skill to the trimmed value for consistent usage
+    params.skill = trimmedSkillName;
 
     return null;
   }

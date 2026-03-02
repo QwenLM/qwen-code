@@ -40,7 +40,7 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -752,7 +752,13 @@ export class CoreToolScheduler {
             }
           }
 
-          const toolInstance = this.toolRegistry.getTool(reqInfo.name);
+          // Migrate legacy tool names to current names (e.g., "bash" -> "run_shell_command")
+          const migratedToolName =
+            ToolNamesMigration[
+              reqInfo.name as keyof typeof ToolNamesMigration
+            ] || reqInfo.name;
+
+          const toolInstance = this.toolRegistry.getTool(migratedToolName);
           if (!toolInstance) {
             // Tool is not in registry and not excluded - likely hallucinated or typo
             const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
