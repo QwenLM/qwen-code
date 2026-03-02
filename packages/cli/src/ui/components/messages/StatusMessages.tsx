@@ -15,6 +15,7 @@ interface StatusMessageProps {
   prefix: string;
   prefixColor: string;
   textColor: string;
+  children?: React.ReactNode;
 }
 
 interface StatusTextProps {
@@ -30,6 +31,7 @@ export const StatusMessage: React.FC<StatusMessageProps> = ({
   prefix,
   prefixColor,
   textColor,
+  children,
 }) => {
   if (!text || text.trim() === '') {
     return null;
@@ -45,6 +47,7 @@ export const StatusMessage: React.FC<StatusMessageProps> = ({
       <Box flexGrow={1}>
         <Text wrap="wrap" color={textColor}>
           <RenderInline text={text} />
+          {children}
         </Text>
       </Box>
     </Box>
@@ -78,13 +81,18 @@ export const WarningMessage: React.FC<StatusTextProps> = ({ text }) => (
   />
 );
 
-export const ErrorMessage: React.FC<StatusTextProps> = ({ text }) => (
+export const ErrorMessage: React.FC<StatusTextProps & { hint?: string }> = ({
+  text,
+  hint,
+}) => (
   <StatusMessage
     text={text}
     prefix="✕"
     prefixColor={theme.status.error}
     textColor={theme.status.error}
-  />
+  >
+    {hint && <Text color={theme.text.secondary}> ({hint})</Text>}
+  </StatusMessage>
 );
 
 export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (

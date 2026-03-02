@@ -873,4 +873,141 @@ describe('Turn', () => {
       expect(turn.getDebugResponses()).toEqual([resp1, resp2]);
     });
   });
+
+  describe('wasOutputTruncated flag', () => {
+    it('should set wasOutputTruncated=true on pending tool calls when finishReason is MAX_TOKENS', async () => {
+      const mockResponseStream = (async function* () {
+        // Yield a tool call request
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/test.txt', content: 'hello' },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        // Yield finish with MAX_TOKENS
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                finishReason: 'MAX_TOKENS',
+                content: { parts: [] },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const reqParts: Part[] = [{ text: 'Test prompt' }];
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      // Verify that pending tool calls have wasOutputTruncated flag set
+      expect(turn.pendingToolCalls).toHaveLength(1);
+      expect(turn.pendingToolCalls[0].wasOutputTruncated).toBe(true);
+      expect(turn.pendingToolCalls[0].name).toBe('write_file');
+    });
+
+    it('should NOT set wasOutputTruncated when finishReason is STOP', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                name: 'read_file',
+                args: { file_path: '/test.txt' },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        // Yield finish with STOP (normal completion)
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                finishReason: 'STOP',
+                content: { parts: [] },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const reqParts: Part[] = [{ text: 'Test prompt' }];
+      for await (const _ of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        // consume stream
+      }
+
+      // Verify that pending tool calls do NOT have wasOutputTruncated flag
+      expect(turn.pendingToolCalls).toHaveLength(1);
+      expect(turn.pendingToolCalls[0].wasOutputTruncated).toBeUndefined();
+    });
+
+    it('should handle multiple pending tool calls with MAX_TOKENS', async () => {
+      const mockResponseStream = (async function* () {
+        // Yield two tool calls
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/test1.txt', content: 'content1' },
+              },
+              {
+                name: 'edit',
+                args: { file_path: '/test2.txt', original_text: 'old' },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        // Yield finish with MAX_TOKENS
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                finishReason: 'MAX_TOKENS',
+                content: { parts: [] },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const reqParts: Part[] = [{ text: 'Test prompt' }];
+      for await (const _ of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        // consume stream
+      }
+
+      // Verify both tool calls have wasOutputTruncated flag set
+      expect(turn.pendingToolCalls).toHaveLength(2);
+      expect(turn.pendingToolCalls[0].wasOutputTruncated).toBe(true);
+      expect(turn.pendingToolCalls[1].wasOutputTruncated).toBe(true);
+    });
+  });
 });
