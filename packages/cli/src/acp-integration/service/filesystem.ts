@@ -85,7 +85,10 @@ export class AcpFileSystemService implements FileSystemService {
         });
         // Check if content starts with BOM character (U+FEFF)
         // Use codePointAt for better Unicode support and check content length first
-        return response.content.length > 0 && response.content.codePointAt(0) === 0xfeff;
+        return (
+          response.content.length > 0 &&
+          response.content.codePointAt(0) === 0xfeff
+        );
       } catch {
         // Fall through to fallback if ACP read fails
       }

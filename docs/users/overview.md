@@ -7,24 +7,23 @@
 
 ## Get started in 30 seconds
 
-Prerequisites:
-
-- A [Qwen Code](https://chat.qwen.ai/auth?mode=register) account
-- Requires [Node.js 20+](https://nodejs.org/zh-cn/download), you can use `node -v` to check the version. If it's not installed, use the following command to install it.
-
 ### Install Qwen Code:
 
-**NPM**(recommended)
+**Linux / macOS**
 
-```bash
-npm install -g @qwen-code/qwen-code@latest
+```sh
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
 ```
 
-**Homebrew**(macOS, Linux)
+**Windows (Run as Administrator CMD)**
 
-```bash
-brew install qwen-code
+```sh
+curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
 ```
+
+> [!note]
+>
+> It's recommended to restart your terminal after installation to ensure environment variables take effect. If the installation fails, please refer to [Manual Installation](./quickstart#manual-installation) in the Quickstart guide.
 
 ### Start using Qwen Code:
 

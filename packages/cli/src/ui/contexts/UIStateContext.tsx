@@ -115,8 +115,6 @@ export interface UIState {
   extensionsUpdateState: Map<string, ExtensionUpdateState>;
   activePtyId: number | undefined;
   embeddedShellFocused: boolean;
-  // Vision switch dialog
-  isVisionSwitchDialogOpen: boolean;
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   welcomeBackInfo: {

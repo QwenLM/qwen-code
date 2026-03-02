@@ -7,59 +7,35 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import Gradient from 'ink-gradient';
-import { AuthType, shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
+import { shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
+/**
+ * Auth display type for the Header component.
+ * Simplified representation of authentication method shown to users.
+ */
+export enum AuthDisplayType {
+  QWEN_OAUTH = 'Qwen OAuth',
+  CODING_PLAN = 'Coding Plan',
+  API_KEY = 'API Key',
+  UNKNOWN = 'Unknown',
+}
+
 interface HeaderProps {
   customAsciiArt?: string; // For user-defined ASCII art
   version: string;
-  authType?: AuthType;
+  authDisplayType?: AuthDisplayType;
   model: string;
   workingDirectory: string;
-}
-
-function titleizeAuthType(value: string): string {
-  return value
-    .split(/[-_]/g)
-    .filter(Boolean)
-    .map((part) => {
-      if (part.toLowerCase() === 'ai') {
-        return 'AI';
-      }
-      return part.charAt(0).toUpperCase() + part.slice(1);
-    })
-    .join(' ');
-}
-
-// Format auth type for display
-function formatAuthType(authType?: AuthType): string {
-  if (!authType) {
-    return 'Unknown';
-  }
-
-  switch (authType) {
-    case AuthType.QWEN_OAUTH:
-      return 'Qwen OAuth';
-    case AuthType.USE_OPENAI:
-      return 'OpenAI';
-    case AuthType.USE_GEMINI:
-      return 'Gemini';
-    case AuthType.USE_VERTEX_AI:
-      return 'Vertex AI';
-    case AuthType.USE_ANTHROPIC:
-      return 'Anthropic';
-    default:
-      return titleizeAuthType(String(authType));
-  }
 }
 
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
   version,
-  authType,
+  authDisplayType,
   model,
   workingDirectory,
 }) => {
@@ -67,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   const displayLogo = customAsciiArt ?? shortAsciiLogo;
   const logoWidth = getAsciiArtWidth(displayLogo);
-  const formattedAuthType = formatAuthType(authType);
+  const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path
@@ -95,7 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
     ? Math.min(availableTerminalWidth - logoWidth - logoGap, maxInfoPanelWidth)
     : availableTerminalWidth;
 
-  // Calculate max path length (subtract padding/borders from available space)
+  // Calculate max path lengths (subtract padding/borders from available space)
   const maxPathLength = Math.max(
     0,
     availableInfoPanelWidth - infoPanelChromeWidth,

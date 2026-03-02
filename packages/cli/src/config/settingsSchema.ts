@@ -147,7 +147,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, string>,
     description:
-      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
@@ -1175,38 +1175,6 @@ const SETTINGS_SCHEMA = {
       | undefined,
     description: 'Configuration for web search providers.',
     showInDialog: false,
-  },
-
-  experimental: {
-    type: 'object',
-    label: 'Experimental',
-    category: 'Experimental',
-    requiresRestart: true,
-    default: {},
-    description: 'Setting to enable experimental features',
-    showInDialog: false,
-    properties: {
-      visionModelPreview: {
-        type: 'boolean',
-        label: 'Vision Model Preview',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: true,
-        description:
-          'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
-        showInDialog: false,
-      },
-      vlmSwitchMode: {
-        type: 'string',
-        label: 'VLM Switch Mode',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
-        showInDialog: false,
-      },
-    },
   },
 } as const satisfies SettingsSchema;
 

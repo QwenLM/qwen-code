@@ -279,6 +279,18 @@ export class DashScopeOpenAICompatibleProvider
     return contentArray;
   }
 
+  /**
+   * Vision-capable model patterns.
+   * Supports exact matches and prefix patterns for easy extension.
+   */
+  private static readonly VISION_MODEL_EXACT_MATCHES = new Set(['coder-model']);
+
+  private static readonly VISION_MODEL_PREFIX_PATTERNS = [
+    'qwen-vl', // qwen-vl-max, qwen-vl-max-latest, etc.
+    'qwen3-vl-plus', // qwen3-vl-plus variants
+    'qwen3.5-plus', // qwen3.5-plus (has built-in vision capabilities)
+  ];
+
   private isVisionModel(model: string | undefined): boolean {
     if (!model) {
       return false;
@@ -286,16 +298,20 @@ export class DashScopeOpenAICompatibleProvider
 
     const normalized = model.toLowerCase();
 
-    if (normalized === 'vision-model') {
+    // Check exact matches
+    if (
+      DashScopeOpenAICompatibleProvider.VISION_MODEL_EXACT_MATCHES.has(
+        normalized,
+      )
+    ) {
       return true;
     }
 
-    if (normalized.startsWith('qwen-vl')) {
-      return true;
-    }
-
-    if (normalized.startsWith('qwen3-vl-plus')) {
-      return true;
+    // Check prefix patterns
+    for (const prefix of DashScopeOpenAICompatibleProvider.VISION_MODEL_PREFIX_PATTERNS) {
+      if (normalized.startsWith(prefix)) {
+        return true;
+      }
     }
 
     return false;

@@ -266,12 +266,12 @@ This is the approach used in the [one-file setup example](#recommended-one-file-
 
 **Priority summary:**
 
-| Priority    | Source                         | Override behavior                        |
-| ----------- | ------------------------------ | ---------------------------------------- |
-| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                              |
-| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.env`      |
-| 3           | `.env` file                    | Only sets if not in system env           |
-| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env` |
+| Priority    | Source                         | Override behavior                            |
+| ----------- | ------------------------------ | -------------------------------------------- |
+| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                                  |
+| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.json` → `env` |
+| 3           | `.env` file                    | Only sets if not in system env               |
+| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env`     |
 
 #### Step 3: Switch models with `/model`
 
@@ -292,7 +292,7 @@ qwen --model "qwen3-coder-plus"
 
 # In another terminal
 
-qwen --model "qwen3-coder-next"
+qwen --model "qwen3.5-plus"
 ```
 
 ## Security notes

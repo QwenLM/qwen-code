@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.10.5",
+  "version": "0.11.1",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -13,7 +13,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.10.5"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.11.1"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -50,7 +50,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
     "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
-    "prepare": "husky && npm run bundle",
+    "prepare": "husky && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
