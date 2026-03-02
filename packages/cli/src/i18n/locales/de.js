@@ -1041,6 +1041,17 @@ export default {
   '(default)': '(Standard)',
   '(set)': '(gesetzt)',
   '(not set)': '(nicht gesetzt)',
+  Modality: 'Modalität',
+  'Context Window': 'Kontextfenster',
+  text: 'Text',
+  'text-only': 'nur Text',
+  image: 'Bild',
+  pdf: 'PDF',
+  audio: 'Audio',
+  video: 'Video',
+  'not set': 'nicht gesetzt',
+  none: 'keine',
+  unknown: 'unbekannt',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
   'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':

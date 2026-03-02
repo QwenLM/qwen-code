@@ -40,6 +40,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+N`                                           | Navigate down through the input history.                                                                                            |
 | `Ctrl+P`                                           | Navigate up through the input history.                                                                                              |
 | `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                         |
+| `Ctrl+Y`                                           | Retry the last failed request.                                                                                                      |
 | `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                              |
 | `Ctrl+U`                                           | Delete from the cursor to the beginning of the line.                                                                                |
 | `Ctrl+V` (Windows: `Alt+V`)                        | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |

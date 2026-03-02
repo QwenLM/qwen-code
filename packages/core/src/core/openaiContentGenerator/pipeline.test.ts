@@ -47,6 +47,7 @@ describe('ContentGenerationPipeline', () => {
     // Mock converter
     mockConverter = {
       setModel: vi.fn(),
+      setModalities: vi.fn(),
       convertGeminiRequestToOpenAI: vi.fn(),
       convertOpenAIResponseToGemini: vi.fn(),
       convertOpenAIChunkToGemini: vi.fn(),
@@ -104,6 +105,7 @@ describe('ContentGenerationPipeline', () => {
       expect(OpenAIContentConverter).toHaveBeenCalledWith(
         'test-model',
         undefined,
+        {},
       );
     });
   });

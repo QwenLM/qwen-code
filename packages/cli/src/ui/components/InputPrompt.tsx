@@ -582,6 +582,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
+      // Ctrl+Y: Retry the last failed request.
+      // This shortcut is available when:
+      // - There is a failed request in the current session
+      // - The stream is not currently responding or waiting for confirmation
+      // If no failed request exists, a message will be shown to the user.
+      if (keyMatchers[Command.RETRY_LAST](key)) {
+        uiActions.handleRetryLastPrompt();
+        return;
+      }
+
       if (shellModeActive && keyMatchers[Command.REVERSE_SEARCH](key)) {
         setReverseSearchActive(true);
         setTextBeforeReverseSearch(buffer.text);
