@@ -285,17 +285,20 @@ export const useGeminiStream = (
       const retryReasonText =
         message ?? t('Rate limit exceeded. Please wait and try again.');
 
-      // Error line stays static (red with ✕ prefix)
-      setPendingRetryErrorItem({
-        type: MessageType.ERROR,
-        text: retryReasonText,
-      });
-
       // Countdown line updates every second (dim/secondary color)
       const updateCountdown = () => {
         const elapsedMs = Date.now() - startTime;
         const remainingMs = Math.max(0, delayMs - elapsedMs);
         const remainingSec = Math.ceil(remainingMs / 1000);
+
+        // Update error item with hint containing countdown info (short format)
+        const hintText = `Retrying in ${remainingSec}s… (attempt ${attempt}/${maxRetries})`;
+
+        setPendingRetryErrorItem({
+          type: MessageType.ERROR,
+          text: retryReasonText,
+          hint: hintText,
+        });
 
         setPendingRetryCountdownItem({
           type: 'retry_countdown',
