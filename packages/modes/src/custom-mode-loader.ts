@@ -26,17 +26,17 @@ export interface CustomModeConfig {
 }
 
 /**
- * Loader for custom modes from .qwen/modes/ directory
+ * Loader for custom modes from .modes-config/modes/ directory
  */
 export class CustomModeLoader {
   private modesDir: string;
 
   constructor(projectRoot: string) {
-    this.modesDir = path.join(projectRoot, '.qwen', 'modes');
+    this.modesDir = path.join(projectRoot, '.modes-config', 'modes');
   }
 
   /**
-   * Load all custom modes from .qwen/modes/
+   * Load all custom modes from .modes-config/modes/
    */
   async loadCustomModes(): Promise<ModeDefinition[]> {
     const modes: ModeDefinition[] = [];
@@ -65,7 +65,7 @@ export class CustomModeLoader {
         if (mode) {
           modes.push(mode);
         }
-      } catch (error) {
+      } catch (_error) {
         // Silently skip invalid mode files
       }
     }
@@ -84,7 +84,7 @@ export class CustomModeLoader {
 
     // Validate ID format
     if (!/^[a-z][a-z0-9-]*$/.test(config.id)) {
-      console.warn(`Invalid mode ID: ${config.id}. Must be lowercase alphanumeric with dashes.`);
+      // Skip invalid IDs silently
       return null;
     }
 

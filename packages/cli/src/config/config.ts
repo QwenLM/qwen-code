@@ -1069,7 +1069,7 @@ export async function loadCliConfig(
     autoSwitch: settings.modes?.autoSwitch,
   }, process.cwd());
 
-  // Load custom modes from .qwen/modes/ directory
+  // Load custom modes from .modes-config/modes/ directory
   await modeManager.loadCustomModesFromProject();
 
   config.setModeManager(modeManager);

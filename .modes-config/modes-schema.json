@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Qwen Code Mode Definition",
+  "description": "Schema for defining custom agent modes in Qwen Code",
+  "type": "object",
+  "required": ["id", "name", "description", "roleSystemPrompt", "allowedTools"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the mode (e.g., 'architect', 'code')",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "examples": ["architect", "code", "debug", "review"]
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name for the mode",
+      "examples": ["Architect", "Code", "Debug"]
+    },
+    "description": {
+      "type": "string",
+      "description": "Short description of what this mode does",
+      "examples": ["Проектирование и планирование перед реализацией"]
+    },
+    "color": {
+      "type": "string",
+      "description": "Hex color code for UI display",
+      "pattern": "^#[0-9A-Fa-f]{6}$",
+      "examples": ["#9333EA", "#10B981"]
+    },
+    "icon": {
+      "type": "string",
+      "description": "Emoji icon for the mode",
+      "examples": ["📐", "💻", "🐛"]
+    },
+    "roleSystemPrompt": {
+      "type": "string",
+      "description": "System prompt that defines the mode's behavior and role"
+    },
+    "allowedTools": {
+      "type": "array",
+      "description": "List of tools this mode can use",
+      "items": {
+        "type": "string",
+        "enum": [
+          "read_file",
+          "write_file",
+          "edit",
+          "list_dir",
+          "glob",
+          "grep",
+          "shell",
+          "memory",
+          "todo_write",
+          "create_markdown_diagrams",
+          "lsp",
+          "web_search",
+          "web_fetch"
+        ]
+      }
+    },
+    "excludedTools": {
+      "type": "array",
+      "description": "List of tools explicitly forbidden for this mode",
+      "items": {
+        "type": "string"
+      }
+    },
+    "useCases": {
+      "type": "array",
+      "description": "List of use cases when this mode is appropriate",
+      "items": {
+        "type": "string"
+      }
+    },
+    "safetyConstraints": {
+      "type": "array",
+      "description": "Safety constraints that this mode must follow",
+      "items": {
+        "type": "string"
+      }
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Priority for mode selection (higher = more likely to be auto-selected)",
+      "default": 0
+    }
+  }
+}

@@ -59,7 +59,7 @@ export class ModeManager {
   }
 
   /**
-   * Load custom modes from .qwen/modes/ directory
+   * Load custom modes from .modes-config/modes/ directory
    */
   async loadCustomModesFromProject(): Promise<void> {
     if (!this.customModeLoader) {
