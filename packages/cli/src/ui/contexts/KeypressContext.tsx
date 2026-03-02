@@ -332,6 +332,36 @@ export function KeypressProvider({
           };
         }
 
+        // Printable CSI-u keys (including space) should behave like regular
+        // character input so downstream text inputs receive the literal char.
+        if (
+          terminator === 'u' &&
+          !ctrl &&
+          keyCode >= 32 &&
+          keyCode !== 127 &&
+          keyCode <= 0x10ffff
+        ) {
+          const char = String.fromCodePoint(keyCode);
+          const printableName =
+            char === ' '
+              ? 'space'
+              : /^[A-Za-z]$/.test(char)
+                ? char.toLowerCase()
+                : char;
+          return {
+            key: {
+              name: printableName,
+              ctrl: false,
+              meta: alt,
+              shift,
+              paste: false,
+              sequence: char,
+              kittyProtocol: true,
+            },
+            length: m[0].length,
+          };
+        }
+
         // Ctrl+letters
         if (
           ctrl &&
