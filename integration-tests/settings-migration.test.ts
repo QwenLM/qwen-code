@@ -335,11 +335,12 @@ describe('settings-migration', () => {
       expect(migratedSettings['customOnlyKey']).toBe('value');
     });
 
-    it('should preserve non-boolean disable* values while bumping V2 to V3', async () => {
+    it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 to V3', async () => {
       rig.setup('v2-non-boolean-disable-values-migration');
 
-      // Cover both string variants and non-boolean invalid types:
-      // only real booleans are migrated, non-boolean values are preserved.
+      // Cover both coercible string booleans and invalid non-boolean values:
+      // - "TRUE"/"false" should be coerced and migrated
+      // - invalid values should have deprecated disable* keys removed
       const mixedNonBooleanDisableSettings = {
         ...v2BooleanStringSettings,
         ui: {
@@ -370,11 +371,10 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Non-boolean disable* values should be preserved
+      // Coercible strings are migrated; invalid disable* values are removed.
       expect(migratedSettings['$version']).toBe(3);
       expect(migratedSettings['general']).toEqual({
-        disableAutoUpdate: 'TRUE',
-        disableUpdateNag: 'false',
+        enableAutoUpdate: false,
       });
       expect(
         (
@@ -382,21 +382,42 @@ describe('settings-migration', () => {
             'accessibility'
           ] as Record<string, unknown>
         )?.['disableLoadingPhrases'],
-      ).toBe('yes');
+      ).toBeUndefined();
+      expect(
+        (
+          (migratedSettings['ui'] as Record<string, unknown>)?.[
+            'accessibility'
+          ] as Record<string, unknown>
+        )?.['enableLoadingPhrases'],
+      ).toBeUndefined();
       expect(
         (
           (migratedSettings['context'] as Record<string, unknown>)?.[
             'fileFiltering'
           ] as Record<string, unknown>
         )?.['disableFuzzySearch'],
-      ).toBeNull();
+      ).toBeUndefined();
+      expect(
+        (
+          (migratedSettings['context'] as Record<string, unknown>)?.[
+            'fileFiltering'
+          ] as Record<string, unknown>
+        )?.['enableFuzzySearch'],
+      ).toBeUndefined();
       expect(
         (
           (migratedSettings['model'] as Record<string, unknown>)?.[
             'generationConfig'
           ] as Record<string, unknown>
         )?.['disableCacheControl'],
-      ).toEqual([1]);
+      ).toBeUndefined();
+      expect(
+        (
+          (migratedSettings['model'] as Record<string, unknown>)?.[
+            'generationConfig'
+          ] as Record<string, unknown>
+        )?.['enableCacheControl'],
+      ).toBeUndefined();
     });
 
     it('should handle V2 settings with preexisting enable* keys', async () => {

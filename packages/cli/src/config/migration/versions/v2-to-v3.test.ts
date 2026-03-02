@@ -272,173 +272,198 @@ describe('V2ToV3Migration', () => {
       });
     });
 
-    it('should preserve string "true" without creating enable key', () => {
+    it('should coerce string "true" and remove deprecated key', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: 'true' },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe('true');
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
-      ).toBeUndefined();
+      ).toBe(false);
+      expect(warnings).toHaveLength(0);
     });
 
-    it('should preserve string "false" without creating enable key', () => {
+    it('should coerce string "false" and remove deprecated key', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: 'false' },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe('false');
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
+      ).toBe(true);
+      expect(warnings).toHaveLength(0);
+    });
+
+    it('should coerce case-insensitive strings for consolidated keys', () => {
+      const v2Settings = {
+        $version: 2,
+        general: {
+          disableAutoUpdate: 'TRUE',
+          disableUpdateNag: 'FALSE',
+        },
+      };
+
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result['$version']).toBe(3);
+      expect(
+        (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
       ).toBeUndefined();
-    });
-
-    it('should preserve string "TRUE" without creating enable key', () => {
-      const v2Settings = {
-        $version: 2,
-        general: { disableAutoUpdate: 'TRUE' },
-      };
-
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
-        settings: Record<string, unknown>;
-        warnings: unknown[];
-      };
-
-      expect(result['$version']).toBe(3);
       expect(
-        (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe('TRUE');
-    });
-
-    it('should preserve string "FALSE" without creating enable key', () => {
-      const v2Settings = {
-        $version: 2,
-        general: { disableAutoUpdate: 'FALSE' },
-      };
-
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
-        settings: Record<string, unknown>;
-        warnings: unknown[];
-      };
-
-      expect(result['$version']).toBe(3);
+        (result['general'] as Record<string, unknown>)['disableUpdateNag'],
+      ).toBeUndefined();
       expect(
-        (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe('FALSE');
+        (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
+      ).toBe(false);
+      expect(warnings).toHaveLength(0);
     });
 
-    it('should preserve number value and not create enable key', () => {
+    it('should remove number value and emit warning', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: 123 },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe(123);
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableAutoUpdate');
     });
 
-    it('should preserve invalid string value and not create enable key', () => {
+    it('should remove invalid string value and emit warning', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: 'invalid-string' },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBe('invalid-string');
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableAutoUpdate');
     });
 
-    it('should preserve disableCacheControl string "true"', () => {
+    it('should coerce disableCacheControl string "true"', () => {
       const v2Settings = {
         $version: 2,
         model: { generationConfig: { disableCacheControl: 'true' } },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['model'] as Record<string, unknown>)['generationConfig'],
       ).toEqual({
-        disableCacheControl: 'true',
+        enableCacheControl: false,
       });
+      expect(warnings).toHaveLength(0);
     });
 
-    it('should preserve disableCacheControl string "false"', () => {
+    it('should coerce disableCacheControl string "false"', () => {
       const v2Settings = {
         $version: 2,
         model: { generationConfig: { disableCacheControl: 'false' } },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['model'] as Record<string, unknown>)['generationConfig'],
       ).toEqual({
-        disableCacheControl: 'false',
+        enableCacheControl: true,
       });
+      expect(warnings).toHaveLength(0);
     });
 
-    it('should preserve disableCacheControl number value and not create enable key', () => {
+    it('should remove disableCacheControl number value and emit warning', () => {
       const v2Settings = {
         $version: 2,
         model: { generationConfig: { disableCacheControl: 456 } },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['model'] as Record<string, unknown>)['generationConfig'],
-      ).toEqual({ disableCacheControl: 456 });
+      ).toEqual({});
       expect(
         (
           (result['model'] as Record<string, unknown>)[
@@ -446,6 +471,10 @@ describe('V2ToV3Migration', () => {
           ] as Record<string, unknown>
         )['enableCacheControl'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        'model.generationConfig.disableCacheControl',
+      );
     });
 
     it('should handle mixed valid and invalid disableAutoUpdate and disableUpdateNag', () => {
@@ -457,9 +486,12 @@ describe('V2ToV3Migration', () => {
         },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
@@ -473,67 +505,84 @@ describe('V2ToV3Migration', () => {
       ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['disableUpdateNag'],
-      ).toBe('invalid');
+      ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableUpdateNag');
     });
 
-    it('should preserve object value for disable key', () => {
+    it('should remove object value for disable key and emit warning', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: { nested: 'value' } },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toEqual({ nested: 'value' });
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableAutoUpdate');
     });
 
-    it('should preserve array value for disable key', () => {
+    it('should remove array value for disable key and emit warning', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: [1, 2, 3] },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toEqual([1, 2, 3]);
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableAutoUpdate');
     });
 
-    it('should preserve null value for disable key', () => {
+    it('should remove null value for disable key and emit warning', () => {
       const v2Settings = {
         $version: 2,
         general: { disableAutoUpdate: null },
       };
 
-      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'user',
+      ) as {
         settings: Record<string, unknown>;
-        warnings: unknown[];
+        warnings: string[];
       };
 
       expect(result['$version']).toBe(3);
       expect(
         (result['general'] as Record<string, unknown>)['disableAutoUpdate'],
-      ).toBeNull();
+      ).toBeUndefined();
       expect(
         (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
       ).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('general.disableAutoUpdate');
     });
   });
 

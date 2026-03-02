@@ -12,6 +12,7 @@ import {
   V1_TO_V2_PRESERVE_DISABLE_MAP,
   V2_CONTAINER_KEYS,
 } from './v1-to-v2-shared.js';
+import { setNestedPropertySafe } from '../../../utils/settingsUtils.js';
 
 /**
  * Heuristic indicators for deciding whether an object is "V1-like".
@@ -28,43 +29,6 @@ import {
  *   and do not alone trigger migration.
  * - Primitive/array/null values on indicator keys are treated as legacy V1 signals.
  */
-
-/**
- * Best-effort nested setter with collision protection.
- *
- * Strategy:
- * - Create missing intermediate objects while traversing the path.
- * - If traversal hits a non-object parent, abort this write.
- *
- * Rationale:
- * - Migration should never coerce scalars into objects implicitly because that can
- *   destroy user data shape. Skipping the write is safer; later carry-over logic
- *   preserves original values.
- */
-function setNestedProperty(
-  obj: Record<string, unknown>,
-  path: string,
-  value: unknown,
-): void {
-  const keys = path.split('.');
-  const lastKey = keys.pop();
-  if (!lastKey) return;
-
-  let current: Record<string, unknown> = obj;
-  for (const key of keys) {
-    if (current[key] === undefined) {
-      current[key] = {};
-    }
-    const next = current[key];
-    if (typeof next === 'object' && next !== null) {
-      current = next as Record<string, unknown>;
-    } else {
-      // Path collision with non-object, stop here
-      return;
-    }
-  }
-  current[lastKey] = value;
-}
 
 /**
  * V1 -> V2 migration (structural normalization stage).
@@ -200,10 +164,14 @@ export class V1ToV2Migration implements SettingsMigration {
         ) {
           // Merge nested properties from this partial V2 structure
           for (const [nestedKey, nestedValue] of Object.entries(value)) {
-            setNestedProperty(result, `${v2Path}.${nestedKey}`, nestedValue);
+            setNestedPropertySafe(
+              result,
+              `${v2Path}.${nestedKey}`,
+              nestedValue,
+            );
           }
         } else {
-          setNestedProperty(result, v2Path, value);
+          setNestedPropertySafe(result, v2Path, value);
         }
         processedKeys.add(v1Key);
       }
@@ -218,10 +186,10 @@ export class V1ToV2Migration implements SettingsMigration {
         if (CONSOLIDATED_DISABLE_KEYS.has(v1Key)) {
           // Preserve stable behavior: consolidated keys use presence semantics.
           // Only literal true remains true; all other present values become false.
-          setNestedProperty(result, v2Path, value === true);
+          setNestedPropertySafe(result, v2Path, value === true);
         } else if (typeof value === 'boolean') {
           // Non-consolidated disable* keys only migrate when explicitly boolean.
-          setNestedProperty(result, v2Path, value);
+          setNestedPropertySafe(result, v2Path, value);
         }
         processedKeys.add(v1Key);
       }
@@ -274,7 +242,7 @@ export class V1ToV2Migration implements SettingsMigration {
                 },
               );
               if (!wasProcessed) {
-                setNestedProperty(result, fullNestedPath, nestedValue);
+                setNestedPropertySafe(result, fullNestedPath, nestedValue);
               }
             }
           } else {

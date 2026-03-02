@@ -31,6 +31,7 @@ import {
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { setNestedPropertySafe } from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
 const debugLogger = createDebugLogger('SETTINGS');
@@ -122,31 +123,6 @@ export interface SettingsFile {
   originalSettings: Settings;
   path: string;
   rawJson?: string;
-}
-
-function setNestedProperty(
-  obj: Record<string, unknown>,
-  path: string,
-  value: unknown,
-) {
-  const keys = path.split('.');
-  const lastKey = keys.pop();
-  if (!lastKey) return;
-
-  let current: Record<string, unknown> = obj;
-  for (const key of keys) {
-    if (current[key] === undefined) {
-      current[key] = {};
-    }
-    const next = current[key];
-    if (typeof next === 'object' && next !== null) {
-      current = next as Record<string, unknown>;
-    } else {
-      // This path is invalid, so we stop.
-      return;
-    }
-  }
-  current[lastKey] = value;
 }
 
 function getSettingsFileKeyWarnings(
@@ -333,8 +309,8 @@ export class LoadedSettings {
 
   setValue(scope: SettingScope, key: string, value: unknown): void {
     const settingsFile = this.forScope(scope);
-    setNestedProperty(settingsFile.settings, key, value);
-    setNestedProperty(settingsFile.originalSettings, key, value);
+    setNestedPropertySafe(settingsFile.settings, key, value);
+    setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
     saveSettings(settingsFile);
   }
