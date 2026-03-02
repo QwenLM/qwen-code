@@ -249,7 +249,7 @@ jobs:
         shell: 'bash'
 
       - name: 'Upload VSIX Artifact'
-        uses: 'actions/upload-artifact@v4'
+        uses: 'actions/upload-artifact@v6'
         with:
           name: 'vsix-${{ matrix.target || ''universal'' }}'
           path: 'qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
@@ -275,7 +275,7 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
 
       - name: 'Download all VSIX artifacts'
-        uses: 'actions/download-artifact@v4'
+        uses: 'actions/download-artifact@v7'
         with:
           pattern: 'vsix-*'
           path: 'vsix-artifacts'
@@ -319,7 +319,7 @@ jobs:
 
       - name: 'Upload all VSIXes as release artifacts (dry run)'
         if: '${{ needs.prepare.outputs.is_dry_run == ''true'' }}'
-        uses: 'actions/upload-artifact@v4'
+        uses: 'actions/upload-artifact@v6'
         with:
           name: 'all-vsix-packages-${{ needs.prepare.outputs.release_version }}'
           path: 'vsix-artifacts/*.vsix'
