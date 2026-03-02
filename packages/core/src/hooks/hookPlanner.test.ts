@@ -64,7 +64,8 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
       expect(result!.eventName).toBe(HookEventName.PreToolUse);
       expect(result!.hookConfigs).toHaveLength(1);
-      expect(result!.sequential).toBe(false);
+      // PreToolUse hooks default to sequential execution to allow input modifications
+      expect(result!.sequential).toBe(true);
     });
 
     it('should set sequential to true when any hook has sequential=true', () => {
@@ -308,6 +309,157 @@ describe('HookPlanner', () => {
       });
 
       expect(result).not.toBeNull();
+    });
+  });
+
+  describe('sequential execution behavior for different hook types', () => {
+    const createEntry = (eventName: HookEventName) => ({
+      config: { type: HookType.Command, command: 'echo test' } as const,
+      source: HooksConfigSource.Project,
+      eventName,
+      enabled: true,
+    });
+
+    it('should set sequential=true for PreToolUse hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.PreToolUse),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreToolUse);
+
+      expect(result!.sequential).toBe(true);
+    });
+
+    it('should set sequential=false for PostToolUse hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.PostToolUse),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.PostToolUse);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for PostToolUseFailure hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.PostToolUseFailure),
+      ]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.PostToolUseFailure,
+      );
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for Notification hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.Notification),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.Notification);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for SessionStart hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.SessionStart),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.SessionStart);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for SessionEnd hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.SessionEnd),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.SessionEnd);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for PreCompact hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.PreCompact),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.PreCompact);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for SubagentStart hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.SubagentStart),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for SubagentStop hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.SubagentStop),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStop);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for PermissionRequest hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.PermissionRequest),
+      ]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.PermissionRequest,
+      );
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for UserPromptSubmit hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.UserPromptSubmit),
+      ]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptSubmit,
+      );
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should set sequential=false for Stop hooks', () => {
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        createEntry(HookEventName.Stop),
+      ]);
+
+      const result = planner.createExecutionPlan(HookEventName.Stop);
+
+      expect(result!.sequential).toBe(false);
+    });
+
+    it('should override sequential=false with hook-level sequential=true', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SessionStart,
+        sequential: true, // Override to sequential
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SessionStart);
+
+      // Hook-level sequential=true should override the default
+      expect(result!.sequential).toBe(true);
     });
   });
 });

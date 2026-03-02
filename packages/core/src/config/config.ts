@@ -84,7 +84,15 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem } from '../hooks/index.js';
+import {
+  HookSystem,
+  type McpToolContext,
+  SessionStartSource,
+  SessionEndReason,
+  PreCompactTrigger,
+  AgentType,
+  type PermissionSuggestion,
+} from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -753,6 +761,86 @@ export class Config {
                   (input['last_assistant_message'] as string) || '',
                 );
                 break;
+              case 'PreToolUse':
+                result = await hookSystem.firePreToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  input['mcp_context'] as McpToolContext | undefined,
+                  input['original_request_name'] as string | undefined,
+                );
+                break;
+              case 'PostToolUse':
+                result = await hookSystem.firePostToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_response'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  input['mcp_context'] as McpToolContext | undefined,
+                  input['original_request_name'] as string | undefined,
+                );
+                break;
+              case 'PostToolUseFailure':
+                result = await hookSystem.firePostToolUseFailureEvent(
+                  (input['tool_use_id'] as string) || '',
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['error'] as string) || '',
+                  input['error_type'] as string | undefined,
+                  input['is_interrupt'] as boolean | undefined,
+                );
+                break;
+              case 'Notification':
+                result = await hookSystem.fireNotificationEvent(
+                  (input['notification_type'] as string) || '',
+                  (input['message'] as string) || '',
+                  input['title'] as string | undefined,
+                );
+                break;
+              case 'SessionStart':
+                result = await hookSystem.fireSessionStartEvent(
+                  (input['source'] as SessionStartSource) ||
+                    SessionStartSource.Startup,
+                  input['model'] as string | undefined,
+                );
+                break;
+              case 'SessionEnd':
+                result = await hookSystem.fireSessionEndEvent(
+                  (input['reason'] as SessionEndReason) ||
+                    SessionEndReason.Other,
+                );
+                break;
+              case 'PreCompact':
+                result = await hookSystem.firePreCompactEvent(
+                  (input['trigger'] as PreCompactTrigger) ||
+                    PreCompactTrigger.Auto,
+                  input['custom_instructions'] as string | undefined,
+                );
+                break;
+              case 'SubagentStart':
+                result = await hookSystem.fireSubagentStartEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as AgentType) || AgentType.Custom,
+                );
+                break;
+              case 'SubagentStop':
+                result = await hookSystem.fireSubagentStopEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as AgentType) || AgentType.Custom,
+                  (input['agent_transcript_path'] as string) || '',
+                  (input['last_assistant_message'] as string) || '',
+                  input['stop_hook_active'] as boolean | undefined,
+                );
+                break;
+              case 'PermissionRequest':
+                result = await hookSystem.firePermissionRequestEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  input['permission_suggestions'] as
+                    | PermissionSuggestion[]
+                    | undefined,
+                );
+                break;
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,
@@ -765,7 +853,17 @@ export class Config {
               type: MessageBusType.HOOK_EXECUTION_RESPONSE,
               correlationId: request.correlationId,
               success: true,
-              output: result,
+              output: result
+                ? {
+                    continue: result.continue,
+                    stopReason: result.stopReason,
+                    suppressOutput: result.suppressOutput,
+                    systemMessage: result.systemMessage,
+                    decision: result.decision,
+                    reason: result.reason,
+                    hookSpecificOutput: result.hookSpecificOutput,
+                  }
+                : undefined,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);

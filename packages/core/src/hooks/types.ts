@@ -97,6 +97,7 @@ export interface HookInput {
   session_id: string;
   transcript_path: string;
   cwd: string;
+  permission_mode?: PermissionMode; // Added: Current permission mode
   hook_event_name: string;
   timestamp: string;
 }
@@ -125,6 +126,12 @@ export function createHookOutput(
   switch (eventName) {
     case HookEventName.PreToolUse:
       return new PreToolUseHookOutput(data);
+    case HookEventName.PostToolUse:
+      return new PostToolUseHookOutput(data);
+    case HookEventName.PostToolUseFailure:
+      return new PostToolUseFailureHookOutput(data);
+    case HookEventName.Notification:
+      return new NotificationHookOutput(data);
     case HookEventName.Stop:
       return new StopHookOutput(data);
     case HookEventName.PermissionRequest:
@@ -222,9 +229,53 @@ export class DefaultHookOutput implements HookOutput {
  */
 export class PreToolUseHookOutput extends DefaultHookOutput {
   /**
+   * Get permission decision if provided by hook
+   */
+  getPermissionDecision(): 'allow' | 'deny' | 'ask' | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'permissionDecision' in this.hookSpecificOutput
+    ) {
+      const decision = this.hookSpecificOutput['permissionDecision'];
+      if (decision === 'allow' || decision === 'deny' || decision === 'ask') {
+        return decision;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get permission decision reason if provided by hook
+   */
+  getPermissionDecisionReason(): string | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'permissionDecisionReason' in this.hookSpecificOutput
+    ) {
+      const reason = this.hookSpecificOutput['permissionDecisionReason'];
+      if (typeof reason === 'string') {
+        return reason;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Get modified tool input if provided by hook
    */
   getModifiedToolInput(): Record<string, unknown> | undefined {
+    // First check for updatedInput (Claude Code standard field)
+    if (this.hookSpecificOutput && 'updatedInput' in this.hookSpecificOutput) {
+      const input = this.hookSpecificOutput['updatedInput'];
+      if (
+        typeof input === 'object' &&
+        input !== null &&
+        !Array.isArray(input)
+      ) {
+        return input as Record<string, unknown>;
+      }
+    }
+    // Fallback to tool_input (legacy/alternative field name)
     if (this.hookSpecificOutput && 'tool_input' in this.hookSpecificOutput) {
       const input = this.hookSpecificOutput['tool_input'];
       if (
@@ -236,6 +287,28 @@ export class PreToolUseHookOutput extends DefaultHookOutput {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Check if execution should be denied
+   */
+  isDenied(): boolean {
+    return this.getPermissionDecision() === 'deny';
+  }
+
+  /**
+   * Check if user confirmation is required
+   */
+  isAsk(): boolean {
+    return this.getPermissionDecision() === 'ask';
+  }
+
+  /**
+   * Check if execution is allowed
+   */
+  isAllowed(): boolean {
+    const decision = this.getPermissionDecision();
+    return decision === 'allow' || decision === undefined;
   }
 }
 
@@ -353,6 +426,97 @@ export class PermissionRequestHookOutput extends DefaultHookOutput {
 }
 
 /**
+ * Specific hook output class for PostToolUse events.
+ */
+export class PostToolUseHookOutput extends DefaultHookOutput {
+  /**
+   * Get additional context if provided by hook
+   */
+  override getAdditionalContext(): string | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'additionalContext' in this.hookSpecificOutput
+    ) {
+      const context = this.hookSpecificOutput['additionalContext'];
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Get tail tool call request if provided by hook
+   */
+  getTailToolCallRequest():
+    | { name: string; args: Record<string, unknown> }
+    | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'tailToolCallRequest' in this.hookSpecificOutput
+    ) {
+      const request = this.hookSpecificOutput['tailToolCallRequest'] as
+        | { name?: unknown; args?: unknown }
+        | undefined;
+      if (
+        request &&
+        typeof request === 'object' &&
+        request !== null &&
+        !Array.isArray(request)
+      ) {
+        if (
+          typeof request.name === 'string' &&
+          typeof request.args === 'object' &&
+          request.args !== null
+        ) {
+          return {
+            name: request.name,
+            args: request.args as Record<string, unknown>,
+          };
+        }
+      }
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Specific hook output class for PostToolUseFailure events.
+ */
+export class PostToolUseFailureHookOutput extends DefaultHookOutput {
+  /**
+   * Get additional context if provided by hook
+   */
+  override getAdditionalContext(): string | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'additionalContext' in this.hookSpecificOutput
+    ) {
+      const context = this.hookSpecificOutput['additionalContext'];
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Specific hook output class for Notification events.
+ */
+export class NotificationHookOutput extends DefaultHookOutput {
+  /**
+   * Get additional context if provided by hook
+   */
+  override getAdditionalContext(): string | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'additionalContext' in this.hookSpecificOutput
+    ) {
+      const context = this.hookSpecificOutput['additionalContext'];
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
+}
+
+/**
  * Context for MCP tool executions.
  * Contains non-sensitive connection information about the MCP server
  * identity. Since server_name is user controlled and arbitrary, we
@@ -377,9 +541,9 @@ export interface McpToolContext {
 }
 
 export interface PreToolUseInput extends HookInput {
-  permission_mode?: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
+  tool_use_id: string;
   mcp_context?: McpToolContext;
   original_request_name?: string;
 }
@@ -390,7 +554,10 @@ export interface PreToolUseInput extends HookInput {
 export interface PreToolUseOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PreToolUse';
-    tool_input?: Record<string, unknown>;
+    permissionDecision?: 'allow' | 'deny' | 'ask';
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
+    additionalContext?: string;
   };
 }
 
@@ -401,6 +568,7 @@ export interface PostToolUseInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response: Record<string, unknown>;
+  tool_use_id: string; // Added: Unique identifier for this tool use
   mcp_context?: McpToolContext;
   original_request_name?: string;
 }
@@ -409,6 +577,8 @@ export interface PostToolUseInput extends HookInput {
  * PostToolUse hook output
  */
 export interface PostToolUseOutput extends HookOutput {
+  decision?: 'block'; // When set to 'block', causes Claude to stop
+  reason?: string; // Reason shown to Claude when decision is 'block'
   hookSpecificOutput?: {
     hookEventName: 'PostToolUse';
     additionalContext?: string;
@@ -421,6 +591,11 @@ export interface PostToolUseOutput extends HookOutput {
       name: string;
       args: Record<string, unknown>;
     };
+
+    /**
+     * Only for MCP tools: replace the tool output with modified content
+     */
+    updatedMCPToolOutput?: Record<string, unknown>;
   };
 }
 
@@ -476,11 +651,11 @@ export enum NotificationType {
  * Notification hook input
  */
 export interface NotificationInput extends HookInput {
-  permission_mode?: PermissionMode;
-  notification_type: NotificationType;
+  notification_type: string; // Changed: Now string instead of enum (e.g., "permission_prompt", "idle_prompt", "auth_success", "elicitation_dialog")
   message: string;
   title?: string;
-  details: Record<string, unknown>;
+  // Removed: details field (not in Claude's definition)
+  // Removed: permission_mode field (already in HookInput base)
 }
 
 /**
@@ -533,7 +708,6 @@ export enum PermissionMode {
  * SessionStart hook input
  */
 export interface SessionStartInput extends HookInput {
-  permission_mode?: PermissionMode;
   source: SessionStartSource;
   model?: string;
 }
@@ -614,7 +788,6 @@ export enum AgentType {
  * Fired when a subagent (Task tool call) is started
  */
 export interface SubagentStartInput extends HookInput {
-  permission_mode?: PermissionMode;
   agent_id: string;
   agent_type: AgentType;
 }
@@ -634,7 +807,6 @@ export interface SubagentStartOutput extends HookOutput {
  * Fired right before a subagent (Task tool call) concludes its response
  */
 export interface SubagentStopInput extends HookInput {
-  permission_mode?: PermissionMode;
   stop_hook_active: boolean;
   agent_id: string;
   agent_type: AgentType;

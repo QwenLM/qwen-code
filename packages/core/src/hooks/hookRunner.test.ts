@@ -6,7 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HookRunner } from './hookRunner.js';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  PermissionMode,
+} from './types.js';
 import type { HookConfig, HookInput } from './types.js';
 
 // Hoisted mock
@@ -32,6 +37,7 @@ describe('HookRunner', () => {
     session_id: 'test-session',
     transcript_path: '/test/transcript',
     cwd: '/test',
+    permission_mode: PermissionMode.Default,
     hook_event_name: 'test-event',
     timestamp: '2024-01-01T00:00:00Z',
     ...overrides,
