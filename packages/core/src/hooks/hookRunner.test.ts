@@ -534,7 +534,7 @@ describe('HookRunner', () => {
 
       // Verify spawn was called with expanded command
       const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][1]; // Second arg after shell args
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
       expect(command).toContain('/test/project');
     });
 
@@ -552,7 +552,7 @@ describe('HookRunner', () => {
       await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
 
       const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][1];
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
       expect(command).toContain('/test/project');
     });
 
@@ -570,7 +570,7 @@ describe('HookRunner', () => {
       await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
 
       const spawnCall = mockSpawn.mock.calls[0];
-      const command = spawnCall[1][1];
+      const command = spawnCall[1][spawnCall[1].length - 1]; // Last arg is the command
       expect(command).toBe('echo hello');
     });
   });
