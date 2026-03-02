@@ -24,6 +24,7 @@ import {
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -226,10 +227,11 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
 
     try {
       const content = await fs.promises.readFile(filePath, 'utf-8');
+      const normalizedContent = normalizeContent(content);
 
       // Parse frontmatter
       const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-      const match = content.match(frontmatterRegex);
+      const match = normalizedContent.match(frontmatterRegex);
 
       if (!match) {
         // No frontmatter, skip this file

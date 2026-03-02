@@ -53,3 +53,23 @@ export function isBinary(
   // If no NULL bytes were found in the sample, we assume it's text.
   return false;
 }
+
+/**
+ * Normalizes text content by stripping the UTF-8 BOM and converting all CRLF (\r\n)
+ * or standalone CR (\r) line endings to LF (\n).
+ *
+ * This is crucial for cross-platform compatibility, particularly to prevent parsing
+ * failures on Windows where files may be saved with CRLF line endings.
+ *
+ * @param content The raw text content to normalize
+ * @returns The normalized string with uniform \n line endings
+ */
+export function normalizeContent(content: string): string {
+  // Strip UTF-8 BOM to ensure string processing starts at the first real character.
+  let normalized = content.replace(/^\uFEFF/, '');
+
+  // Normalize line endings to LF (\n).
+  normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  return normalized;
+}
