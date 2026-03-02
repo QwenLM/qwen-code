@@ -1052,6 +1052,8 @@ export default {
     '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
+  'Try /insight to generate personalized insights from your chat history.':
+    '试试 /insight，从聊天记录中生成个性化洞察。',
 
   // ============================================================================
   // Exit Screen / Stats
