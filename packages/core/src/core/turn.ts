@@ -367,7 +367,9 @@ export class Turn {
       fnCall.id ??
       `${fnCall.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const name = fnCall.name || 'undefined_tool_name';
-    const args = (fnCall.args || {}) as Record<string, unknown>;
+    const args = sanitizeToolArgs(
+      (fnCall.args || {}) as Record<string, unknown>,
+    );
 
     const toolCallRequest: ToolCallRequestInfo = {
       callId,
@@ -398,4 +400,30 @@ function getCitations(resp: GenerateContentResponse): string[] {
       }
       return citation.uri!;
     });
+}
+
+/**
+ * Sanitizes tool arguments to fix common model output issues.
+ * Specifically removes spaces between Chinese characters and numbers in file paths.
+ * This fixes issue #2032 where the model adds spaces like "测试 1 文件.txt" instead of "测试1文件.txt"
+ */
+function sanitizeToolArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === 'string') {
+      // Remove spaces between Chinese characters and numbers
+      // This regex matches: Chinese char + space + digit, or digit + space + Chinese char
+      sanitized[key] = value.replace(
+        /([\u4e00-\u9fa5])\s+(\d)|(\d)\s+([\u4e00-\u9fa5])/g,
+        '$1$2$3$4',
+      );
+    } else {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
 }
