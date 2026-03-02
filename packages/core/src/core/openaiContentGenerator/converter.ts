@@ -20,11 +20,15 @@ import type {
 import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { InputModalities } from '../contentGenerator.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+
+const debugLogger = createDebugLogger('CONVERTER');
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -92,12 +96,18 @@ type OpenAIContentPart =
 export class OpenAIContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
+  private modalities: InputModalities;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
 
-  constructor(model: string, schemaCompliance: SchemaComplianceMode = 'auto') {
+  constructor(
+    model: string,
+    schemaCompliance: SchemaComplianceMode = 'auto',
+    modalities: InputModalities = {},
+  ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
+    this.modalities = modalities;
   }
 
   /**
@@ -106,6 +116,13 @@ export class OpenAIContentConverter {
    */
   setModel(model: string): void {
     this.model = model;
+  }
+
+  /**
+   * Update the supported input modalities.
+   */
+  setModalities(modalities: InputModalities): void {
+    this.modalities = modalities;
   }
 
   /**
@@ -585,13 +602,19 @@ export class OpenAIContentConverter {
   }
 
   /**
-   * Create OpenAI media content part from Gemini part
+   * Create OpenAI media content part from Gemini part.
+   * Checks modality support before building each media type.
    */
   private createMediaContentPart(part: Part): OpenAIContentPart | null {
     if (part.inlineData?.mimeType && part.inlineData?.data) {
       const mimeType = part.inlineData.mimeType;
       const mediaType = this.getMediaType(mimeType);
+      const displayName = part.inlineData.displayName || mimeType;
+
       if (mediaType === 'image') {
+        if (!this.modalities.image) {
+          return this.unsupportedModalityPlaceholder('image', displayName);
+        }
         const dataUrl = `data:${mimeType};base64,${part.inlineData.data}`;
         return {
           type: 'image_url' as const,
@@ -600,6 +623,9 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        if (!this.modalities.pdf) {
+          return this.unsupportedModalityPlaceholder('pdf', displayName);
+        }
         const filename = part.inlineData.displayName || 'document.pdf';
         return {
           type: 'file' as const,
@@ -611,6 +637,9 @@ export class OpenAIContentConverter {
       }
 
       if (mediaType === 'audio') {
+        if (!this.modalities.audio) {
+          return this.unsupportedModalityPlaceholder('audio', displayName);
+        }
         const format = this.getAudioFormat(mimeType);
         if (format) {
           return {
@@ -624,6 +653,9 @@ export class OpenAIContentConverter {
       }
 
       if (mediaType === 'video') {
+        if (!this.modalities.video) {
+          return this.unsupportedModalityPlaceholder('video', displayName);
+        }
         return {
           type: 'video_url' as const,
           video_url: {
@@ -632,12 +664,9 @@ export class OpenAIContentConverter {
         };
       }
 
-      const displayName = part.inlineData.displayName
-        ? ` (${part.inlineData.displayName})`
-        : '';
       return {
         type: 'text' as const,
-        text: `Unsupported inline media type: ${mimeType}${displayName}.`,
+        text: `Unsupported inline media type: ${mimeType} (${displayName}).`,
       };
     }
 
@@ -648,6 +677,9 @@ export class OpenAIContentConverter {
       const mediaType = this.getMediaType(mimeType);
 
       if (mediaType === 'image') {
+        if (!this.modalities.image) {
+          return this.unsupportedModalityPlaceholder('image', filename);
+        }
         return {
           type: 'image_url' as const,
           image_url: { url: fileUri },
@@ -655,6 +687,9 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
+        if (!this.modalities.pdf) {
+          return this.unsupportedModalityPlaceholder('pdf', filename);
+        }
         return {
           type: 'file' as const,
           file: {
@@ -665,6 +700,9 @@ export class OpenAIContentConverter {
       }
 
       if (mediaType === 'video') {
+        if (!this.modalities.video) {
+          return this.unsupportedModalityPlaceholder('video', filename);
+        }
         return {
           type: 'video_url' as const,
           video_url: {
@@ -673,16 +711,40 @@ export class OpenAIContentConverter {
         };
       }
 
-      const displayName = part.fileData.displayName
+      const displayNameStr = part.fileData.displayName
         ? ` (${part.fileData.displayName})`
         : '';
       return {
         type: 'text' as const,
-        text: `Unsupported file media type: ${mimeType}${displayName}.`,
+        text: `Unsupported file media type: ${mimeType}${displayNameStr}.`,
       };
     }
 
     return null;
+  }
+
+  /**
+   * Create a text placeholder for unsupported modalities.
+   */
+  private unsupportedModalityPlaceholder(
+    modality: string,
+    displayName: string,
+  ): OpenAIContentPart {
+    debugLogger.warn(
+      `Model '${this.model}' does not support ${modality} input. ` +
+        `Replacing with text placeholder: ${displayName}`,
+    );
+    let hint: string;
+    if (modality === 'pdf') {
+      hint =
+        'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
+    } else {
+      hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+    }
+    return {
+      type: 'text' as const,
+      text: `[Unsupported ${modality} file: "${displayName}". ${hint}]`,
+    };
   }
 
   /**

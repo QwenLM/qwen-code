@@ -23,7 +23,12 @@ describe('OpenAIContentConverter', () => {
   let converter: OpenAIContentConverter;
 
   beforeEach(() => {
-    converter = new OpenAIContentConverter('test-model');
+    converter = new OpenAIContentConverter('test-model', 'auto', {
+      image: true,
+      pdf: true,
+      audio: true,
+      video: true,
+    });
   });
 
   describe('resetStreamingToolCalls', () => {
@@ -1685,7 +1690,12 @@ describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', ()
   let converter: OpenAIContentConverter;
 
   beforeEach(() => {
-    converter = new OpenAIContentConverter('test-model');
+    converter = new OpenAIContentConverter('test-model', 'auto', {
+      image: true,
+      pdf: true,
+      audio: true,
+      video: true,
+    });
   });
 
   it('should preserve MCP multi-text content in tool message (not leak to user message)', () => {
@@ -2054,7 +2064,8 @@ describe('Truncated tool call detection in streaming', () => {
           index: 0,
           id: 'call_1',
           name: 'write_file',
-          arguments: '{"file_path": "/tmp/test.cpp", "content": "partial content',
+          arguments:
+            '{"file_path": "/tmp/test.cpp", "content": "partial content',
           // Truncated mid-string
         },
       ],
@@ -2190,5 +2201,161 @@ describe('Truncated tool call detection in streaming', () => {
     } as unknown as OpenAI.Chat.ChatCompletionChunk);
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+});
+
+describe('modality filtering', () => {
+  function makeRequest(parts: Part[]): GenerateContentParameters {
+    return {
+      model: 'test-model',
+      contents: [{ role: 'user', parts }],
+    };
+  }
+
+  function getUserContentParts(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): Array<{ type: string; text?: string }> {
+    const userMsg = messages.find((m) => m.role === 'user');
+    if (
+      !userMsg ||
+      !('content' in userMsg) ||
+      !Array.isArray(userMsg.content)
+    ) {
+      return [];
+    }
+    return userMsg.content as Array<{ type: string; text?: string }>;
+  }
+
+  it('replaces image with placeholder when image modality is disabled', () => {
+    const conv = new OpenAIContentConverter('deepseek-chat', 'auto', {});
+    const request = makeRequest([
+      {
+        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        displayName: 'screenshot.png',
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toContain('image file');
+    expect(parts[0].text).toContain('does not support image input');
+  });
+
+  it('keeps image when image modality is enabled', () => {
+    const conv = new OpenAIContentConverter('gpt-4o', 'auto', { image: true });
+    const request = makeRequest([
+      {
+        inlineData: { mimeType: 'image/png', data: 'abc123' },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('image_url');
+  });
+
+  it('replaces PDF with placeholder when pdf modality is disabled', () => {
+    const conv = new OpenAIContentConverter('test-model', 'auto', {
+      image: true,
+    });
+    const request = makeRequest([
+      {
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: 'pdf-data',
+          displayName: 'doc.pdf',
+        },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toContain('pdf file');
+    expect(parts[0].text).toContain('does not support PDF input');
+  });
+
+  it('keeps PDF when pdf modality is enabled', () => {
+    const conv = new OpenAIContentConverter('claude-sonnet', 'auto', {
+      image: true,
+      pdf: true,
+    });
+    const request = makeRequest([
+      {
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: 'pdf-data',
+          displayName: 'doc.pdf',
+        },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('file');
+  });
+
+  it('replaces video with placeholder when video modality is disabled', () => {
+    const conv = new OpenAIContentConverter('test-model', 'auto', {});
+    const request = makeRequest([
+      {
+        inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toContain('video file');
+  });
+
+  it('replaces audio with placeholder when audio modality is disabled', () => {
+    const conv = new OpenAIContentConverter('test-model', 'auto', {});
+    const request = makeRequest([
+      {
+        inlineData: { mimeType: 'audio/wav', data: 'audio-data' },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toContain('audio file');
+  });
+
+  it('handles mixed content: keeps text + supported media, replaces unsupported', () => {
+    const conv = new OpenAIContentConverter('gpt-4o', 'auto', { image: true });
+    const request = makeRequest([
+      { text: 'Analyze these files' },
+      {
+        inlineData: { mimeType: 'image/png', data: 'img-data' },
+      } as unknown as Part,
+      {
+        inlineData: { mimeType: 'video/mp4', data: 'vid-data' },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(3);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toBe('Analyze these files');
+    expect(parts[1].type).toBe('image_url');
+    expect(parts[2].type).toBe('text');
+    expect(parts[2].text).toContain('video file');
+  });
+
+  it('defaults to text-only when no modalities are specified', () => {
+    const conv = new OpenAIContentConverter('unknown-model');
+    const request = makeRequest([
+      {
+        inlineData: { mimeType: 'image/png', data: 'img-data' },
+      } as unknown as Part,
+    ]);
+    const messages = conv.convertGeminiRequestToOpenAI(request);
+    const parts = getUserContentParts(messages);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe('text');
+    expect(parts[0].text).toContain('image file');
   });
 });

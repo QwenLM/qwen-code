@@ -22,12 +22,14 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
   'maxRetries',
+  'retryErrorCodes',
   'enableCacheControl',
   'schemaCompliance',
   'reasoning',
   'contextWindowSize',
   'customHeaders',
   'extra_body',
+  'modalities',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**
