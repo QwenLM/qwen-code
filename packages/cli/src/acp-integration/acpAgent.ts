@@ -254,13 +254,24 @@ class GeminiAgent {
       size: params.size,
     });
 
+    const sessions = result.items.map((item) => ({
+      cwd: item.cwd,
+      filePath: item.filePath,
+      gitBranch: item.gitBranch,
+      messageCount: item.messageCount,
+      mtime: item.mtime,
+      prompt: item.prompt,
+      sessionId: item.sessionId,
+      startTime: item.startTime,
+      title: item.prompt || '(session)',
+      updatedAt: new Date(item.mtime).toISOString(),
+    }));
+
     return {
-      sessions: result.items.map((item) => ({
-        sessionId: item.sessionId,
-        cwd: item.cwd,
-        title: item.prompt || '(session)',
-        updatedAt: new Date(item.mtime).toISOString(),
-      })),
+      hasMore: result.hasMore,
+      items: sessions,
+      nextCursor: result.nextCursor,
+      sessions,
     };
   }
 

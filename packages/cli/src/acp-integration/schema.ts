@@ -290,13 +290,22 @@ export const sessionModelStateSchema = z.object({
 export const loadSessionResponseSchema = z.null();
 
 export const sessionListItemSchema = z.object({
-  sessionId: z.string(),
   cwd: z.string(),
+  filePath: z.string().optional(),
+  gitBranch: z.string().optional(),
+  messageCount: z.number().optional(),
+  mtime: z.number().optional(),
+  prompt: z.string().optional(),
+  sessionId: z.string(),
+  startTime: z.string().optional(),
   title: z.string(),
   updatedAt: z.string(),
 });
 
 export const listSessionsResponseSchema = z.object({
+  hasMore: z.boolean().optional(),
+  items: z.array(sessionListItemSchema).optional(),
+  nextCursor: z.number().optional(),
   sessions: z.array(sessionListItemSchema),
 });
 
