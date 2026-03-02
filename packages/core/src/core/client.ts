@@ -447,7 +447,7 @@ export class GeminiClient {
           type: GeminiEventType.Error,
           value: {
             error: new Error(
-              `BeforeAgent hook blocked processing: ${hookOutput.getEffectiveReason()}`,
+              `UserPromptSubmit hook blocked processing: ${hookOutput.getEffectiveReason()}`,
             ),
           },
         };
