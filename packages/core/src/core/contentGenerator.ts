@@ -14,6 +14,7 @@ import type {
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
+import { RedactingContentGenerator } from './redactingContentGenerator/redactingContentGenerator.js';
 import type {
   ConfigSource,
   ConfigSourceKind,
@@ -339,5 +340,14 @@ export async function createContentGenerator(
     );
   }
 
-  return new LoggingContentGenerator(baseGenerator, config, generatorConfig);
+  const loggingGenerator = new LoggingContentGenerator(
+    baseGenerator,
+    config,
+    generatorConfig,
+  );
+
+  return new RedactingContentGenerator(
+    loggingGenerator,
+    config.getRedactionManager(),
+  );
 }

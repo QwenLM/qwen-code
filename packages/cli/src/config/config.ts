@@ -1005,6 +1005,7 @@ export async function loadCliConfig(
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
+    redaction: settings.security?.redaction,
     interactive,
     trustedFolder,
     useRipgrep: settings.tools?.useRipgrep,

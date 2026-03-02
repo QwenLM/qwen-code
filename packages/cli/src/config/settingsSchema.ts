@@ -1019,6 +1019,100 @@ const SETTINGS_SCHEMA = {
     description: 'Security-related settings.',
     showInDialog: false,
     properties: {
+      redaction: {
+        type: 'object',
+        label: 'Client-side Redaction',
+        category: 'Security',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Redact configured secrets/PII into placeholders before sending prompts/tool history to providers.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Redaction',
+            category: 'Security',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable client-side redaction before provider requests (default off).',
+            showInDialog: false,
+          },
+          placeholderPrefix: {
+            type: 'string',
+            label: 'Placeholder Prefix',
+            category: 'Security',
+            requiresRestart: true,
+            default: '__VG_',
+            description:
+              'Placeholder prefix. Keep "__VG_" for compatibility with VibeGuard-style placeholders.',
+            showInDialog: false,
+          },
+          keywords: {
+            type: 'object',
+            label: 'Keywords',
+            category: 'Security',
+            requiresRestart: true,
+            default: {} as Record<string, string>,
+            description:
+              'Exact substring matches: { "secretValue": "CATEGORY" }',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+          patterns: {
+            type: 'object',
+            label: 'Patterns',
+            category: 'Security',
+            requiresRestart: true,
+            default: {} as Record<string, string>,
+            description:
+              'Regex matches (JavaScript syntax): { "regexPattern": "CATEGORY" }',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+          builtins: {
+            type: 'array',
+            label: 'Built-in Detectors',
+            category: 'Security',
+            requiresRestart: true,
+            default: [] as string[],
+            description:
+              'Built-in patterns: email, china_phone, china_id, uuid, ipv4, mac',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+          exclude: {
+            type: 'array',
+            label: 'Exclude',
+            category: 'Security',
+            requiresRestart: true,
+            default: [] as string[],
+            description: 'Exact values that should not be redacted.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+          ttlMinutes: {
+            type: 'number',
+            label: 'Mapping TTL (minutes)',
+            category: 'Security',
+            requiresRestart: true,
+            default: 60,
+            description:
+              'How long placeholder ↔ original mappings are kept in memory.',
+            showInDialog: false,
+          },
+          maxSize: {
+            type: 'number',
+            label: 'Max Mapping Size',
+            category: 'Security',
+            requiresRestart: true,
+            default: 10000,
+            description: 'Maximum number of in-memory mappings to keep.',
+            showInDialog: false,
+          },
+        },
+      },
       folderTrust: {
         type: 'object',
         label: 'Folder Trust',
