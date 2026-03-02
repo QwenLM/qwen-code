@@ -22,6 +22,40 @@ const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
 
+function normalizePathEnvForWindows(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  if (os.platform() !== 'win32') {
+    return env;
+  }
+
+  const normalized: NodeJS.ProcessEnv = { ...env };
+  const pathKeys = Object.keys(normalized).filter(
+    (key) => key.toLowerCase() === 'path',
+  );
+
+  if (pathKeys.length === 0) {
+    return normalized;
+  }
+
+  // Prefer canonical "Path" value when present, otherwise use the first
+  // available PATH-like key and collapse duplicates to avoid ambiguity.
+  const canonicalValue =
+    normalized['Path'] ?? normalized[pathKeys[0] as keyof NodeJS.ProcessEnv];
+
+  for (const key of pathKeys) {
+    if (key !== 'Path') {
+      delete normalized[key];
+    }
+  }
+
+  if (canonicalValue !== undefined) {
+    normalized['Path'] = canonicalValue;
+  }
+
+  return normalized;
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /** The raw, unprocessed output buffer. */
@@ -237,7 +271,7 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
@@ -431,7 +465,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',

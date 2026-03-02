@@ -421,6 +421,36 @@ describe('ShellExecutionService', () => {
       );
     });
 
+    it('should normalize PATH-like env keys on Windows for pty execution', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const originalPath = process.env['Path'];
+      const originalPATH = process.env['PATH'];
+      // On Windows, env keys are case-insensitive. Set PATH first, then Path.
+      process.env['PATH'] = 'C:\\Windows\\System32';
+      process.env['Path'] = 'C:\\Users\\tester\\bin';
+
+      try {
+        await simulateExecution('dir', (pty) =>
+          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+        );
+
+        const spawnOptions = mockPtySpawn.mock.calls[0][2];
+        expect(spawnOptions.env.Path).toBe('C:\\Users\\tester\\bin');
+        expect(spawnOptions.env.PATH).toBeUndefined();
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env['Path'];
+        } else {
+          process.env['Path'] = originalPath;
+        }
+        if (originalPATH === undefined) {
+          delete process.env['PATH'];
+        } else {
+          process.env['PATH'] = originalPATH;
+        }
+      }
+    });
+
     it('should use bash on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
       await simulateExecution('ls "foo bar"', (pty) =>
@@ -834,6 +864,34 @@ describe('ShellExecutionService child_process fallback', () => {
           windowsHide: true,
         }),
       );
+    });
+
+    it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const originalPath = process.env['Path'];
+      const originalPATH = process.env['PATH'];
+      // On Windows, env keys are case-insensitive. Set PATH first, then Path.
+      process.env['PATH'] = 'C:\\Windows\\System32';
+      process.env['Path'] = 'C:\\Users\\tester\\bin';
+
+      try {
+        await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));
+
+        const spawnOptions = mockCpSpawn.mock.calls[0][2];
+        expect(spawnOptions.env.Path).toBe('C:\\Users\\tester\\bin');
+        expect(spawnOptions.env.PATH).toBeUndefined();
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env['Path'];
+        } else {
+          process.env['Path'] = originalPath;
+        }
+        if (originalPATH === undefined) {
+          delete process.env['PATH'];
+        } else {
+          process.env['PATH'] = originalPATH;
+        }
+      }
     });
 
     it('should use bash and detached process group on Linux', async () => {
