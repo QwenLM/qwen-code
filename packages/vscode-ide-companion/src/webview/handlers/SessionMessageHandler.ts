@@ -9,6 +9,7 @@ import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
+import { processImageAttachments } from '../utils/imageAttachmentHandler.js';
 
 const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
 
@@ -68,6 +69,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
                 startLine?: number;
                 endLine?: number;
               }
+            | undefined,
+          data?.attachments as
+            | Array<{
+                id: string;
+                name: string;
+                type: string;
+                size: number;
+                data: string;
+                timestamp: number;
+              }>
             | undefined,
         );
         break;
@@ -244,17 +255,27 @@ export class SessionMessageHandler extends BaseMessageHandler {
       startLine?: number;
       endLine?: number;
     },
+    attachments?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      size: number;
+      data: string;
+      timestamp: number;
+    }>,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
-
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
     const trimmedText = text.replace(/\u200B/g, '').trim();
-    if (!trimmedText) {
+    const hasAttachments = (attachments?.length ?? 0) > 0;
+    if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
+
+    let displayText = trimmedText ? text : '';
 
     // Format message with file context if present
     let formattedText = text;
@@ -270,6 +291,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       formattedText = `${contextParts}\n\n${text}`;
     }
+
+    // Process image attachments
+    const {
+      formattedText: updatedFormattedText,
+      displayText: updatedDisplayText,
+    } = await processImageAttachments(formattedText, attachments);
+    formattedText = updatedFormattedText;
+    displayText = updatedDisplayText;
 
     // Ensure we have an active conversation
     if (!this.currentConversationId) {
@@ -323,7 +352,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Generate title for first message, but only if it hasn't been set yet
     if (isFirstMessage && !this.isTitleSet) {
-      const title = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+      const title =
+        displayText.substring(0, 50) + (displayText.length > 50 ? '...' : '');
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
@@ -337,16 +367,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // Save user message
     const userMessage: ChatMessage = {
       role: 'user',
-      content: text,
+      content: displayText,
       timestamp: Date.now(),
     };
 
+    // Store the original message with just text
     await this.conversationStore.addMessage(
       this.currentConversationId,
       userMessage,
     );
 
-    // Send to WebView
+    // Send to WebView with file context
     this.sendToWebView({
       type: 'message',
       data: { ...userMessage, fileContext },

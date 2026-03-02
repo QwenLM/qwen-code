@@ -16,6 +16,7 @@ import { WebViewContent } from '../webview/WebViewContent.js';
 import { getFileName } from './utils/webviewUtils.js';
 import { type ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
+import { createImagePathResolver } from './utils/imagePathResolver.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -458,6 +459,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data);
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1000,6 +1005,34 @@ export class WebViewProvider {
     panel?.webview.postMessage(message);
   }
 
+  private handleResolveImagePaths(data: unknown): void {
+    const panel = this.panelManager.getPanel();
+    if (!panel) {
+      return;
+    }
+
+    const payload = data as
+      | { paths?: string[]; requestId?: number }
+      | undefined;
+    const paths = Array.isArray(payload?.paths) ? (payload?.paths ?? []) : [];
+
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const workspaceRoots = workspaceFolders.map((folder) => folder.uri.fsPath);
+
+    const resolveImagePaths = createImagePathResolver({
+      workspaceRoots,
+      toWebviewUri: (filePath: string) =>
+        panel.webview.asWebviewUri(vscode.Uri.file(filePath)).toString(),
+    });
+
+    const resolved = resolveImagePaths(paths);
+
+    this.sendMessageToWebView({
+      type: 'imagePathsResolved',
+      data: { resolved, requestId: payload?.requestId },
+    });
+  }
+
   /**
    * Whether there is a pending permission decision awaiting an option.
    */
@@ -1138,6 +1171,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data);
           return;
         }
         if (message.type === 'updatePanelTitle') {

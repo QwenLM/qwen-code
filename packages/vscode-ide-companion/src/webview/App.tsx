@@ -49,6 +49,10 @@ import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import { useImageAttachments } from './hooks/useImageAttachments.js';
+import { ImagePreview } from './components/messages/ImagePreview.js';
+import { ImageMessageRenderer } from './components/messages/ImageMessageRenderer.js';
+import type { WebViewImageMessage } from './utils/imageMessageUtils.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -281,10 +285,21 @@ export const App: React.FC = () => {
     completion.query,
   ]);
 
+  // Image handling
+  const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
+    useImageAttachments({
+      onError: (error) => {
+        console.error('Paste error:', error);
+        // You can show a toast/notification here if needed
+      },
+    });
+
   // Message submission
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,
+    attachedImages,
+    clearImages,
     messageHandling,
     fileContext,
     skipAutoActiveContext,
@@ -777,76 +792,87 @@ export const App: React.FC = () => {
   console.log('[App] Rendering messages:', allMessages);
 
   // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(
-    () =>
-      allMessages.map((item, index) => {
-        switch (item.type) {
-          case 'message': {
-            const msg = item.data as TextMessage;
-            const handleFileClick = (path: string): void => {
-              vscode.postMessage({
-                type: 'openFile',
-                data: { path },
-              });
-            };
+  const renderMessages = useCallback<() => React.ReactNode>(() => {
+    let imageIndex = 0;
+    return allMessages.map((item, index) => {
+      switch (item.type) {
+        case 'message': {
+          const msg = item.data as TextMessage;
+          const handleFileClick = (path: string): void => {
+            vscode.postMessage({
+              type: 'openFile',
+              data: { path },
+            });
+          };
 
-            if (msg.role === 'thinking') {
-              return (
-                <ThinkingMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-
-            if (msg.role === 'user') {
-              return (
-                <UserMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                  fileContext={msg.fileContext}
-                />
-              );
-            }
-
-            {
-              const content = (msg.content || '').trim();
-              if (content === 'Interrupted' || content === 'Tool interrupted') {
-                return (
-                  <InterruptedMessage key={`message-${index}`} text={content} />
-                );
-              }
-              return (
-                <AssistantMessage
-                  key={`message-${index}`}
-                  content={content}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-          }
-
-          case 'in-progress-tool-call':
-          case 'completed-tool-call': {
+          if (msg.kind === 'image' && msg.imagePath) {
+            imageIndex += 1;
             return (
-              <ToolCall
-                key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-                toolCall={item.data as ToolCallData}
+              <ImageMessageRenderer
+                key={`message-${index}`}
+                msg={msg as WebViewImageMessage}
+                imageIndex={imageIndex}
+                index={index}
               />
             );
           }
 
-          default:
-            return null;
+          if (msg.role === 'thinking') {
+            return (
+              <ThinkingMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
+
+          if (msg.role === 'user') {
+            return (
+              <UserMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+                fileContext={msg.fileContext}
+              />
+            );
+          }
+
+          {
+            const content = (msg.content || '').trim();
+            if (content === 'Interrupted' || content === 'Tool interrupted') {
+              return (
+                <InterruptedMessage key={`message-${index}`} text={content} />
+              );
+            }
+            return (
+              <AssistantMessage
+                key={`message-${index}`}
+                content={content}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
         }
-      }),
-    [allMessages, vscode],
-  );
+
+        case 'in-progress-tool-call':
+        case 'completed-tool-call': {
+          return (
+            <ToolCall
+              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
+              toolCall={item.data as ToolCallData}
+            />
+          );
+        }
+
+        default:
+          return null;
+      }
+    });
+  }, [allMessages, vscode]);
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -991,10 +1017,19 @@ export const App: React.FC = () => {
             }
           }}
           onAttachContext={handleAttachContextClick}
+          onPaste={handlePaste}
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
           onCompletionClose={completion.closeCompletion}
+          extraContent={
+            attachedImages.length > 0 ? (
+              <ImagePreview
+                images={attachedImages}
+                onRemove={handleRemoveImage}
+              />
+            ) : null
+          }
           showModelSelector={showModelSelector}
           availableModels={availableModels}
           currentModelId={modelInfo?.modelId}

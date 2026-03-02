@@ -115,6 +115,10 @@ export interface InputFormProps {
   onCompletionSelect?: (item: CompletionItem) => void;
   /** Completion close callback */
   onCompletionClose?: () => void;
+  /** Optional paste handler for the contentEditable input */
+  onPaste?: (e: React.ClipboardEvent) => void;
+  /** Optional content rendered between the input and actions */
+  extraContent?: ReactNode;
   /** Placeholder text */
   placeholder?: string;
 }
@@ -171,6 +175,8 @@ export const InputForm: FC<InputFormProps> = ({
   completionItems,
   onCompletionSelect,
   onCompletionClose,
+  onPaste,
+  extraContent,
   placeholder = 'Ask Qwen Code …',
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
@@ -271,9 +277,14 @@ export const InputForm: FC<InputFormProps> = ({
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}
               onKeyDown={handleKeyDown}
+              onPaste={onPaste}
               suppressContentEditableWarning
             />
           </div>
+
+          {extraContent ? (
+            <div className="relative z-[1]">{extraContent}</div>
+          ) : null}
 
           <div className="composer-actions">
             {/* Edit mode button */}
