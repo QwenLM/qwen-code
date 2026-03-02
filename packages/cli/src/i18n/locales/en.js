@@ -289,6 +289,73 @@ export default {
     'Failed to save and edit subagent: {{error}}',
 
   // ============================================================================
+  // Extensions - Management Dialog
+  // ============================================================================
+  'Manage Extensions': 'Manage Extensions',
+  'Extension Details': 'Extension Details',
+  'View Extension': 'View Extension',
+  'Update Extension': 'Update Extension',
+  'Disable Extension': 'Disable Extension',
+  'Enable Extension': 'Enable Extension',
+  'Uninstall Extension': 'Uninstall Extension',
+  'Select Scope': 'Select Scope',
+  'User Scope': 'User Scope',
+  'Workspace Scope': 'Workspace Scope',
+  'No extensions found.': 'No extensions found.',
+  Active: 'Active',
+  Disabled: 'Disabled',
+  'Update available': 'Update available',
+  'Up to date': 'Up to date',
+  'Checking...': 'Checking...',
+  'Updating...': 'Updating...',
+  Unknown: 'Unknown',
+  Error: 'Error',
+  'Version:': 'Version:',
+  'Status:': 'Status:',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    'Are you sure you want to uninstall extension "{{name}}"?',
+  'This action cannot be undone.': 'This action cannot be undone.',
+  'Extension "{{name}}" disabled successfully.':
+    'Extension "{{name}}" disabled successfully.',
+  'Extension "{{name}}" enabled successfully.':
+    'Extension "{{name}}" enabled successfully.',
+  'Extension "{{name}}" updated successfully.':
+    'Extension "{{name}}" updated successfully.',
+  'Failed to update extension "{{name}}": {{error}}':
+    'Failed to update extension "{{name}}": {{error}}',
+  'Select the scope for this action:': 'Select the scope for this action:',
+  'User - Applies to all projects': 'User - Applies to all projects',
+  'Workspace - Applies to current project only':
+    'Workspace - Applies to current project only',
+  // Extension dialog - missing keys
+  'Name:': 'Name:',
+  'MCP Servers:': 'MCP Servers:',
+  'Settings:': 'Settings:',
+  active: 'active',
+  disabled: 'disabled',
+  'View Details': 'View Details',
+  'Update failed:': 'Update failed:',
+  'Updating {{name}}...': 'Updating {{name}}...',
+  'Update complete!': 'Update complete!',
+  'User (global)': 'User (global)',
+  'Workspace (project-specific)': 'Workspace (project-specific)',
+  'Disable "{{name}}" - Select Scope': 'Disable "{{name}}" - Select Scope',
+  'Enable "{{name}}" - Select Scope': 'Enable "{{name}}" - Select Scope',
+  'No extension selected': 'No extension selected',
+  'Press Y/Enter to confirm, N/Esc to cancel':
+    'Press Y/Enter to confirm, N/Esc to cancel',
+  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter to confirm, N/Esc to cancel',
+  '{{count}} extensions installed': '{{count}} extensions installed',
+  "Use '/extensions install' to install your first extension.":
+    "Use '/extensions install' to install your first extension.",
+  // Update status values
+  'up to date': 'up to date',
+  'update available': 'update available',
+  'checking...': 'checking...',
+  'not updatable': 'not updatable',
+  error: 'error',
+
+  // ============================================================================
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',

@@ -1,0 +1,36 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ExtensionListStep Snapshots > should render empty state 1`] = `
+"No extensions installed.
+Use '/extensions install' to install your first extension."
+`;
+
+exports[`ExtensionListStep Snapshots > should render list with multiple extensions 1`] = `
+"● active-extension v1.0.0 (active) [up to date]
+  disabled-extension v1.0.0 (disabled) [not updatable]
+  update-available v1.0.0 (active) [update available]
+
+
+3 extensions installed"
+`;
+
+exports[`ExtensionListStep Snapshots > should render list with single extension 1`] = `
+"● test-extension v1.0.0 (active)
+
+
+1 extensions installed"
+`;
+
+exports[`ExtensionListStep Snapshots > should render with checking status 1`] = `
+"● checking-extension v1.0.0 (active) [checking for updates]
+
+
+1 extensions installed"
+`;
+
+exports[`ExtensionListStep Snapshots > should render with error status 1`] = `
+"● error-extension v1.0.0 (active) [error]
+
+
+1 extensions installed"
+`;

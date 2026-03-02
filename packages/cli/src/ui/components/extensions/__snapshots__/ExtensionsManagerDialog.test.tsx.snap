@@ -1,0 +1,53 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ExtensionsManagerDialog Snapshots > should render empty state when no extensions installed 1`] = `
+"┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│ Manage Extensions                                                                                │
+│                                                                                                  │
+│ No extensions installed.                                                                         │
+│ Use '/extensions install' to install your first extension.                                       │
+│                                                                                                  │
+│ Esc to close                                                                                     │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+`;
+
+exports[`ExtensionsManagerDialog Snapshots > should render extension list with extensions 1`] = `
+"┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│ Manage Extensions                                                                                │
+│                                                                                                  │
+│ No extensions installed.                                                                         │
+│ Use '/extensions install' to install your first extension.                                       │
+│                                                                                                  │
+│ Esc to close                                                                                     │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+`;
+
+exports[`ExtensionsManagerDialog Snapshots > should render with checking status 1`] = `
+"┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│ Manage Extensions                                                                                │
+│                                                                                                  │
+│ No extensions installed.                                                                         │
+│ Use '/extensions install' to install your first extension.                                       │
+│                                                                                                  │
+│ Esc to close                                                                                     │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+`;
+
+exports[`ExtensionsManagerDialog Snapshots > should render with update available status 1`] = `
+"┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│ Manage Extensions                                                                                │
+│                                                                                                  │
+│ No extensions installed.                                                                         │
+│ Use '/extensions install' to install your first extension.                                       │
+│                                                                                                  │
+│ Esc to close                                                                                     │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+`;
