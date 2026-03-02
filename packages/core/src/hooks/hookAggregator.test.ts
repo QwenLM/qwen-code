@@ -446,7 +446,7 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.continue).toBe(false);
     });
 
-    it('should completely replace hookSpecificOutput', () => {
+    it('should concatenate additionalContext from multiple hooks', () => {
       const outputs: HookOutput[] = [
         {
           hookSpecificOutput: {
@@ -469,10 +469,11 @@ describe('HookAggregator', () => {
         results,
         HookEventName.Notification,
       );
-      // mergeSimple replaces entire hookSpecificOutput, so only ctx2 remains
+      // mergeSimple concatenates additionalContext with newlines
       expect(
         result.finalOutput?.hookSpecificOutput?.['additionalContext'],
-      ).toBe('ctx2');
+      ).toBe('ctx1\nctx2');
+      // otherField is overwritten (later value wins since it's not special-cased)
       expect(
         result.finalOutput?.hookSpecificOutput?.['otherField'],
       ).toBeUndefined();

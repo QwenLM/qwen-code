@@ -306,10 +306,21 @@ export class HookAggregator {
    * Simple merge for events without special logic
    */
   private mergeSimple(outputs: HookOutput[]): HookOutput {
+    const additionalContexts: string[] = [];
     let merged: HookOutput = {};
 
     for (const output of outputs) {
+      // Collect additionalContext for concatenation
+      this.extractAdditionalContext(output, additionalContexts);
       merged = { ...merged, ...output };
+    }
+
+    // Merge additionalContext with concatenation
+    if (additionalContexts.length > 0) {
+      merged.hookSpecificOutput = {
+        ...merged.hookSpecificOutput,
+        additionalContext: additionalContexts.join('\n'),
+      };
     }
 
     return merged;
