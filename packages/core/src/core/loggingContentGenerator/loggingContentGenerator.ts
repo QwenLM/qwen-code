@@ -154,7 +154,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
-        JSON.stringify(response),
       );
       await this.logOpenAIInteraction(openaiRequest, response);
       return response;
@@ -219,7 +218,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses[0]?.modelVersion || model,
         userPromptId,
         lastUsageMetadata,
-        JSON.stringify(responses),
       );
       const consolidatedResponse =
         this.consolidateGeminiResponsesForLogging(responses);
