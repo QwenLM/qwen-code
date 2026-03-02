@@ -300,3 +300,8 @@ export * from './qwen/qwenOAuth2.js';
 
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
+
+// Export hook types and components
+export * from './hooks/types.js';
+export { HookSystem, HookRegistry } from './hooks/index.js';
+export type { HookRegistryEntry } from './hooks/index.js';

@@ -1176,6 +1176,52 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
+
+  hooks: {
+    type: 'object',
+    label: 'Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook configurations for extending CLI behavior at various lifecycle points.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'List of hook names to disable. Hooks in this list will not be executed.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      UserPromptSubmit: {
+        type: 'array',
+        label: 'Before Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+      },
+      Stop: {
+        type: 'array',
+        label: 'After Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

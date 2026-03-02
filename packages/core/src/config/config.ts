@@ -84,6 +84,13 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
+import { HookSystem } from '../hooks/index.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -377,6 +384,10 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Enable hook system for lifecycle events */
+  enableHooks?: boolean;
+  /** Hooks configuration from settings */
+  hooks?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
 }
@@ -519,6 +530,10 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType;
+  private readonly enableHooks: boolean;
+  private readonly hooks?: Record<string, unknown>;
+  private hookSystem?: HookSystem;
+  private messageBus?: MessageBus;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -673,6 +688,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableHooks = params.enableHooks ?? true;
+    this.hooks = params.hooks;
   }
 
   /**
@@ -695,6 +712,75 @@ export class Config {
     this.extensionManager.setConfig(this);
     await this.extensionManager.refreshCache();
     this.debugLogger.debug('Extension manager initialized');
+
+    // Initialize hook system if enabled
+    if (this.enableHooks) {
+      this.hookSystem = new HookSystem(this);
+      await this.hookSystem.initialize();
+      this.debugLogger.debug('Hook system initialized');
+
+      // Initialize MessageBus for hook execution
+      this.messageBus = new MessageBus();
+
+      // Subscribe to HOOK_EXECUTION_REQUEST to execute hooks
+      this.messageBus.subscribe<HookExecutionRequest>(
+        MessageBusType.HOOK_EXECUTION_REQUEST,
+        async (request: HookExecutionRequest) => {
+          try {
+            const hookSystem = this.hookSystem;
+            if (!hookSystem) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook system not initialized'),
+              } as HookExecutionResponse);
+              return;
+            }
+
+            // Execute the appropriate hook based on eventName
+            let result;
+            const input = request.input || {};
+            switch (request.eventName) {
+              case 'UserPromptSubmit':
+                result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                );
+                break;
+              case 'Stop':
+                result = await hookSystem.fireStopEvent(
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['last_assistant_message'] as string) || '',
+                );
+                break;
+              default:
+                this.debugLogger.warn(
+                  `Unknown hook event: ${request.eventName}`,
+                );
+                result = undefined;
+            }
+
+            // Send response
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: true,
+              output: result,
+            } as HookExecutionResponse);
+          } catch (error) {
+            this.debugLogger.warn(`Hook execution failed: ${error}`);
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            } as HookExecutionResponse);
+          }
+        },
+      );
+
+      this.debugLogger.debug('MessageBus initialized with hook subscription');
+    }
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
@@ -1384,6 +1470,66 @@ export class Config {
     return this.extensionManager;
   }
 
+  /**
+   * Get the hook system instance if hooks are enabled.
+   * Returns undefined if hooks are not enabled.
+   */
+  getHookSystem(): HookSystem | undefined {
+    return this.hookSystem;
+  }
+
+  /**
+   * Check if hooks are enabled.
+   */
+  getEnableHooks(): boolean {
+    return this.enableHooks;
+  }
+
+  /**
+   * Get the message bus instance.
+   * Returns undefined if not set.
+   */
+  getMessageBus(): MessageBus | undefined {
+    return this.messageBus;
+  }
+
+  /**
+   * Set the message bus instance.
+   * This is called by the CLI layer to inject the MessageBus.
+   */
+  setMessageBus(messageBus: MessageBus): void {
+    this.messageBus = messageBus;
+  }
+
+  /**
+   * Get the list of disabled hook names.
+   * This is used by the HookRegistry to filter out disabled hooks.
+   */
+  getDisabledHooks(): string[] {
+    const hooks = this.hooks;
+    if (!hooks) return [];
+    const disabled = hooks['disabled'];
+    return Array.isArray(disabled) ? (disabled as string[]) : [];
+  }
+
+  /**
+   * Get project-level hooks configuration.
+   * This is used by the HookRegistry to load project-specific hooks.
+   */
+  getProjectHooks(): Record<string, unknown> | undefined {
+    // This will be populated from settings by the CLI layer
+    // The core Config doesn't have direct access to settings
+    return undefined;
+  }
+
+  /**
+   * Get all hooks configuration (merged from all sources).
+   * This is used by the HookRegistry to load hooks.
+   */
+  getHooks(): Record<string, unknown> | undefined {
+    return this.hooks;
+  }
+
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
@@ -1618,6 +1764,21 @@ export class Config {
       this.chatRecordingService = new ChatRecordingService(this);
     }
     return this.chatRecordingService;
+  }
+
+  /**
+   * Returns the transcript file path for the current session.
+   * This is the path to the JSONL file where the conversation is recorded.
+   * Returns empty string if chat recording is disabled.
+   */
+  getTranscriptPath(): string {
+    if (!this.chatRecordingEnabled) {
+      return '';
+    }
+    const projectDir = this.storage.getProjectDir();
+    const sessionId = this.getSessionId();
+    const safeFilename = `${sessionId}.jsonl`;
+    return path.join(projectDir, 'chats', safeFilename);
   }
 
   /**

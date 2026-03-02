@@ -1020,6 +1020,15 @@ export const useGeminiStream = (
               clearRetryCountdown();
             }
             break;
+          case ServerGeminiEventType.HookSystemMessage:
+            // Display system message from hooks (e.g., Ralph Loop iteration info)
+            // This is handled as a content event to show in the UI
+            geminiMessageBuffer = handleContentEvent(
+              event.value + '\n',
+              geminiMessageBuffer,
+              userMessageTimestamp,
+            );
+            break;
           default: {
             // enforces exhaustive switch-case
             const unreachable: never = event;
