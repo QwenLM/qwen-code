@@ -693,14 +693,21 @@ export async function loadCliConfig(
   }
 
   // Automatically load output-language.md if it exists
-  let outputLanguageFilePath: string | undefined = path.join(
+  const projectStorage = new Storage(cwd);
+  const projectOutputLanguagePath = path.join(
+    projectStorage.getQwenDir(),
+    'output-language.md',
+  );
+  const globalOutputLanguagePath = path.join(
     Storage.getGlobalQwenDir(),
     'output-language.md',
   );
-  if (fs.existsSync(outputLanguageFilePath)) {
-    // output-language.md found - will be added to context files
-  } else {
-    outputLanguageFilePath = undefined;
+
+  let outputLanguageFilePath: string | undefined;
+  if (fs.existsSync(projectOutputLanguagePath)) {
+    outputLanguageFilePath = projectOutputLanguagePath;
+  } else if (fs.existsSync(globalOutputLanguagePath)) {
+    outputLanguageFilePath = globalOutputLanguagePath;
   }
 
   const fileService = new FileDiscoveryService(cwd);

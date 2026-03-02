@@ -629,6 +629,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
+    retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
@@ -1532,6 +1533,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onSuggestionsVisibilityChange: setHasSuggestionsVisible,
       refreshStatic,
       handleFinalSubmit,
+      handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       // Welcome back dialog
       handleWelcomeBackSelection,
@@ -1575,6 +1577,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      retryLastPrompt,
       handleClearScreen,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,

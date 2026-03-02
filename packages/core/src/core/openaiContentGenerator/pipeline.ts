@@ -46,6 +46,7 @@ export class ContentGenerationPipeline {
     this.converter = new OpenAIContentConverter(
       this.contentGeneratorConfig.model,
       this.contentGeneratorConfig.schemaCompliance,
+      this.contentGeneratorConfig.modalities ?? {},
     );
   }
 
@@ -58,6 +59,7 @@ export class ContentGenerationPipeline {
     // that is not valid/available for the OpenAI-compatible backend.
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -85,6 +87,7 @@ export class ContentGenerationPipeline {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,

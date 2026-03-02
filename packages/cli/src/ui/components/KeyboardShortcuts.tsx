@@ -39,6 +39,7 @@ const getShortcuts = (): Shortcut[] => [
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },
   { key: 'ctrl+r', description: t('to search history') },
+  { key: 'ctrl+y', description: t('to retry last request') },
   { key: getPasteKey(), description: t('to paste images') },
   { key: getExternalEditorKey(), description: t('for external editor') },
 ];
@@ -54,11 +55,11 @@ const COLUMN_GAP = 4;
 const MARGIN_LEFT = 2;
 const MARGIN_RIGHT = 2;
 
-// Column distribution for different layouts (3+4+4 for 3 cols, 6+5 for 2 cols)
+// Column distribution for different layouts (4+4+4 for 3 cols, 6+6 for 2 cols)
 const COLUMN_SPLITS: Record<number, number[]> = {
-  3: [3, 4, 4],
-  2: [6, 5],
-  1: [11],
+  3: [4, 4, 4],
+  2: [6, 6],
+  1: [12],
 };
 
 export const KeyboardShortcuts: React.FC = () => {
