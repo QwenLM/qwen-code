@@ -71,20 +71,11 @@ type OpenAIContentPartVideoUrl = {
   };
 };
 
-type OpenAIContentPartFile = {
-  type: 'file';
-  file: {
-    filename: string;
-    file_data: string;
-  };
-};
-
 type OpenAIContentPart =
   | OpenAI.Chat.ChatCompletionContentPartText
   | OpenAI.Chat.ChatCompletionContentPartImage
   | OpenAI.Chat.ChatCompletionContentPartInputAudio
-  | OpenAIContentPartVideoUrl
-  | OpenAIContentPartFile;
+  | OpenAIContentPartVideoUrl;
 
 /**
  * Converter class for transforming data between Gemini and OpenAI formats
@@ -600,13 +591,10 @@ export class OpenAIContentConverter {
       }
 
       if (mimeType === 'application/pdf') {
-        const filename = part.inlineData.displayName || 'document.pdf';
+        const displayName = part.inlineData.displayName || 'document.pdf';
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: `data:${mimeType};base64,${part.inlineData.data}`,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${displayName} - PDF content cannot be directly displayed in this context. Please use a text extraction tool or ask the user to provide the content in text format.]`,
         };
       }
 
@@ -656,11 +644,8 @@ export class OpenAIContentConverter {
 
       if (mimeType === 'application/pdf') {
         return {
-          type: 'file' as const,
-          file: {
-            filename,
-            file_data: fileUri,
-          },
+          type: 'text' as const,
+          text: `[PDF file: ${filename} - PDF content cannot be directly displayed in this context. Please use a text extraction tool or ask the user to provide the content in text format.]`,
         };
       }
 
