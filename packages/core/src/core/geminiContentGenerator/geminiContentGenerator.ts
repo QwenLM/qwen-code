@@ -250,7 +250,8 @@ export class GeminiContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Convert unsupported media types (audio, video) to explanatory text for Gemini API
+   * Convert unsupported media types (audio, video, pdf) to explanatory text for Gemini API.
+   * Note: PDF files are not supported in FunctionResponse parts and must be converted to text.
    */
   private convertUnsupportedMediaToText(part: Part): Part {
     if (typeof part === 'string') return part;
@@ -258,9 +259,11 @@ export class GeminiContentGenerator implements ContentGenerator {
     const inlineMimeType = part.inlineData?.mimeType || '';
     const fileMimeType = part.fileData?.mimeType || '';
 
+    // Check for unsupported media types in inlineData
     if (
       inlineMimeType.startsWith('audio/') ||
-      inlineMimeType.startsWith('video/')
+      inlineMimeType.startsWith('video/') ||
+      inlineMimeType === 'application/pdf'
     ) {
       const displayName = (part.inlineData as { displayName?: string })
         ?.displayName;
@@ -270,9 +273,11 @@ export class GeminiContentGenerator implements ContentGenerator {
       };
     }
 
+    // Check for unsupported media types in fileData
     if (
       fileMimeType.startsWith('audio/') ||
-      fileMimeType.startsWith('video/')
+      fileMimeType.startsWith('video/') ||
+      fileMimeType === 'application/pdf'
     ) {
       const displayName = (part.fileData as { displayName?: string })
         ?.displayName;
