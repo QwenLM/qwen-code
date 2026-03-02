@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
+  AgentStatus,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -125,6 +126,11 @@ export type HistoryItemError = HistoryItemBase & {
 
 export type HistoryItemWarning = HistoryItemBase & {
   type: 'warning';
+  text: string;
+};
+
+export type HistoryItemSuccess = HistoryItemBase & {
+  type: 'success';
   text: string;
 };
 
@@ -256,6 +262,40 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+/**
+ * Arena agent completion card data.
+ */
+export interface ArenaAgentCardData {
+  label: string;
+  status: AgentStatus;
+  durationMs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  toolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  rounds: number;
+  error?: string;
+  diff?: string;
+}
+
+export type HistoryItemArenaAgentComplete = HistoryItemBase & {
+  type: 'arena_agent_complete';
+  agent: ArenaAgentCardData;
+};
+
+export type HistoryItemArenaSessionComplete = HistoryItemBase & {
+  type: 'arena_session_complete';
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
+/**
+ * Insight progress message.
+ */
 export type HistoryItemInsightProgress = HistoryItemBase & {
   type: 'insight_progress';
   progress: InsightProgressProps;
@@ -275,6 +315,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemSuccess
   | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
@@ -290,6 +331,8 @@ export type HistoryItemWithoutId =
   | HistoryItemToolsList
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
+  | HistoryItemArenaAgentComplete
+  | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
@@ -297,6 +340,7 @@ export type HistoryItem = HistoryItemWithoutId & { id: number };
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',
+  SUCCESS = 'success',
   ERROR = 'error',
   WARNING = 'warning',
   USER = 'user',
@@ -313,6 +357,8 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  ARENA_AGENT_COMPLETE = 'arena_agent_complete',
+  ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
 }
 

@@ -133,6 +133,27 @@ const computeInitialIndex = <T>(
   return targetIndex;
 };
 
+const areItemsStructurallyEqual = <T>(
+  a: Array<SelectionListItem<T>>,
+  b: Array<SelectionListItem<T>>,
+): boolean => {
+  if (a === b) {
+    return true;
+  }
+
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.key !== b[i]?.key || a[i]?.disabled !== b[i]?.disabled) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
 function selectionListReducer<T>(
   state: SelectionListState<T>,
   action: SelectionListAction<T>,
@@ -176,22 +197,30 @@ function selectionListReducer<T>(
 
     case 'INITIALIZE': {
       const { initialIndex, items } = action.payload;
+      const initialIndexChanged = initialIndex !== state.initialIndex;
       const activeKey =
-        initialIndex === state.initialIndex &&
-        state.activeIndex !== state.initialIndex
+        !initialIndexChanged && state.activeIndex !== state.initialIndex
           ? state.items[state.activeIndex]?.key
           : undefined;
+      const targetIndex = computeInitialIndex(initialIndex, items, activeKey);
+      const itemsStructurallyEqual = areItemsStructurallyEqual(
+        items,
+        state.items,
+      );
 
-      if (items === state.items && initialIndex === state.initialIndex) {
+      if (
+        !initialIndexChanged &&
+        targetIndex === state.activeIndex &&
+        itemsStructurallyEqual
+      ) {
         return state;
       }
 
-      const targetIndex = computeInitialIndex(initialIndex, items, activeKey);
-
       return {
         ...state,
-        items,
+        items: itemsStructurallyEqual ? state.items : items,
         activeIndex: targetIndex,
+        initialIndex,
         pendingHighlight: false,
       };
     }

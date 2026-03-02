@@ -8,7 +8,7 @@ import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import type {
   TaskResultDisplay,
-  SubagentStatsSummary,
+  AgentStatsSummary,
   Config,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
@@ -467,7 +467,7 @@ const ExecutionSummaryDetails: React.FC<{
  * Tool usage statistics component
  */
 const ToolUsageStats: React.FC<{
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 }> = ({ executionSummary }) => {
   if (!executionSummary) {
     return (

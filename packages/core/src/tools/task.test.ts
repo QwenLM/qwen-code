@@ -10,11 +10,12 @@ import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, TaskResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import {
-  type SubagentConfig,
-  SubagentTerminateMode,
-} from '../subagents/types.js';
-import { type SubAgentScope, ContextState } from '../subagents/subagent.js';
+  type AgentHeadless,
+  ContextState,
+} from '../agents/runtime/agent-headless.js';
 import { partToString } from '../utils/partUtils.js';
 
 // Type for accessing protected methods in tests
@@ -34,7 +35,7 @@ type TaskToolWithProtectedMethods = TaskTool & {
 
 // Mock dependencies
 vi.mock('../subagents/subagent-manager.js');
-vi.mock('../subagents/subagent.js');
+vi.mock('../agents/runtime/agent-headless.js');
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
@@ -80,7 +81,7 @@ describe('TaskTool', () => {
     mockSubagentManager = {
       listSubagents: vi.fn().mockResolvedValue(mockSubagents),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createAgentHeadless: vi.fn(),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
         return () => {
@@ -293,14 +294,14 @@ describe('TaskTool', () => {
   });
 
   describe('TaskToolInvocation', () => {
-    let mockSubagentScope: SubAgentScope;
+    let mockSubagentScope: AgentHeadless;
     let mockContextState: ContextState;
 
     beforeEach(() => {
       mockSubagentScope = {
-        runNonInteractive: vi.fn().mockResolvedValue(undefined),
+        execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
-        terminateMode: SubagentTerminateMode.GOAL,
+        terminateMode: AgentTerminateMode.GOAL,
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi
           .fn()
@@ -344,8 +345,8 @@ describe('TaskTool', () => {
           successfulToolCalls: 3,
           failedToolCalls: 0,
         }),
-        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
-      } as unknown as SubAgentScope;
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
 
       mockContextState = {
         set: vi.fn(),
@@ -356,7 +357,7 @@ describe('TaskTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createSubagentScope).mockResolvedValue(
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
         mockSubagentScope,
       );
     });
@@ -376,12 +377,12 @@ describe('TaskTool', () => {
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
       );
-      expect(mockSubagentManager.createSubagentScope).toHaveBeenCalledWith(
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
         mockSubagents[0],
         config,
         expect.any(Object), // eventEmitter parameter
       );
-      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledWith(
+      expect(mockSubagentScope.execute).toHaveBeenCalledWith(
         mockContextState,
         undefined, // signal parameter (undefined when not provided)
       );
@@ -416,7 +417,7 @@ describe('TaskTool', () => {
     });
 
     it('should handle execution errors gracefully', async () => {
-      vi.mocked(mockSubagentManager.createSubagentScope).mockRejectedValue(
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockRejectedValue(
         new Error('Creation failed'),
       );
 

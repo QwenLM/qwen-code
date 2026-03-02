@@ -78,6 +78,24 @@ vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
+vi.mock('./contexts/AgentViewContext.js', () => ({
+  useAgentViewState: vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+  })),
+  useAgentViewActions: vi.fn(() => ({
+    switchToMain: vi.fn(),
+    switchToAgent: vi.fn(),
+    switchToNext: vi.fn(),
+    switchToPrevious: vi.fn(),
+    registerAgent: vi.fn(),
+    unregisterAgent: vi.fn(),
+    unregisterAll: vi.fn(),
+  })),
+}));
+vi.mock('./hooks/useArenaInProcess.js', () => ({
+  useArenaInProcess: vi.fn(),
+}));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
 
@@ -267,7 +285,7 @@ describe('AppContainer State Management', () => {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createSubagent: vi.fn(),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,

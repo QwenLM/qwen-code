@@ -1176,6 +1176,115 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
+  agents: {
+    type: 'object',
+    label: 'Agents',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
+    showInDialog: false,
+    properties: {
+      displayMode: {
+        type: 'enum',
+        label: 'Display Mode',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Display mode for multi-agent sessions. "tmux" uses tmux panes, "iterm2" uses iTerm2 tabs, "in-process" runs in the current terminal.',
+        showInDialog: false,
+        options: [
+          { value: 'in-process', label: 'In-process' },
+          { value: 'tmux', label: 'tmux' },
+          { value: 'iterm2', label: 'iTerm2' },
+        ],
+      },
+      arena: {
+        type: 'object',
+        label: 'Arena',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description: 'Settings for Arena (multi-model competitive execution).',
+        showInDialog: false,
+        properties: {
+          worktreeBaseDir: {
+            type: 'string',
+            label: 'Worktree Base Directory',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description:
+              'Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.',
+            showInDialog: false,
+          },
+          preserveArtifacts: {
+            type: 'boolean',
+            label: 'Preserve Arena Artifacts',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.',
+            showInDialog: true,
+          },
+          maxRoundsPerAgent: {
+            type: 'number',
+            label: 'Max Rounds Per Agent',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum number of rounds (turns) each agent can execute. No limit if unset.',
+            showInDialog: false,
+          },
+          timeoutSeconds: {
+            type: 'number',
+            label: 'Timeout (seconds)',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Total timeout in seconds for the Arena session. No limit if unset.',
+            showInDialog: false,
+          },
+        },
+      },
+      team: {
+        type: 'object',
+        label: 'Team',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Team (role-based collaborative execution). Reserved for future use.',
+        showInDialog: false,
+      },
+      swarm: {
+        type: 'object',
+        label: 'Swarm',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  experimental: {
+    type: 'object',
+    label: 'Experimental',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description: 'Setting to enable experimental features',
+    showInDialog: false,
+    properties: {},
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

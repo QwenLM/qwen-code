@@ -103,7 +103,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
         if (codeMatch && codeMatch[2]) {
           renderedNode = (
-            <Text key={key} color={theme.text.accent}>
+            <Text key={key} color={theme.text.code}>
               {codeMatch[2]}
             </Text>
           );

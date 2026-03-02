@@ -356,6 +356,7 @@ describe('Gemini Client (client.ts)', () => {
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getArenaAgentClient: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
