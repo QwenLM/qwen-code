@@ -18,3 +18,6 @@ export * from './tool-router.js';
 
 // Prompt composer
 export * from './prompt-composer.js';
+
+// Custom mode loader (re-export types but not the loader itself to avoid conflicts)
+export type { CustomModeConfig as CustomModeConfigFromLoader } from './types/mode-definition.js';

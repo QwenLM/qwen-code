@@ -14,6 +14,7 @@ import {
   DEFAULT_MODE,
   getBuiltinMode,
 } from './modes/builtin-modes.js';
+import { CustomModeLoader } from './custom-mode-loader.js';
 
 /**
  * Менеджер режимов работы агента
@@ -24,19 +25,25 @@ export class ModeManager {
   private customModes: Map<string, ModeDefinition> = new Map();
   private globalInstructions?: string;
   private onModeChangeCallbacks: ((mode: ModeDefinition) => void)[] = [];
+  private customModeLoader?: CustomModeLoader;
 
-  constructor(defaultModeId?: string) {
+  constructor(defaultModeId?: string, projectRoot?: string) {
     const defaultMode = defaultModeId
       ? getBuiltinMode(defaultModeId) || DEFAULT_MODE
       : DEFAULT_MODE;
     this.currentMode = defaultMode;
+    
+    // Initialize custom mode loader if project root is provided
+    if (projectRoot) {
+      this.customModeLoader = new CustomModeLoader(projectRoot);
+    }
   }
 
   /**
    * Инициализация менеджера режимов из настроек
    */
-  static fromSettings(settings: ModesSettings): ModeManager {
-    const manager = new ModeManager(settings.defaultMode);
+  static fromSettings(settings: ModesSettings, projectRoot?: string): ModeManager {
+    const manager = new ModeManager(settings.defaultMode, projectRoot);
 
     if (settings.globalInstructions) {
       manager.setGlobalInstructions(settings.globalInstructions);
@@ -49,6 +56,27 @@ export class ModeManager {
     }
 
     return manager;
+  }
+
+  /**
+   * Load custom modes from .qwen/modes/ directory
+   */
+  async loadCustomModesFromProject(): Promise<void> {
+    if (!this.customModeLoader) {
+      return;
+    }
+
+    const customModes = await this.customModeLoader.loadCustomModes();
+
+    for (const mode of customModes) {
+      // Check if mode ID conflicts with builtin modes
+      if (getBuiltinMode(mode.id)) {
+        // Skip conflicting modes silently
+        continue;
+      }
+
+      this.customModes.set(mode.id, mode);
+    }
   }
 
   /**
