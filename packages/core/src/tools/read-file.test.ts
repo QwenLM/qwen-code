@@ -231,8 +231,8 @@ describe('ReadFileTool', () => {
 
     it('should return error for a file that is too large', async () => {
       const filePath = path.join(tempRootDir, 'largefile.txt');
-      // 21MB of content exceeds 20MB limit
-      const largeContent = 'x'.repeat(21 * 1024 * 1024);
+      // 11MB of content exceeds 10MB limit
+      const largeContent = 'x'.repeat(11 * 1024 * 1024);
       await fsp.writeFile(filePath, largeContent, 'utf-8');
       const params: ReadFileToolParams = { absolute_path: filePath };
       const invocation = tool.build(params) as ToolInvocation<
@@ -244,7 +244,7 @@ describe('ReadFileTool', () => {
       expect(result).toHaveProperty('error');
       expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.error?.message).toContain(
-        'File size exceeds the 20MB limit',
+        'File size exceeds the 10MB limit',
       );
     });
 

@@ -731,6 +731,17 @@ export default {
   // Dialogs - Model
   'Select Model': 'モデルを選択',
   '(Press Esc to close)': '(Esc で閉じる)',
+  Modality: 'モダリティ',
+  'Context Window': 'コンテキストウィンドウ',
+  text: 'テキスト',
+  'text-only': 'テキストのみ',
+  image: '画像',
+  pdf: 'PDF',
+  audio: '音声',
+  video: '動画',
+  'not set': '未設定',
+  none: 'なし',
+  unknown: '不明',
   'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
     'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
