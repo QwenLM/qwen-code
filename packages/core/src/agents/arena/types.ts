@@ -262,4 +262,8 @@ export interface ArenaAgentState {
   executionPromise?: Promise<void>;
   /** Error if failed */
   error?: string;
+  /** Unique session ID for this agent (for telemetry correlation) */
+  agentSessionId: string;
+  /** Flush latest counters into `stats` (set by in-process event bridge) */
+  syncStats?: () => void;
 }

@@ -318,7 +318,6 @@ describe('TaskTool', () => {
           inputTokens: 1000,
           outputTokens: 500,
           totalTokens: 1500,
-          estimatedCost: 0.045,
           toolUsage: [
             {
               name: 'grep',

@@ -109,7 +109,6 @@ export interface ExecutionStats {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
-  estimatedCost?: number;
 }
 
 /**
@@ -150,7 +149,6 @@ export class AgentCore {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
-    estimatedCost: 0,
   };
   private toolUsage = new Map<
     string,
@@ -997,6 +995,7 @@ Important Rules:
     const outTok = Number(usage.candidatesTokenCount || 0);
     const thoughtTok = Number(usage.thoughtsTokenCount || 0);
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
+    const totalTok = Number(usage.totalTokenCount || 0);
     if (
       isFinite(inTok) ||
       isFinite(outTok) ||
@@ -1008,6 +1007,7 @@ Important Rules:
         isFinite(outTok) ? outTok : 0,
         isFinite(thoughtTok) ? thoughtTok : 0,
         isFinite(cachedTok) ? cachedTok : 0,
+        isFinite(totalTok) ? totalTok : 0,
       );
       // Mirror legacy fields for compatibility
       this.executionStats.inputTokens =
@@ -1016,13 +1016,8 @@ Important Rules:
         (this.executionStats.outputTokens || 0) +
         (isFinite(outTok) ? outTok : 0);
       this.executionStats.totalTokens =
-        (this.executionStats.inputTokens || 0) +
-        (this.executionStats.outputTokens || 0) +
-        (isFinite(thoughtTok) ? thoughtTok : 0) +
-        (isFinite(cachedTok) ? cachedTok : 0);
-      this.executionStats.estimatedCost =
-        (this.executionStats.inputTokens || 0) * 3e-5 +
-        (this.executionStats.outputTokens || 0) * 6e-5;
+        (this.executionStats.totalTokens || 0) +
+        (isFinite(totalTok) ? totalTok : 0);
     }
     this.eventEmitter?.emit(AgentEventType.USAGE_METADATA, {
       subagentId: this.subagentId,

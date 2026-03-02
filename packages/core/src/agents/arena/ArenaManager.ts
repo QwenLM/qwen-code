@@ -37,6 +37,15 @@ import {
   safeAgentId,
 } from './types.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  logArenaSessionStarted,
+  logArenaAgentCompleted,
+  logArenaSessionEnded,
+  makeArenaSessionStartedEvent,
+  makeArenaAgentCompletedEvent,
+  makeArenaSessionEndedEvent,
+} from '../../telemetry/index.js';
+import type { ArenaSessionEndedStatus } from '../../telemetry/index.js';
 
 const debugLogger = createDebugLogger('ARENA');
 
@@ -74,6 +83,8 @@ export class ArenaManager {
   private lifecyclePromise: Promise<void> | null = null;
   /** Cleanup functions for in-process event bridge listeners. */
   private eventBridgeCleanups: Array<() => void> = [];
+  /** Guard to prevent double-emitting the session-ended telemetry event. */
+  private sessionEndedLogged = false;
 
   constructor(config: Config, callbacks: ArenaCallbacks = {}) {
     this.config = config;
@@ -306,6 +317,16 @@ export class ArenaManager {
       timestamp: Date.now(),
     });
 
+    // Log arena session start telemetry
+    logArenaSessionStarted(
+      this.config,
+      makeArenaSessionStartedEvent({
+        arena_session_id: this.sessionId,
+        model_ids: options.models.map((m) => m.modelId),
+        task_length: options.task.length,
+      }),
+    );
+
     try {
       // Detect and initialize the backend.
       // Priority: explicit option > agents.displayMode setting > auto-detect
@@ -319,7 +340,9 @@ export class ArenaManager {
       // If cancelled during backend init, bail out early
       if (this.masterAbortController?.signal.aborted) {
         this.sessionStatus = ArenaSessionStatus.CANCELLED;
-        return this.collectResults();
+        const result = await this.collectResults();
+        this.emitSessionEnded('cancelled');
+        return result;
       }
 
       // Set up worktrees for all agents
@@ -329,7 +352,9 @@ export class ArenaManager {
       // If cancelled during worktree setup, bail out early
       if (this.masterAbortController?.signal.aborted) {
         this.sessionStatus = ArenaSessionStatus.CANCELLED;
-        return this.collectResults();
+        const result = await this.collectResults();
+        this.emitSessionEnded('cancelled');
+        return result;
       }
 
       // Start all agents in parallel via PTY
@@ -355,6 +380,11 @@ export class ArenaManager {
 
       this.callbacks.onArenaComplete?.(result);
 
+      // NOTE: session-ended telemetry is NOT emitted here.
+      // The session is "done running" but the user hasn't picked a winner
+      // or discarded yet.  The ended event fires from applyAgentResult()
+      // (status: 'selected') or cleanup/cleanupRuntime (status: 'discarded').
+
       return result;
     } catch (error) {
       this.sessionStatus = ArenaSessionStatus.FAILED;
@@ -368,6 +398,9 @@ export class ArenaManager {
         error: errorMessage,
         timestamp: Date.now(),
       });
+
+      // Log arena session failed telemetry
+      this.emitSessionEnded('failed');
 
       this.callbacks.onArenaError?.(
         error instanceof Error ? error : new Error(errorMessage),
@@ -396,16 +429,33 @@ export class ArenaManager {
     // Force stop all PTY processes (sends Ctrl-C)
     this.backend?.stopAll();
 
+    // Final stats sync so telemetry reflects the latest counters.
+    // For PTY agents: read each agent's status file one last time.
+    // For in-process agents: pull counters from the interactive object.
+    await this.pollAgentStatuses().catch(() => {});
+    for (const agent of this.agents.values()) {
+      if (!isTerminalStatus(agent.status)) {
+        agent.syncStats?.();
+      }
+    }
+
     // Update agent statuses — skip agents already in a terminal state
     // (COMPLETED, FAILED, CANCELLED) so we don't overwrite a successful result.
     for (const agent of this.agents.values()) {
       if (!isTerminalStatus(agent.status)) {
         agent.abortController.abort();
+        agent.stats.durationMs = Date.now() - agent.startedAt;
         this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
       }
     }
 
     this.sessionStatus = ArenaSessionStatus.CANCELLED;
+
+    // NOTE: session-ended telemetry is NOT emitted here.
+    // start() emits 'cancelled' when it unwinds through its early-cancel
+    // paths.  If cancel() is called after start() has already returned
+    // (all agents done, user viewing results), the ended event fires
+    // from cleanup() / cleanupRuntime() instead.
   }
 
   /**
@@ -417,6 +467,15 @@ export class ArenaManager {
     }
 
     debugLogger.info(`Cleaning up Arena session: ${this.sessionId}`);
+
+    // If no session-ended event was emitted yet, emit before tearing down.
+    // Use 'cancelled' if the session was explicitly stopped, 'discarded' if
+    // the user simply left without picking a winner.
+    this.emitSessionEnded(
+      this.sessionStatus === ArenaSessionStatus.CANCELLED
+        ? 'cancelled'
+        : 'discarded',
+    );
 
     // Stop polling in case cleanup is called without cancel
     this.stopPolling();
@@ -437,6 +496,7 @@ export class ArenaManager {
     this.sessionId = undefined;
     this.arenaConfig = undefined;
     this.backend = null;
+    this.sessionEndedLogged = false;
   }
 
   /**
@@ -450,6 +510,13 @@ export class ArenaManager {
 
     debugLogger.info(
       `Cleaning up Arena runtime (preserving artifacts): ${this.sessionId}`,
+    );
+
+    // If no session-ended event was emitted yet, emit before tearing down.
+    this.emitSessionEnded(
+      this.sessionStatus === ArenaSessionStatus.CANCELLED
+        ? 'cancelled'
+        : 'discarded',
     );
 
     this.stopPolling();
@@ -466,6 +533,7 @@ export class ArenaManager {
     this.sessionId = undefined;
     this.arenaConfig = undefined;
     this.backend = null;
+    this.sessionEndedLogged = false;
   }
 
   /**
@@ -486,7 +554,15 @@ export class ArenaManager {
       };
     }
 
-    return this.worktreeService.applyWorktreeChanges(agent.worktree.path);
+    const applyResult = await this.worktreeService.applyWorktreeChanges(
+      agent.worktree.path,
+    );
+
+    if (applyResult.success) {
+      this.emitSessionEnded('selected', agent.model.modelId);
+    }
+
+    return applyResult;
   }
 
   /**
@@ -499,6 +575,46 @@ export class ArenaManager {
     }
 
     return this.worktreeService.getWorktreeDiff(agent.worktree.path);
+  }
+
+  // ─── Private: Telemetry ───────────────────────────────────────
+
+  /**
+   * Emit the `arena_session_ended` telemetry event exactly once.
+   *
+   * Called from:
+   *  - start() early-cancel paths → 'cancelled'
+   *  - start() catch block → 'failed'
+   *  - applyAgentResult() on success → 'selected' (with winner)
+   *  - cleanup() / cleanupRuntime() → 'discarded' (user left without picking)
+   */
+  private emitSessionEnded(
+    status: ArenaSessionEndedStatus,
+    winnerModelId?: string,
+  ): void {
+    if (this.sessionEndedLogged) return;
+    this.sessionEndedLogged = true;
+
+    const agents = Array.from(this.agents.values());
+    logArenaSessionEnded(
+      this.config,
+      makeArenaSessionEndedEvent({
+        arena_session_id: this.sessionId ?? '',
+        status,
+        duration_ms: this.startedAt ? Date.now() - this.startedAt : 0,
+        display_backend: this.backend?.type,
+        agent_count: agents.length,
+        completed_agents: agents.filter(
+          (a) => a.status === AgentStatus.COMPLETED,
+        ).length,
+        failed_agents: agents.filter((a) => a.status === AgentStatus.FAILED)
+          .length,
+        cancelled_agents: agents.filter(
+          (a) => a.status === AgentStatus.CANCELLED,
+        ).length,
+        winner_model_id: winnerModelId,
+      }),
+    );
   }
 
   // ─── Private: Progress ─────────────────────────────────────────
@@ -635,6 +751,7 @@ export class ArenaManager {
         status: AgentStatus.INITIALIZING,
         worktree,
         abortController: new AbortController(),
+        agentSessionId: `${this.sessionId}#${agentId}`,
         stats: {
           rounds: 0,
           totalTokens: 0,
@@ -855,6 +972,10 @@ export class ArenaManager {
       args.push('--approval-mode', this.arenaConfig.approvalMode);
     }
 
+    // Pass the agent's session ID so the child CLI uses it for telemetry
+    // correlation instead of generating a random UUID.
+    args.push('--session-id', agent.agentSessionId);
+
     // Construct env vars for the agent
     const arenaSessionDir = this.getArenaSessionDir();
     const env: Record<string, string> = {
@@ -967,6 +1088,31 @@ export class ArenaManager {
         result,
         timestamp: Date.now(),
       });
+
+      // Log arena agent completed telemetry
+      const agentTelemetryStatus =
+        newStatus === AgentStatus.COMPLETED
+          ? ('completed' as const)
+          : newStatus === AgentStatus.FAILED
+            ? ('failed' as const)
+            : ('cancelled' as const);
+      logArenaAgentCompleted(
+        this.config,
+        makeArenaAgentCompletedEvent({
+          arena_session_id: this.sessionId ?? '',
+          agent_session_id: agent.agentSessionId,
+          agent_model_id: agent.model.modelId,
+          status: agentTelemetryStatus,
+          duration_ms: agent.stats.durationMs,
+          rounds: agent.stats.rounds,
+          total_tokens: agent.stats.totalTokens,
+          input_tokens: agent.stats.inputTokens,
+          output_tokens: agent.stats.outputTokens,
+          tool_calls: agent.stats.toolCalls,
+          successful_tool_calls: agent.stats.successfulToolCalls,
+          failed_tool_calls: agent.stats.failedToolCalls,
+        }),
+      );
 
       this.callbacks.onAgentComplete?.(result);
     }
@@ -1091,6 +1237,8 @@ export class ArenaManager {
           durationMs: totalDurationMs,
         });
       };
+
+      agent.syncStats = syncStats;
 
       const applyStatus = (incoming: AgentStatus) => {
         const resolved = this.resolveTransition(agent.status, incoming);

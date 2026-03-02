@@ -61,6 +61,9 @@ const createMockConfig = (workingDir: string) => ({
     getTool: () => undefined,
   }),
   getAgentsSettings: () => ({}),
+  getUsageStatisticsEnabled: () => false,
+  getTelemetryEnabled: () => false,
+  getTelemetryLogPromptsEnabled: () => false,
 });
 
 describe('ArenaManager', () => {
