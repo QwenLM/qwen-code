@@ -19,6 +19,7 @@ import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
+import {type SkillTool} from '../tools/skill.js'
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import type {
   Content,
@@ -286,8 +287,10 @@ export class SubAgentScope {
     // If no explicit toolConfig or it contains "*" or is empty, inherit all tools.
     const toolsList: FunctionDeclaration[] = [];
     if (this.toolConfig) {
+      let visible_skills = this.toolConfig.skills?.length>0;
+      
       const asStrings = this.toolConfig.tools.filter(
-        (t): t is string => typeof t === 'string',
+        (t): t is string => typeof t === 'string' && (!visible_skills || t !== SkillTool.Name),
       );
       const hasWildcard = asStrings.includes('*');
       const onlyInlineDecls = this.toolConfig.tools.filter(
@@ -304,6 +307,10 @@ export class SubAgentScope {
         toolsList.push(
           ...toolRegistry.getFunctionDeclarationsFiltered(asStrings),
         );
+
+        if (visible_skills){
+          toolsList.push(SkillTool(this.runtimeContext, visible_skills).schema)
+        }
       }
       toolsList.push(...onlyInlineDecls);
     } else {
