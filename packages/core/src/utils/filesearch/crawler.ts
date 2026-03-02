@@ -8,6 +8,9 @@ import path from 'node:path';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
+import { createDebugLogger } from '../debugLogger.js';
+
+const debugLogger = createDebugLogger('CRAWLER');
 
 export interface CrawlOptions {
   // The directory to start the crawl from.
@@ -21,6 +24,8 @@ export interface CrawlOptions {
   // Caching options.
   cache: boolean;
   cacheTtl: number;
+  // Maximum number of files to crawl to prevent OOM (default: 100000)
+  maxFiles?: number;
 }
 
 function toPosixPath(p: string) {
@@ -28,6 +33,8 @@ function toPosixPath(p: string) {
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
+  const maxFiles = options.maxFiles ?? 100000;
+
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
       options.crawlDirectory,
@@ -61,6 +68,15 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
 
     results = await api.crawl(options.crawlDirectory).withPromise();
+
+    // Limit the number of files to prevent OOM in large projects
+    if (results.length > maxFiles) {
+      debugLogger.warn(
+        `Project contains ${results.length} files, limiting to ${maxFiles} to prevent memory issues. ` +
+          `Consider using .qwenignore to exclude unnecessary directories.`,
+      );
+      results = results.slice(0, maxFiles);
+    }
   } catch (_e) {
     // The directory probably doesn't exist.
     return [];

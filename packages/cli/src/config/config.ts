@@ -11,7 +11,6 @@ import {
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
   FileEncoding,
-  getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -687,10 +686,8 @@ export async function loadCliConfig(
   // However, loadHierarchicalGeminiMemory is called *before* createServerConfig.
   if (settings.context?.fileName) {
     setServerGeminiMdFilename(settings.context.fileName);
-  } else {
-    // Reset to default if not provided in settings.
-    setServerGeminiMdFilename(getCurrentGeminiMdFilename());
   }
+  // If not provided in settings, keep the default which includes both QWEN.md and AGENTS.md
 
   // Automatically load output-language.md if it exists
   let outputLanguageFilePath: string | undefined = path.join(
