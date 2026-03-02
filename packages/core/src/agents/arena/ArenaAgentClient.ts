@@ -235,6 +235,7 @@ export class ArenaAgentClient {
 
   /**
    * Atomically write JSON data to a file (write temp → rename).
+   * Retries on EPERM which occurs on Windows under concurrent renames.
    */
   private async atomicWrite(
     filePath: string,
@@ -243,15 +244,38 @@ export class ArenaAgentClient {
     const tmpPath = `${filePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     try {
       await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
-      await fs.rename(tmpPath, filePath);
+      await this.renameWithRetry(tmpPath, filePath);
     } catch (error) {
-      // Clean up temp file on failure
       try {
         await fs.unlink(tmpPath);
       } catch {
         // Ignore cleanup errors
       }
       throw error;
+    }
+  }
+
+  private async renameWithRetry(
+    src: string,
+    dest: string,
+    retries = 3,
+    delayMs = 50,
+  ): Promise<void> {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        await fs.rename(src, dest);
+        return;
+      } catch (error: unknown) {
+        const isRetryable =
+          isNodeError(error) &&
+          (error.code === 'EPERM' || error.code === 'EACCES');
+        if (!isRetryable || attempt === retries) {
+          throw error;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, delayMs * 2 ** attempt),
+        );
+      }
     }
   }
 

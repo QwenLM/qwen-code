@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
@@ -139,17 +140,22 @@ describe('GitWorktreeService', () => {
 
     const result = await service.createWorktree('s1', 'Model A');
 
+    const expectedPath = path.join(
+      '/mock-qwen',
+      'worktrees',
+      's1',
+      'worktrees',
+      'model-a',
+    );
     expect(result.success).toBe(true);
     expect(result.worktree?.branch).toBe('worktrees/s1/model-a');
-    expect(result.worktree?.path).toBe(
-      '/mock-qwen/worktrees/s1/worktrees/model-a',
-    );
+    expect(result.worktree?.path).toBe(expectedPath);
     expect(hoistedMockRaw).toHaveBeenCalledWith([
       'worktree',
       'add',
       '-b',
       'worktrees/s1/model-a',
-      '/mock-qwen/worktrees/s1/worktrees/model-a',
+      expectedPath,
       'main',
     ]);
   });
