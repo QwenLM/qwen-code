@@ -154,19 +154,7 @@ export class HookRunner {
           break;
 
         case HookEventName.PreToolUse:
-          // Support both 'updatedInput' (Claude Code standard) and 'tool_input' (legacy)
-          if ('updatedInput' in hookOutput.hookSpecificOutput) {
-            const newToolInput = hookOutput.hookSpecificOutput[
-              'updatedInput'
-            ] as Record<string, unknown>;
-            if (newToolInput && 'tool_input' in modifiedInput) {
-              (modifiedInput as PreToolUseInput).tool_input = {
-                ...(modifiedInput as PreToolUseInput).tool_input,
-                ...newToolInput,
-              };
-            }
-          } else if ('tool_input' in hookOutput.hookSpecificOutput) {
-            // Legacy support: also check for 'tool_input' field
+          if ('tool_input' in hookOutput.hookSpecificOutput) {
             const newToolInput = hookOutput.hookSpecificOutput[
               'tool_input'
             ] as Record<string, unknown>;

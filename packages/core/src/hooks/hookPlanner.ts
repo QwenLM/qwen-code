@@ -6,7 +6,7 @@
 
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
-import { getHookKey, HookEventName } from './types.js';
+import { getHookKey, type HookEventName } from './types.js';
 
 /**
  * Hook planner that selects matching hooks and creates execution plans
@@ -46,44 +46,10 @@ export class HookPlanner {
     // Extract hook configs
     const hookConfigs = deduplicatedEntries.map((entry) => entry.config);
 
-    // Determine execution strategy
-    // Default behavior: if ANY hook definition has sequential=true, run all sequentially
-    const hasHookLevelSequential = deduplicatedEntries.some(
+    // Determine execution strategy - if ANY hook definition has sequential=true, run all sequentially
+    const sequential = deduplicatedEntries.some(
       (entry) => entry.sequential === true,
     );
-
-    // If any hook has sequential=true, respect that setting
-    let sequential = hasHookLevelSequential;
-
-    // Override with hook-specific defaults ONLY if no hook-level override
-    if (!hasHookLevelSequential) {
-      switch (eventName) {
-        case HookEventName.PreToolUse:
-          // PreToolUse hooks need to run sequentially to allow input modifications to build upon each other
-          sequential = true;
-          break;
-        case HookEventName.PostToolUse:
-        case HookEventName.PostToolUseFailure:
-        case HookEventName.Notification:
-          // These can run in parallel for performance (they occur after main action is complete)
-          sequential = false;
-          break;
-        case HookEventName.SessionStart:
-        case HookEventName.SessionEnd:
-        case HookEventName.PreCompact:
-        case HookEventName.SubagentStart:
-        case HookEventName.SubagentStop:
-        case HookEventName.PermissionRequest:
-        case HookEventName.UserPromptSubmit:
-        case HookEventName.Stop:
-          // These hooks typically don't modify shared state, can run in parallel
-          sequential = false;
-          break;
-        default:
-          // Other hook types maintain the default behavior determined above
-          break;
-      }
-    }
 
     const plan: HookExecutionPlan = {
       eventName,
