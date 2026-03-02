@@ -161,8 +161,9 @@ export function write(filePath: string, data: unknown[]): void {
  * Counts the number of non-empty lines in a JSONL file.
  */
 export async function countLines(filePath: string): Promise<number> {
+  let fileStream: fs.ReadStream | undefined;
   try {
-    const fileStream = fs.createReadStream(filePath);
+    fileStream = fs.createReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
@@ -180,6 +181,11 @@ export async function countLines(filePath: string): Promise<number> {
       debugLogger.error(`Error counting lines in ${filePath}:`, error);
     }
     return 0;
+  } finally {
+    // Ensure the file stream is always closed, even if an error occurs
+    if (fileStream) {
+      fileStream.destroy();
+    }
   }
 }
 
