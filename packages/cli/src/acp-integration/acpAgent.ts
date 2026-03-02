@@ -466,13 +466,13 @@ class GeminiAgent {
     const currentApprovalMode = config.getApprovalMode();
 
     const availableModes = APPROVAL_MODES.map((mode) => ({
-      id: mode as ApprovalModeValue,
+      id: mode as acp.ApprovalModeValue,
       name: APPROVAL_MODE_INFO[mode].name,
       description: APPROVAL_MODE_INFO[mode].description,
     }));
 
     return {
-      currentModeId: currentApprovalMode as ApprovalModeValue,
+      currentModeId: currentApprovalMode as acp.ApprovalModeValue,
       availableModes,
     };
   }

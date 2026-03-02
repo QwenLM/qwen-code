@@ -473,7 +473,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -481,7 +481,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         expect(generationConfig.systemInstruction).toContain(
@@ -511,7 +511,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -519,7 +519,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
@@ -540,7 +540,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -548,7 +548,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;

@@ -268,17 +268,15 @@ export function ArenaStatusDialog({
                 )}
               </Box>
             </Box>
-            {/* In-process mode: show extra detail row with cost + thought tokens */}
-            {live && (live.estimatedCost > 0 || live.thoughtTokens > 0) && (
+            {/* In-process mode: show extra detail row with thought/cached tokens */}
+            {live && (live.thoughtTokens > 0 || live.cachedTokens > 0) && (
               <Box marginLeft={2}>
                 <Text color={theme.text.secondary}>
-                  {live.estimatedCost > 0 &&
-                    `Cost: $${live.estimatedCost.toFixed(4)}`}
-                  {live.estimatedCost > 0 && live.thoughtTokens > 0 && '  ·  '}
                   {live.thoughtTokens > 0 &&
                     `Thinking: ${live.thoughtTokens.toLocaleString()} tok`}
+                  {live.thoughtTokens > 0 && live.cachedTokens > 0 && '  ·  '}
                   {live.cachedTokens > 0 &&
-                    `  ·  Cached: ${live.cachedTokens.toLocaleString()} tok`}
+                    `Cached: ${live.cachedTokens.toLocaleString()} tok`}
                 </Text>
               </Box>
             )}
