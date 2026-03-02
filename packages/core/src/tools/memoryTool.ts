@@ -80,10 +80,11 @@ export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
 
 // This variable will hold the currently configured filename for context files.
-// It defaults to include both AGENTS.md and QWEN.md but can be overridden by setGeminiMdFilename.
+// It defaults to include both QWEN.md and AGENTS.md but can be overridden by setGeminiMdFilename.
+// QWEN.md is first to maintain backward compatibility (used by /init command and save_memory tool).
 let currentGeminiMdFilename: string | string[] = [
-  AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
+  AGENT_CONTEXT_FILENAME,
 ];
 
 export function setGeminiMdFilename(newFilename: string | string[]): void {
