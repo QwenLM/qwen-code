@@ -30,6 +30,8 @@ export interface BaseSelectionListProps<
   showNumbers?: boolean;
   showScrollArrows?: boolean;
   maxItemsToShow?: number;
+  /** Gap (in rows) between each item. */
+  itemGap?: number;
   renderItem: (item: TItem, context: RenderItemContext) => React.ReactNode;
 }
 
@@ -59,6 +61,7 @@ export function BaseSelectionList<
   showNumbers = true,
   showScrollArrows = false,
   maxItemsToShow = 10,
+  itemGap = 0,
   renderItem,
 }: BaseSelectionListProps<T, TItem>): React.JSX.Element {
   const { activeIndex } = useSelectionList({
@@ -89,7 +92,7 @@ export function BaseSelectionList<
   const numberColumnWidth = String(items.length).length;
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" gap={itemGap}>
       {/* Use conditional coloring instead of conditional rendering */}
       {showScrollArrows && (
         <Text

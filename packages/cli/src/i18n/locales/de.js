@@ -157,6 +157,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter zum Bestätigen, Esc zum Abbrechen',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter zum Auswählen, ↑↓ zum Navigieren, Esc zum Zurückgehen',
+  'Enter to submit, Esc to go back': 'Enter zum Absenden, Esc zum Zurückgehen',
   'Invalid step: {{step}}': 'Ungültiger Schritt: {{step}}',
   'No subagents found.': 'Keine Unteragenten gefunden.',
   "Use '/agents create' to create your first subagent.":
@@ -944,18 +945,22 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Loslegen',
-  'How would you like to authenticate for this project?':
-    'Wie möchten Sie sich für dieses Projekt authentifizieren?',
+  'Select Authentication Method': 'Authentifizierungsmethode auswählen',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI API-Schlüssel ist für die OpenAI-Authentifizierung erforderlich.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'Sie müssen eine Authentifizierungsmethode wählen, um fortzufahren. Drücken Sie erneut Strg+C zum Beenden.',
-  '(Use Enter to Set Auth)': '(Enter zum Festlegen der Authentifizierung)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Nutzungsbedingungen und Datenschutzhinweis für Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Nutzungsbedingungen und Datenschutzhinweis',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Kostenlos \u00B7 Bis zu 1.000 Anfragen/Tag \u00B7 Qwen neueste Modelle',
   'Login with QwenChat account to use daily free quota.':
     'Melden Sie sich mit Ihrem QwenChat-Konto an, um das tägliche kostenlose Kontingent zu nutzen.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax and more':
+    'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Qwen, GLM, Kimi, Minimax und mehr',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Eigenen API-Schlüssel verwenden',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Verwenden Sie Coding Plan-Anmeldedaten oder Ihre eigenen API-Schlüssel/Anbieter.',
@@ -985,6 +990,8 @@ export default {
     'Warten auf Qwen OAuth-Authentifizierung...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Hinweis: Ihr bestehender API-Schlüssel in settings.json wird bei Verwendung von Qwen OAuth nicht gelöscht. Sie können später bei Bedarf zur OpenAI-Authentifizierung zurückwechseln.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Hinweis: Ihr bestehender API-Schlüssel wird bei Verwendung von Qwen OAuth nicht gelöscht.',
   'Authentication timed out. Please try again.':
     'Authentifizierung abgelaufen. Bitte versuchen Sie es erneut.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1413,32 +1420,21 @@ export default {
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'Für fortgeschrittene Benutzer, die Modelle manuell konfigurieren möchten.',
-  'Please configure your models in settings.json:':
-    'Bitte konfigurieren Sie Ihre Modelle in settings.json:',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    'API-Schlüssel über Umgebungsvariable setzen (z.B. OPENAI_API_KEY)',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "Modellkonfiguration zu modelProviders['openai'] (oder anderen Authentifizierungstypen) hinzufügen",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    'Jeder Anbieter benötigt: id, envKey (erforderlich), plus optionale baseUrl, generationConfig',
-  'Use /model command to select your preferred model from the configured list':
-    'Verwenden Sie den /model-Befehl, um Ihr bevorzugtes Modell aus der konfigurierten Liste auszuwählen',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'Unterstützte Authentifizierungstypen: openai, anthropic, gemini, vertex-ai, usw.',
+  'You can configure your API key and models in settings.json':
+    'Sie können Ihren API-Schlüssel und Modelle in settings.json konfigurieren',
+  'Refer to the documentation for setup instructions':
+    'Einrichtungsanweisungen finden Sie in der Dokumentation',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'Bitte geben Sie Ihren API-Schlüssel ein:',
   'API key cannot be empty.': 'API-Schlüssel darf nicht leer sein.',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'Hier können Sie Ihren exklusiven Coding Plan API-KEY erhalten:',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'Neue Modellkonfigurationen sind für Bailian Coding Plan verfügbar. Jetzt aktualisieren?',
+  'You can get your Coding Plan API key here':
+    'Sie können Ihren Coding-Plan-API-Schlüssel hier erhalten',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Neue Modellkonfigurationen sind für Alibaba Cloud Coding Plan verfügbar. Jetzt aktualisieren?',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Coding Plan-Konfiguration erfolgreich aktualisiert. Neue Modelle sind jetzt verfügbar.',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1449,32 +1445,16 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'Coding Plan': 'Coding Plan',
-  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
-  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
-  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
-    'Fügen Sie Ihren Coding Plan (Bailian, Global/Intl) API-Schlüssel ein und Sie sind bereit!',
-  Custom: 'Benutzerdefiniert',
-  'More instructions about configuring `modelProviders` manually.':
-    'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
-  'Select API-KEY configuration mode:':
-    'API-KEY-Konfigurationsmodus auswählen:',
-  '(Press Escape to go back)': '(Escape drücken zum Zurückgehen)',
-  '(Press Enter to submit, Escape to cancel)':
-    '(Enter zum Absenden, Escape zum Abbrechen)',
-  'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
+  'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
+  'Choose based on where your account is registered':
+    'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
+  'Enter Coding Plan API Key': 'Coding-Plan-API-Schlüssel eingeben',
 
   // ============================================================================
   // Coding Plan International Updates
   // ============================================================================
   'New model configurations are available for {{region}}. Update now?':
     'Neue Modellkonfigurationen sind für {{region}} verfügbar. Jetzt aktualisieren?',
-  'New model configurations are available for Bailian Coding Plan (China). Update now?':
-    'Neue Modellkonfigurationen sind für Bailian Coding Plan (China) verfügbar. Jetzt aktualisieren?',
-  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
-    'Neue Modellkonfigurationen sind für Coding Plan (Bailian, Global/Intl) verfügbar. Jetzt aktualisieren?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':

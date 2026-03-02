@@ -11,16 +11,19 @@ import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
+import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
 import { ApiKeyInput } from '../components/ApiKeyInput.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { t } from '../../i18n/index.js';
-import { CodingPlanRegion } from '../../constants/codingPlan.js';
+import {
+  CodingPlanRegion,
+  isCodingPlanConfig,
+} from '../../constants/codingPlan.js';
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
-  'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders';
+  'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/';
 
 function parseDefaultAuthType(
   defaultAuthType: string | undefined,
@@ -34,11 +37,11 @@ function parseDefaultAuthType(
   return null;
 }
 
-// Sub-mode types for API-KEY authentication
-type ApiKeySubMode = 'coding-plan' | 'coding-plan-intl' | 'custom';
+// Main menu option type
+type MainOption = typeof AuthType.QWEN_OAUTH | 'CODING_PLAN' | 'API_KEY';
 
 // View level for navigation
-type ViewLevel = 'main' | 'api-key-sub' | 'api-key-input' | 'custom-info';
+type ViewLevel = 'main' | 'region-select' | 'api-key-input' | 'custom-info';
 
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
@@ -50,58 +53,107 @@ export function AuthDialog(): React.JSX.Element {
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
-  const [apiKeySubModeIndex, setApiKeySubModeIndex] = useState<number>(0);
+  const [regionIndex, setRegionIndex] = useState<number>(0);
   const [region, setRegion] = useState<CodingPlanRegion>(
     CodingPlanRegion.CHINA,
   );
 
-  // Main authentication entries
+  // Main authentication entries (flat three-option layout)
   const mainItems = [
     {
       key: AuthType.QWEN_OAUTH,
+      title: t('Qwen OAuth'),
       label: t('Qwen OAuth'),
-      value: AuthType.QWEN_OAUTH,
+      description: t(
+        'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
+      ),
+      value: AuthType.QWEN_OAUTH as MainOption,
     },
     {
-      key: 'API-KEY',
-      label: t('API-KEY'),
-      value: 'API-KEY' as const,
+      key: 'CODING_PLAN',
+      title: t('Alibaba Cloud Coding Plan'),
+      label: t('Alibaba Cloud Coding Plan'),
+      description: t(
+        'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 Qwen, GLM, Kimi, Minimax and more',
+      ),
+      value: 'CODING_PLAN' as MainOption,
+    },
+    {
+      key: 'API_KEY',
+      title: t('API Key'),
+      label: t('API Key'),
+      description: t('Bring your own API key'),
+      value: 'API_KEY' as MainOption,
     },
   ];
 
-  // API-KEY sub-mode entries
-  const apiKeySubItems = [
+  // Region selection entries (shown after selecting Alibaba Cloud Coding Plan)
+  const regionItems = [
     {
-      key: 'coding-plan',
-      label: t('Coding Plan (Bailian, China)'),
-      value: 'coding-plan' as ApiKeySubMode,
+      key: 'china',
+      title: '阿里云百炼 (aliyun.com)',
+      label: '阿里云百炼 (aliyun.com)',
+      description: (
+        <Link
+          url="https://help.aliyun.com/zh/model-studio/coding-plan"
+          fallback={false}
+        >
+          <Text color={theme.text.secondary}>
+            https://help.aliyun.com/zh/model-studio/coding-plan
+          </Text>
+        </Link>
+      ),
+      value: CodingPlanRegion.CHINA,
     },
     {
-      key: 'coding-plan-intl',
-      label: t('Coding Plan (Bailian, Global/Intl)'),
-      value: 'coding-plan-intl' as ApiKeySubMode,
-    },
-    {
-      key: 'custom',
-      label: t('Custom'),
-      value: 'custom' as ApiKeySubMode,
+      key: 'global',
+      title: 'Alibaba Cloud (alibabacloud.com)',
+      label: 'Alibaba Cloud (alibabacloud.com)',
+      description: (
+        <Link
+          url="https://www.alibabacloud.com/help/en/model-studio/coding-plan"
+          fallback={false}
+        >
+          <Text color={theme.text.secondary}>
+            https://www.alibabacloud.com/help/en/model-studio/coding-plan
+          </Text>
+        </Link>
+      ),
+      value: CodingPlanRegion.GLOBAL,
     },
   ];
+
+  // Map an AuthType to the corresponding main menu option.
+  // QWEN_OAUTH maps directly; any other auth type maps to CODING_PLAN only
+  // if the current config actually uses a Coding Plan baseUrl+envKey,
+  // otherwise it maps to API_KEY.
+  const contentGenConfig = config.getContentGeneratorConfig();
+  const isCurrentlyCodingPlan =
+    isCodingPlanConfig(
+      contentGenConfig?.baseUrl,
+      contentGenConfig?.apiKeyEnvKey,
+    ) !== false;
+
+  const authTypeToMainOption = (authType: AuthType): MainOption => {
+    if (authType === AuthType.QWEN_OAUTH) return AuthType.QWEN_OAUTH;
+    if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan)
+      return 'CODING_PLAN';
+    return 'API_KEY';
+  };
 
   const initialAuthIndex = Math.max(
     0,
     mainItems.findIndex((item) => {
       // Priority 1: pendingAuthType
       if (pendingAuthType) {
-        return item.value === pendingAuthType;
+        return item.value === authTypeToMainOption(pendingAuthType);
       }
 
       // Priority 2: config.getAuthType() - the source of truth
       const currentAuthType = config.getAuthType();
       if (currentAuthType) {
-        return item.value === currentAuthType;
+        return item.value === authTypeToMainOption(currentAuthType);
       }
 
       // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
@@ -109,7 +161,7 @@ export function AuthDialog(): React.JSX.Element {
         process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
       if (defaultAuthType) {
-        return item.value === defaultAuthType;
+        return item.value === authTypeToMainOption(defaultAuthType);
       }
 
       // Priority 4: default to QWEN_OAUTH
@@ -117,21 +169,19 @@ export function AuthDialog(): React.JSX.Element {
     }),
   );
 
-  const hasApiKey = Boolean(config.getContentGeneratorConfig()?.apiKey);
-  const currentSelectedAuthType =
-    selectedIndex !== null
-      ? mainItems[selectedIndex]?.value
-      : mainItems[initialAuthIndex]?.value;
-
-  const handleMainSelect = async (
-    value: (typeof mainItems)[number]['value'],
-  ) => {
+  const handleMainSelect = async (value: MainOption) => {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (value === 'API-KEY') {
-      // Navigate to API-KEY sub-mode selection
-      setViewLevel('api-key-sub');
+    if (value === 'CODING_PLAN') {
+      // Navigate to region selection
+      setViewLevel('region-select');
+      return;
+    }
+
+    if (value === 'API_KEY') {
+      // Navigate directly to custom API key info
+      setViewLevel('custom-info');
       return;
     }
 
@@ -139,19 +189,11 @@ export function AuthDialog(): React.JSX.Element {
     await onAuthSelect(value);
   };
 
-  const handleApiKeySubSelect = async (subMode: ApiKeySubMode) => {
+  const handleRegionSelect = async (selectedRegion: CodingPlanRegion) => {
     setErrorMessage(null);
     onAuthError(null);
-
-    if (subMode === 'coding-plan') {
-      setRegion(CodingPlanRegion.CHINA);
-      setViewLevel('api-key-input');
-    } else if (subMode === 'coding-plan-intl') {
-      setRegion(CodingPlanRegion.GLOBAL);
-      setViewLevel('api-key-input');
-    } else {
-      setViewLevel('custom-info');
-    }
+    setRegion(selectedRegion);
+    setViewLevel('api-key-input');
   };
 
   const handleApiKeyInputSubmit = async (apiKey: string) => {
@@ -170,12 +212,10 @@ export function AuthDialog(): React.JSX.Element {
     setErrorMessage(null);
     onAuthError(null);
 
-    if (viewLevel === 'api-key-sub') {
+    if (viewLevel === 'region-select' || viewLevel === 'custom-info') {
       setViewLevel('main');
-      // Reset selectedIndex to ensure UI syncs with initialAuthIndex
-      setSelectedIndex(null);
-    } else if (viewLevel === 'api-key-input' || viewLevel === 'custom-info') {
-      setViewLevel('api-key-sub');
+    } else if (viewLevel === 'api-key-input') {
+      setViewLevel('region-select');
     }
   };
 
@@ -183,7 +223,7 @@ export function AuthDialog(): React.JSX.Element {
     (key) => {
       if (key.name === 'escape') {
         // Handle Escape based on current view level
-        if (viewLevel === 'api-key-sub') {
+        if (viewLevel === 'region-select') {
           handleGoBack();
           return;
         }
@@ -215,62 +255,39 @@ export function AuthDialog(): React.JSX.Element {
   const renderMainView = () => (
     <>
       <Box marginTop={1}>
-        <Text>{t('How would you like to authenticate for this project?')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <RadioButtonSelect
+        <DescriptiveRadioButtonSelect
           items={mainItems}
           initialIndex={initialAuthIndex}
           onSelect={handleMainSelect}
-          onHighlight={(value) => {
-            const index = mainItems.findIndex((item) => item.value === value);
-            setSelectedIndex(index);
-          }}
+          itemGap={1}
         />
-      </Box>
-      <Box marginTop={1} paddingLeft={2}>
-        <Text color={theme.text.secondary}>
-          {currentSelectedAuthType === AuthType.QWEN_OAUTH
-            ? t('Login with QwenChat account to use daily free quota.')
-            : t('Use coding plan credentials or your own api-keys/providers.')}
-        </Text>
       </Box>
     </>
   );
 
-  // Render API-KEY sub-mode selection
-  const renderApiKeySubView = () => (
+  // Render region selection for Alibaba Cloud Coding Plan
+  const renderRegionSelectView = () => (
     <>
       <Box marginTop={1}>
-        <Text>{t('Select API-KEY configuration mode:')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <RadioButtonSelect
-          items={apiKeySubItems}
-          initialIndex={apiKeySubModeIndex}
-          onSelect={handleApiKeySubSelect}
-          onHighlight={(value) => {
-            const index = apiKeySubItems.findIndex(
-              (item) => item.value === value,
-            );
-            setApiKeySubModeIndex(index);
-          }}
-        />
-      </Box>
-      <Box marginTop={1} paddingLeft={2}>
-        <Text color={theme.text.secondary}>
-          {apiKeySubItems[apiKeySubModeIndex]?.value === 'custom'
-            ? t(
-                'More instructions about configuring `modelProviders` manually.',
-              )
-            : t(
-                "Paste your api key of Bailian Coding Plan and you're all set!",
-              )}
+        <Text color={theme.text.primary}>
+          {t('Choose based on where your account is registered')}
         </Text>
       </Box>
       <Box marginTop={1}>
+        <DescriptiveRadioButtonSelect
+          items={regionItems}
+          initialIndex={regionIndex}
+          onSelect={handleRegionSelect}
+          onHighlight={(value) => {
+            const index = regionItems.findIndex((item) => item.value === value);
+            setRegionIndex(index);
+          }}
+          itemGap={1}
+        />
+      </Box>
+      <Box marginTop={1}>
         <Text color={theme?.text?.secondary}>
-          {t('(Press Escape to go back)')}
+          {t('Enter to select, ↑↓ to navigate, Esc to go back')}
         </Text>
       </Box>
     </>
@@ -291,68 +308,22 @@ export function AuthDialog(): React.JSX.Element {
   const renderCustomInfoView = () => (
     <>
       <Box marginTop={1}>
-        <Text bold>{t('Custom API-KEY Configuration')}</Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text>
-          {t('For advanced users who want to configure models manually.')}
+        <Text color={theme.text.primary}>
+          {t('You can configure your API key and models in settings.json')}
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text>{t('Please configure your models in settings.json:')}</Text>
-      </Box>
-      <Box marginTop={1} paddingLeft={2}>
-        <Text color={theme.status.warning}>
-          1. {t('Set API key via environment variable (e.g., OPENAI_API_KEY)')}
-        </Text>
-      </Box>
-      <Box marginTop={0} paddingLeft={2}>
-        <Text color={theme.status.warning}>
-          2.{' '}
-          {t(
-            "Add model configuration to modelProviders['openai'] (or other auth types)",
-          )}
-        </Text>
-      </Box>
-      <Box marginTop={0} paddingLeft={2}>
-        <Text color={theme.status.warning}>
-          3.{' '}
-          {t(
-            'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig',
-          )}
-        </Text>
-      </Box>
-      <Box marginTop={0} paddingLeft={2}>
-        <Text color={theme.status.warning}>
-          4.{' '}
-          {t(
-            'Use /model command to select your preferred model from the configured list',
-          )}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t(
-            'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.',
-          )}
-        </Text>
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme?.text?.secondary} underline>
-          {t('More instructions please check:')}
-        </Text>
+        <Text>{t('Refer to the documentation for setup instructions')}</Text>
       </Box>
       <Box marginTop={0}>
         <Link url={MODEL_PROVIDERS_DOCUMENTATION_URL} fallback={false}>
-          <Text color={theme.status.success} underline>
+          <Text color={theme.text.link}>
             {MODEL_PROVIDERS_DOCUMENTATION_URL}
           </Text>
         </Link>
       </Box>
       <Box marginTop={1}>
-        <Text color={theme?.text?.secondary}>
-          {t('(Press Escape to go back)')}
-        </Text>
+        <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
       </Box>
     </>
   );
@@ -360,15 +331,15 @@ export function AuthDialog(): React.JSX.Element {
   const getViewTitle = () => {
     switch (viewLevel) {
       case 'main':
-        return t('Get started');
-      case 'api-key-sub':
-        return t('API-KEY Configuration');
+        return t('Select Authentication Method');
+      case 'region-select':
+        return t('Select Region for Coding Plan');
       case 'api-key-input':
-        return t('Coding Plan Setup');
+        return t('Enter Coding Plan API Key');
       case 'custom-info':
         return t('Custom Configuration');
       default:
-        return t('Get started');
+        return t('Select Authentication Method');
     }
   };
 
@@ -383,7 +354,7 @@ export function AuthDialog(): React.JSX.Element {
       <Text bold>{getViewTitle()}</Text>
 
       {viewLevel === 'main' && renderMainView()}
-      {viewLevel === 'api-key-sub' && renderApiKeySubView()}
+      {viewLevel === 'region-select' && renderRegionSelectView()}
       {viewLevel === 'api-key-input' && renderApiKeyInputView()}
       {viewLevel === 'custom-info' && renderCustomInfoView()}
 
@@ -395,31 +366,28 @@ export function AuthDialog(): React.JSX.Element {
 
       {viewLevel === 'main' && (
         <>
-          <Box marginTop={1}>
-            <Text color={theme.text.accent}>
-              {t('(Use Enter to Set Auth)')}
+          {/* <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Enter to select, \u2191\u2193 to navigate, Esc to close')}
+            </Text>
+          </Box> */}
+          <Box marginY={1}>
+            <Text color={theme.border.default}>{'\u2500'.repeat(80)}</Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.primary}>
+              {t('Terms of Services and Privacy Notice')}:
             </Text>
           </Box>
-          {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
-            <Box marginTop={1}>
-              <Text color={theme?.text?.secondary}>
-                {t(
-                  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
-                )}
+          <Box>
+            <Link
+              url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              fallback={false}
+            >
+              <Text color={theme.text.secondary} underline>
+                https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
               </Text>
-            </Box>
-          )}
-          <Box marginTop={1}>
-            <Text>
-              {t('Terms of Services and Privacy Notice for Qwen Code')}
-            </Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text color={theme.text.link}>
-              {
-                'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/'
-              }
-            </Text>
+            </Link>
           </Box>
         </>
       )}
