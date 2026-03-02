@@ -18,16 +18,6 @@ vi.mock('os', async (importOriginal) => {
   };
 });
 
-// Mock './settings.js' to ensure it uses the mocked 'os.homedir()' for its internal constants.
-vi.mock('./settings.js', async (importActual) => {
-  const originalModule = await importActual<typeof import('./settings.js')>();
-  return {
-    __esModule: true, // Ensure correct module shape
-    ...originalModule, // Re-export all original members
-    // We are relying on originalModule's USER_SETTINGS_PATH being constructed with mocked os.homedir()
-  };
-});
-
 // Mock trustedFolders
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi
@@ -46,7 +36,6 @@ import {
   afterEach,
   type Mocked,
   type Mock,
-  fail,
 } from 'vitest';
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
@@ -60,13 +49,12 @@ import {
   getSystemSettingsPath,
   getSystemDefaultsPath,
   SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
-  migrateSettingsToV1,
-  needsMigration,
   type Settings,
   loadEnvironment,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
 } from './settings.js';
+import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
@@ -84,6 +72,23 @@ type TestSettings = Settings & {
   nestedObj?: { [key: string]: unknown };
 };
 
+vi.mock('node:fs', async (importOriginal) => {
+  // Get all the functions from the real 'fs' module
+  const actualFs = await importOriginal<typeof fs>();
+
+  return {
+    ...actualFs, // Keep all the real functions
+    // Now, just override the ones we need for the test
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    realpathSync: (p: string) => p,
+  };
+});
+
+// Also mock 'fs' for compatibility
 vi.mock('fs', async (importOriginal) => {
   // Get all the functions from the real 'fs' module
   const actualFs = await importOriginal<typeof fs>();
@@ -594,19 +599,22 @@ describe('Settings Loading and Merging', () => {
 
       loadSettings(MOCK_WORKSPACE_DIR);
 
-      // Verify that fs.writeFileSync was called (to add version)
-      // but NOT fs.renameSync (no backup needed, just adding version)
-      expect(fs.renameSync).not.toHaveBeenCalled();
-      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
-
-      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
-      const writtenPath = writeCall[0];
+      // Version normalization now uses writeWithBackupSync (temp write + rename)
+      // Verify that writeFileSync was called with the temp file path
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for version normalization');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
 
-      expect(writtenPath).toBe(USER_SETTINGS_PATH);
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
       expect(writtenContent.ui?.theme).toBe('dark');
       expect(writtenContent.model?.name).toBe('qwen-coder');
+      // Verify writeWithBackupSync was called by checking temp file write
+      expect(fs.writeFileSync).toHaveBeenCalled();
     });
 
     it('should correctly handle partially migrated settings without version field', () => {
@@ -734,12 +742,83 @@ describe('Settings Loading and Merging', () => {
       loadSettings(MOCK_WORKSPACE_DIR);
 
       // Version should be bumped to 3 even though no keys needed migration
+      // writeWithBackupSync writes to a temp file first, then renames
       const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
-        (call: unknown[]) => call[0] === USER_SETTINGS_PATH,
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
       );
       expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error('Expected temp write call for V2->V3 version bump');
+      }
       const writtenContent = JSON.parse(writeCall[1] as string);
       expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+    });
+
+    it('should normalize invalid version metadata when no migration is applicable', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const invalidVersionSettings = {
+        $version: 'invalid-version',
+        general: {
+          enableAutoUpdate: true,
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(invalidVersionSettings);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for invalid version normalization',
+        );
+      }
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+      expect(writtenContent.general?.enableAutoUpdate).toBe(true);
+    });
+
+    it('should normalize legacy numeric version when no migration can execute', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const staleVersionSettings = {
+        $version: 1,
+        // No V1/V2 indicators recognized by migrations
+        customOnlyKey: 'value',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(staleVersionSettings);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === `${USER_SETTINGS_PATH}.tmp`,
+      );
+      expect(writeCall).toBeDefined();
+      if (!writeCall) {
+        throw new Error(
+          'Expected temp write call for stale version normalization',
+        );
+      }
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+      expect(writtenContent.customOnlyKey).toBe('value');
     });
 
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
@@ -1619,7 +1698,7 @@ describe('Settings Loading and Merging', () => {
 
       try {
         loadSettings(MOCK_WORKSPACE_DIR);
-        fail('loadSettings should have thrown a FatalConfigError');
+        throw new Error('loadSettings should have thrown a FatalConfigError');
       } catch (e) {
         expect(e).toBeInstanceOf(FatalConfigError);
         const error = e as FatalConfigError;
@@ -2258,385 +2337,6 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.tools?.sandbox).toBe(false); // User setting
       expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
       expect(settings.merged.ui?.theme).toBe('dark'); // User setting
-    });
-  });
-
-  describe('migrateSettingsToV1', () => {
-    it('should handle an empty object', () => {
-      const v2Settings = {};
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({});
-    });
-
-    it('should migrate a simple v2 settings object to v1', () => {
-      const v2Settings = {
-        general: {
-          preferredEditor: 'vscode',
-          vimMode: true,
-        },
-        ui: {
-          theme: 'dark',
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      });
-    });
-
-    it('should handle nested properties correctly', () => {
-      const v2Settings = {
-        security: {
-          folderTrust: {
-            enabled: true,
-          },
-          auth: {
-            selectedType: 'oauth',
-          },
-        },
-        advanced: {
-          autoConfigureMemory: true,
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        folderTrust: true,
-        selectedAuthType: 'oauth',
-        autoConfigureMaxOldSpaceSize: true,
-      });
-    });
-
-    it('should preserve mcpServers at the top level', () => {
-      const v2Settings = {
-        general: {
-          preferredEditor: 'vscode',
-        },
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        preferredEditor: 'vscode',
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-      });
-    });
-
-    it('should carry over unrecognized top-level properties', () => {
-      const v2Settings = {
-        general: {
-          vimMode: false,
-        },
-        unrecognized: 'value',
-        another: {
-          nested: true,
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        unrecognized: 'value',
-        another: {
-          nested: true,
-        },
-      });
-    });
-
-    it('should handle a complex object with mixed properties', () => {
-      const v2Settings = {
-        general: {
-          disableAutoUpdate: true,
-        },
-        ui: {
-          hideTips: true,
-          customThemes: {
-            myTheme: {},
-          },
-        },
-        model: {
-          name: 'gemini-pro',
-          chatCompression: {
-            contextPercentageThreshold: 0.5,
-          },
-        },
-        mcpServers: {
-          'server-1': {
-            command: 'node server.js',
-          },
-        },
-        unrecognized: {
-          should: 'be-preserved',
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({
-        disableAutoUpdate: true,
-        hideTips: true,
-        customThemes: {
-          myTheme: {},
-        },
-        model: 'gemini-pro',
-        chatCompression: {
-          contextPercentageThreshold: 0.5,
-        },
-        mcpServers: {
-          'server-1': {
-            command: 'node server.js',
-          },
-        },
-        unrecognized: {
-          should: 'be-preserved',
-        },
-      });
-    });
-
-    it('should not migrate a v1 settings object', () => {
-      const v1Settings = {
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      };
-      const migratedSettings = migrateSettingsToV1(v1Settings);
-      expect(migratedSettings).toEqual({
-        preferredEditor: 'vscode',
-        vimMode: true,
-        theme: 'dark',
-      });
-    });
-
-    it('should migrate a full v2 settings object to v1', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          preferredEditor: 'code',
-          vimMode: true,
-        },
-        ui: {
-          theme: 'dark',
-        },
-        privacy: {
-          usageStatisticsEnabled: false,
-        },
-        model: {
-          name: 'gemini-pro',
-          chatCompression: {
-            contextPercentageThreshold: 0.8,
-          },
-        },
-        context: {
-          fileName: 'CONTEXT.md',
-          includeDirectories: ['/src'],
-        },
-        tools: {
-          sandbox: true,
-          exclude: ['toolA'],
-        },
-        mcp: {
-          allowed: ['server1'],
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
-          },
-        },
-        advanced: {
-          dnsResolutionOrder: 'ipv4first',
-          excludedEnvVars: ['SECRET'],
-        },
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-        unrecognizedTopLevel: {
-          value: 'should be preserved',
-        },
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        preferredEditor: 'code',
-        vimMode: true,
-        theme: 'dark',
-        usageStatisticsEnabled: false,
-        model: 'gemini-pro',
-        chatCompression: {
-          contextPercentageThreshold: 0.8,
-        },
-        contextFileName: 'CONTEXT.md',
-        includeDirectories: ['/src'],
-        sandbox: true,
-        excludeTools: ['toolA'],
-        allowMCPServers: ['server1'],
-        folderTrust: true,
-        dnsResolutionOrder: 'ipv4first',
-        excludedProjectEnvVars: ['SECRET'],
-        mcpServers: {
-          'my-server': {
-            command: 'npm start',
-          },
-        },
-        unrecognizedTopLevel: {
-          value: 'should be preserved',
-        },
-      });
-    });
-
-    it('should handle partial v2 settings', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: false,
-        },
-        ui: {},
-        model: {
-          name: 'gemini-1.5-pro',
-        },
-        unrecognized: 'value',
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        model: 'gemini-1.5-pro',
-        unrecognized: 'value',
-      });
-    });
-
-    it('should handle settings with different data types', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: false,
-        },
-        model: {
-          maxSessionTurns: -1,
-        },
-        context: {
-          includeDirectories: [],
-        },
-        security: {
-          folderTrust: {
-            enabled: false,
-          },
-        },
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        vimMode: false,
-        maxSessionTurns: -1,
-        includeDirectories: [],
-        folderTrust: false,
-      });
-    });
-
-    it('should preserve unrecognized top-level keys', () => {
-      const v2Settings: TestSettings = {
-        general: {
-          vimMode: true,
-        },
-        customTopLevel: {
-          a: 1,
-          b: [2],
-        },
-        anotherOne: 'hello',
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        vimMode: true,
-        customTopLevel: {
-          a: 1,
-          b: [2],
-        },
-        anotherOne: 'hello',
-      });
-    });
-
-    it('should handle an empty v2 settings object', () => {
-      const v2Settings = {};
-      const v1Settings = migrateSettingsToV1(v2Settings);
-      expect(v1Settings).toEqual({});
-    });
-
-    it('should correctly handle mcpServers at the top level', () => {
-      const v2Settings: TestSettings = {
-        mcpServers: {
-          serverA: { command: 'a' },
-        },
-        mcp: {
-          allowed: ['serverA'],
-        },
-      };
-
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      expect(v1Settings).toEqual({
-        mcpServers: {
-          serverA: { command: 'a' },
-        },
-        allowMCPServers: ['serverA'],
-      });
-    });
-
-    it('should correctly migrate customWittyPhrases', () => {
-      const v2Settings: Partial<Settings> = {
-        ui: {
-          customWittyPhrases: ['test phrase'],
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings as Settings);
-      expect(v1Settings).toEqual({
-        customWittyPhrases: ['test phrase'],
-      });
-    });
-
-    it('should remove version field when migrating to V1', () => {
-      const v2Settings = {
-        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
-        ui: {
-          theme: 'dark',
-        },
-        model: {
-          name: 'qwen-coder',
-        },
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      // Version field should not be present in V1 settings
-      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
-      // Other fields should be properly migrated
-      expect(v1Settings).toEqual({
-        theme: 'dark',
-        model: 'qwen-coder',
-      });
-    });
-
-    it('should handle version field in unrecognized properties', () => {
-      const v2Settings = {
-        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
-        general: {
-          vimMode: true,
-        },
-        someUnrecognizedKey: 'value',
-      };
-      const v1Settings = migrateSettingsToV1(v2Settings);
-
-      // Version field should be filtered out
-      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
-      // Unrecognized keys should be preserved
-      expect(v1Settings['someUnrecognizedKey']).toBe('value');
-      expect(v1Settings['vimMode']).toBe(true);
     });
   });
 

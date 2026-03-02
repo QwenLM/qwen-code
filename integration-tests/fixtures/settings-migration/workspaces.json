@@ -1,0 +1,189 @@
+{
+  "v1Settings": {
+    "theme": "dark",
+    "model": "gemini",
+    "autoAccept": true,
+    "hideTips": false,
+    "vimMode": true,
+    "checkpointing": true,
+    "disableAutoUpdate": true,
+    "disableLoadingPhrases": true,
+    "mcpServers": {
+      "fetch": {
+        "command": "node",
+        "args": ["fetch-server.js"]
+      }
+    },
+    "customUserSetting": "preserved-value"
+  },
+  "v1ComplexSettings": {
+    "theme": "dark",
+    "model": "gemini-1.5-pro",
+    "autoAccept": false,
+    "hideTips": true,
+    "vimMode": false,
+    "checkpointing": true,
+    "disableAutoUpdate": true,
+    "disableUpdateNag": false,
+    "disableLoadingPhrases": true,
+    "disableFuzzySearch": false,
+    "disableCacheControl": true,
+    "allowedTools": ["read-file", "write-file"],
+    "allowMCPServers": true,
+    "autoConfigureMaxOldSpaceSize": true,
+    "bugCommand": "/bug",
+    "chatCompression": "auto",
+    "coreTools": ["edit", "bash"],
+    "customThemes": [],
+    "customWittyPhrases": [],
+    "fileFiltering": true,
+    "folderTrust": true,
+    "ideMode": true,
+    "includeDirectories": ["src", "lib"],
+    "maxSessionTurns": 50,
+    "preferredEditor": "vscode",
+    "sandbox": false,
+    "summarizeToolOutput": true,
+    "telemetry": {
+      "enabled": false
+    },
+    "useRipgrep": true,
+    "myCustomKey": "custom-value",
+    "anotherCustomSetting": {
+      "nested": true,
+      "items": [1, 2, 3]
+    }
+  },
+  "v1ArrayAndNullSettings": {
+    "theme": null,
+    "model": ["gemini", "claude"],
+    "autoAccept": false,
+    "includeDirectories": [],
+    "disableFuzzySearch": "TRUE",
+    "disableCacheControl": "FALSE",
+    "customArray": [{ "key": 1 }]
+  },
+  "v1ParentCollisionSettings": {
+    "theme": "dark",
+    "model": "gemini",
+    "ui": "legacy-ui-string",
+    "general": "legacy-general-string",
+    "disableAutoUpdate": true,
+    "disableLoadingPhrases": false,
+    "notes": {
+      "fromUser": "preserve-custom"
+    }
+  },
+  "v1VersionStringSettings": {
+    "$version": "2",
+    "theme": "light",
+    "model": "qwen-plus",
+    "disableAutoUpdate": "false",
+    "disableLoadingPhrases": "TRUE",
+    "ui": {
+      "hideWindowTitle": true
+    },
+    "customSection": {
+      "keepMe": true
+    }
+  },
+  "v2Settings": {
+    "$version": 2,
+    "ui": {
+      "theme": "light",
+      "accessibility": {
+        "disableLoadingPhrases": false
+      }
+    },
+    "general": {
+      "disableAutoUpdate": false,
+      "disableUpdateNag": false,
+      "checkpointing": false
+    },
+    "model": {
+      "name": "claude"
+    },
+    "context": {
+      "fileFiltering": {
+        "disableFuzzySearch": true
+      }
+    },
+    "mcpServers": {}
+  },
+  "v2MinimalSettings": {
+    "$version": 2
+  },
+  "v2BooleanStringSettings": {
+    "$version": 2,
+    "general": {
+      "disableAutoUpdate": "TRUE",
+      "disableUpdateNag": "false"
+    },
+    "ui": {
+      "accessibility": {
+        "disableLoadingPhrases": "FaLsE"
+      }
+    },
+    "context": {
+      "fileFiltering": {
+        "disableFuzzySearch": "TRUE"
+      }
+    },
+    "model": {
+      "generationConfig": {
+        "disableCacheControl": "false"
+      }
+    }
+  },
+  "v2PreexistingEnableSettings": {
+    "$version": 2,
+    "general": {
+      "disableAutoUpdate": false,
+      "disableUpdateNag": true,
+      "enableAutoUpdate": true
+    },
+    "ui": {
+      "accessibility": {
+        "disableLoadingPhrases": true,
+        "enableLoadingPhrases": true
+      }
+    },
+    "context": {
+      "fileFiltering": {
+        "disableFuzzySearch": false,
+        "enableFuzzySearch": false
+      }
+    },
+    "model": {
+      "generationConfig": {
+        "disableCacheControl": true,
+        "enableCacheControl": true
+      }
+    }
+  },
+  "v3LegacyDisableSettings": {
+    "$version": 3,
+    "general": {
+      "disableAutoUpdate": true,
+      "enableAutoUpdate": false
+    },
+    "ui": {
+      "accessibility": {
+        "disableLoadingPhrases": false,
+        "enableLoadingPhrases": true
+      }
+    },
+    "custom": {
+      "note": "should remain unchanged in v3"
+    }
+  },
+  "v999FutureVersionSettings": {
+    "$version": 999,
+    "theme": "dark",
+    "model": "future-model",
+    "disableAutoUpdate": true,
+    "experimentalFlag": {
+      "enabled": true
+    }
+  }
+}
