@@ -16,6 +16,7 @@ export const AGENT_METHODS = {
   session_list: 'session/list',
   session_set_mode: 'session/set_mode',
   session_set_model: 'session/set_model',
+  session_set_config_option: 'session/set_config_option',
 };
 
 export const CLIENT_METHODS = {
@@ -475,6 +476,23 @@ export const configOptionSchema = z.object({
 
 export type ConfigOption = z.infer<typeof configOptionSchema>;
 
+export const setConfigOptionRequestSchema = z.object({
+  sessionId: z.string(),
+  configId: z.string(),
+  value: z.unknown(),
+});
+
+export const setConfigOptionResponseSchema = z.object({
+  configOptions: z.array(configOptionSchema),
+});
+
+export type SetConfigOptionRequest = z.infer<
+  typeof setConfigOptionRequestSchema
+>;
+export type SetConfigOptionResponse = z.infer<
+  typeof setConfigOptionResponseSchema
+>;
+
 // newSessionResponseSchema includes modes and configOptions for ACP/Zed integration
 export const newSessionResponseSchema = z.object({
   sessionId: z.string(),
@@ -684,6 +702,7 @@ export const agentRequestSchema = z.union([
   listSessionsRequestSchema,
   setModeRequestSchema,
   setModelRequestSchema,
+  setConfigOptionRequestSchema,
 ]);
 
 export const agentNotificationSchema = sessionNotificationSchema;
