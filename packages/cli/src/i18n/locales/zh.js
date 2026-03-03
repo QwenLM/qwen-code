@@ -1281,4 +1281,10 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // ============================================================================
+  // Insight Report - Language Support
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    '正在生成 {{language}} 的洞察报告...',
 };

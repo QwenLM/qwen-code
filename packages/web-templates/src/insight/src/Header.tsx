@@ -1,6 +1,12 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
+import { t } from './i18n';
+
+// Get current language from window or default to 'en'
+const currentLang =
+  (typeof window !== 'undefined' && window.INSIGHT_LANGUAGE) || 'en';
+const tr = (key: string) => t(key, currentLang);
 
 // Header Component
 export function Header({
@@ -15,11 +21,11 @@ export function Header({
   return (
     <header className="mb-8 space-y-3 text-center">
       <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
-        Qwen Code Insights
+        {tr('Qwen Code Insights')}
       </h1>
       <p className="text-sm text-slate-600">
         {totalMessages
-          ? `${totalMessages} messages across ${totalSessions} sessions`
+          ? `${totalMessages} ${tr('messages across')} ${totalSessions} ${tr('sessions')}`
           : 'Your personalized coding journey and patterns'}
         {dateRangeStr && ` | ${dateRangeStr}`}
       </p>
@@ -54,25 +60,25 @@ export function StatsRow({ data }: { data: InsightData }) {
     <div className="stats-row">
       <div className="stat">
         <div className="stat-value">{totalMessages}</div>
-        <div className="stat-label">Messages</div>
+        <div className="stat-label">{tr('Messages')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">
           +{totalLinesAdded}/-{totalLinesRemoved}
         </div>
-        <div className="stat-label">Lines</div>
+        <div className="stat-label">{tr('Lines')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{totalFiles}</div>
-        <div className="stat-label">Files</div>
+        <div className="stat-label">{tr('Files')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{daysSpan}</div>
-        <div className="stat-label">Days</div>
+        <div className="stat-label">{tr('Days')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{msgsPerDay}</div>
-        <div className="stat-label">Msgs/Day</div>
+        <div className="stat-label">{tr('Msgs/Day')}</div>
       </div>
     </div>
   );

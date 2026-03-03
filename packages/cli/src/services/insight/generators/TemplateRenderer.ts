@@ -6,12 +6,26 @@
 
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
 import type { InsightData } from '../types/StaticInsightTypes.js';
+import type { SupportedLanguage } from '../../../i18n/index.js';
+
+// Language codes for HTML lang attribute
+const HTML_LANG_CODES: Record<SupportedLanguage, string> = {
+  en: 'en',
+  zh: 'zh-CN',
+  ja: 'ja',
+  de: 'de',
+  pt: 'pt-BR',
+  ru: 'ru',
+};
 
 export class TemplateRenderer {
+  constructor(private language: SupportedLanguage = 'en') {}
+
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
+    const htmlLang = HTML_LANG_CODES[this.language];
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${htmlLang}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -38,6 +52,7 @@ export class TemplateRenderer {
     <!-- Application Data -->
     <script>
       window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_LANGUAGE = ${JSON.stringify(this.language)};
     </script>
 
     <!-- App Script -->

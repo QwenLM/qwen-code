@@ -15,16 +15,22 @@ import type {
 } from '../types/StaticInsightTypes.js';
 
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import {
+  getCurrentLanguage,
+  type SupportedLanguage,
+} from '../../../i18n/index.js';
 
 const logger = createDebugLogger('StaticInsightGenerator');
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private language: SupportedLanguage;
 
   constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
-    this.templateRenderer = new TemplateRenderer();
+    this.language = getCurrentLanguage();
+    this.dataProcessor = new DataProcessor(config, this.language);
+    this.templateRenderer = new TemplateRenderer(this.language);
   }
 
   // Ensure the output directory exists
