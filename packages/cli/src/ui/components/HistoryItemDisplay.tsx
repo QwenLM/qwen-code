@@ -126,7 +126,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <WarningMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'error' && (
-        <ErrorMessage text={itemForDisplay.text} />
+        <ErrorMessage text={itemForDisplay.text} hint={itemForDisplay.hint} />
       )}
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />

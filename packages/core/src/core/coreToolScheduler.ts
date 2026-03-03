@@ -1088,12 +1088,21 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
-        await this.executeSingleToolCall(toolCall, signal);
-      }
+      // Execute all scheduled tool calls in parallel.
+      // For dependent operations, model-side prompt constraints should emit
+      // those calls across multiple turns instead of in a single batch.
+      await Promise.allSettled(
+        callsToExecute.map((toolCall) =>
+          this.executeSingleToolCall(toolCall, signal),
+        ),
+      );
     }
   }
 
+  /**
+   * Executes a single scheduled tool call.
+   * Handles status updates, error handling, and result processing.
+   */
   private async executeSingleToolCall(
     toolCall: ToolCall,
     signal: AbortSignal,
