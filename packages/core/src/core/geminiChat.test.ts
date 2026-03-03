@@ -145,11 +145,29 @@ describe('GeminiChat', async () => {
         /* consume */
       }
     })();
-    // Get assertion promise first (don't await), then advance timers to avoid deadlock.
-    const resultPromise =
+    // Get assertion promise first (don't await), then advance timers.
+    const resultPromise = (async () => {
       await expect(collecting).rejects.toThrow(InvalidStreamError);
+    })();
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(35_000);
     await resultPromise;
+  }
+
+  async function collectStreamWithFakeTimers(
+    stream: AsyncGenerator<StreamEvent>,
+    advanceByMs: number = 10_000,
+  ): Promise<StreamEvent[]> {
+    const events: StreamEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of stream) {
+        events.push(event);
+      }
+      return events;
+    })();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(advanceByMs);
+    return collecting;
   }
 
   describe('sendMessageStream', () => {
@@ -204,6 +222,47 @@ describe('GeminiChat', async () => {
       const modelTurn = history[1]!;
       expect(modelTurn?.parts?.length).toBe(1); // The empty part is discarded
       expect(modelTurn?.parts![0]!.functionCall).toBeDefined();
+    });
+
+    it('should fail if the stream ends with an empty part and has no finishReason', async () => {
+      vi.useFakeTimers();
+      try {
+        const streamWithNoFinish = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'Initial content...' }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: '' }],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          streamWithNoFinish,
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test message' },
+          'prompt-id-no-finish-empty-end',
+        );
+        await expectStreamExhaustion(stream);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should succeed if the stream ends with an invalid part but has a finishReason and contained a valid part', async () => {
@@ -789,74 +848,78 @@ describe('GeminiChat', async () => {
 
   describe('sendMessageStream with retries', () => {
     it('should retry on invalid content, succeed, and report metrics', async () => {
-      // Use mockImplementationOnce to provide a fresh, promise-wrapped generator for each attempt.
-      vi.mocked(mockContentGenerator.generateContentStream)
-        .mockImplementationOnce(async () =>
-          // First call returns an invalid stream
-          (async function* () {
-            yield {
-              candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid empty text part
-            } as unknown as GenerateContentResponse;
-          })(),
-        )
-        .mockImplementationOnce(async () =>
-          // Second call returns a valid stream
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: { parts: [{ text: 'Successful response' }] },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
+      vi.useFakeTimers();
+      try {
+        // Use mockImplementationOnce to provide a fresh, promise-wrapped generator for each attempt.
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockImplementationOnce(async () =>
+            // First call returns an invalid stream
+            (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid empty text part
+              } as unknown as GenerateContentResponse;
+            })(),
+          )
+          .mockImplementationOnce(async () =>
+            // Second call returns a valid stream
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Successful response' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-retry-success',
         );
+        const chunks = await collectStreamWithFakeTimers(stream);
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-retry-success',
-      );
-      const chunks: StreamEvent[] = [];
-      for await (const chunk of stream) {
-        chunks.push(chunk);
+        // Assertions
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+
+        // Check for a retry event
+        expect(chunks.some((c) => c.type === StreamEventType.RETRY)).toBe(true);
+
+        // Check for the successful content chunk
+        expect(
+          chunks.some(
+            (c) =>
+              c.type === StreamEventType.CHUNK &&
+              c.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Successful response',
+          ),
+        ).toBe(true);
+
+        // Check that history was recorded correctly once, with no duplicates.
+        const history = chat.getHistory();
+        expect(history.length).toBe(2);
+        expect(history[0]).toEqual({
+          role: 'user',
+          parts: [{ text: 'test' }],
+        });
+        expect(history[1]).toEqual({
+          role: 'model',
+          parts: [{ text: 'Successful response' }],
+        });
+
+        // Verify that token counting is not called when usageMetadata is missing
+        expect(
+          uiTelemetryService.setLastPromptTokenCount,
+        ).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
       }
-
-      // Assertions
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-      expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        2,
-      );
-
-      // Check for a retry event
-      expect(chunks.some((c) => c.type === StreamEventType.RETRY)).toBe(true);
-
-      // Check for the successful content chunk
-      expect(
-        chunks.some(
-          (c) =>
-            c.type === StreamEventType.CHUNK &&
-            c.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Successful response',
-        ),
-      ).toBe(true);
-
-      // Check that history was recorded correctly once, with no duplicates.
-      const history = chat.getHistory();
-      expect(history.length).toBe(2);
-      expect(history[0]).toEqual({
-        role: 'user',
-        parts: [{ text: 'test' }],
-      });
-      expect(history[1]).toEqual({
-        role: 'model',
-        parts: [{ text: 'Successful response' }],
-      });
-
-      // Verify that token counting is not called when usageMetadata is missing
-      expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
     });
 
     it('should fail after all retries on persistent invalid content and report metrics', async () => {
@@ -906,55 +969,57 @@ describe('GeminiChat', async () => {
     });
 
     it('should retry usage-only empty streams and succeed on a later attempt', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream)
-        .mockImplementationOnce(async () =>
-          (async function* () {
-            yield {
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 0,
-                totalTokenCount: 10,
-              },
-            } as unknown as GenerateContentResponse;
-          })(),
-        )
-        .mockImplementationOnce(async () =>
-          (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'Recovered after empty stream' }],
-                  },
-                  finishReason: 'STOP',
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockImplementationOnce(async () =>
+            (async function* () {
+              yield {
+                usageMetadata: {
+                  promptTokenCount: 10,
+                  candidatesTokenCount: 0,
+                  totalTokenCount: 10,
                 },
-              ],
-            } as unknown as GenerateContentResponse;
-          })(),
+              } as unknown as GenerateContentResponse;
+            })(),
+          )
+          .mockImplementationOnce(async () =>
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered after empty stream' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-empty-usage-retry',
         );
+        const events = await collectStreamWithFakeTimers(stream);
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-empty-usage-retry',
-      );
-      const events: StreamEvent[] = [];
-      for await (const event of stream) {
-        events.push(event);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered after empty stream',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
       }
-
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        2,
-      );
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-      expect(
-        events.some(
-          (e) =>
-            e.type === StreamEventType.CHUNK &&
-            e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Recovered after empty stream',
-        ),
-      ).toBe(true);
     });
 
     it('should retry on TPM throttling StreamContentError with fixed delay', async () => {
