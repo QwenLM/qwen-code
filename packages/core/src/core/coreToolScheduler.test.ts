@@ -2330,6 +2330,67 @@ describe('CoreToolScheduler Parallel Execution', () => {
     // Use 90ms as threshold to be safe against CI timing jitter.
     expect(totalTime).toBeLessThan(90);
   });
+
+  it('should finish two independent task-like calls in roughly the longest duration (10s + 5s -> ~10s)', async () => {
+    vi.useFakeTimers();
+    try {
+      const executeFn = vi
+        .fn()
+        .mockImplementation(async (args: { delayMs: number }) => {
+          await new Promise((resolve) => setTimeout(resolve, args.delayMs));
+          return { llmContent: 'Done' };
+        });
+
+      const mockTool = new MockTool({ name: 'mockTool', execute: executeFn });
+      const mockToolRegistry = createMockToolRegistry(mockTool);
+      const onAllToolCallsComplete = vi.fn();
+
+      const scheduler = new CoreToolScheduler({
+        config: createMockConfig(mockToolRegistry),
+        onAllToolCallsComplete,
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const abortController = new AbortController();
+      const requests = [
+        {
+          callId: 'task-1',
+          name: 'mockTool',
+          args: { delayMs: 10_000 },
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'task-2',
+          name: 'mockTool',
+          args: { delayMs: 5_000 },
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+      ];
+
+      const schedulePromise = scheduler.schedule(
+        requests,
+        abortController.signal,
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await schedulePromise;
+
+      expect(onAllToolCallsComplete).toHaveBeenCalledTimes(1);
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(2);
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('truncateAndSaveToFile', () => {
