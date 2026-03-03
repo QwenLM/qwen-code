@@ -145,7 +145,7 @@ describe('GeminiChat', async () => {
         /* consume */
       }
     })();
-    // Register rejection handler BEFORE advancing timers to avoid unhandled rejection.
+    // Get assertion promise first (don't await), then advance timers to avoid deadlock.
     const resultPromise =
       await expect(collecting).rejects.toThrow(InvalidStreamError);
     await vi.advanceTimersByTimeAsync(35_000);
