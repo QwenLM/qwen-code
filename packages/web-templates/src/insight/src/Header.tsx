@@ -1,6 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
+import type { InsightTranslations } from './translations';
 
 // Header Component
 export function Header({
@@ -27,7 +28,13 @@ export function Header({
   );
 }
 
-export function StatsRow({ data }: { data: InsightData }) {
+export function StatsRow({
+  data,
+  t,
+}: {
+  data: InsightData;
+  t: InsightTranslations;
+}) {
   const {
     totalMessages = 0,
     totalLinesAdded = 0,
@@ -54,25 +61,25 @@ export function StatsRow({ data }: { data: InsightData }) {
     <div className="stats-row">
       <div className="stat">
         <div className="stat-value">{totalMessages}</div>
-        <div className="stat-label">Messages</div>
+        <div className="stat-label">{t.statMessages}</div>
       </div>
       <div className="stat">
         <div className="stat-value">
           +{totalLinesAdded}/-{totalLinesRemoved}
         </div>
-        <div className="stat-label">Lines</div>
+        <div className="stat-label">{t.statLines}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{totalFiles}</div>
-        <div className="stat-label">Files</div>
+        <div className="stat-label">{t.statFiles}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{daysSpan}</div>
-        <div className="stat-label">Days</div>
+        <div className="stat-label">{t.statDays}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{msgsPerDay}</div>
-        <div className="stat-label">Msgs/Day</div>
+        <div className="stat-label">{t.statMsgsPerDay}</div>
       </div>
     </div>
   );

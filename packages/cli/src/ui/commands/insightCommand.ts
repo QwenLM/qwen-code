@@ -13,6 +13,7 @@ import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { resolveOutputLanguage } from '../../utils/languageUtils.js';
 import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
@@ -27,6 +28,11 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
+      // Get the user's output language setting
+      const outputLanguageSetting =
+        context.services?.settings?.merged?.general?.outputLanguage;
+      const language = resolveOutputLanguage(outputLanguageSetting);
+
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
@@ -53,6 +59,15 @@ export const insightCommand: SlashCommand = {
         context.ui.setPendingItem(progressItem);
       };
 
+      // Show language indicator message
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', { language }),
+        },
+        Date.now(),
+      );
+
       context.ui.addItem(
         {
           type: MessageType.INFO,
@@ -68,6 +83,7 @@ export const insightCommand: SlashCommand = {
       const outputPath = await insightGenerator.generateStaticInsight(
         projectsDir,
         updateProgress,
+        language,
       );
 
       // Clear pending item

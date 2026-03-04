@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
 import { StatsRow } from './Header';
 import {
@@ -15,6 +15,7 @@ import {
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
 import type { InsightData } from './types';
+import { getTranslations, interpolateTranslation } from './translations';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -22,6 +23,9 @@ import React from 'react';
 function InsightApp({ data }: { data: InsightData }) {
   const [cardTheme, setCardTheme] = useState<Theme>('dark');
   const pendingExport = useRef(false);
+
+  // Get translations based on the language in data
+  const t = useMemo(() => getTranslations(data.language), [data.language]);
 
   const performExport = async () => {
     const card = document.getElementById('share-card');
@@ -96,33 +100,39 @@ function InsightApp({ data }: { data: InsightData }) {
     dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
   }
 
+  // Generate subtitle
+  const subtitle = data.totalMessages
+    ? interpolateTranslation(t.headerSubtitle, {
+        messages: data.totalMessages.toLocaleString(),
+        sessions: data.totalSessions?.toLocaleString() || '0',
+      })
+    : t.headerSubtitleFallback;
+
   return (
     <div>
       {/* Elegant Header */}
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">Qwen Code Insights</h1>
+            <h1 className="header-title">{t.headerTitle}</h1>
             <p className="header-subtitle">
-              {data.totalMessages
-                ? `${data.totalMessages.toLocaleString()} messages across ${data.totalSessions?.toLocaleString()} sessions`
-                : 'Your personalized coding journey and patterns'}
+              {subtitle}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
 
-          <ExportCardButton onExport={handleExportWithTheme} />
+          <ExportCardButton t={t} onExport={handleExportWithTheme} />
         </div>
       </header>
 
       {data.qualitative && (
         <>
-          <AtAGlance qualitative={data.qualitative} />
-          <NavToc />
+          <AtAGlance qualitative={data.qualitative} t={t} />
+          <NavToc t={t} />
         </>
       )}
 
-      <StatsRow data={data} />
+      <StatsRow data={data} t={t} />
 
       {data.qualitative && (
         <>
@@ -130,13 +140,18 @@ function InsightApp({ data }: { data: InsightData }) {
             qualitative={data.qualitative}
             topGoals={data.topGoals}
             topTools={data.topTools}
+            t={t}
           />
         </>
       )}
 
       {data.qualitative && (
         <>
-          <InteractionStyle qualitative={data.qualitative} insights={data} />
+          <InteractionStyle
+            qualitative={data.qualitative}
+            insights={data}
+            t={t}
+          />
         </>
       )}
 
@@ -146,14 +161,16 @@ function InsightApp({ data }: { data: InsightData }) {
             qualitative={data.qualitative}
             primarySuccess={data.primarySuccess!}
             outcomes={data.outcomes!}
+            t={t}
           />
           <FrictionPoints
             qualitative={data.qualitative}
             satisfaction={data.satisfaction}
             friction={data.friction}
+            t={t}
           />
-          <Improvements qualitative={data.qualitative} />
-          <FutureOpportunities qualitative={data.qualitative} />
+          <Improvements qualitative={data.qualitative} t={t} />
+          <FutureOpportunities qualitative={data.qualitative} t={t} />
           <MemorableMoment qualitative={data.qualitative} />
         </>
       )}
@@ -164,7 +181,13 @@ function InsightApp({ data }: { data: InsightData }) {
 }
 
 // Export Card Button with theme dropdown
-function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
+function ExportCardButton({
+  t,
+  onExport,
+}: {
+  t: ReturnType<typeof getTranslations>;
+  onExport: (theme: Theme) => void;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -205,7 +228,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>Export Card</span>
+        <span>{t.exportCard}</span>
         <svg
           width="12"
           height="12"
@@ -247,7 +270,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>Light Theme</span>
+            <span>{t.lightTheme}</span>
           </button>
           <button
             className="export-dropdown-item"
@@ -265,7 +288,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
             >
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span>Dark Theme</span>
+            <span>{t.darkTheme}</span>
           </button>
         </div>
       )}

@@ -1463,4 +1463,24 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+
+  // ============================================================================
+  // Insight Command
+  // ============================================================================
+  'Generating insights...': 'Генерация инсайтов...',
+  'Generating insights in {{language}}...':
+    'Генерация инсайтов на {{language}}...',
+  'generate personalized programming insights from your chat history':
+    'сгенерировать персонализированные инсайты по программированию из истории чата',
+  'This may take a couple minutes. Sit tight!':
+    'Это может занять несколько минут. Пожалуйста, подождите!',
+  'Starting insight generation...': 'Запуск генерации инсайтов...',
+  'Insight report generated successfully!': 'Отчёт с инсайтами успешно создан!',
+  'Opening insights in your browser: {{path}}':
+    'Открытие инсайтов в браузере: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Инсайты созданы: {{path}}. Пожалуйста, откройте этот файл в браузере.',
+  'Insights ready.': 'Инсайты готовы.',
+  'Failed to generate insights: {{error}}':
+    'Не удалось создать инсайты: {{error}}',
 };

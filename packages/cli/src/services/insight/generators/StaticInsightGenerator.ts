@@ -94,6 +94,7 @@ export class StaticInsightGenerator {
   async generateStaticInsight(
     baseDir: string,
     onProgress?: InsightProgressCallback,
+    language?: string,
   ): Promise<string> {
     // Ensure output directory exists
     const outputDir = await this.ensureOutputDirectory();
@@ -105,6 +106,7 @@ export class StaticInsightGenerator {
       baseDir,
       facetsDir,
       onProgress,
+      language,
     );
 
     // Render HTML

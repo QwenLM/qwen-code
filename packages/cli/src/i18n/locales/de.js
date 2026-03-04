@@ -1459,4 +1459,25 @@ export default {
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
+
+  // ============================================================================
+  // Insight Command
+  // ============================================================================
+  'Generating insights...': 'Erstelle Einblicke...',
+  'Generating insights in {{language}}...':
+    'Erstelle Einblicke auf {{language}}...',
+  'generate personalized programming insights from your chat history':
+    'personalisierte Programmier-Einblicke aus Ihrem Chat-Verlauf erstellen',
+  'This may take a couple minutes. Sit tight!':
+    'Dies kann einige Minuten dauern. Bitte warten!',
+  'Starting insight generation...': 'Starte Erstellung der Einblicke...',
+  'Insight report generated successfully!':
+    'Einblicks-Bericht erfolgreich erstellt!',
+  'Opening insights in your browser: {{path}}':
+    'Öffne Einblicke im Browser: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Einblicke erstellt unter: {{path}}. Bitte öffnen Sie diese Datei in Ihrem Browser.',
+  'Insights ready.': 'Einblicke bereit.',
+  'Failed to generate insights: {{error}}':
+    'Fehler beim Erstellen der Einblicke: {{error}}',
 };

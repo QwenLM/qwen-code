@@ -966,4 +966,25 @@ export default {
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+
+  // ============================================================================
+  // Insight Command
+  // ============================================================================
+  'Generating insights...': 'インサイトを生成中...',
+  'Generating insights in {{language}}...':
+    '{{language}} でインサイトを生成中...',
+  'generate personalized programming insights from your chat history':
+    'チャット履歴からパーソナライズされたプログラミングインサイトを生成',
+  'This may take a couple minutes. Sit tight!':
+    '数分かかる場合があります。しばらくお待ちください。',
+  'Starting insight generation...': 'インサイト生成を開始...',
+  'Insight report generated successfully!':
+    'インサイトレポートが正常に生成されました！',
+  'Opening insights in your browser: {{path}}':
+    'ブラウザでインサイトを開いています：{{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'インサイトが生成されました：{{path}}。ブラウザでこのファイルを開いてください。',
+  'Insights ready.': 'インサイトの準備ができました。',
+  'Failed to generate insights: {{error}}':
+    'インサイトの生成に失敗しました：{{error}}',
 };
