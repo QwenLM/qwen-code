@@ -13,6 +13,8 @@ import {
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
+import { RedactingContentGenerator } from './redactingContentGenerator/redactingContentGenerator.js';
+import { RedactionManager } from '../security/redaction.js';
 
 vi.mock('@google/genai');
 
@@ -22,6 +24,7 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => true,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
+      getRedactionManager: () => new RedactionManager(undefined),
     } as unknown as Config;
 
     const mockGenerator = {
@@ -46,10 +49,10 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    // We expect it to be a LoggingContentGenerator wrapping a GeminiContentGenerator
-    expect(generator).toBeInstanceOf(LoggingContentGenerator);
-    const wrapped = (generator as LoggingContentGenerator).getWrapped();
-    expect(wrapped).toBeDefined();
+    // We expect it to be a RedactingContentGenerator wrapping a LoggingContentGenerator
+    expect(generator).toBeInstanceOf(RedactingContentGenerator);
+    const wrapped = (generator as RedactingContentGenerator).getWrapped();
+    expect(wrapped).toBeInstanceOf(LoggingContentGenerator);
   });
 
   it('should create a Gemini content generator with client install id logging disabled', async () => {
@@ -57,6 +60,7 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => false,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
+      getRedactionManager: () => new RedactionManager(undefined),
     } as unknown as Config;
     const mockGenerator = {
       models: {},
@@ -79,7 +83,7 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    expect(generator).toBeInstanceOf(LoggingContentGenerator);
+    expect(generator).toBeInstanceOf(RedactingContentGenerator);
   });
 });
 
