@@ -14,6 +14,12 @@ import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { DefaultHookOutput } from './types.js';
 import { createHookOutput } from './types.js';
+import type {
+  SessionStartSource,
+  SessionEndReason,
+  PermissionMode,
+  AgentType,
+} from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -98,6 +104,32 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('Stop', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+    model: string,
+    permissionMode?: PermissionMode,
+    agentType?: AgentType,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionStartEvent(
+      source,
+      model,
+      permissionMode,
+      agentType,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionStart', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionEndEvent(reason);
+    return result.finalOutput
+      ? createHookOutput('SessionEnd', result.finalOutput)
       : undefined;
   }
 }

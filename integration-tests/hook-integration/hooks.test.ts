@@ -7,6 +7,8 @@ import { TestRig, validateModelOutput } from '../test-helper.js';
  * Tests for complete hook system flow including:
  * - UserPromptSubmit hooks: Triggered before prompt is sent to LLM
  * - Stop hooks: Triggered when agent is about to stop
+ * - SessionStart hooks: Triggered when a new session starts (Startup, Resume, Clear, Compact)
+ * - SessionEnd hooks: Triggered when a session ends (Clear, Logout, PromptInputExit)
  *
  * Test categories:
  * - Single hook scenarios (allow, block, modify, context, etc.)
@@ -1836,6 +1838,1059 @@ console.log(JSON.stringify({
   });
 
   // ==========================================================================
+  // SessionStart Hooks
+  // Triggered when a new session starts (Startup, Resume, Clear, Compact)
+  // ==========================================================================
+  describe('SessionStart Hooks', () => {
+    describe('Allow Decision', () => {
+      it('should allow session start when hook returns allow decision (Startup source)', async () => {
+        const allowScript = `console.log(JSON.stringify({decision: 'allow', reason: 'Session startup approved'}));`;
+
+        await rig.setup('session-start-allow-startup', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-start-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should allow session start with additional context', async () => {
+        const contextScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session context from hook'}}));`;
+
+        await rig.setup('session-start-add-context', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${contextScript}"`,
+                      name: 'session-start-context-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say context test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Block Decision', () => {
+      it('should block session start when hook returns block decision', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Session blocked by security policy'}));`;
+
+        await rig.setup('session-start-block-decision', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-start-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should block session start with custom reason', async () => {
+        const blockReasonScript = `console.log(JSON.stringify({decision: 'block', reason: 'Custom block reason: unauthorized user'}));`;
+
+        await rig.setup('session-start-block-custom-reason', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockReasonScript}"`,
+                      name: 'session-start-block-reason-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+    });
+
+    describe('System Message', () => {
+      it('should include system message when hook provides it', async () => {
+        const systemMsgScript = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message from SessionStart hook'}));`;
+
+        await rig.setup('session-start-system-message', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${systemMsgScript}"`,
+                      name: 'session-start-system-msg-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say system message test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Input Format Validation', () => {
+      it('should receive properly formatted input with session start source', async () => {
+        const inputValidationScript = `
+const input = JSON.parse(process.argv[2] || '{}');
+const hasRequired = input.session_id && input.cwd && input.hook_event_name && input.source && input.model;
+console.log(JSON.stringify({
+  decision: 'allow',
+  hookSpecificOutput: { 
+    additionalContext: hasRequired ? 'Valid SessionStart input: ' + input.source : 'Invalid input format'
+  }
+}));
+`;
+
+        await rig.setup('session-start-correct-input', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${inputValidationScript.replace(/\n/g, ' ')}"`,
+                      name: 'session-start-input-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say input test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Timeout Handling', () => {
+      it('should continue session start when hook times out', async () => {
+        await rig.setup('session-start-timeout', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 60',
+                      name: 'session-start-timeout-hook',
+                      timeout: 1000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say timeout test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Error Handling', () => {
+      it('should continue session start when hook exits with non-blocking error', async () => {
+        await rig.setup('session-start-nonblocking-error', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'echo warning && exit 1',
+                      name: 'session-start-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say error test');
+        expect(result).toBeDefined();
+      });
+
+      it('should continue session start when hook command does not exist', async () => {
+        await rig.setup('session-start-missing-command', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/session/start/command',
+                      name: 'session-start-missing-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say missing test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Multiple SessionStart Hooks', () => {
+      it('should block when one of multiple parallel hooks returns block', async () => {
+        const allowScript = `console.log(JSON.stringify({decision: 'allow', reason: 'Allowed'}));`;
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked by security policy'}));`;
+
+        await rig.setup('session-start-multi-one-blocks', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-start-allow-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-start-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should block when first sequential hook returns block', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'First hook blocks'}));`;
+        const allowScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+
+        await rig.setup('session-start-seq-first-blocks', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-start-seq-block-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-start-seq-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle multiple hooks all returning allow', async () => {
+        const allow1Script = `console.log(JSON.stringify({decision: 'allow', reason: 'First allows'}));`;
+        const allow2Script = `console.log(JSON.stringify({decision: 'allow', reason: 'Second allows'}));`;
+
+        await rig.setup('session-start-multi-all-allow', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allow1Script}"`,
+                      name: 'session-start-allow-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${allow2Script}"`,
+                      name: 'session-start-allow-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should concatenate additional context from multiple hooks', async () => {
+        const context1Script = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'context from session start hook 1'}}));`;
+        const context2Script = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'context from session start hook 2'}}));`;
+
+        await rig.setup('session-start-multi-context', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${context1Script}"`,
+                      name: 'session-start-context-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${context2Script}"`,
+                      name: 'session-start-context-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+      });
+
+      it('should handle hook with error alongside blocking hook', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked'}));`;
+
+        await rig.setup('session-start-error-with-block', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/command',
+                      name: 'session-start-error-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-start-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle hook timeout alongside blocking hook', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked while other times out'}));`;
+
+        await rig.setup('session-start-timeout-with-block', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 60',
+                      name: 'session-start-timeout-hook',
+                      timeout: 1000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-start-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle system messages from multiple hooks', async () => {
+        const msg1Script = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message 1 from SessionStart'}));`;
+        const msg2Script = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message 2 from SessionStart'}));`;
+
+        await rig.setup('session-start-multi-system-msg', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${msg1Script}"`,
+                      name: 'session-start-msg-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${msg2Script}"`,
+                      name: 'session-start-msg-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
+  // SessionEnd Hooks
+  // Triggered when a session ends (Clear, Logout, PromptInputExit)
+  // ==========================================================================
+  describe('SessionEnd Hooks', () => {
+    describe('Allow Decision', () => {
+      it('should allow session end when hook returns allow decision', async () => {
+        const allowScript = `console.log(JSON.stringify({decision: 'allow', reason: 'Session end approved'}));`;
+
+        await rig.setup('session-end-allow', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-end-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+      });
+
+      it('should allow session end with additional context', async () => {
+        const contextScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session end context from hook'}}));`;
+
+        await rig.setup('session-end-add-context', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${contextScript}"`,
+                      name: 'session-end-context-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say context test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Block Decision', () => {
+      it('should block session end when hook returns block decision', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Session end blocked by security policy'}));`;
+
+        await rig.setup('session-end-block-decision', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-end-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should block session end with custom reason', async () => {
+        const blockReasonScript = `console.log(JSON.stringify({decision: 'block', reason: 'Custom block reason: session audit required'}));`;
+
+        await rig.setup('session-end-block-custom-reason', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockReasonScript}"`,
+                      name: 'session-end-block-reason-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+    });
+
+    describe('System Message', () => {
+      it('should include system message when hook provides it', async () => {
+        const systemMsgScript = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message from SessionEnd hook'}));`;
+
+        await rig.setup('session-end-system-message', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${systemMsgScript}"`,
+                      name: 'session-end-system-msg-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say system message test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Input Format Validation', () => {
+      it('should receive properly formatted input with session end reason', async () => {
+        const inputValidationScript = `
+const input = JSON.parse(process.argv[2] || '{}');
+const hasRequired = input.session_id && input.cwd && input.hook_event_name && input.reason;
+console.log(JSON.stringify({
+  decision: 'allow',
+  hookSpecificOutput: { 
+    additionalContext: hasRequired ? 'Valid SessionEnd input: ' + input.reason : 'Invalid input format'
+  }
+}));
+`;
+
+        await rig.setup('session-end-correct-input', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${inputValidationScript.replace(/\n/g, ' ')}"`,
+                      name: 'session-end-input-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say input test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Timeout Handling', () => {
+      it('should continue session end when hook times out', async () => {
+        await rig.setup('session-end-timeout', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 60',
+                      name: 'session-end-timeout-hook',
+                      timeout: 1000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say timeout test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Error Handling', () => {
+      it('should continue session end when hook exits with non-blocking error', async () => {
+        await rig.setup('session-end-nonblocking-error', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'echo warning && exit 1',
+                      name: 'session-end-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say error test');
+        expect(result).toBeDefined();
+      });
+
+      it('should continue session end when hook command does not exist', async () => {
+        await rig.setup('session-end-missing-command', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/session/end/command',
+                      name: 'session-end-missing-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say missing test');
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Multiple SessionEnd Hooks', () => {
+      it('should block when one of multiple parallel hooks returns block', async () => {
+        const allowScript = `console.log(JSON.stringify({decision: 'allow', reason: 'Allowed'}));`;
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked by security policy'}));`;
+
+        await rig.setup('session-end-multi-one-blocks', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-end-allow-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-end-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should block when first sequential hook returns block', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'First hook blocks'}));`;
+        const allowScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+
+        await rig.setup('session-end-seq-first-blocks', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-end-seq-block-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${allowScript}"`,
+                      name: 'session-end-seq-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle multiple hooks all returning allow', async () => {
+        const allow1Script = `console.log(JSON.stringify({decision: 'allow', reason: 'First allows'}));`;
+        const allow2Script = `console.log(JSON.stringify({decision: 'allow', reason: 'Second allows'}));`;
+
+        await rig.setup('session-end-multi-all-allow', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${allow1Script}"`,
+                      name: 'session-end-allow-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${allow2Script}"`,
+                      name: 'session-end-allow-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should concatenate additional context from multiple hooks', async () => {
+        const context1Script = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'context from session end hook 1'}}));`;
+        const context2Script = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'context from session end hook 2'}}));`;
+
+        await rig.setup('session-end-multi-context', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${context1Script}"`,
+                      name: 'session-end-context-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${context2Script}"`,
+                      name: 'session-end-context-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+      });
+
+      it('should handle hook with error alongside blocking hook', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked'}));`;
+
+        await rig.setup('session-end-error-with-block', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/command',
+                      name: 'session-end-error-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-end-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle hook timeout alongside blocking hook', async () => {
+        const blockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Blocked while other times out'}));`;
+
+        await rig.setup('session-end-timeout-with-block', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 60',
+                      name: 'session-end-timeout-hook',
+                      timeout: 1000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${blockScript}"`,
+                      name: 'session-end-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say test');
+        expect(result).toBeDefined();
+        expect(result.toLowerCase()).toContain('block');
+      });
+
+      it('should handle system messages from multiple hooks', async () => {
+        const msg1Script = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message 1 from SessionEnd'}));`;
+        const msg2Script = `console.log(JSON.stringify({decision: 'allow', systemMessage: 'System message 2 from SessionEnd'}));`;
+
+        await rig.setup('session-end-multi-system-msg', {
+          settings: {
+            hooks: {
+              enabled: true,
+              SessionEnd: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `node -e "${msg1Script}"`,
+                      name: 'session-end-msg-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: `node -e "${msg2Script}"`,
+                      name: 'session-end-msg-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run('Say hello');
+        expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
   // Combined Hooks
   // Tests for using multiple hook types (UserPromptSubmit + Stop) together
   // ==========================================================================
@@ -1878,6 +2933,346 @@ console.log(JSON.stringify({
       });
 
       const result = await rig.run('Say both hooks');
+      expect(result).toBeDefined();
+    });
+
+    it('should execute SessionStart, SessionEnd, UserPromptSubmit, and Stop hooks in same session', async () => {
+      const sessionStartScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session start hook executed'}}));`;
+      const sessionEndScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session end hook executed'}}));`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'UPS hook executed'}}));`;
+      const stopScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Stop hook executed'}}));`;
+
+      await rig.setup('combined-all-hooks', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionStartScript}"`,
+                    name: 'session-start-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            SessionEnd: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionEndScript}"`,
+                    name: 'session-end-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${stopScript}"`,
+                    name: 'stop-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say all hooks test');
+      expect(result).toBeDefined();
+    });
+
+    it('should block session when SessionStart hook returns block', async () => {
+      const sessionStartBlockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Session start blocked'}));`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+
+      await rig.setup('combined-session-start-blocks', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionStartBlockScript}"`,
+                    name: 'session-start-block-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say test');
+      expect(result).toBeDefined();
+      expect(result.toLowerCase()).toContain('block');
+    });
+
+    it('should block session when SessionEnd hook returns block', async () => {
+      const sessionEndBlockScript = `console.log(JSON.stringify({decision: 'block', reason: 'Session end blocked'}));`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+
+      await rig.setup('combined-session-end-blocks', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionEnd: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionEndBlockScript}"`,
+                    name: 'session-end-block-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say test');
+      expect(result).toBeDefined();
+      expect(result.toLowerCase()).toContain('block');
+    });
+
+    it('should handle multiple hooks of different types all returning allow', async () => {
+      const sessionStartScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session start allows'}}));`;
+      const sessionEndScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Session end allows'}}));`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'UPS allows'}}));`;
+      const stopScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Stop allows'}}));`;
+
+      await rig.setup('combined-multi-all-allow', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionStartScript}"`,
+                    name: 'session-start-allow',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            SessionEnd: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionEndScript}"`,
+                    name: 'session-end-allow',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-allow',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${stopScript}"`,
+                    name: 'stop-allow',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say all allow test');
+      expect(result).toBeDefined();
+      expect(result.length).toBeGreaterThan(0);
+    });
+
+    it('should handle error in one hook type while others succeed', async () => {
+      const sessionStartErrorScript = `node -e "console.log(JSON.stringify({decision: 'allow'})); process.exit(1)"`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+      const stopScript = `console.log(JSON.stringify({decision: 'allow'}));`;
+
+      await rig.setup('combined-error-one-type', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: sessionStartErrorScript,
+                    name: 'session-start-error-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${stopScript}"`,
+                    name: 'stop-hook',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say error test');
+      expect(result).toBeDefined();
+    });
+
+    it('should concatenate additional context from all hook types', async () => {
+      const sessionStartScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Context from SessionStart'}}));`;
+      const sessionEndScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Context from SessionEnd'}}));`;
+      const upsScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Context from UPS'}}));`;
+      const stopScript = `console.log(JSON.stringify({decision: 'allow', hookSpecificOutput: {additionalContext: 'Context from Stop'}}));`;
+
+      await rig.setup('combined-all-context', {
+        settings: {
+          hooks: {
+            enabled: true,
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionStartScript}"`,
+                    name: 'session-start-context',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            SessionEnd: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${sessionEndScript}"`,
+                    name: 'session-end-context',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            UserPromptSubmit: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${upsScript}"`,
+                    name: 'ups-context',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node -e "${stopScript}"`,
+                    name: 'stop-context',
+                    timeout: 5000,
+                  },
+                ],
+              },
+            ],
+          },
+          trusted: true,
+        },
+      });
+
+      const result = await rig.run('Say context test');
       expect(result).toBeDefined();
     });
   });

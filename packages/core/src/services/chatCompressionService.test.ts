@@ -16,6 +16,7 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
+import { SessionStartSource } from '../hooks/types.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -107,16 +108,27 @@ describe('ChatCompressionService', () => {
   let mockConfig: Config;
   const mockModel = 'gemini-pro';
   const mockPromptId = 'test-prompt-id';
+  let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
+  let mockGetHookSystem: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     service = new ChatCompressionService();
     mockChat = {
       getHistory: vi.fn(),
     } as unknown as GeminiChat;
+    mockFireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    mockGetHookSystem = vi.fn().mockReturnValue({
+      fireSessionStartEvent: mockFireSessionStartEvent,
+    });
     mockConfig = {
       getChatCompression: vi.fn(),
       getContentGenerator: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getHookSystem: mockGetHookSystem,
+      getModel: () => 'test-model',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+      }),
     } as unknown as Config;
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
@@ -274,6 +286,11 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).not.toBeNull();
     expect(result.newHistory![0].parts![0].text).toBe('Summary');
     expect(mockGenerateContent).toHaveBeenCalled();
+    expect(mockGetHookSystem).toHaveBeenCalled();
+    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
+      SessionStartSource.Compact,
+      'test-model',
+    );
   });
 
   it('should force compress even if under threshold', async () => {
@@ -317,6 +334,10 @@ describe('ChatCompressionService', () => {
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.newHistory).not.toBeNull();
+    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
+      SessionStartSource.Compact,
+      'test-model',
+    );
   });
 
   it('should return FAILED if new token count is inflated', async () => {
@@ -480,5 +501,98 @@ describe('ChatCompressionService', () => {
       CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
     );
     expect(result.newHistory).toBeNull();
+  });
+
+  it('should not fire SessionStart event when compression fails', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(10);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1,
+        candidatesTokenCount: 20,
+        totalTokenCount: 21,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      true,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+  });
+
+  it('should handle SessionStart hook errors gracefully', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    mockFireSessionStartEvent.mockRejectedValue(
+      new Error('SessionStart hook failed'),
+    );
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    // Should still complete compression despite hook error
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
   });
 });

@@ -15,7 +15,13 @@ import type {
   HookExecutionResult,
   UserPromptSubmitInput,
   StopInput,
+  SessionStartInput,
+  SessionEndInput,
+  SessionStartSource,
+  SessionEndReason,
+  AgentType,
 } from './types.js';
+import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -71,6 +77,42 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input);
+  }
+
+  /**
+   * Fire a SessionStart event
+   * Called when a new session starts or resumes
+   */
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+    model: string,
+    permissionMode?: PermissionMode,
+    agentType?: AgentType,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionStartInput = {
+      ...this.createBaseInput(HookEventName.SessionStart),
+      permission_mode: permissionMode ?? PermissionMode.Default,
+      source,
+      model,
+      agent_type: agentType,
+    };
+
+    return this.executeHooks(HookEventName.SessionStart, input);
+  }
+
+  /**
+   * Fire a SessionEnd event
+   * Called when a session ends
+   */
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionEndInput = {
+      ...this.createBaseInput(HookEventName.SessionEnd),
+      reason,
+    };
+
+    return this.executeHooks(HookEventName.SessionEnd, input);
   }
 
   /**

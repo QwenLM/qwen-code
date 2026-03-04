@@ -524,18 +524,18 @@ export enum SessionStartSource {
 export enum PermissionMode {
   Default = 'default',
   Plan = 'plan',
-  AcceptEdit = 'accept_edit',
-  DontAsk = 'dont_ask',
-  BypassPermissions = 'bypass_permissions',
+  AutoEdit = 'auto_edit',
+  Yolo = 'yolo',
 }
 
 /**
  * SessionStart hook input
  */
 export interface SessionStartInput extends HookInput {
-  permission_mode?: PermissionMode;
+  permission_mode: PermissionMode;
   source: SessionStartSource;
-  model?: string;
+  model: string;
+  agent_type?: AgentType;
 }
 
 /**

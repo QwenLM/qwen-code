@@ -63,6 +63,8 @@ describe('HookSystem', () => {
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
       fireStopEvent: vi.fn(),
+      fireSessionStartEvent: vi.fn(),
+      fireSessionEndEvent: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -323,6 +325,143 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('Some additional context');
+    });
+  });
+
+  describe('fireSessionStartEvent', () => {
+    it('should fire session start event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSessionStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionStartEvent('manual', 'gpt-4');
+
+      expect(mockHookEventHandler.fireSessionStartEvent).toHaveBeenCalledWith(
+        'manual',
+        'gpt-4',
+        undefined,
+        undefined,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSessionStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireSessionStartEvent(
+        'api_call',
+        'claude-3',
+        'auto_edit', // Using actual enum value from PermissionMode
+        'chat',
+      );
+
+      expect(mockHookEventHandler.fireSessionStartEvent).toHaveBeenCalledWith(
+        'api_call',
+        'claude-3',
+        'auto_edit',
+        'chat',
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireSessionStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionStartEvent('manual', 'gpt-4');
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('fireSessionEndEvent', () => {
+    it('should fire session end event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSessionEndEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionEndEvent('user_quit');
+
+      expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
+        'user_quit',
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass reason to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSessionEndEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireSessionEndEvent('timeout');
+
+      expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
+        'timeout',
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireSessionEndEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSessionEndEvent('normal_exit');
+
+      expect(result).toBeUndefined();
     });
   });
 });

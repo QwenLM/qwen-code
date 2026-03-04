@@ -7,7 +7,11 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+import {
+  uiTelemetryService,
+  SessionEndReason,
+  SessionStartSource,
+} from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -20,6 +24,15 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     if (config) {
+      // Fire SessionEnd event before clearing (current session ends)
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionEndEvent(SessionEndReason.Clear);
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
+      }
+
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session
@@ -39,6 +52,18 @@ export const clearCommand: SlashCommand = {
         await geminiClient.resetChat();
       } else {
         context.ui.setDebugMessage(t('Starting a new session and clearing.'));
+      }
+
+      // Fire SessionStart event after clearing (new session starts)
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(
+            SessionStartSource.Clear,
+            config.getModel() ?? '',
+          );
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       }
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
