@@ -283,6 +283,7 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    outputLanguage?: string,
   ): Promise<InsightData> {
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
@@ -298,7 +299,11 @@ export class DataProcessor {
     );
 
     if (onProgress) onProgress('Generating personalized insights...', 80);
-    const qualitative = await this.generateQualitativeInsights(metrics, facets);
+    const qualitative = await this.generateQualitativeInsights(
+      metrics,
+      facets,
+      outputLanguage,
+    );
 
     // Aggregate satisfaction, friction, success and outcome data from facets
     const {
@@ -376,6 +381,7 @@ export class DataProcessor {
   private async generateQualitativeInsights(
     metrics: Omit<InsightData, 'facets' | 'qualitative'>,
     facets: SessionFacets[],
+    outputLanguage?: string,
   ): Promise<QualitativeInsights | undefined> {
     if (facets.length === 0) {
       return undefined;
@@ -385,11 +391,17 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
+    // Build language instruction if output language is specified
+    const languageInstruction =
+      outputLanguage && outputLanguage !== 'en'
+        ? `\n\nIMPORTANT: You MUST respond entirely in ${outputLanguage}. All text, including titles, descriptions, and analysis, must be in ${outputLanguage}.`
+        : '';
+
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

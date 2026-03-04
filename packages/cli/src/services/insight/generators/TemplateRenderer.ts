@@ -10,12 +10,18 @@ import type { InsightData } from '../types/StaticInsightTypes.js';
 export class TemplateRenderer {
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
+    // Use the language from insights or default to 'en'
+    const lang = insights.language || 'en';
+    // Use translated title if available, otherwise default
+    const title =
+      insights.translations?.['Qwen Code Insights'] || 'Qwen Code Insights';
+
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${lang}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Qwen Code Insights</title>
+    <title>${title}</title>
     <style>
       ${INSIGHT_CSS}
     </style>

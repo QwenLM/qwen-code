@@ -94,6 +94,11 @@ export class StaticInsightGenerator {
   async generateStaticInsight(
     baseDir: string,
     onProgress?: InsightProgressCallback,
+    options?: {
+      language?: string;
+      translations?: Record<string, string>;
+      outputLanguage?: string;
+    },
   ): Promise<string> {
     // Ensure output directory exists
     const outputDir = await this.ensureOutputDirectory();
@@ -105,10 +110,19 @@ export class StaticInsightGenerator {
       baseDir,
       facetsDir,
       onProgress,
+      options?.outputLanguage,
     );
 
+    // Add language and translations to insights data
+    const insightsWithLanguage: InsightData = {
+      ...insights,
+      language: options?.language || 'en',
+      translations: options?.translations,
+    };
+
     // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    const html =
+      await this.templateRenderer.renderInsightHTML(insightsWithLanguage);
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);
