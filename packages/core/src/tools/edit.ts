@@ -131,8 +131,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let currentContent: string | null = null;
     let fileExists = false;
     let isNewFile = false;
-    let finalNewString = params.new_string;
-    let finalOldString = params.old_string;
+    // Normalize line endings in the edit strings to handle Windows CRLF
+    let finalNewString = params.new_string.replace(/\r\n/g, '\n');
+    let finalOldString = params.old_string.replace(/\r\n/g, '\n');
     let occurrences = 0;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
