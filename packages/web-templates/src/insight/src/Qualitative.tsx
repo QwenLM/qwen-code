@@ -1,10 +1,60 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState } from 'react';
 import { DashboardCards, HeatmapSection } from './Charts';
-import type { InsightData, QualitativeData } from './types';
+import type { InsightData, QualitativeData, InsightLocalizedStrings } from './types';
 import { CopyButton, MarkdownText } from './Components';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
+
+// -----------------------------------------------------------------------------
+// i18n Helper
+// -----------------------------------------------------------------------------
+function getI18n(): InsightLocalizedStrings {
+  if (typeof window !== 'undefined' && window.INSIGHT_I18N) {
+    return window.INSIGHT_I18N;
+  }
+  // Default English strings
+  return {
+    language: 'en',
+    title: 'Qwen Code Insights',
+    subtitle: 'Your personalized coding journey and patterns',
+    messagesAcrossSessions: 'messages across {{sessions}} sessions',
+    atAGlance: 'At a Glance',
+    whatsWorking: "What's working:",
+    whatsHindering: "What's hindering you:",
+    quickWins: 'Quick wins to try:',
+    ambitiousWorkflows: 'Ambitious workflows:',
+    impressiveThingsYouDid: 'Impressive Things You Did',
+    whereThingsGoWrong: 'Where Things Go Wrong',
+    existingFeaturesToTry: 'Existing Qwen Code Features to Try',
+    newWaysToUse: 'New Ways to Use Qwen Code',
+    onTheHorizon: 'On the Horizon',
+    whatYouWorkOn: 'What You Work On',
+    howYouUseQwenCode: 'How You Use Qwen Code',
+    whatYouWanted: 'What You Wanted',
+    topToolsUsed: 'Top Tools Used',
+    whatHelpedMost: "What Helped Most (Qwen's Capabilities)",
+    outcomes: 'Outcomes',
+    primaryFrictionTypes: 'Primary Friction Types',
+    inferredSatisfaction: 'Inferred Satisfaction (model-estimated)',
+    suggestedQwenMdAdditions: 'Suggested QWEN.md Additions',
+    copyToQwenMd: 'Just copy this into Qwen Code to add it to your QWEN.md.',
+    copyAllChecked: 'Copy All Checked',
+    copiedAll: 'Copied All!',
+    whyForYou: 'Why for you:',
+    pasteIntoQwenCode: 'Paste into Qwen Code:',
+    gettingStarted: 'Getting started:',
+    keyPattern: 'Key pattern:',
+    exportCard: 'Export Card',
+    lightTheme: 'Light Theme',
+    darkTheme: 'Dark Theme',
+    noDataAvailable: 'No insight data available',
+    seeMoreImpressive: 'Impressive Things You Did →',
+    seeMoreFriction: 'Where Things Go Wrong →',
+    seeMoreFeatures: 'Features to Try →',
+    seeMoreHorizon: 'On the Horizon →',
+  };
+}
 
 // -----------------------------------------------------------------------------
 // Qualitative Insight Components
@@ -12,38 +62,39 @@ import React from 'react';
 
 export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
   const { atAGlance } = qualitative;
+  const i18n = getI18n();
   if (!atAGlance) return null;
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">At a Glance</div>
+      <div className="glance-title">{i18n.atAGlance}</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
+          <strong>{i18n.whatsWorking}</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
+            {i18n.seeMoreImpressive}
           </a>
         </div>
         <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
+          <strong>{i18n.whatsHindering}</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
+            {i18n.seeMoreFriction}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
+          <strong>{i18n.quickWins}</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
-            Features to Try →
+            {i18n.seeMoreFeatures}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
+          <strong>{i18n.ambitiousWorkflows}</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
-            On the Horizon →
+            {i18n.seeMoreHorizon}
           </a>
         </div>
       </div>
@@ -52,15 +103,16 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 }
 
 export function NavToc() {
+  const i18n = getI18n();
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-work">{i18n.whatYouWorkOn}</a>
+      <a href="#section-usage">{i18n.howYouUseQwenCode}</a>
+      <a href="#section-wins">{i18n.impressiveThingsYouDid}</a>
+      <a href="#section-friction">{i18n.whereThingsGoWrong}</a>
+      <a href="#section-features">{i18n.existingFeaturesToTry}</a>
+      <a href="#section-patterns">{i18n.newWaysToUse}</a>
+      <a href="#section-horizon">{i18n.onTheHorizon}</a>
     </nav>
   );
 }
@@ -75,6 +127,7 @@ export function ProjectAreas({
   topTools?: Record<string, number> | Array<[string, number]>;
 }) {
   const { projectAreas } = qualitative;
+  const i18n = getI18n();
 
   // Convert topTools (array of tuples) to object for chart if needed
   const topToolsObj = Array.isArray(topTools)
@@ -87,7 +140,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        What You Work On
+        {i18n.whatYouWorkOn}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -119,14 +172,14 @@ export function ProjectAreas({
         {topGoals && Object.keys(topGoals).length > 0 && (
           <HorizontalBarChart
             data={topGoals}
-            title="What You Wanted"
+            title={i18n.whatYouWanted}
             color="#0ea5e9"
           />
         )}
         {topToolsObj && Object.keys(topToolsObj).length > 0 && (
           <HorizontalBarChart
             data={topToolsObj}
-            title="Top Tools Used"
+            title={i18n.topToolsUsed}
             color="#6366f1"
           />
         )}
@@ -143,6 +196,7 @@ export function InteractionStyle({
   insights: InsightData;
 }) {
   const { interactionStyle } = qualitative;
+  const i18n = getI18n();
   if (!interactionStyle) return null;
 
   return (
@@ -151,7 +205,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        How You Use Qwen Code
+        {i18n.howYouUseQwenCode}
       </h2>
       <div className="narrative">
         <p>
@@ -159,7 +213,7 @@ export function InteractionStyle({
         </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>Key pattern:</strong>{' '}
+            <strong>{i18n.keyPattern}</strong>{' '}
             <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
@@ -181,6 +235,7 @@ export function ImpressiveWorkflows({
   outcomes: Record<string, number>;
 }) {
   const { impressiveWorkflows } = qualitative;
+  const i18n = getI18n();
   if (!impressiveWorkflows) return null;
 
   return (
@@ -189,7 +244,7 @@ export function ImpressiveWorkflows({
         id="section-wins"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Impressive Things You Did
+        {i18n.impressiveThingsYouDid}
       </h2>
       {impressiveWorkflows.intro && (
         <p className="section-intro">
@@ -220,7 +275,7 @@ export function ImpressiveWorkflows({
         {primarySuccess && Object.keys(primarySuccess).length > 0 && (
           <HorizontalBarChart
             data={primarySuccess}
-            title="What Helped Most (Qwen's Capabilities)"
+            title={i18n.whatHelpedMost}
             color="#3b82f6"
             allowedKeys={[
               'fast_accurate_search',
@@ -235,7 +290,7 @@ export function ImpressiveWorkflows({
         {outcomes && Object.keys(outcomes).length > 0 && (
           <HorizontalBarChart
             data={outcomes}
-            title="Outcomes"
+            title={i18n.outcomes}
             color="#8b5cf6"
             allowedKeys={[
               'fully_achieved',
@@ -405,6 +460,7 @@ export function FrictionPoints({
   friction?: Record<string, number>;
 }) {
   const { frictionPoints } = qualitative;
+  const i18n = getI18n();
   if (!frictionPoints) return null;
 
   return (
@@ -413,7 +469,7 @@ export function FrictionPoints({
         id="section-friction"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Where Things Go Wrong
+        {i18n.whereThingsGoWrong}
       </h2>
       {frictionPoints.intro && (
         <p className="section-intro">
@@ -454,7 +510,7 @@ export function FrictionPoints({
         {friction && Object.keys(friction).length > 0 && (
           <HorizontalBarChart
             data={friction}
-            title="Primary Friction Types"
+            title={i18n.primaryFrictionTypes}
             color="#ef4444"
             allowedKeys={[
               'misunderstood_request',
@@ -468,7 +524,7 @@ export function FrictionPoints({
         {satisfaction && Object.keys(satisfaction).length > 0 && (
           <HorizontalBarChart
             data={satisfaction}
-            title="Inferred Satisfaction (model-estimated)"
+            title={i18n.inferredSatisfaction}
             color="#10b981"
             allowedKeys={[
               'happy',
@@ -492,6 +548,7 @@ function QwenMdAdditionsSection({
     NonNullable<QualitativeData['improvements']>['Qwen_md_additions']
   >;
 }) {
+  const i18n = getI18n();
   const [checkedState, setCheckedState] = useState(
     new Array(additions.length).fill(true),
   );
@@ -522,10 +579,8 @@ function QwenMdAdditionsSection({
 
   return (
     <div className="qwen-md-section">
-      <h3>Suggested QWEN.md Additions</h3>
-      <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code to add it to your QWEN.md.
-      </p>
+      <h3>{i18n.suggestedQwenMdAdditions}</h3>
+      <p className="text-xs text-slate-500 mb-3">{i18n.copyToQwenMd}</p>
 
       <div className="qwen-md-actions" style={{ marginBottom: '12px' }}>
         <button
@@ -533,7 +588,7 @@ function QwenMdAdditionsSection({
           onClick={handleCopyAll}
           disabled={checkedCount === 0}
         >
-          {copiedAll ? 'Copied All!' : `Copy All Checked (${checkedCount})`}
+          {copiedAll ? i18n.copiedAll : `${i18n.copyAllChecked} (${checkedCount})`}
         </button>
       </div>
 
@@ -564,6 +619,7 @@ export function Improvements({
   qualitative: QualitativeData;
 }) {
   const { improvements } = qualitative;
+  const i18n = getI18n();
   if (!improvements) return null;
 
   return (
@@ -572,7 +628,7 @@ export function Improvements({
         id="section-features"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Existing Qwen Code Features to Try
+        {i18n.existingFeaturesToTry}
       </h2>
 
       {/* QWEN.md Additions */}
@@ -581,9 +637,7 @@ export function Improvements({
           <QwenMdAdditionsSection additions={improvements.Qwen_md_additions} />
         )}
 
-      <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll set it up for you.
-      </p>
+      <p className="text-xs text-slate-500 mb-3">{i18n.copyToQwenMd}</p>
 
       {/* Features to Try */}
       <div className="features-section">
@@ -595,7 +649,7 @@ export function Improvements({
                 <MarkdownText>{feat.one_liner}</MarkdownText>
               </div>
               <div className="feature-why">
-                <strong>Why for you:</strong>{' '}
+                <strong>{i18n.whyForYou}</strong>{' '}
                 <MarkdownText>{feat.why_for_you}</MarkdownText>
               </div>
               <div className="feature-examples">
@@ -614,7 +668,7 @@ export function Improvements({
         id="section-patterns"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        New Ways to Use Qwen Code
+        {i18n.newWaysToUse}
       </h2>
       <p className="text-xs text-slate-500 mb-3">
         Just copy this into Qwen Code and it&apos;ll walk you through it.
@@ -651,6 +705,7 @@ export function FutureOpportunities({
   qualitative: QualitativeData;
 }) {
   const { futureOpportunities } = qualitative;
+  const i18n = getI18n();
   if (!futureOpportunities) return null;
 
   return (
@@ -659,7 +714,7 @@ export function FutureOpportunities({
         id="section-horizon"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        On the Horizon
+        {i18n.onTheHorizon}
       </h2>
       {futureOpportunities.intro && (
         <p className="section-intro">
@@ -676,11 +731,11 @@ export function FutureOpportunities({
                 <MarkdownText>{opp.whats_possible}</MarkdownText>
               </div>
               <div className="horizon-tip">
-                <strong>Getting started:</strong>{' '}
+                <strong>{i18n.gettingStarted}</strong>{' '}
                 <MarkdownText>{opp.how_to_try}</MarkdownText>
               </div>
               <div className="pattern-prompt">
-                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="prompt-label">{i18n.pasteIntoQwenCode}</div>
                 <div
                   style={{
                     display: 'flex',

@@ -8,7 +8,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { DataProcessor } from './DataProcessor.js';
-import { TemplateRenderer } from './TemplateRenderer.js';
+import {
+  TemplateRenderer,
+  type InsightLocalizedStrings,
+} from './TemplateRenderer.js';
 import type {
   InsightData,
   InsightProgressCallback,
@@ -94,21 +97,29 @@ export class StaticInsightGenerator {
   async generateStaticInsight(
     baseDir: string,
     onProgress?: InsightProgressCallback,
+    localizedStrings?: InsightLocalizedStrings,
   ): Promise<string> {
     // Ensure output directory exists
     const outputDir = await this.ensureOutputDirectory();
     const facetsDir = path.join(outputDir, 'facets');
     await fs.mkdir(facetsDir, { recursive: true });
 
+    // Get output language from localized strings
+    const outputLanguage = localizedStrings?.outputLanguage;
+
     // Process data
     const insights: InsightData = await this.dataProcessor.generateInsights(
       baseDir,
       facetsDir,
       onProgress,
+      outputLanguage,
     );
 
-    // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Render HTML with localized strings
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      localizedStrings,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

@@ -2,6 +2,21 @@
 import React from 'react';
 import type { InsightData } from './types';
 
+// Get localized strings or use defaults
+function getI18n() {
+  if (typeof window !== 'undefined' && window.INSIGHT_I18N) {
+    return window.INSIGHT_I18N;
+  }
+  // Default English strings
+  return {
+    language: 'en',
+    title: 'Qwen Code Insights',
+    subtitle: 'Your personalized coding journey and patterns',
+    messagesAcrossSessions: 'messages across {{sessions}} sessions',
+    noDataAvailable: 'No insight data available',
+  };
+}
+
 // Header Component
 export function Header({
   data,
@@ -11,16 +26,22 @@ export function Header({
   dateRangeStr: string;
 }) {
   const { totalMessages, totalSessions } = data;
+  const i18n = getI18n();
+
+  const subtitleText = totalMessages
+    ? i18n.messagesAcrossSessions.replace(
+        '{{sessions}}',
+        String(totalSessions ?? 0),
+      )
+    : i18n.subtitle;
 
   return (
     <header className="mb-8 space-y-3 text-center">
       <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
-        Qwen Code Insights
+        {i18n.title}
       </h1>
       <p className="text-sm text-slate-600">
-        {totalMessages
-          ? `${totalMessages} messages across ${totalSessions} sessions`
-          : 'Your personalized coding journey and patterns'}
+        {subtitleText}
         {dateRangeStr && ` | ${dateRangeStr}`}
       </p>
     </header>

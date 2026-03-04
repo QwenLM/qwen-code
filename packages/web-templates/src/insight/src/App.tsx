@@ -14,14 +14,33 @@ import {
 } from './Qualitative';
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
-import type { InsightData } from './types';
+import type { InsightData, InsightLocalizedStrings } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
+
+// Get localized strings or use defaults
+function getI18n(): InsightLocalizedStrings {
+  if (typeof window !== 'undefined' && window.INSIGHT_I18N) {
+    return window.INSIGHT_I18N;
+  }
+  // Default English strings
+  return {
+    language: 'en',
+    title: 'Qwen Code Insights',
+    subtitle: 'Your personalized coding journey and patterns',
+    messagesAcrossSessions: 'messages across {{sessions}} sessions',
+    noDataAvailable: 'No insight data available',
+    exportCard: 'Export Card',
+    lightTheme: 'Light Theme',
+    darkTheme: 'Dark Theme',
+  };
+}
 
 // Main App Component
 function InsightApp({ data }: { data: InsightData }) {
   const [cardTheme, setCardTheme] = useState<Theme>('dark');
   const pendingExport = useRef(false);
+  const i18n = getI18n();
 
   const performExport = async () => {
     const card = document.getElementById('share-card');
@@ -79,7 +98,7 @@ function InsightApp({ data }: { data: InsightData }) {
   if (!data) {
     return (
       <div className="text-center text-slate-600">
-        No insight data available
+        {i18n.noDataAvailable}
       </div>
     );
   }
@@ -96,22 +115,29 @@ function InsightApp({ data }: { data: InsightData }) {
     dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
   }
 
+  const subtitleText = data.totalMessages
+    ? i18n.messagesAcrossSessions.replace(
+        '{{sessions}}',
+        String(data.totalSessions ?? 0),
+      )
+    : i18n.subtitle;
+
   return (
     <div>
       {/* Elegant Header */}
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">Qwen Code Insights</h1>
+            <h1 className="header-title">{i18n.title}</h1>
             <p className="header-subtitle">
               {data.totalMessages
-                ? `${data.totalMessages.toLocaleString()} messages across ${data.totalSessions?.toLocaleString()} sessions`
-                : 'Your personalized coding journey and patterns'}
+                ? `${data.totalMessages.toLocaleString()} ${subtitleText}`
+                : i18n.subtitle}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
 
-          <ExportCardButton onExport={handleExportWithTheme} />
+          <ExportCardButton onExport={handleExportWithTheme} i18n={i18n} />
         </div>
       </header>
 
@@ -164,7 +190,13 @@ function InsightApp({ data }: { data: InsightData }) {
 }
 
 // Export Card Button with theme dropdown
-function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
+function ExportCardButton({
+  onExport,
+  i18n,
+}: {
+  onExport: (theme: Theme) => void;
+  i18n: InsightLocalizedStrings;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -205,7 +237,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>Export Card</span>
+        <span>{i18n.exportCard}</span>
         <svg
           width="12"
           height="12"
@@ -247,25 +279,13 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>Light Theme</span>
+            <span>{i18n.lightTheme}</span>
           </button>
           <button
             className="export-dropdown-item"
             onClick={() => handleSelect('dark')}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-            </svg>
-            <span>Dark Theme</span>
+            <span>{i18n.darkTheme}</span>
           </button>
         </div>
       )}
