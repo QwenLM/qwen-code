@@ -17,6 +17,19 @@ import './styles.css';
 import type { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
+import { initializeTranslations, t } from './i18n';
+
+// Declare global variables from HTML
+declare global {
+  interface Window {
+    INSIGHT_DATA?: InsightData;
+    INSIGHT_LANGUAGE?: string;
+    INSIGHT_TRANSLATIONS?: Record<string, Record<string, string>>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    html2canvas?: any;
+    ReactDOM?: typeof ReactDOM;
+  }
+}
 
 // Main App Component
 function InsightApp({ data }: { data: InsightData }) {
@@ -79,7 +92,7 @@ function InsightApp({ data }: { data: InsightData }) {
   if (!data) {
     return (
       <div className="text-center text-slate-600">
-        No insight data available
+        {t('No insight data available')}
       </div>
     );
   }
@@ -102,11 +115,14 @@ function InsightApp({ data }: { data: InsightData }) {
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">Qwen Code Insights</h1>
+            <h1 className="header-title">{t('Qwen Code Insights')}</h1>
             <p className="header-subtitle">
               {data.totalMessages
-                ? `${data.totalMessages.toLocaleString()} messages across ${data.totalSessions?.toLocaleString()} sessions`
-                : 'Your personalized coding journey and patterns'}
+                ? t('{{messages}} messages across {{sessions}} sessions', {
+                    messages: data.totalMessages.toLocaleString(),
+                    sessions: (data.totalSessions ?? 0).toLocaleString(),
+                  })
+                : t('Your personalized coding journey and patterns')}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
@@ -205,7 +221,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>Export Card</span>
+        <span>{t('Export Card')}</span>
         <svg
           width="12"
           height="12"
@@ -247,7 +263,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>Light Theme</span>
+            <span>{t('Light Theme')}</span>
           </button>
           <button
             className="export-dropdown-item"
@@ -265,7 +281,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
             >
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span>Dark Theme</span>
+            <span>{t('Dark Theme')}</span>
           </button>
         </div>
       )}
@@ -276,6 +292,11 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
 // App Initialization - Mount React app when DOM is ready
 const container = document.getElementById('react-root');
 if (container && window.INSIGHT_DATA && ReactDOM) {
+  // Initialize translations from window global
+  const language = window.INSIGHT_LANGUAGE || 'en';
+  const translations = window.INSIGHT_TRANSLATIONS || {};
+  initializeTranslations(language, translations[language] || {});
+
   const root = ReactDOM.createRoot(container);
   root.render(<InsightApp data={window.INSIGHT_DATA} />);
 } else {

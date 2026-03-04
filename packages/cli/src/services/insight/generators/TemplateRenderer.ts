@@ -5,13 +5,21 @@
  */
 
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
-import type { InsightData } from '../types/StaticInsightTypes.js';
+import type { InsightData , SupportedLanguage } from '../types/StaticInsightTypes.js';
+
+export interface RenderInsightHTMLOptions {
+  language?: SupportedLanguage;
+}
 
 export class TemplateRenderer {
-  // Render the complete HTML file
-  async renderInsightHTML(insights: InsightData): Promise<string> {
+  // Render the complete HTML file with optional localization
+  async renderInsightHTML(
+    insights: InsightData,
+    options?: RenderInsightHTMLOptions,
+  ): Promise<string> {
+    const language = options?.language ?? 'en';
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${language}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -38,6 +46,7 @@ export class TemplateRenderer {
     <!-- Application Data -->
     <script>
       window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_LANGUAGE = ${JSON.stringify(language)};
     </script>
 
     <!-- App Script -->

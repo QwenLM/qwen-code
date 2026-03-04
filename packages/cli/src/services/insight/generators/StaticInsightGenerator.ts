@@ -12,19 +12,48 @@ import { TemplateRenderer } from './TemplateRenderer.js';
 import type {
   InsightData,
   InsightProgressCallback,
+  SupportedLanguage,
 } from '../types/StaticInsightTypes.js';
 
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import { getCurrentLanguage } from '../../../i18n/index.js';
 
 const logger = createDebugLogger('StaticInsightGenerator');
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private userLanguage: SupportedLanguage;
 
   constructor(config: Config) {
     this.dataProcessor = new DataProcessor(config);
     this.templateRenderer = new TemplateRenderer();
+    // Get user's UI language preference
+    this.userLanguage = this.resolveUserLanguage();
+  }
+
+  /**
+   * Resolve the user's language preference from settings
+   */
+  private resolveUserLanguage(): SupportedLanguage {
+    try {
+      const currentLang = getCurrentLanguage();
+      // Map to supported languages for insight report
+      const supportedLanguages: SupportedLanguage[] = [
+        'en',
+        'zh',
+        'ja',
+        'pt',
+        'ru',
+        'de',
+      ];
+      if (supportedLanguages.includes(currentLang as SupportedLanguage)) {
+        return currentLang as SupportedLanguage;
+      }
+      return 'en';
+    } catch {
+      return 'en';
+    }
   }
 
   // Ensure the output directory exists
@@ -100,15 +129,18 @@ export class StaticInsightGenerator {
     const facetsDir = path.join(outputDir, 'facets');
     await fs.mkdir(facetsDir, { recursive: true });
 
-    // Process data
+    // Process data with user's language preference
     const insights: InsightData = await this.dataProcessor.generateInsights(
       baseDir,
       facetsDir,
       onProgress,
+      this.userLanguage,
     );
 
-    // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Render HTML with user's language preference
+    const html = await this.templateRenderer.renderInsightHTML(insights, {
+      language: this.userLanguage,
+    });
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

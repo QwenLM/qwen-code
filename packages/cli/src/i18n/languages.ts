@@ -73,6 +73,15 @@ export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
 }
 
 /**
+ * Get language display name (native name).
+ * Used for showing the user which language is being used.
+ */
+export function getLanguageDisplayName(lang: SupportedLanguage): string {
+  const language = SUPPORTED_LANGUAGES.find((l) => l.code === lang);
+  return language?.nativeName || language?.fullName || 'English';
+}
+
+/**
  * Gets the language options for the settings schema.
  */
 export function getLanguageSettingsOptions(): Array<{

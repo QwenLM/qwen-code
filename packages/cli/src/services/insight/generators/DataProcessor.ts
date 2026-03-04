@@ -17,6 +17,7 @@ import type {
   StreakData,
   SessionFacets,
   InsightProgressCallback,
+  SupportedLanguage,
 } from '../types/StaticInsightTypes.js';
 import type {
   QualitativeInsights,
@@ -34,13 +35,21 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { getLanguageNameFromLocale } from '../../../i18n/languages.js';
 
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
-  constructor(private config: Config) {}
+  private userLanguage: SupportedLanguage;
+
+  constructor(
+    private config: Config,
+    language?: SupportedLanguage,
+  ) {
+    this.userLanguage = language ?? 'en';
+  }
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -283,7 +292,13 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language?: SupportedLanguage,
   ): Promise<InsightData> {
+    // Update language if provided
+    if (language) {
+      this.userLanguage = language;
+    }
+
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
@@ -298,7 +313,11 @@ export class DataProcessor {
     );
 
     if (onProgress) onProgress('Generating personalized insights...', 80);
-    const qualitative = await this.generateQualitativeInsights(metrics, facets);
+    const qualitative = await this.generateQualitativeInsights(
+      metrics,
+      facets,
+      this.userLanguage,
+    );
 
     // Aggregate satisfaction, friction, success and outcome data from facets
     const {
@@ -376,6 +395,7 @@ export class DataProcessor {
   private async generateQualitativeInsights(
     metrics: Omit<InsightData, 'facets' | 'qualitative'>,
     facets: SessionFacets[],
+    language: SupportedLanguage = 'en',
   ): Promise<QualitativeInsights | undefined> {
     if (facets.length === 0) {
       return undefined;
@@ -385,11 +405,16 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
+    // Get the language name for the LLM instruction
+    const languageName = getLanguageNameFromLocale(language);
+
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      // Add language instruction to the prompt
+      const languageInstruction = `Respond in ${languageName}. All output text (intro, descriptions, titles, summaries, etc.) must be written in ${languageName}.`;
+      const prompt = `${promptTemplate}\n\n${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

@@ -6,6 +6,8 @@
 
 import type { QualitativeInsights } from './QualitativeInsightTypes.js';
 
+export type SupportedLanguage = 'en' | 'zh' | 'ja' | 'pt' | 'ru' | 'de';
+
 export interface HeatMapData {
   [date: string]: number;
 }

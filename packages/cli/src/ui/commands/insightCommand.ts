@@ -8,12 +8,13 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import open from 'open';
+import { getLanguageDisplayName } from '../../i18n/languages.js';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -27,7 +28,15 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
-      context.ui.setDebugMessage(t('Generating insights...'));
+      // Get user's language preference and show info message
+      const userLanguage = getCurrentLanguage();
+      const languageDisplayName = getLanguageDisplayName(userLanguage);
+
+      context.ui.setDebugMessage(
+        t('Generating insights in {{language}}...', {
+          language: languageDisplayName,
+        }),
+      );
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
       if (!context.services.config) {

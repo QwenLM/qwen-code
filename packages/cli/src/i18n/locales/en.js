@@ -1137,6 +1137,27 @@ export default {
     'Try /insight to generate personalized insights from your chat history.',
 
   // ============================================================================
+  // Insight Command
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'generate personalized programming insights from your chat history',
+  'Generating insights...': 'Generating insights...',
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
+  'This may take a couple minutes. Sit tight!':
+    'This may take a couple minutes. Sit tight!',
+  'Starting insight generation...': 'Starting insight generation...',
+  'Insight report generated successfully!':
+    'Insight report generated successfully!',
+  'Opening insights in your browser: {{path}}':
+    'Opening insights in your browser: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Insights generated at: {{path}}. Please open this file in your browser.',
+  'Failed to generate insights: {{error}}':
+    'Failed to generate insights: {{error}}',
+  'Insights ready.': 'Insights ready.',
+
+  // ============================================================================
   // Exit Screen / Stats
   // ============================================================================
   'Agent powering down. Goodbye!': 'Agent powering down. Goodbye!',

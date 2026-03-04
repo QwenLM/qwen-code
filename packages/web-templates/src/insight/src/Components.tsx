@@ -1,6 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import { useState } from 'react';
+import { t } from './i18n';
 
 // Simple Markdown Parser Component
 export function MarkdownText({ children }: { children: string }) {
@@ -39,7 +40,7 @@ export function CopyButton({
 
   return (
     <button className="copy-btn" onClick={handleCopy}>
-      {copied ? 'Copied!' : label}
+      {copied ? t('Copied!') : t(label)}
     </button>
   );
 }
