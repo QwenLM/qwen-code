@@ -469,6 +469,41 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    it('should not include empty tools array in request', () => {
+      const requestWithEmptyTools: OpenAI.Chat.ChatCompletionCreateParams = {
+        ...baseRequest,
+        tools: [],
+      };
+
+      const result = provider.buildRequest(
+        requestWithEmptyTools,
+        'test-prompt-id',
+      );
+
+      // Empty tools array should be excluded to avoid API errors like "[] is too short - 'tools'"
+      expect(result.tools).toBeUndefined();
+    });
+
+    it('should include non-empty tools array in request', () => {
+      const requestWithTools: OpenAI.Chat.ChatCompletionCreateParams = {
+        ...baseRequest,
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'test_function',
+              description: 'A test function',
+            },
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(requestWithTools, 'test-prompt-id');
+
+      expect(result.tools).toHaveLength(1);
+      expect(result.tools?.[0].function.name).toBe('test_function');
+    });
+
     it('should preserve all original request parameters', () => {
       const complexRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         ...baseRequest,
