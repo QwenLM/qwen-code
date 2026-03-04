@@ -40,7 +40,24 @@ const logger = createDebugLogger('DataProcessor');
 const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
-  constructor(private config: Config) {}
+  constructor(
+    private config: Config,
+    private language: string = 'en',
+  ) {}
+
+  // Get language instruction for LLM prompts
+  private getLanguageInstruction(): string {
+    const languageNames: Record<string, string> = {
+      en: 'English',
+      zh: 'Chinese (中文)',
+      ja: 'Japanese (日本語)',
+      de: 'German (Deutsch)',
+      pt: 'Portuguese (Português)',
+      ru: 'Russian (Русский)',
+    };
+    const langName = languageNames[this.language] || 'English';
+    return `IMPORTANT: You MUST respond in ${langName}. All your analysis, summaries, and insights should be written entirely in ${langName}.`;
+  }
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -193,7 +210,8 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
+    const languageInstruction = this.getLanguageInstruction();
+    const prompt = `${getInsightPrompt('analysis')}\n\n${languageInstruction}\n\nSESSION:\n${sessionText}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -283,7 +301,12 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language?: string,
   ): Promise<InsightData> {
+    // Update language if provided
+    if (language) {
+      this.language = language;
+    }
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
@@ -384,12 +407,13 @@ export class DataProcessor {
     logger.info('Generating qualitative insights...');
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
+    const languageInstruction = this.getLanguageInstruction();
 
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${promptTemplate}\n\n${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

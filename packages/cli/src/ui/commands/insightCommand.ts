@@ -8,7 +8,7 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
@@ -27,7 +27,28 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
+      // Get user's language preference
+      const userLanguage = getCurrentLanguage();
+      
+      // Display language info message
+      const languageNames: Record<string, string> = {
+        en: 'English',
+        zh: '中文',
+        ja: '日本語',
+        de: 'Deutsch',
+        pt: 'Português',
+        ru: 'Русский',
+      };
+      const langName = languageNames[userLanguage] || 'English';
+      
       context.ui.setDebugMessage(t('Generating insights...'));
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{lang}}...', { lang: langName }),
+        },
+        Date.now(),
+      );
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
       if (!context.services.config) {
@@ -35,6 +56,7 @@ export const insightCommand: SlashCommand = {
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        userLanguage,
       );
 
       const updateProgress = (

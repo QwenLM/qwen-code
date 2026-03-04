@@ -1281,4 +1281,17 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // Insight command
+  'Generating insights in {{lang}}...': '正在生成 {{lang}} 洞察报告...',
+  'Generating insights...': '正在生成洞察...',
+  'This may take a couple minutes. Sit tight!': '这可能需要几分钟，请稍候！',
+  'Starting insight generation...': '正在开始生成洞察...',
+  'Insight report generated successfully!': '洞察报告生成成功！',
+  'Opening insights in your browser: {{path}}': '正在浏览器中打开洞察报告：{{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.': '洞察报告已生成于：{{path}}。请在浏览器中打开此文件。',
+  'Insights ready.': '洞察报告已就绪。',
+  'Failed to generate insights: {{error}}': '生成洞察失败：{{error}}',
+  'generate personalized programming insights from your chat history': '根据您的聊天历史生成个性化编程洞察',
+
 };

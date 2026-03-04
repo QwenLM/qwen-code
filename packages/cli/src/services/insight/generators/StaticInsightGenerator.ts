@@ -15,16 +15,19 @@ import type {
 } from '../types/StaticInsightTypes.js';
 
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import { getCurrentLanguage, type SupportedLanguage } from '../../i18n/index.js';
 
 const logger = createDebugLogger('StaticInsightGenerator');
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private language: SupportedLanguage;
 
-  constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
+  constructor(config: Config, language?: SupportedLanguage) {
+    this.dataProcessor = new DataProcessor(config, language);
     this.templateRenderer = new TemplateRenderer();
+    this.language = language || getCurrentLanguage();
   }
 
   // Ensure the output directory exists
@@ -100,15 +103,19 @@ export class StaticInsightGenerator {
     const facetsDir = path.join(outputDir, 'facets');
     await fs.mkdir(facetsDir, { recursive: true });
 
-    // Process data
+    // Process data with language support
     const insights: InsightData = await this.dataProcessor.generateInsights(
       baseDir,
       facetsDir,
       onProgress,
+      this.language,
     );
 
-    // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Render HTML with language and translations
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      this.language,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);
