@@ -31,10 +31,15 @@ export type MarkdownCommandDef = z.infer<typeof MarkdownCommandDefSchema>;
  * @returns Parsed command definition with frontmatter and prompt
  */
 export function parseMarkdownCommand(content: string): MarkdownCommandDef {
-  // Match YAML frontmatter pattern: ---\n...\n---\n
-  // Allow empty frontmatter: ---\n---\n  // Use (?:[\s\S]*?) to make the frontmatter content optional
-  const frontmatterRegex = /^---\n([\s\S]*?)---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
+  // Remove UTF-8 BOM if present
+  const normalizedContent = content.replace(/^\uFEFF/, '');
+
+  // Match YAML frontmatter pattern: ---\n...\n---\n or ---\r\n...\r\n---\r\n
+  // Allow empty frontmatter: ---\n---\n or ---\r\n---\r\n
+  // Use (?:[\s\S]*?) to make the frontmatter content optional
+  // Support both LF (\n) and CRLF (\r\n) line endings
+  const frontmatterRegex = /^---(?:\r?\n)([\s\S]*?)---(?:\r?\n)([\s\S]*)$/;
+  const match = normalizedContent.match(frontmatterRegex);
 
   if (!match) {
     // No frontmatter, entire content is the prompt

@@ -94,6 +94,45 @@ Prompt content.`;
     expect(result.frontmatter).toBeDefined();
     expect(result.prompt).toBe('Prompt content.');
   });
+
+  it('should parse markdown with CRLF line endings (Windows)', () => {
+    const content = `---\r\ndescription: Test command\r\n---\r\n\r\nThis is the prompt content.`;
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'Test command',
+      },
+      prompt: 'This is the prompt content.',
+    });
+  });
+
+  it('should parse markdown with UTF-8 BOM', () => {
+    const content = `\uFEFF---\ndescription: Test command\n---\n\nThis is the prompt content.`;
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'Test command',
+      },
+      prompt: 'This is the prompt content.',
+    });
+  });
+
+  it('should parse markdown with UTF-8 BOM and CRLF line endings', () => {
+    const content = `\uFEFF---\r\ndescription: Test command\r\n---\r\n\r\nThis is the prompt content.`;
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'Test command',
+      },
+      prompt: 'This is the prompt content.',
+    });
+  });
 });
 
 describe('MarkdownCommandDefSchema', () => {
