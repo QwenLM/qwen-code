@@ -21,7 +21,7 @@ import {
   type ConversationRecord,
   type DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
-import type { ApprovalModeValue } from './schema.js';
+import type { ApprovalModeValue, ConfigOption } from './schema.js';
 import * as acp from './acp.js';
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
@@ -107,6 +107,10 @@ class GeminiAgent {
           audio: true,
           embeddedContext: true,
         },
+        sessionCapabilities: {
+          list: {},
+          resume: {},
+        },
       },
     };
   }
@@ -153,10 +157,14 @@ class GeminiAgent {
 
     const session = await this.createAndStoreSession(config);
     const availableModels = this.buildAvailableModels(config);
+    const modesData = this.buildModesData(config);
+    const configOptions = this.buildConfigOptions(config);
 
     return {
       sessionId: session.getId(),
       models: availableModels,
+      modes: modesData,
+      configOptions,
     };
   }
 
@@ -239,25 +247,31 @@ class GeminiAgent {
   async listSessions(
     params: acp.ListSessionsRequest,
   ): Promise<acp.ListSessionsResponse> {
-    const sessionService = new SessionService(params.cwd);
+    const cwd = params.cwd || process.cwd();
+    const sessionService = new SessionService(cwd);
     const result = await sessionService.listSessions({
       cursor: params.cursor,
       size: params.size,
     });
 
+    const sessions = result.items.map((item) => ({
+      cwd: item.cwd,
+      filePath: item.filePath,
+      gitBranch: item.gitBranch,
+      messageCount: item.messageCount,
+      mtime: item.mtime,
+      prompt: item.prompt,
+      sessionId: item.sessionId,
+      startTime: item.startTime,
+      title: item.prompt || '(session)',
+      updatedAt: new Date(item.mtime).toISOString(),
+    }));
+
     return {
-      items: result.items.map((item) => ({
-        sessionId: item.sessionId,
-        cwd: item.cwd,
-        startTime: item.startTime,
-        mtime: item.mtime,
-        prompt: item.prompt,
-        gitBranch: item.gitBranch,
-        filePath: item.filePath,
-        messageCount: item.messageCount,
-      })),
-      nextCursor: result.nextCursor,
       hasMore: result.hasMore,
+      items: sessions,
+      nextCursor: result.nextCursor,
+      sessions,
     };
   }
 
@@ -279,6 +293,104 @@ class GeminiAgent {
       );
     }
     return await session.setModel(params);
+  }
+
+  async setConfigOption(
+    params: acp.SetConfigOptionRequest,
+  ): Promise<acp.SetConfigOptionResponse> {
+    const { sessionId, configId, value } = params;
+
+    // Get the session's config
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${sessionId}`,
+      );
+    }
+
+    switch (configId) {
+      case 'mode': {
+        await this.setMode({
+          sessionId,
+          modeId: value as ApprovalModeValue,
+        });
+        break;
+      }
+      case 'model': {
+        await this.setModel({
+          sessionId,
+          modelId: value as string,
+        });
+        break;
+      }
+      default:
+        throw acp.RequestError.invalidParams(
+          `Unsupported configId: ${configId}`,
+        );
+    }
+
+    // Return all config options with current values
+    return {
+      configOptions: this.buildConfigOptions(session.getConfig()),
+    };
+  }
+
+  private buildConfigOptions(config: Config): ConfigOption[] {
+    const currentApprovalMode = config.getApprovalMode();
+    const allConfiguredModels = config.getAllConfiguredModels();
+    const rawCurrentModelId = (config.getModel() || '').trim();
+    const currentAuthType = config.getAuthType?.();
+
+    // Check if current model is a runtime model
+    const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+    const currentModelId = activeRuntimeSnapshot
+      ? formatAcpModelId(
+          activeRuntimeSnapshot.id,
+          activeRuntimeSnapshot.authType,
+        )
+      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+
+    // Build mode config option
+    const modeOptions = APPROVAL_MODES.map((mode) => ({
+      value: mode,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    const modeConfigOption: ConfigOption = {
+      id: 'mode',
+      name: 'Mode',
+      description: 'Session permission mode',
+      category: 'mode',
+      type: 'select',
+      currentValue: currentApprovalMode,
+      options: modeOptions,
+    };
+
+    // Build model config option
+    const modelOptions = allConfiguredModels.map((model) => {
+      const effectiveModelId =
+        model.isRuntimeModel && model.runtimeSnapshotId
+          ? model.runtimeSnapshotId
+          : model.id;
+      return {
+        value: formatAcpModelId(effectiveModelId, model.authType),
+        name: model.label,
+        description: model.description ?? '',
+      };
+    });
+
+    const modelConfigOption: ConfigOption = {
+      id: 'model',
+      name: 'Model',
+      description: 'AI model to use',
+      category: 'model',
+      type: 'select',
+      currentValue: currentModelId,
+      options: modelOptions,
+    };
+
+    return [modeConfigOption, modelConfigOption];
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
@@ -446,6 +558,21 @@ class GeminiAgent {
     return {
       currentModelId,
       availableModels: mappedAvailableModels,
+    };
+  }
+
+  private buildModesData(config: Config): acp.ModesData {
+    const currentApprovalMode = config.getApprovalMode();
+
+    const availableModes = APPROVAL_MODES.map((mode) => ({
+      id: mode as ApprovalModeValue,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    return {
+      currentModeId: currentApprovalMode as ApprovalModeValue,
+      availableModes,
     };
   }
 

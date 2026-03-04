@@ -35,6 +35,7 @@ import {
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
 } from '../../constants/codingPlan.js';
+import { backupSettingsFile } from '../../utils/settingsUtils.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
@@ -299,10 +300,14 @@ export const useAuthCommand = (
         setAuthError(null);
 
         // Get configuration based on region
-        const { template, version, regionName } = getCodingPlanConfig(region);
+        const { template, version } = getCodingPlanConfig(region);
 
         // Get persist scope
         const persistScope = getPersistScopeForModelSelection(settings);
+
+        // Backup settings file before modification
+        const settingsFile = settings.forScope(persistScope);
+        backupSettingsFile(settingsFile.path);
 
         // Store api-key in settings.env (unified env key)
         settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, apiKey);
@@ -384,8 +389,8 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with {{region}}. API key is stored in settings.env.',
-              { region: regionName },
+              'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+              { region: t('Alibaba Cloud Coding Plan') },
             ),
           },
           Date.now(),

@@ -137,7 +137,6 @@ export interface CliArgs {
   googleSearchEngineId: string | undefined;
   webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
-  vlmSwitchMode: string | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
@@ -426,13 +425,6 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description: 'Enable screen reader mode for accessibility.',
         })
-        .option('vlm-switch-mode', {
-          type: 'string',
-          choices: ['once', 'session', 'persist'],
-          description:
-            'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). Overrides settings files.',
-          default: process.env['VLM_SWITCH_MODE'],
-        })
         .option('input-format', {
           type: 'string',
           choices: ['text', 'stream-json'],
@@ -701,14 +693,21 @@ export async function loadCliConfig(
   }
 
   // Automatically load output-language.md if it exists
-  let outputLanguageFilePath: string | undefined = path.join(
+  const projectStorage = new Storage(cwd);
+  const projectOutputLanguagePath = path.join(
+    projectStorage.getQwenDir(),
+    'output-language.md',
+  );
+  const globalOutputLanguagePath = path.join(
     Storage.getGlobalQwenDir(),
     'output-language.md',
   );
-  if (fs.existsSync(outputLanguageFilePath)) {
-    // output-language.md found - will be added to context files
-  } else {
-    outputLanguageFilePath = undefined;
+
+  let outputLanguageFilePath: string | undefined;
+  if (fs.existsSync(projectOutputLanguagePath)) {
+    outputLanguageFilePath = projectOutputLanguagePath;
+  } else if (fs.existsSync(globalOutputLanguagePath)) {
+    outputLanguageFilePath = globalOutputLanguagePath;
   }
 
   const fileService = new FileDiscoveryService(cwd);
@@ -903,9 +902,6 @@ export async function loadCliConfig(
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
 
-  const vlmSwitchMode =
-    argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
-
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
 
@@ -1002,6 +998,7 @@ export async function loadCliConfig(
     modelProvidersConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    warnings: resolvedCliConfig.warnings,
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
     summarizeToolOutput: settings.model?.summarizeToolOutput,
@@ -1016,7 +1013,6 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipLoopDetection: settings.model?.skipLoopDetection ?? false,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
-    vlmSwitchMode,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
     enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,

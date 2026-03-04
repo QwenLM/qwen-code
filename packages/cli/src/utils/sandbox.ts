@@ -541,7 +541,7 @@ export async function start_sandbox(
   // name container after image, plus random suffix to avoid conflicts
   const imageName = parseImageName(image);
   const isIntegrationTest =
-    process.env['GEMINI_CLI_INTEGRATION_TEST'] === 'true';
+    process.env['QWEN_CODE_INTEGRATION_TEST'] === 'true';
   let containerName;
   if (isIntegrationTest) {
     containerName = `qwen-code-integration-test-${randomBytes(4).toString(
@@ -721,11 +721,10 @@ export async function start_sandbox(
   // tests that need to access host's ~/.qwen (e.g., --resume functionality)
   const useCurrentUser = await shouldUseCurrentUserInSandbox();
 
-  if (!useCurrentUser) {
-    // Use root user (default for integration tests or when explicitly disabled)
-    args.push('--user', 'root');
-    userFlag = '--user root';
-  } else {
+  if (useCurrentUser) {
+    // SANDBOX_SET_UID_GID is enabled: create user with host's UID/GID
+    // This includes integration test mode with SANDBOX_SET_UID_GID=true,
+    // allowing tests that need to access host's ~/.qwen (e.g., --resume) to work.
     // For the user-creation logic to work, the container must start as root.
     // The entrypoint script then handles dropping privileges to the correct user.
     args.push('--user', 'root');
@@ -735,10 +734,10 @@ export async function start_sandbox(
 
     // Instead of passing --user to the main sandbox container, we let it
     // start as root, then create a user with the host's UID/GID, and
-    // finally switch to that user to run the gemini process. This is
+    // finally switch to that user to run the qwen process. This is
     // necessary on Linux to ensure the user exists within the
     // container's /etc/passwd file, which is required by os.userInfo().
-    const username = 'gemini';
+    const username = 'qwen';
     const homeDir = getContainerPath(os.homedir());
 
     const setupUserCommands = [
@@ -761,7 +760,12 @@ export async function start_sandbox(
     userFlag = `--user ${uid}:${gid}`;
     // When forcing a UID in the sandbox, $HOME can be reset to '/', so we copy $HOME as well.
     args.push('--env', `HOME=${os.homedir()}`);
+  } else if (isIntegrationTest) {
+    // Integration test mode with UID/GID matching disabled: use root
+    args.push('--user', 'root');
+    userFlag = '--user root';
   }
+  // else: non-IT mode with UID/GID matching disabled - use image default user (node)
 
   // push container image name
   args.push(image);

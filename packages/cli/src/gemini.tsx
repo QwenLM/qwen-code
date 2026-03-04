@@ -411,6 +411,7 @@ export async function main() {
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
         })),
         ...getSettingsWarnings(settings),
+        ...config.getWarnings(),
       ]),
     ];
 

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import type {
   Settings,
   SettingScope,
@@ -575,6 +576,27 @@ export function getEffectiveDisplayValue(
   mergedSettings: Settings,
 ): boolean {
   return getSettingValue(key, settings, mergedSettings);
+}
+
+/**
+ * Backup a settings file before modification.
+ * Creates a backup with `.orig` suffix if the file exists and backup doesn't already exist.
+ * @param filePath - Path to the settings file to backup
+ * @returns boolean indicating whether a backup was created
+ */
+export function backupSettingsFile(filePath: string): boolean {
+  try {
+    if (fs.existsSync(filePath)) {
+      const backupPath = `${filePath}.orig`;
+      if (!fs.existsSync(backupPath)) {
+        fs.renameSync(filePath, backupPath);
+        return true;
+      }
+    }
+  } catch (_e) {
+    // Ignore backup errors, proceed without backup
+  }
+  return false;
 }
 
 export const TEST_ONLY = { clearFlattenedSchema };

@@ -790,4 +790,70 @@ describe('StreamingToolCallParser', () => {
       expect(call2?.args).toEqual({ param2: 'value2' });
     });
   });
+
+  describe('hasIncompleteToolCalls', () => {
+    it('should return false when no tool calls exist', () => {
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should return false when all tool calls have complete JSON', () => {
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'write_file');
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should return true when a tool call has depth > 0 (unclosed braces)', () => {
+      parser.addChunk(
+        0,
+        '{"file_path": "/tmp/test.txt", "content": "partial',
+        'call_1',
+        'write_file',
+      );
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return true when a tool call is inside a string literal', () => {
+      // Simulate truncation mid-string: {"file_path": "/tmp/test.txt", "content": "some text
+      parser.addChunk(0, '{"file_path": "/tmp/test.txt"', 'call_1', 'write_file');
+      parser.addChunk(0, ', "content": "some text');
+      const state = parser.getState(0);
+      expect(state.inString).toBe(true);
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return false for tool calls without name metadata', () => {
+      // Tool calls without a name should be ignored
+      parser.addChunk(0, '{"key": "incomplete', undefined, undefined);
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should detect incomplete among multiple tool calls', () => {
+      // First tool call is complete
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'func_a');
+      // Second tool call is incomplete
+      parser.addChunk(1, '{"key": "val', 'call_2', 'func_b');
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+    });
+
+    it('should return false after reset', () => {
+      parser.addChunk(0, '{"key": "incomplete', 'call_1', 'write_file');
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+      parser.reset();
+      expect(parser.hasIncompleteToolCalls()).toBe(false);
+    });
+
+    it('should detect real-world truncation: write_file with only file_path', () => {
+      // Reproduces the actual bug: LLM output truncated mid-JSON,
+      // only file_path key received, content never arrived.
+      // Buffer: {"file_path": "/path/to/file.cpp"
+      // depth=1 because outer brace is unclosed
+      parser.addChunk(
+        0,
+        '{"file_path": "/path/to/file.cpp"',
+        'call_1',
+        'write_file',
+      );
+      expect(parser.hasIncompleteToolCalls()).toBe(true);
+      expect(parser.getState(0).depth).toBe(1);
+    });
+  });
 });

@@ -207,6 +207,42 @@ Use the `/model` command at any time to switch between all configured models.
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
         "description": "qwen3-coder-plus from Bailian Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY"
+      },
+      {
+        "id": "qwen3-coder-next",
+        "name": "qwen3-coder-next (Coding Plan)",
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "description": "qwen3-coder-next with thinking enabled from Bailian Coding Plan",
+        "envKey": "BAILIAN_CODING_PLAN_API_KEY",
+        "generationConfig": {
+          "extra_body": {
+            "enable_thinking": true
+          }
+        }
+      },
+      {
+        "id": "glm-4.7",
+        "name": "glm-4.7 (Coding Plan)",
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "description": "glm-4.7 with thinking enabled from Bailian Coding Plan",
+        "envKey": "BAILIAN_CODING_PLAN_API_KEY",
+        "generationConfig": {
+          "extra_body": {
+            "enable_thinking": true
+          }
+        }
+      },
+      {
+        "id": "kimi-k2.5",
+        "name": "kimi-k2.5 (Coding Plan)",
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "description": "kimi-k2.5 with thinking enabled from Bailian Coding Plan",
+        "envKey": "BAILIAN_CODING_PLAN_API_KEY",
+        "generationConfig": {
+          "extra_body": {
+            "enable_thinking": true
+          }
+        }
       }
     ]
   },

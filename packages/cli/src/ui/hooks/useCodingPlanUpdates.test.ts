@@ -112,7 +112,7 @@ describe('useCodingPlanUpdates', () => {
 
       // Should prompt for China region since it defaults to China
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        chinaConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
 
@@ -135,7 +135,7 @@ describe('useCodingPlanUpdates', () => {
       });
 
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        chinaConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
 
@@ -158,7 +158,7 @@ describe('useCodingPlanUpdates', () => {
       });
 
       expect(result.current.codingPlanUpdateRequest?.prompt).toContain(
-        globalConfig.regionName,
+        'Alibaba Cloud Coding Plan',
       );
     });
   });
@@ -228,7 +228,7 @@ describe('useCodingPlanUpdates', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',
-          text: expect.stringContaining(chinaConfig.regionName),
+          text: expect.stringContaining('Alibaba Cloud Coding Plan'),
         }),
         expect.any(Number),
       );
@@ -297,7 +297,7 @@ describe('useCodingPlanUpdates', () => {
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'info',
-          text: expect.stringContaining(globalConfig.regionName),
+          text: expect.stringContaining('Alibaba Cloud Coding Plan'),
         }),
         expect.any(Number),
       );
@@ -391,8 +391,9 @@ describe('useCodingPlanUpdates', () => {
       >;
 
       // Should have new China configs + custom config only (global config removed since regions are mutually exclusive)
-      // The template has 3 models, so we expect 3 (from template) + 1 (custom) = 4
-      expect(updatedConfigs.length).toBe(4);
+      // The China template has 8 models, so we expect 8 (from template) + 1 (custom) = 9
+      // Note: description field has been removed, only name field contains the branding
+      expect(updatedConfigs.length).toBe(9);
 
       // Should NOT contain the Global config (mutually exclusive)
       expect(
