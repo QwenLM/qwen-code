@@ -125,6 +125,10 @@ export function createHookOutput(
   switch (eventName) {
     case HookEventName.PreToolUse:
       return new PreToolUseHookOutput(data);
+    case HookEventName.PostToolUse:
+      return new PostToolUseHookOutput(data);
+    case HookEventName.PostToolUseFailure:
+      return new PostToolUseFailureHookOutput(data);
     case HookEventName.Stop:
       return new StopHookOutput(data);
     case HookEventName.PermissionRequest:
@@ -222,20 +226,94 @@ export class DefaultHookOutput implements HookOutput {
  */
 export class PreToolUseHookOutput extends DefaultHookOutput {
   /**
-   * Get modified tool input if provided by hook
+   * Get permission decision from hook output
+   * @returns 'allow' | 'deny' | 'ask' | undefined
    */
-  getModifiedToolInput(): Record<string, unknown> | undefined {
-    if (this.hookSpecificOutput && 'tool_input' in this.hookSpecificOutput) {
-      const input = this.hookSpecificOutput['tool_input'];
-      if (
-        typeof input === 'object' &&
-        input !== null &&
-        !Array.isArray(input)
-      ) {
-        return input as Record<string, unknown>;
+  getPermissionDecision(): 'allow' | 'deny' | 'ask' | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'permissionDecision' in this.hookSpecificOutput
+    ) {
+      const decision = this.hookSpecificOutput['permissionDecision'];
+      if (decision === 'allow' || decision === 'deny' || decision === 'ask') {
+        return decision;
       }
     }
+    // Fall back to base decision field
+    if (this.decision === 'allow' || this.decision === 'approve') {
+      return 'allow';
+    }
+    if (this.decision === 'deny' || this.decision === 'block') {
+      return 'deny';
+    }
+    if (this.decision === 'ask') {
+      return 'ask';
+    }
     return undefined;
+  }
+
+  /**
+   * Get permission decision reason
+   */
+  getPermissionDecisionReason(): string | undefined {
+    if (
+      this.hookSpecificOutput &&
+      'permissionDecisionReason' in this.hookSpecificOutput
+    ) {
+      const reason = this.hookSpecificOutput['permissionDecisionReason'];
+      if (typeof reason === 'string') {
+        return reason;
+      }
+    }
+    return this.reason;
+  }
+
+  /**
+   * Check if permission was denied
+   */
+  isDenied(): boolean {
+    return this.getPermissionDecision() === 'deny';
+  }
+
+  /**
+   * Check if user confirmation is required
+   */
+  isAsk(): boolean {
+    return this.getPermissionDecision() === 'ask';
+  }
+
+  /**
+   * Check if permission was allowed
+   */
+  isAllowed(): boolean {
+    return this.getPermissionDecision() === 'allow';
+  }
+}
+
+/**
+ * Specific hook output class for PostToolUse events.
+ */
+export class PostToolUseHookOutput extends DefaultHookOutput {
+  override decision: HookDecision;
+  override reason: string;
+
+  constructor(data: Partial<HookOutput> = {}) {
+    super(data);
+    // Ensure required fields are present
+    this.decision = data.decision ?? 'allow';
+    this.reason = data.reason ?? 'No reason provided';
+  }
+}
+
+/**
+ * Specific hook output class for PostToolUseFailure events.
+ */
+export class PostToolUseFailureHookOutput extends DefaultHookOutput {
+  /**
+   * Get additional context to provide error handling information
+   */
+  override getAdditionalContext(): string | undefined {
+    return super.getAdditionalContext();
   }
 }
 
@@ -353,44 +431,23 @@ export class PermissionRequestHookOutput extends DefaultHookOutput {
 }
 
 /**
- * Context for MCP tool executions.
- * Contains non-sensitive connection information about the MCP server
- * identity. Since server_name is user controlled and arbitrary, we
- * also include connection information (e.g., command or url) to
- * help identify the MCP server.
- *
- * NOTE: In the future, consider defining a shared sanitized interface
- * from MCPServerConfig to avoid duplication and ensure consistency.
+ * PreToolUse hook input
  */
-export interface McpToolContext {
-  server_name: string;
-  tool_name: string; // Original tool name from the MCP server
-
-  // Connection info (mutually exclusive based on transport type)
-  command?: string; // For stdio transport
-  args?: string[]; // For stdio transport
-  cwd?: string; // For stdio transport
-
-  url?: string; // For SSE/HTTP transport
-
-  tcp?: string; // For WebSocket transport
-}
-
 export interface PreToolUseInput extends HookInput {
-  permission_mode?: PermissionMode;
+  permission_mode: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
-  mcp_context?: McpToolContext;
-  original_request_name?: string;
+  tool_use_id: string; // Unique identifier for this tool use instance
 }
 
 /**
  * PreToolUse hook output
  */
 export interface PreToolUseOutput extends HookOutput {
-  hookSpecificOutput?: {
+  hookSpecificOutput: {
     hookEventName: 'PreToolUse';
-    tool_input?: Record<string, unknown>;
+    permissionDecision: 'allow' | 'deny' | 'ask';
+    permissionDecisionReason: string;
   };
 }
 
@@ -398,30 +455,24 @@ export interface PreToolUseOutput extends HookOutput {
  * PostToolUse hook input
  */
 export interface PostToolUseInput extends HookInput {
+  permission_mode: PermissionMode;
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response: Record<string, unknown>;
-  mcp_context?: McpToolContext;
-  original_request_name?: string;
+  tool_use_id: string; // Unique identifier for this tool use instance
 }
 
 /**
  * PostToolUse hook output
  */
 export interface PostToolUseOutput extends HookOutput {
+  decision: HookDecision;
+  reason: string;
   hookSpecificOutput?: {
     hookEventName: 'PostToolUse';
     additionalContext?: string;
-
-    /**
-     * Optional request to execute another tool immediately after this one.
-     * The result of this tail call will replace the original tool's response.
-     */
-    tailToolCallRequest?: {
-      name: string;
-      args: Record<string, unknown>;
-    };
   };
+  updatedMCPToolOutput?: Record<string, unknown>;
 }
 
 /**
@@ -429,11 +480,11 @@ export interface PostToolUseOutput extends HookOutput {
  * Fired when a tool execution fails
  */
 export interface PostToolUseFailureInput extends HookInput {
+  permission_mode: PermissionMode;
   tool_use_id: string; // Unique identifier for the tool use
   tool_name: string;
   tool_input: Record<string, unknown>;
   error: string; // Error message describing the failure
-  error_type?: string; // Type of error (e.g., 'timeout', 'network', 'permission', etc.)
   is_interrupt?: boolean; // Whether the failure was caused by user interruption
 }
 

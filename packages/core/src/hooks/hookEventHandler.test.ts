@@ -510,4 +510,230 @@ describe('HookEventHandler', () => {
       expect(result.errors[0].message).toBe('SessionEnd planner error');
     });
   });
+
+  describe('firePostToolUseFailureEvent', () => {
+    it('should execute hooks for PostToolUseFailure event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test123',
+        'test-tool',
+        { param: 'value' },
+        'An error occurred',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolUseFailure,
+        { toolName: 'test-tool' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test456',
+        'shell',
+        { command: 'ls' },
+        'Command failed',
+        true,
+        PermissionMode.Yolo,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_mode: PermissionMode;
+        tool_use_id: string;
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        error: string;
+        is_interrupt: boolean;
+      };
+
+      expect(input.permission_mode).toBe(PermissionMode.Yolo);
+      expect(input.tool_use_id).toBe('toolu_test456');
+      expect(input.tool_name).toBe('shell');
+      expect(input.tool_input).toEqual({ command: 'ls' });
+      expect(input.error).toBe('Command failed');
+      expect(input.is_interrupt).toBe(true);
+    });
+
+    it('should handle default values for optional parameters', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test789',
+        'test-tool',
+        { param: 'value' },
+        'An error occurred',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_mode: PermissionMode;
+        is_interrupt?: boolean;
+      };
+
+      expect(input.permission_mode).toBe(PermissionMode.Default); // Should default to Default
+      expect(input.is_interrupt).toBeUndefined(); // Should be undefined when not provided
+    });
+
+    it('should pass tool name as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test123',
+        'special-tool',
+        { param: 'value' },
+        'Error occurred',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolUseFailure,
+        { toolName: 'special-tool' }, // Context with tool name
+      );
+    });
+
+    it('should handle successful execution with final output', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        reason: 'Processing error',
+        hookSpecificOutput: {
+          additionalContext: 'Additional failure context',
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test999',
+        'test-tool',
+        { param: 'value' },
+        'Error occurred',
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput).toBeDefined();
+      expect(result.finalOutput?.reason).toBe('Processing error');
+    });
+
+    it('should handle multiple hooks execution', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo hook1',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo hook2',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_test111',
+        'multi-tool',
+        { params: ['a', 'b'] },
+        'Multiple errors',
+      );
+
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledTimes(1);
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo hook1',
+            source: HooksConfigSource.Project,
+          },
+          {
+            type: HookType.Command,
+            command: 'echo hook2',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        HookEventName.PostToolUseFailure,
+        expect.any(Object), // input object
+        expect.any(Function), // onHookStart callback
+        expect.any(Function), // onHookEnd callback
+      );
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseFailureEvent(
+        'toolu_sequential',
+        'seq-tool',
+        { param: 'value' },
+        'Sequential error',
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+  });
 });

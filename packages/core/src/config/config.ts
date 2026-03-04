@@ -757,6 +757,43 @@ export class Config {
                   (input['last_assistant_message'] as string) || '',
                 );
                 break;
+              case 'PreToolUse': {
+                const { PermissionMode: PM } = await import(
+                  '../hooks/types.js'
+                );
+                result = await hookSystem.firePreToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as
+                    | import('../hooks/types.js').PermissionMode
+                    | undefined) ?? PM.Default,
+                );
+                break;
+              }
+              case 'PostToolUse':
+                result = await hookSystem.firePostToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_response'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input[
+                    'permission_mode'
+                  ] as import('../hooks/types.js').PermissionMode) || 'default',
+                );
+                break;
+              case 'PostToolUseFailure':
+                result = await hookSystem.firePostToolUseFailureEvent(
+                  (input['tool_use_id'] as string) || '',
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['error'] as string) || '',
+                  input['is_interrupt'] as boolean | undefined,
+                  (input[
+                    'permission_mode'
+                  ] as import('../hooks/types.js').PermissionMode) || 'default',
+                );
+                break;
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,

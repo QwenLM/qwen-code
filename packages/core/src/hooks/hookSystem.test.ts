@@ -15,6 +15,10 @@ import {
   HookType,
   HooksConfigSource,
   HookEventName,
+  SessionStartSource,
+  SessionEndReason,
+  PermissionMode,
+  AgentType,
   type HookDecision,
 } from './types.js';
 import type { Config } from '../config/config.js';
@@ -344,10 +348,13 @@ describe('HookSystem', () => {
         mockResult,
       );
 
-      const result = await hookSystem.fireSessionStartEvent('manual', 'gpt-4');
+      const result = await hookSystem.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'gpt-4',
+      );
 
       expect(mockHookEventHandler.fireSessionStartEvent).toHaveBeenCalledWith(
-        'manual',
+        SessionStartSource.Startup,
         'gpt-4',
         undefined,
         undefined,
@@ -370,17 +377,17 @@ describe('HookSystem', () => {
       );
 
       await hookSystem.fireSessionStartEvent(
-        'api_call',
+        SessionStartSource.Clear,
         'claude-3',
-        'auto_edit', // Using actual enum value from PermissionMode
-        'chat',
+        PermissionMode.AutoEdit, // Using actual enum value from PermissionMode
+        AgentType.Custom,
       );
 
       expect(mockHookEventHandler.fireSessionStartEvent).toHaveBeenCalledWith(
-        'api_call',
+        SessionStartSource.Clear,
         'claude-3',
-        'auto_edit',
-        'chat',
+        PermissionMode.AutoEdit,
+        AgentType.Custom,
       );
     });
 
@@ -396,7 +403,10 @@ describe('HookSystem', () => {
         mockResult,
       );
 
-      const result = await hookSystem.fireSessionStartEvent('manual', 'gpt-4');
+      const result = await hookSystem.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'gpt-4',
+      );
 
       expect(result).toBeUndefined();
     });
@@ -418,10 +428,12 @@ describe('HookSystem', () => {
         mockResult,
       );
 
-      const result = await hookSystem.fireSessionEndEvent('user_quit');
+      const result = await hookSystem.fireSessionEndEvent(
+        SessionEndReason.Other,
+      );
 
       expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
-        'user_quit',
+        SessionEndReason.Other,
       );
       expect(result).toBeDefined();
     });
@@ -440,10 +452,10 @@ describe('HookSystem', () => {
         mockResult,
       );
 
-      await hookSystem.fireSessionEndEvent('timeout');
+      await hookSystem.fireSessionEndEvent(SessionEndReason.Other);
 
       expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
-        'timeout',
+        SessionEndReason.Other,
       );
     });
 
@@ -459,7 +471,9 @@ describe('HookSystem', () => {
         mockResult,
       );
 
-      const result = await hookSystem.fireSessionEndEvent('normal_exit');
+      const result = await hookSystem.fireSessionEndEvent(
+        SessionEndReason.Other,
+      );
 
       expect(result).toBeUndefined();
     });

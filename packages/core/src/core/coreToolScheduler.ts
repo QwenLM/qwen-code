@@ -19,6 +19,14 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  generateToolUseId,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
+  appendAdditionalContext,
+} from './toolHookTriggers.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
@@ -820,7 +828,7 @@ export class CoreToolScheduler {
               response: createErrorResponse(
                 reqInfo,
                 truncationError,
-                ToolErrorType.OUTPUT_TRUNCATED,
+                undefined,
               ),
               durationMs: 0,
             };
@@ -1143,6 +1151,41 @@ export class CoreToolScheduler {
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
     const invocation = scheduledCall.invocation;
+    const toolInput = scheduledCall.request.args as Record<string, unknown>;
+
+    // Generate unique tool_use_id for hook tracking
+    const toolUseId = generateToolUseId();
+
+    // Get MessageBus for hook execution
+    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
+    const hooksEnabled = this.config.getEnableHooks();
+
+    // ===== PreToolUse Hook =====
+    if (hooksEnabled && messageBus) {
+      // Convert ApprovalMode to permission_mode string for hooks
+      const permissionMode = this.config.getApprovalMode();
+      const preHookResult = await firePreToolUseHook(
+        messageBus,
+        toolName,
+        toolInput,
+        toolUseId,
+        permissionMode,
+      );
+
+      if (!preHookResult.shouldProceed) {
+        // Hook blocked the execution
+        const blockMessage =
+          preHookResult.blockReason || 'Tool execution blocked by hook';
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          new Error(blockMessage),
+          ToolErrorType.EXECUTION_DENIED,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+        return;
+      }
+    }
+
     this.setStatusInternal(callId, 'executing');
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
@@ -1192,6 +1235,26 @@ export class CoreToolScheduler {
     try {
       const toolResult: ToolResult = await promise;
       if (signal.aborted) {
+        // PostToolUseFailure Hook
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+          return;
+        }
         this.setStatusInternal(
           callId,
           'cancelled',
@@ -1239,6 +1302,44 @@ export class CoreToolScheduler {
           }
         }
 
+        // PostToolUse Hook
+        if (hooksEnabled && messageBus) {
+          const toolResponse = {
+            llmContent: content,
+            returnDisplay: toolResult.returnDisplay,
+          };
+          const permissionMode = this.config.getApprovalMode();
+          const postHookResult = await firePostToolUseHook(
+            messageBus,
+            toolName,
+            toolInput,
+            toolResponse,
+            toolUseId,
+            permissionMode,
+          );
+
+          // Append additional context from hook if provided
+          if (postHookResult.additionalContext) {
+            content = appendAdditionalContext(
+              content,
+              postHookResult.additionalContext,
+            );
+          }
+
+          // Check if hook requested to stop execution
+          if (postHookResult.shouldStop) {
+            const stopMessage =
+              postHookResult.stopReason || 'Execution stopped by hook';
+            const errorResponse = createErrorResponse(
+              scheduledCall.request,
+              new Error(stopMessage),
+              ToolErrorType.EXECUTION_DENIED,
+            );
+            this.setStatusInternal(callId, 'error', errorResponse);
+            return;
+          }
+        }
+
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
           callId,
@@ -1252,7 +1353,26 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'success', successResponse);
       } else {
         // It is a failure
-        const error = new Error(toolResult.error.message);
+        // PostToolUseFailure Hook
+        let errorMessage = toolResult.error.message;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            toolResult.error.message,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            errorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
+
+        const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
@@ -1261,20 +1381,63 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'error', errorResponse);
       }
     } catch (executionError: unknown) {
+      const errorMessage =
+        executionError instanceof Error
+          ? executionError.message
+          : String(executionError);
+
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
+        // PostToolUseFailure Hook (user interrupt)
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
+        }
       } else {
+        // PostToolUseFailure Hook
+        let exceptionErrorMessage = errorMessage;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            errorMessage,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
         this.setStatusInternal(
           callId,
           'error',
           createErrorResponse(
             scheduledCall.request,
             executionError instanceof Error
-              ? executionError
+              ? new Error(exceptionErrorMessage)
               : new Error(String(executionError)),
             ToolErrorType.UNHANDLED_EXCEPTION,
           ),

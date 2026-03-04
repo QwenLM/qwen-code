@@ -8,6 +8,8 @@ import {
   HookEventName,
   DefaultHookOutput,
   PreToolUseHookOutput,
+  PostToolUseHookOutput,
+  PostToolUseFailureHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
 } from './types.js';
@@ -88,7 +90,7 @@ export class HookAggregator {
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
-        merged = this.mergeWithOrLogic(outputs);
+        merged = this.mergeWithOrLogic(outputs, eventName);
         break;
       case HookEventName.PermissionRequest:
         merged = this.mergePermissionRequestOutputs(outputs);
@@ -108,8 +110,12 @@ export class HookAggregator {
    * - Reasons are concatenated with newlines
    * - continue=false takes precedence over continue=true
    * - Additional context is concatenated
+   * - For PostToolUse, decision and reason are required fields
    */
-  private mergeWithOrLogic(outputs: HookOutput[]): HookOutput {
+  private mergeWithOrLogic(
+    outputs: HookOutput[],
+    _eventName?: HookEventName,
+  ): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
@@ -336,6 +342,10 @@ export class HookAggregator {
     switch (eventName) {
       case HookEventName.PreToolUse:
         return new PreToolUseHookOutput(output);
+      case HookEventName.PostToolUse:
+        return new PostToolUseHookOutput(output);
+      case HookEventName.PostToolUseFailure:
+        return new PostToolUseFailureHookOutput(output);
       case HookEventName.Stop:
         return new StopHookOutput(output);
       case HookEventName.PermissionRequest:

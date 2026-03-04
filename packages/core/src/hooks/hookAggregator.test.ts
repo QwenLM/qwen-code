@@ -174,12 +174,21 @@ describe('HookAggregator', () => {
     it('should preserve other hookSpecificOutput fields', () => {
       const outputs: HookOutput[] = [
         {
+          decision: 'allow',
+          reason: 'Test reason 1',
           hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
             additionalContext: 'ctx',
-            tailToolCallRequest: { name: 'A' },
           },
         },
-        { hookSpecificOutput: { additionalContext: 'ctx2' } },
+        {
+          decision: 'allow',
+          reason: 'Test reason 2',
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse',
+            additionalContext: 'ctx2',
+          },
+        },
       ];
 
       const results: HookExecutionResult[] = outputs.map((output) => ({
@@ -194,9 +203,6 @@ describe('HookAggregator', () => {
         results,
         HookEventName.PostToolUse,
       );
-      expect(
-        result.finalOutput?.hookSpecificOutput?.['tailToolCallRequest'],
-      ).toEqual({ name: 'A' });
       expect(
         result.finalOutput?.hookSpecificOutput?.['additionalContext'],
       ).toBe('ctx\nctx2');

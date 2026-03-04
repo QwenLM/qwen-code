@@ -20,6 +20,9 @@ import type {
   SessionStartSource,
   SessionEndReason,
   AgentType,
+  PreToolUseInput,
+  PostToolUseInput,
+  PostToolUseFailureInput,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -113,6 +116,84 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.SessionEnd, input);
+  }
+
+  /**
+   * Fire a PreToolUse event
+   * Called before tool execution begins
+   */
+  async firePreToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PreToolUseInput = {
+      ...this.createBaseInput(HookEventName.PreToolUse),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PreToolUse, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a PostToolUse event
+   * Called after successful tool execution
+   */
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseInput = {
+      ...this.createBaseInput(HookEventName.PostToolUse),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_response: toolResponse,
+      tool_use_id: toolUseId,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PostToolUse, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a PostToolUseFailure event
+   * Called when tool execution fails
+   */
+  async firePostToolUseFailureEvent(
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    errorMessage: string,
+    isInterrupt?: boolean,
+    permissionMode?: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseFailureInput = {
+      ...this.createBaseInput(HookEventName.PostToolUseFailure),
+      permission_mode: permissionMode ?? PermissionMode.Default,
+      tool_use_id: toolUseId,
+      tool_name: toolName,
+      tool_input: toolInput,
+      error: errorMessage,
+      is_interrupt: isInterrupt,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PostToolUseFailure, input, {
+      toolName,
+    });
   }
 
   /**
