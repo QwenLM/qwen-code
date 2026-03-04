@@ -746,27 +746,43 @@ export class CoreToolScheduler {
         (reqInfo): ToolCall => {
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
-          const excludeTools = this.config.getExcludeTools?.() ?? undefined;
-          if (excludeTools && excludeTools.length > 0) {
-            const normalizedToolName = reqInfo.name.toLowerCase().trim();
-            const excludedMatch = excludeTools.find(
-              (excludedTool) =>
-                excludedTool.toLowerCase().trim() === normalizedToolName,
-            );
+          const pm = this.config.getPermissionManager?.();
+          if (pm && !pm.isToolEnabled(reqInfo.name)) {
+            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            return {
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(permissionErrorMessage),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+              durationMs: 0,
+            };
+          }
 
-            if (excludedMatch) {
-              // The tool exists but is excluded - return permission error directly
-              const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
-              return {
-                status: 'error',
-                request: reqInfo,
-                response: createErrorResponse(
-                  reqInfo,
-                  new Error(permissionErrorMessage),
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-                durationMs: 0,
-              };
+          // Legacy fallback: check getExcludeTools() when PM is not available
+          if (!pm) {
+            const excludeTools = this.config.getExcludeTools?.() ?? undefined;
+            if (excludeTools && excludeTools.length > 0) {
+              const normalizedToolName = reqInfo.name.toLowerCase().trim();
+              const excludedMatch = excludeTools.find(
+                (excludedTool) =>
+                  excludedTool.toLowerCase().trim() === normalizedToolName,
+              );
+              if (excludedMatch) {
+                const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
+                return {
+                  status: 'error',
+                  request: reqInfo,
+                  response: createErrorResponse(
+                    reqInfo,
+                    new Error(permissionErrorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                  durationMs: 0,
+                };
+              }
             }
           }
 
@@ -868,7 +884,51 @@ export class CoreToolScheduler {
             continue;
           }
 
-          const allowedTools = this.config.getAllowedTools() || [];
+          // Determine if this invocation is auto-approved via PermissionManager
+          const pm = this.config.getPermissionManager?.();
+          const isAutoApproved = (() => {
+            if (this.config.getApprovalMode() === ApprovalMode.YOLO)
+              return true;
+            if (pm) {
+              // Build invocation context from tool params.
+              // Different tool types contribute different context fields:
+              //   - Shell tools: command
+              //   - File read/edit/write tools: filePath (via absolute_path or file_path)
+              //   - WebFetch: domain (extracted from url param)
+              const params = invocation.params as Record<string, unknown>;
+              const shellCommand =
+                'command' in params ? String(params['command']) : undefined;
+              const filePath =
+                typeof params['absolute_path'] === 'string'
+                  ? params['absolute_path']
+                  : typeof params['file_path'] === 'string'
+                    ? params['file_path']
+                    : undefined;
+              let domain: string | undefined;
+              if (typeof params['url'] === 'string') {
+                try {
+                  domain = new URL(params['url']).hostname;
+                } catch {
+                  // malformed URL — leave domain undefined
+                }
+              }
+              const decision = pm.evaluate({
+                toolName: reqInfo.name,
+                command: shellCommand,
+                filePath,
+                domain,
+              });
+              return decision === 'allow';
+            }
+            // Legacy fallback: check getAllowedTools() when PM is not available
+            const allowedTools = this.config.getAllowedTools() || [];
+            return doesToolInvocationMatch(
+              toolCall.tool,
+              invocation,
+              allowedTools,
+            );
+          })();
+
           const isPlanMode =
             this.config.getApprovalMode() === ApprovalMode.PLAN;
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
@@ -889,10 +949,7 @@ export class CoreToolScheduler {
             } else {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
-          } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
-          ) {
+          } else if (isAutoApproved) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,

@@ -18,7 +18,7 @@ import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
-import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
+import { TrustDialog } from './TrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 import { theme } from '../semantic-colors.js';
@@ -265,12 +265,9 @@ export const DialogManager = ({
       );
     }
   }
-  if (uiState.isPermissionsDialogOpen) {
+  if (uiState.isTrustDialogOpen) {
     return (
-      <PermissionsModifyTrustDialog
-        onExit={uiActions.closePermissionsDialog}
-        addItem={addItem}
-      />
+      <TrustDialog onExit={uiActions.closeTrustDialog} addItem={addItem} />
     );
   }
 

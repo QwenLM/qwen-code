@@ -146,7 +146,7 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'subagent_create'
     | 'subagent_list'
-    | 'permissions'
+    | 'trust'
     | 'approval-mode'
     | 'resume';
 }

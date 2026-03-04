@@ -52,7 +52,7 @@ export interface UIState {
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
-  isPermissionsDialogOpen: boolean;
+  isTrustDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];

@@ -13,6 +13,9 @@ export * from './config/config.js';
 export { Storage } from './config/storage.js';
 export * from './utils/configResolver.js';
 
+// Permission system
+export * from './permissions/index.js';
+
 // Model configuration
 export {
   DEFAULT_QWEN_MODEL,

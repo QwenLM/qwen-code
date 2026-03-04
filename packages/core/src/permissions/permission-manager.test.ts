@@ -1,0 +1,967 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  parseRule,
+  parseRules,
+  matchesRule,
+  matchesCommandPattern,
+  matchesPathPattern,
+  matchesDomainPattern,
+  resolveToolName,
+  resolvePathPattern,
+  getSpecifierKind,
+  toolMatchesRuleToolName,
+} from './rule-parser.js';
+import { PermissionManager } from './permission-manager.js';
+import type { PermissionManagerConfig } from './permission-manager.js';
+
+// ─── resolveToolName ─────────────────────────────────────────────────────────
+
+describe('resolveToolName', () => {
+  it('resolves canonical names', () => {
+    expect(resolveToolName('run_shell_command')).toBe('run_shell_command');
+    expect(resolveToolName('read_file')).toBe('read_file');
+  });
+
+  it('resolves display-name aliases', () => {
+    expect(resolveToolName('Shell')).toBe('run_shell_command');
+    expect(resolveToolName('ShellTool')).toBe('run_shell_command');
+    expect(resolveToolName('Bash')).toBe('run_shell_command');
+    expect(resolveToolName('ReadFile')).toBe('read_file');
+    expect(resolveToolName('ReadFileTool')).toBe('read_file');
+    expect(resolveToolName('EditTool')).toBe('edit');
+    expect(resolveToolName('WriteFileTool')).toBe('write_file');
+  });
+
+  it('resolves "Read" and "Edit" meta-categories', () => {
+    expect(resolveToolName('Read')).toBe('read_file');
+    expect(resolveToolName('Edit')).toBe('edit');
+    expect(resolveToolName('Write')).toBe('write_file');
+  });
+
+  it('resolves Agent category', () => {
+    expect(resolveToolName('Agent')).toBe('Agent');
+  });
+
+  it('returns unknown names unchanged', () => {
+    expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
+    expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
+  });
+});
+
+// ─── getSpecifierKind ────────────────────────────────────────────────────────
+
+describe('getSpecifierKind', () => {
+  it('returns "command" for shell tools', () => {
+    expect(getSpecifierKind('run_shell_command')).toBe('command');
+  });
+
+  it('returns "path" for file read/edit tools', () => {
+    expect(getSpecifierKind('read_file')).toBe('path');
+    expect(getSpecifierKind('edit')).toBe('path');
+    expect(getSpecifierKind('write_file')).toBe('path');
+    expect(getSpecifierKind('grep_search')).toBe('path');
+    expect(getSpecifierKind('glob')).toBe('path');
+    expect(getSpecifierKind('list_directory')).toBe('path');
+  });
+
+  it('returns "domain" for web fetch tools', () => {
+    expect(getSpecifierKind('web_fetch')).toBe('domain');
+  });
+
+  it('returns "literal" for other tools', () => {
+    expect(getSpecifierKind('Agent')).toBe('literal');
+    expect(getSpecifierKind('task')).toBe('literal');
+    expect(getSpecifierKind('mcp__server')).toBe('literal');
+  });
+});
+
+// ─── toolMatchesRuleToolName ─────────────────────────────────────────────────
+
+describe('toolMatchesRuleToolName', () => {
+  it('exact match', () => {
+    expect(toolMatchesRuleToolName('read_file', 'read_file')).toBe(true);
+    expect(toolMatchesRuleToolName('edit', 'edit')).toBe(true);
+  });
+
+  it('"Read" (read_file) covers grep_search, glob, list_directory', () => {
+    expect(toolMatchesRuleToolName('read_file', 'grep_search')).toBe(true);
+    expect(toolMatchesRuleToolName('read_file', 'glob')).toBe(true);
+    expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
+  });
+
+  it('"Edit" (edit) covers write_file', () => {
+    expect(toolMatchesRuleToolName('edit', 'write_file')).toBe(true);
+  });
+
+  it('does not cross categories', () => {
+    expect(toolMatchesRuleToolName('read_file', 'edit')).toBe(false);
+    expect(toolMatchesRuleToolName('edit', 'read_file')).toBe(false);
+    expect(toolMatchesRuleToolName('read_file', 'run_shell_command')).toBe(
+      false,
+    );
+  });
+});
+
+// ─── parseRule ───────────────────────────────────────────────────────────────
+
+describe('parseRule', () => {
+  it('parses a simple tool name', () => {
+    const r = parseRule('ShellTool');
+    expect(r.raw).toBe('ShellTool');
+    expect(r.toolName).toBe('run_shell_command');
+    expect(r.specifier).toBeUndefined();
+    expect(r.specifierKind).toBeUndefined();
+  });
+
+  it('parses Bash alias (Claude Code compat)', () => {
+    const r = parseRule('Bash');
+    expect(r.toolName).toBe('run_shell_command');
+  });
+
+  it('parses a shell tool with a specifier', () => {
+    const r = parseRule('Bash(git *)');
+    expect(r.toolName).toBe('run_shell_command');
+    expect(r.specifier).toBe('git *');
+    expect(r.specifierKind).toBe('command');
+  });
+
+  it('parses Read with path specifier', () => {
+    const r = parseRule('Read(./secrets/**)');
+    expect(r.toolName).toBe('read_file');
+    expect(r.specifier).toBe('./secrets/**');
+    expect(r.specifierKind).toBe('path');
+  });
+
+  it('parses Edit with path specifier', () => {
+    const r = parseRule('Edit(/src/**/*.ts)');
+    expect(r.toolName).toBe('edit');
+    expect(r.specifier).toBe('/src/**/*.ts');
+    expect(r.specifierKind).toBe('path');
+  });
+
+  it('parses WebFetch with domain specifier', () => {
+    const r = parseRule('WebFetch(domain:example.com)');
+    expect(r.toolName).toBe('web_fetch');
+    expect(r.specifier).toBe('domain:example.com');
+    expect(r.specifierKind).toBe('domain');
+  });
+
+  it('parses Agent with literal specifier', () => {
+    const r = parseRule('Agent(Explore)');
+    expect(r.toolName).toBe('Agent');
+    expect(r.specifier).toBe('Explore');
+    expect(r.specifierKind).toBe('literal');
+  });
+
+  it('handles unknown tools without specifier', () => {
+    const r = parseRule('mcp__my_server__my_tool');
+    expect(r.toolName).toBe('mcp__my_server__my_tool');
+    expect(r.specifier).toBeUndefined();
+  });
+
+  it('handles legacy :* suffix (deprecated)', () => {
+    const r = parseRule('Bash(git:*)');
+    expect(r.toolName).toBe('run_shell_command');
+    expect(r.specifier).toBe('git *');
+  });
+
+  it('handles malformed pattern (no closing paren)', () => {
+    const r = parseRule('Bash(git status');
+    expect(r.specifier).toBeUndefined();
+  });
+});
+
+// ─── parseRules ──────────────────────────────────────────────────────────────
+
+describe('parseRules', () => {
+  it('filters empty strings', () => {
+    const rules = parseRules(['ShellTool', '', '  ', 'ReadFileTool']);
+    expect(rules).toHaveLength(2);
+  });
+});
+
+// ─── matchesCommandPattern (Shell glob) ──────────────────────────────────────
+
+describe('matchesCommandPattern', () => {
+  // Basic prefix matching (no wildcards)
+  describe('prefix matching without glob', () => {
+    it('exact match', () => {
+      expect(matchesCommandPattern('git', 'git')).toBe(true);
+    });
+
+    it('prefix + space', () => {
+      expect(matchesCommandPattern('git', 'git status')).toBe(true);
+      expect(matchesCommandPattern('git commit', 'git commit -m "test"')).toBe(
+        true,
+      );
+    });
+
+    it('does not match as substring', () => {
+      expect(matchesCommandPattern('git', 'gitcommit')).toBe(false);
+    });
+  });
+
+  // Wildcard at tail
+  describe('wildcard at tail', () => {
+    it('matches any arguments', () => {
+      expect(matchesCommandPattern('git *', 'git status')).toBe(true);
+      expect(matchesCommandPattern('git *', 'git commit -m "test"')).toBe(true);
+      expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
+    });
+
+    it('does not match different command', () => {
+      expect(matchesCommandPattern('git *', 'echo hello')).toBe(false);
+    });
+  });
+
+  // Wildcard at head
+  describe('wildcard at head', () => {
+    it('matches any command ending with pattern', () => {
+      expect(matchesCommandPattern('* --version', 'node --version')).toBe(true);
+      expect(matchesCommandPattern('* --version', 'npm --version')).toBe(true);
+      expect(matchesCommandPattern('* --help *', 'npm --help install')).toBe(
+        true,
+      );
+    });
+
+    it('does not match non-matching suffix', () => {
+      expect(matchesCommandPattern('* --version', 'node --help')).toBe(false);
+    });
+  });
+
+  // Wildcard in middle
+  describe('wildcard in middle', () => {
+    it('matches middle segments', () => {
+      expect(matchesCommandPattern('git * main', 'git checkout main')).toBe(
+        true,
+      );
+      expect(matchesCommandPattern('git * main', 'git merge main')).toBe(true);
+    });
+
+    it('does not match different suffix', () => {
+      expect(matchesCommandPattern('git * main', 'git checkout dev')).toBe(
+        false,
+      );
+    });
+  });
+
+  // Word boundary rule: space before * matters
+  describe('word boundary rule (space before *)', () => {
+    it('Bash(ls *): matches "ls -la" but NOT "lsof"', () => {
+      expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
+      expect(matchesCommandPattern('ls *', 'ls')).toBe(true); // "ls" alone
+      expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);
+    });
+
+    it('Bash(ls*): matches both "ls -la" and "lsof"', () => {
+      expect(matchesCommandPattern('ls*', 'ls -la')).toBe(true);
+      expect(matchesCommandPattern('ls*', 'lsof')).toBe(true);
+      expect(matchesCommandPattern('ls*', 'ls')).toBe(true);
+    });
+
+    it('Bash(npm *): matches "npm run" but NOT "npmx"', () => {
+      expect(matchesCommandPattern('npm *', 'npm run build')).toBe(true);
+      expect(matchesCommandPattern('npm *', 'npmx install')).toBe(false);
+    });
+  });
+
+  // Shell operator awareness
+  //
+  // Key insight: operator boundary extraction means we only match against
+  // the FIRST simple command. So `git *` still matches `git status && rm -rf /`
+  // because the first command IS `git status` which matches `git *`.
+  //
+  // The safety benefit: a pattern like `rm *` would NOT match
+  // `git status && rm -rf /` because the first command is `git status`.
+  describe('shell operator boundaries', () => {
+    it('first-command extraction: git * matches first cmd in compound', () => {
+      // First command is "git status", which matches "git *"
+      expect(matchesCommandPattern('git *', 'git status && rm -rf /')).toBe(
+        true,
+      );
+    });
+
+    it('second command is not reachable: rm * does not match compound starting with git', () => {
+      // First command is "git status", NOT "rm -rf /"
+      expect(matchesCommandPattern('rm *', 'git status && rm -rf /')).toBe(
+        false,
+      );
+    });
+
+    it('pipe boundary: grep * does not match first command', () => {
+      // First command is "git status", not "grep foo"
+      expect(matchesCommandPattern('grep *', 'git status | grep foo')).toBe(
+        false,
+      );
+    });
+
+    it('semicolon boundary: rm * does not match first command', () => {
+      // First command is "git status", not "rm -rf /"
+      expect(matchesCommandPattern('rm *', 'git status; rm -rf /')).toBe(false);
+    });
+
+    it('|| boundary: echo * does not match first command', () => {
+      expect(matchesCommandPattern('echo *', 'git status || echo fail')).toBe(
+        false,
+      );
+    });
+
+    it('matches when no operators are present', () => {
+      expect(
+        matchesCommandPattern('git *', 'git commit -m "hello world"'),
+      ).toBe(true);
+    });
+
+    it('operators inside quotes are not boundaries', () => {
+      // "echo 'a && b'" → first command is the whole thing because && is inside quotes
+      expect(matchesCommandPattern('echo *', "echo 'a && b'")).toBe(true);
+    });
+  });
+
+  // Special: lone * matches any command
+  describe('lone wildcard', () => {
+    it('* matches any single command', () => {
+      expect(matchesCommandPattern('*', 'anything here')).toBe(true);
+    });
+  });
+
+  // Exact command match with specifier
+  describe('exact command specifier', () => {
+    it('Bash(npm run build) matches exact command', () => {
+      expect(matchesCommandPattern('npm run build', 'npm run build')).toBe(
+        true,
+      );
+    });
+    it('Bash(npm run build) also matches with trailing args (prefix)', () => {
+      expect(
+        matchesCommandPattern('npm run build', 'npm run build --verbose'),
+      ).toBe(true);
+    });
+    it('Bash(npm run build) does not match different command', () => {
+      expect(matchesCommandPattern('npm run build', 'npm run test')).toBe(
+        false,
+      );
+    });
+  });
+});
+
+// ─── resolvePathPattern ──────────────────────────────────────────────────────
+
+describe('resolvePathPattern', () => {
+  const projectRoot = '/project';
+  const cwd = '/project/subdir';
+
+  it('// prefix → absolute from filesystem root', () => {
+    expect(
+      resolvePathPattern('//Users/alice/secrets/**', projectRoot, cwd),
+    ).toBe('/Users/alice/secrets/**');
+  });
+
+  it('~/ prefix → relative to home directory', () => {
+    const result = resolvePathPattern('~/Documents/*.pdf', projectRoot, cwd);
+    expect(result).toContain('Documents/*.pdf');
+    // Should start with actual home directory
+    expect(result.startsWith('/')).toBe(true);
+  });
+
+  it('/ prefix → relative to project root (NOT absolute)', () => {
+    expect(resolvePathPattern('/src/**/*.ts', projectRoot, cwd)).toBe(
+      '/project/src/**/*.ts',
+    );
+  });
+
+  it('./ prefix → relative to cwd', () => {
+    expect(resolvePathPattern('./secrets/**', projectRoot, cwd)).toBe(
+      '/project/subdir/secrets/**',
+    );
+  });
+
+  it('no prefix → relative to cwd', () => {
+    expect(resolvePathPattern('*.env', projectRoot, cwd)).toBe(
+      '/project/subdir/*.env',
+    );
+  });
+
+  it('/Users/alice/file is relative to project root, NOT absolute', () => {
+    // This is a gotcha from the Claude Code docs
+    expect(resolvePathPattern('/Users/alice/file', projectRoot, cwd)).toBe(
+      '/project/Users/alice/file',
+    );
+  });
+});
+
+// ─── matchesPathPattern ──────────────────────────────────────────────────────
+
+describe('matchesPathPattern', () => {
+  const projectRoot = '/project';
+  const cwd = '/project';
+
+  it('matches dotfiles (e.g. .env)', () => {
+    expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
+      true,
+    );
+    expect(matchesPathPattern('*.env', '/project/.env', projectRoot, cwd)).toBe(
+      true,
+    );
+  });
+
+  it('** matches recursively across directories', () => {
+    expect(
+      matchesPathPattern(
+        './secrets/**',
+        '/project/secrets/deep/nested/file.txt',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(true);
+  });
+
+  it('* matches single directory only', () => {
+    expect(
+      matchesPathPattern(
+        '/src/*.ts',
+        '/project/src/index.ts',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(true);
+    expect(
+      matchesPathPattern(
+        '/src/*.ts',
+        '/project/src/nested/index.ts',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(false);
+  });
+
+  it('/docs/** matches under project root docs', () => {
+    expect(
+      matchesPathPattern(
+        '/docs/**',
+        '/project/docs/readme.md',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(true);
+    expect(
+      matchesPathPattern(
+        '/docs/**',
+        '/project/src/docs/readme.md',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(false);
+  });
+
+  it('//tmp/scratch.txt matches absolute path', () => {
+    expect(
+      matchesPathPattern(
+        '//tmp/scratch.txt',
+        '/tmp/scratch.txt',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not match unrelated paths', () => {
+    expect(
+      matchesPathPattern(
+        './secrets/**',
+        '/project/public/index.html',
+        projectRoot,
+        cwd,
+      ),
+    ).toBe(false);
+  });
+});
+
+// ─── matchesDomainPattern ────────────────────────────────────────────────────
+
+describe('matchesDomainPattern', () => {
+  it('matches exact domain', () => {
+    expect(matchesDomainPattern('domain:example.com', 'example.com')).toBe(
+      true,
+    );
+  });
+
+  it('matches subdomain', () => {
+    expect(matchesDomainPattern('domain:example.com', 'sub.example.com')).toBe(
+      true,
+    );
+    expect(
+      matchesDomainPattern('domain:example.com', 'deep.sub.example.com'),
+    ).toBe(true);
+  });
+
+  it('does not match different domain', () => {
+    expect(matchesDomainPattern('domain:example.com', 'notexample.com')).toBe(
+      false,
+    );
+  });
+
+  it('is case-insensitive', () => {
+    expect(matchesDomainPattern('domain:Example.COM', 'example.com')).toBe(
+      true,
+    );
+  });
+
+  it('handles missing prefix', () => {
+    expect(matchesDomainPattern('example.com', 'example.com')).toBe(true);
+  });
+});
+
+// ─── matchesRule (unified) ───────────────────────────────────────────────────
+
+describe('matchesRule', () => {
+  // Basic tool name matching
+  it('simple tool-name rule matches any invocation', () => {
+    const rule = parseRule('ShellTool');
+    expect(matchesRule(rule, 'run_shell_command')).toBe(true);
+    expect(matchesRule(rule, 'run_shell_command', 'git status')).toBe(true);
+  });
+
+  it('does not match a different tool', () => {
+    const rule = parseRule('ShellTool');
+    expect(matchesRule(rule, 'read_file')).toBe(false);
+  });
+
+  // Shell command specifier
+  it('specifier rule requires a command for shell tools', () => {
+    const rule = parseRule('Bash(git *)');
+    expect(matchesRule(rule, 'run_shell_command')).toBe(false); // no command
+    expect(matchesRule(rule, 'run_shell_command', 'git status')).toBe(true);
+    expect(matchesRule(rule, 'run_shell_command', 'echo hello')).toBe(false);
+  });
+
+  it('operator boundary: pattern matches first command only', () => {
+    const rule = parseRule('Bash(git *)');
+    // First command is "git status" which matches "git *" → true
+    expect(
+      matchesRule(rule, 'run_shell_command', 'git status && rm -rf /'),
+    ).toBe(true);
+    // rm * would not match because first command is "git status"
+    const rmRule = parseRule('Bash(rm *)');
+    expect(
+      matchesRule(rmRule, 'run_shell_command', 'git status && rm -rf /'),
+    ).toBe(false);
+  });
+
+  // Meta-category matching: Read
+  it('Read rule matches grep_search, glob, list_directory', () => {
+    const rule = parseRule('Read');
+    expect(matchesRule(rule, 'read_file')).toBe(true);
+    expect(matchesRule(rule, 'grep_search')).toBe(true);
+    expect(matchesRule(rule, 'glob')).toBe(true);
+    expect(matchesRule(rule, 'list_directory')).toBe(true);
+    expect(matchesRule(rule, 'edit')).toBe(false); // not a read tool
+  });
+
+  // Meta-category matching: Edit
+  it('Edit rule matches edit and write_file', () => {
+    const rule = parseRule('Edit');
+    expect(matchesRule(rule, 'edit')).toBe(true);
+    expect(matchesRule(rule, 'write_file')).toBe(true);
+    expect(matchesRule(rule, 'read_file')).toBe(false); // not an edit tool
+  });
+
+  // File path matching
+  it('Read with path specifier requires filePath', () => {
+    const rule = parseRule('Read(.env)');
+    const pathCtx = { projectRoot: '/project', cwd: '/project' };
+    // No filePath → no match
+    expect(matchesRule(rule, 'read_file')).toBe(false);
+    // With filePath
+    expect(
+      matchesRule(
+        rule,
+        'read_file',
+        undefined,
+        '/project/.env',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'read_file',
+        undefined,
+        '/project/other.txt',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(false);
+  });
+
+  it('Edit path specifier matches write_file too', () => {
+    const rule = parseRule('Edit(/src/**/*.ts)');
+    const pathCtx = { projectRoot: '/project', cwd: '/project' };
+    expect(
+      matchesRule(
+        rule,
+        'write_file',
+        undefined,
+        '/project/src/index.ts',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'write_file',
+        undefined,
+        '/project/docs/readme.md',
+        undefined,
+        pathCtx,
+      ),
+    ).toBe(false);
+  });
+
+  // WebFetch domain matching
+  it('WebFetch domain specifier', () => {
+    const rule = parseRule('WebFetch(domain:example.com)');
+    expect(
+      matchesRule(rule, 'web_fetch', undefined, undefined, 'example.com'),
+    ).toBe(true);
+    expect(
+      matchesRule(rule, 'web_fetch', undefined, undefined, 'sub.example.com'),
+    ).toBe(true);
+    expect(
+      matchesRule(rule, 'web_fetch', undefined, undefined, 'other.com'),
+    ).toBe(false);
+    // No domain → no match
+    expect(matchesRule(rule, 'web_fetch')).toBe(false);
+  });
+
+  // Agent literal matching
+  it('Agent literal specifier', () => {
+    const rule = parseRule('Agent(Explore)');
+    // Agent rules use `command` field for the agent name
+    expect(matchesRule(rule, 'Agent', 'Explore')).toBe(true);
+    expect(matchesRule(rule, 'Agent', 'Plan')).toBe(false);
+    expect(matchesRule(rule, 'Agent')).toBe(false); // no agent name
+  });
+
+  // MCP tool matching
+  it('MCP tool exact match', () => {
+    const rule = parseRule('mcp__puppeteer__puppeteer_navigate');
+    expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
+    expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_click')).toBe(false);
+  });
+
+  it('MCP server-level match (2-part pattern)', () => {
+    const rule = parseRule('mcp__puppeteer');
+    expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
+    expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_click')).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
+  });
+
+  it('MCP wildcard match', () => {
+    const rule = parseRule('mcp__puppeteer__*');
+    expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
+    expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
+  });
+});
+
+// ─── PermissionManager ──────────────────────────────────────────────────────
+
+function makeConfig(
+  opts: Partial<{
+    permissionsAllow: string[];
+    permissionsAsk: string[];
+    permissionsDeny: string[];
+    projectRoot: string;
+    cwd: string;
+  }> = {},
+): PermissionManagerConfig {
+  return {
+    getPermissionsAllow: () => opts.permissionsAllow,
+    getPermissionsAsk: () => opts.permissionsAsk,
+    getPermissionsDeny: () => opts.permissionsDeny,
+    getProjectRoot: () => opts.projectRoot ?? '/project',
+    getCwd: () => opts.cwd ?? '/project',
+  };
+}
+
+describe('PermissionManager', () => {
+  let pm: PermissionManager;
+
+  describe('basic rule evaluation', () => {
+    beforeEach(() => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFileTool', 'Bash(git *)'],
+          permissionsAsk: ['WriteFileTool'],
+          permissionsDeny: ['ShellTool'],
+        }),
+      );
+      pm.initialize();
+    });
+
+    it('returns deny for a denied tool', () => {
+      expect(pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+
+    it('returns ask for an ask-rule tool', () => {
+      expect(pm.evaluate({ toolName: 'write_file' })).toBe('ask');
+    });
+
+    it('returns allow for an allow-rule tool', () => {
+      expect(pm.evaluate({ toolName: 'read_file' })).toBe('allow');
+    });
+
+    it('returns default for unmatched tool', () => {
+      // Note: 'glob' is covered by ReadFileTool via Read meta-category,
+      // so use a tool not in any rule or meta-category
+      expect(pm.evaluate({ toolName: 'task' })).toBe('default');
+    });
+
+    it('deny takes precedence over ask and allow', () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['run_shell_command'],
+          permissionsAsk: ['run_shell_command'],
+          permissionsDeny: ['run_shell_command'],
+        }),
+      );
+      pm2.initialize();
+      expect(pm2.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+
+    it('ask takes precedence over allow', () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['write_file'],
+          permissionsAsk: ['write_file'],
+        }),
+      );
+      pm2.initialize();
+      expect(pm2.evaluate({ toolName: 'write_file' })).toBe('ask');
+    });
+  });
+
+  describe('command-level evaluation', () => {
+    beforeEach(() => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+    });
+
+    it('allows a matching allowed command', () => {
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+      ).toBe('allow');
+    });
+
+    it('denies a matching denied command', () => {
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'rm -rf /' }),
+      ).toBe('deny');
+    });
+
+    it('returns default for an unmatched command', () => {
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'echo hello' }),
+      ).toBe('default');
+    });
+
+    it('isCommandAllowed delegates to evaluate', () => {
+      expect(pm.isCommandAllowed('git commit')).toBe('allow');
+      expect(pm.isCommandAllowed('rm -rf /')).toBe('deny');
+      expect(pm.isCommandAllowed('ls')).toBe('default');
+    });
+  });
+
+  describe('file path evaluation', () => {
+    beforeEach(() => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Read(.env)', 'Edit(/src/generated/**)'],
+          permissionsAllow: ['Read(/docs/**)'],
+          projectRoot: '/project',
+          cwd: '/project',
+        }),
+      );
+      pm.initialize();
+    });
+
+    it('denies reading a denied file', () => {
+      expect(
+        pm.evaluate({ toolName: 'read_file', filePath: '/project/.env' }),
+      ).toBe('deny');
+    });
+
+    it('denies editing in a denied directory', () => {
+      expect(
+        pm.evaluate({
+          toolName: 'edit',
+          filePath: '/project/src/generated/code.ts',
+        }),
+      ).toBe('deny');
+    });
+
+    it('allows reading in an allowed directory', () => {
+      expect(
+        pm.evaluate({
+          toolName: 'read_file',
+          filePath: '/project/docs/readme.md',
+        }),
+      ).toBe('allow');
+    });
+
+    it('Read deny applies to grep_search too (meta-category)', () => {
+      expect(
+        pm.evaluate({ toolName: 'grep_search', filePath: '/project/.env' }),
+      ).toBe('deny');
+    });
+
+    it('returns default for unmatched path', () => {
+      expect(
+        pm.evaluate({
+          toolName: 'read_file',
+          filePath: '/project/src/index.ts',
+        }),
+      ).toBe('default');
+    });
+  });
+
+  describe('WebFetch domain evaluation', () => {
+    beforeEach(() => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['WebFetch(domain:github.com)'],
+          permissionsDeny: ['WebFetch(domain:evil.com)'],
+        }),
+      );
+      pm.initialize();
+    });
+
+    it('allows fetch to allowed domain', () => {
+      expect(pm.evaluate({ toolName: 'web_fetch', domain: 'github.com' })).toBe(
+        'allow',
+      );
+    });
+
+    it('allows fetch to subdomain of allowed domain', () => {
+      expect(
+        pm.evaluate({ toolName: 'web_fetch', domain: 'api.github.com' }),
+      ).toBe('allow');
+    });
+
+    it('denies fetch to denied domain', () => {
+      expect(pm.evaluate({ toolName: 'web_fetch', domain: 'evil.com' })).toBe(
+        'deny',
+      );
+    });
+
+    it('returns default for unmatched domain', () => {
+      expect(
+        pm.evaluate({ toolName: 'web_fetch', domain: 'example.com' }),
+      ).toBe('default');
+    });
+  });
+
+  describe('isToolEnabled', () => {
+    it('returns false for deny-ruled tools', () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['ShellTool'] }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('run_shell_command')).toBe(false);
+    });
+
+    it('returns true for tools with only specifier deny rules', () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true);
+    });
+
+    it('excludeTools passed via permissionsDeny disables the tool', () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsDeny: ['run_shell_command'] }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('run_shell_command')).toBe(false);
+    });
+
+    it('coreTools allowlist passed via permissionsAllow enables only listed tools', () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['read_file'] }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('read_file')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true);
+    });
+  });
+
+  describe('session rules', () => {
+    beforeEach(() => {
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+    });
+
+    it('addSessionAllowRule enables auto-approval for that pattern', () => {
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+      ).toBe('default');
+      pm.addSessionAllowRule('Bash(git *)');
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+      ).toBe('allow');
+    });
+
+    it('session deny rules override allow rules', () => {
+      pm.addSessionAllowRule('run_shell_command');
+      pm.addSessionDenyRule('run_shell_command');
+      expect(pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
+    });
+  });
+
+  describe('allowedTools via permissionsAllow', () => {
+    it('allow rule auto-approves matching tools/commands', () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['ReadFileTool', 'Bash(git *)'] }),
+      );
+      pm.initialize();
+      expect(pm.evaluate({ toolName: 'read_file' })).toBe('allow');
+      expect(
+        pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
+      ).toBe('allow');
+    });
+  });
+
+  describe('listRules', () => {
+    it('returns all rules with type and scope', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFileTool'],
+          permissionsDeny: ['ShellTool'],
+        }),
+      );
+      pm.initialize();
+      pm.addSessionAllowRule('Bash(git *)');
+
+      const rules = pm.listRules();
+      expect(rules.length).toBe(3);
+      const sessionAllow = rules.find(
+        (r) => r.scope === 'session' && r.type === 'allow',
+      );
+      expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
+    });
+  });
+});

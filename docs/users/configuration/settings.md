@@ -225,6 +225,54 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | `tools.truncateToolOutputThreshold`  | number            | Truncate tool output if it is larger than this many characters. Applies to Shell, Grep, Glob, ReadFile and ReadManyFiles tools.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `25000`     | Requires restart: Yes                                                                                                                                                                                                                                |
 | `tools.truncateToolOutputLines`      | number            | Maximum lines or entries kept when truncating tool output. Applies to Shell, Grep, Glob, ReadFile and ReadManyFiles tools.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `1000`      | Requires restart: Yes                                                                                                                                                                                                                                |
 
+> [!note]
+>
+> **Migrating from `tools.core` / `tools.exclude` / `tools.allowed`:** These legacy settings are automatically migrated to the new `permissions` format. See below.
+
+#### permissions
+
+The permissions system provides fine-grained control over which tools can run, which require confirmation, and which are blocked. Rules use the format `"ToolName"` or `"ToolName(specifier)"`.
+
+| Setting             | Type             | Description                                                                                                      | Default     |
+| ------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------- | ----------- |
+| `permissions.allow` | array of strings | Rules for auto-approved tool calls (no confirmation needed). Merged across all scopes (user + project + system). | `undefined` |
+| `permissions.ask`   | array of strings | Rules for tool calls that require user confirmation.                                                             | `undefined` |
+| `permissions.deny`  | array of strings | Rules for blocked tool calls. Deny rules take highest priority.                                                  | `undefined` |
+
+**Rule syntax examples:**
+
+| Rule                             | Meaning                                                        |
+| -------------------------------- | -------------------------------------------------------------- |
+| `"Bash"`                         | All shell commands                                             |
+| `"Bash(git *)"`                  | Shell commands starting with `git` (word boundary: NOT `gitk`) |
+| `"Bash(npm run build)"`          | Exact command (also matches with trailing args)                |
+| `"Read"`                         | All file read tools (read_file, grep, glob, list_directory)    |
+| `"Read(./secrets/**)"`           | Read files under `./secrets/` recursively                      |
+| `"Edit(/src/**/*.ts)"`           | Edit TypeScript files under project root `/src/`               |
+| `"WebFetch(domain:example.com)"` | Fetch from example.com and subdomains                          |
+| `"mcp__puppeteer"`               | All tools from the puppeteer MCP server                        |
+
+**Path pattern prefixes:**
+
+| Prefix | Meaning                               | Example                    |
+| ------ | ------------------------------------- | -------------------------- |
+| `//`   | Absolute path from filesystem root    | `//Users/alice/secrets/**` |
+| `~/`   | Relative to home directory            | `~/Documents/*.pdf`        |
+| `/`    | Relative to project root              | `/src/**/*.ts`             |
+| `./`   | Relative to current working directory | `./secrets/**`             |
+
+**Example configuration:**
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(git *)", "Bash(npm *)"],
+    "ask": ["Edit"],
+    "deny": ["Bash(rm -rf *)", "Read(.env)"]
+  }
+}
+```
+
 #### mcp
 
 | Setting             | Type             | Description                                                                                                                                                                                                                                                                  | Default     |
