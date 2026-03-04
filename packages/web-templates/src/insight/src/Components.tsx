@@ -1,6 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import { useState } from 'react';
+import { useTranslations } from './App';
 
 // Simple Markdown Parser Component
 export function MarkdownText({ children }: { children: string }) {
@@ -21,14 +22,9 @@ export function MarkdownText({ children }: { children: string }) {
   );
 }
 
-export function CopyButton({
-  text,
-  label = 'Copy',
-}: {
-  text: string;
-  label?: string;
-}) {
+export function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
+  const t = useTranslations();
 
   const handleCopy = () => {
     navigator.clipboard.writeText(text).then(() => {
@@ -39,7 +35,7 @@ export function CopyButton({
 
   return (
     <button className="copy-btn" onClick={handleCopy}>
-      {copied ? 'Copied!' : label}
+      {copied ? t.copied : label || t.copy}
     </button>
   );
 }

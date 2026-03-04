@@ -5,6 +5,7 @@
  */
 
 import type { QualitativeInsights } from './QualitativeInsightTypes.js';
+import type { SupportedLanguage } from '../../../i18n/languages.js';
 
 export interface HeatMapData {
   [date: string]: number;
@@ -31,6 +32,8 @@ export interface InsightData {
   primarySuccess?: Record<string, number>;
   outcomes?: Record<string, number>;
   topGoals?: Record<string, number>;
+  /** The language code for the report (e.g., 'en', 'zh') */
+  language?: SupportedLanguage;
 }
 
 export interface StreakData {

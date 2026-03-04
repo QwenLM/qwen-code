@@ -34,13 +34,18 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import type { SupportedLanguage } from '../../../i18n/languages.js';
+import { getLanguageNameFromLocale } from '../../../i18n/languages.js';
 
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
-  constructor(private config: Config) {}
+  constructor(
+    private config: Config,
+    private language: SupportedLanguage = 'en',
+  ) {}
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -319,6 +324,7 @@ export class DataProcessor {
       primarySuccess: primarySuccessAgg,
       outcomes: outcomesAgg,
       topGoals: goalsAgg,
+      language: this.language,
     };
   }
 
@@ -385,11 +391,18 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
+    // Add language instruction if not English
+    const languageName = getLanguageNameFromLocale(this.language);
+    const languageInstruction =
+      languageName !== 'English'
+        ? `\n\nIMPORTANT: Generate all text content in ${languageName}. All narratives, descriptions, titles, and text should be in ${languageName}.`
+        : '';
+
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

@@ -1,6 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
+import { useTranslations } from './App';
 
 // Header Component
 export function Header({
@@ -11,16 +12,17 @@ export function Header({
   dateRangeStr: string;
 }) {
   const { totalMessages, totalSessions } = data;
+  const t = useTranslations();
 
   return (
     <header className="mb-8 space-y-3 text-center">
       <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
-        Qwen Code Insights
+        {t.headerTitle}
       </h1>
       <p className="text-sm text-slate-600">
         {totalMessages
-          ? `${totalMessages} messages across ${totalSessions} sessions`
-          : 'Your personalized coding journey and patterns'}
+          ? t.headerSubtitle(totalMessages, totalSessions || 0)
+          : t.headerSubtitleEmpty}
         {dateRangeStr && ` | ${dateRangeStr}`}
       </p>
     </header>
@@ -36,6 +38,8 @@ export function StatsRow({ data }: { data: InsightData }) {
     // totalSessions = 0,
     // totalHours = 0,
   } = data;
+
+  const t = useTranslations();
 
   const heatmapKeys = Object.keys(data.heatmap || {});
   let daysSpan = 0;
@@ -54,25 +58,25 @@ export function StatsRow({ data }: { data: InsightData }) {
     <div className="stats-row">
       <div className="stat">
         <div className="stat-value">{totalMessages}</div>
-        <div className="stat-label">Messages</div>
+        <div className="stat-label">{t.statMessages}</div>
       </div>
       <div className="stat">
         <div className="stat-value">
           +{totalLinesAdded}/-{totalLinesRemoved}
         </div>
-        <div className="stat-label">Lines</div>
+        <div className="stat-label">{t.statLines}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{totalFiles}</div>
-        <div className="stat-label">Files</div>
+        <div className="stat-label">{t.statFiles}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{daysSpan}</div>
-        <div className="stat-label">Days</div>
+        <div className="stat-label">{t.statDays}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{msgsPerDay}</div>
-        <div className="stat-label">Msgs/Day</div>
+        <div className="stat-label">{t.statMsgsPerDay}</div>
       </div>
     </div>
   );

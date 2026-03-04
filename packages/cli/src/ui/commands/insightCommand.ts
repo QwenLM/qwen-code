@@ -8,7 +8,11 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import {
+  t,
+  getCurrentLanguage,
+  getLanguageNameFromLocale,
+} from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
@@ -27,7 +31,11 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
-      context.ui.setDebugMessage(t('Generating insights...'));
+      const language = getCurrentLanguage();
+      const languageName = getLanguageNameFromLocale(language);
+      context.ui.setDebugMessage(
+        t('Generating insights in {{language}}...', { language: languageName }),
+      );
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
       if (!context.services.config) {
@@ -35,6 +43,7 @@ export const insightCommand: SlashCommand = {
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        language,
       );
 
       const updateProgress = (

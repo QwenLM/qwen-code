@@ -10,8 +10,9 @@ import type { InsightData } from '../types/StaticInsightTypes.js';
 export class TemplateRenderer {
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
+    const lang = insights.language || 'en';
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${lang}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
