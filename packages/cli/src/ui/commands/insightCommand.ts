@@ -8,12 +8,22 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import open from 'open';
+
+// Language name mapping for display
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
+  zh: '中文',
+  ja: '日本語',
+  de: 'Deutsch',
+  pt: 'Português',
+  ru: 'Русский',
+};
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -27,6 +37,10 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
+      // Get current language setting
+      const currentLanguage = getCurrentLanguage();
+      const languageName = LANGUAGE_NAMES[currentLanguage] || currentLanguage;
+
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
@@ -35,6 +49,7 @@ export const insightCommand: SlashCommand = {
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        currentLanguage,
       );
 
       const updateProgress = (
@@ -52,6 +67,17 @@ export const insightCommand: SlashCommand = {
         };
         context.ui.setPendingItem(progressItem);
       };
+
+      // Show language info message
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: languageName,
+          }),
+        },
+        Date.now(),
+      );
 
       context.ui.addItem(
         {

@@ -2,6 +2,8 @@
 import type { InsightData } from '../../../src/services/insight/types/StaticInsightTypes';
 import type { QualitativeInsights as QualitativeData } from '../../../src/services/insight/types/QualitativeInsightTypes';
 
+export type Translations = Record<string, string>;
+
 declare global {
   interface Window {
     React: typeof import('react');
@@ -9,6 +11,8 @@ declare global {
     Chart: any;
     html2canvas: any;
     INSIGHT_DATA: InsightData;
+    INSIGHT_TRANSLATIONS: Translations;
+    INSIGHT_LANGUAGE: string;
   }
 }
 

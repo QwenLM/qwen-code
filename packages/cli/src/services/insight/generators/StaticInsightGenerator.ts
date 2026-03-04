@@ -22,9 +22,9 @@ export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
 
-  constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
-    this.templateRenderer = new TemplateRenderer();
+  constructor(config: Config, language: string = 'en') {
+    this.dataProcessor = new DataProcessor(config, language);
+    this.templateRenderer = new TemplateRenderer(language);
   }
 
   // Ensure the output directory exists

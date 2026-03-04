@@ -1054,8 +1054,29 @@ Call respond_in_schema function with A VALID JSON OBJECT as argument:
 /**
  * Get an insight analysis prompt by type.
  * @param type - The type of insight prompt to retrieve
+ * @param language - The language code for the response (e.g., 'en', 'zh', 'ja')
  * @returns The prompt string for the specified type
  */
-export function getInsightPrompt(type: InsightPromptType): string {
-  return INSIGHT_PROMPTS[type];
+export function getInsightPrompt(
+  type: InsightPromptType,
+  language?: string,
+): string {
+  const basePrompt = INSIGHT_PROMPTS[type];
+
+  // If language is specified and not English, add language instruction
+  if (language && language !== 'en') {
+    const languageNames: Record<string, string> = {
+      zh: 'Chinese (中文)',
+      ja: 'Japanese (日本語)',
+      de: 'German (Deutsch)',
+      pt: 'Portuguese (Português)',
+      ru: 'Russian (Русский)',
+    };
+
+    const langName = languageNames[language] || language;
+
+    return `${basePrompt}\n\nIMPORTANT: You MUST respond entirely in ${langName}. All text, including titles, descriptions, and explanations, should be in ${langName}.`;
+  }
+
+  return basePrompt;
 }

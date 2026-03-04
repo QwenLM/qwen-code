@@ -1463,4 +1463,62 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+
+  // ============================================================================
+  // Insight Report
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    'Генерация инсайтов на {{language}}...',
+  'Qwen Code Insights': 'Инсайты Qwen Code',
+  'Your personalized coding journey and patterns':
+    'Ваш персонализированный путь разработки и паттерны',
+  'Export Card': 'Экспортировать карточку',
+  'Light Theme': 'Светлая тема',
+  'Dark Theme': 'Тёмная тема',
+  Messages: 'Сообщения',
+  Lines: 'Строки',
+  Files: 'Файлы',
+  Days: 'Дни',
+  'Msgs/Day': 'Сообщ./день',
+  'At a Glance': 'Обзор',
+  "What's working:": 'Что работает:',
+  "What's hindering you:": 'Что мешает вам:',
+  'Quick wins to try:': 'Быстрые победы для попробования:',
+  'Ambitious workflows:': 'Амбициозные рабочие процессы:',
+  'Impressive Things You Did →': 'Впечатляющие вещи, которые вы сделали →',
+  'Where Things Go Wrong →': 'Где возникают проблемы →',
+  'Features to Try →': 'Функции для попробования →',
+  'On the Horizon →': 'На горизонте →',
+  'What You Work On': 'Над чем вы работаете',
+  '~{{count}} sessions': '~{{count}} сессий',
+  'What You Wanted': 'Что вы хотели',
+  'Top Tools Used': 'Наиболее используемые инструменты',
+  'How You Use Qwen Code': 'Как вы используете Qwen Code',
+  'Key pattern:': 'Ключевой паттерн:',
+  'Impressive Things You Did': 'Впечатляющие вещи, которые вы сделали',
+  "What Helped Most (Qwen's Capabilities)":
+    'Что помогло больше всего (возможности Qwen)',
+  Outcomes: 'Результаты',
+  'Where Things Go Wrong': 'Где возникают проблемы',
+  'Primary Friction Types': 'Основные типы трений',
+  'Inferred Satisfaction (model-estimated)':
+    'Предполагаемая удовлетворённость (оценка модели)',
+  'Existing Qwen Code Features to Try':
+    'Существующие функции Qwen Code для попробования',
+  'Suggested QWEN.md Additions': 'Предлагаемые дополнения к QWEN.md',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    'Просто скопируйте это в Qwen Code, чтобы добавить в ваш QWEN.md.',
+  'Copy All Checked ({{count}})': 'Копировать все отмеченные ({{count}})',
+  'Copied All!': 'Всё скопировано!',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    'Просто скопируйте это в Qwen Code, и он настроит всё за вас.',
+  'Why for you:': 'Почему для вас:',
+  'New Ways to Use Qwen Code': 'Новые способы использования Qwen Code',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    'Просто скопируйте это в Qwen Code, и он проведёт вас через процесс.',
+  'Paste into Qwen Code:': 'Вставить в Qwen Code:',
+  'On the Horizon': 'На горизонте',
+  'Getting started:': 'Начало работы:',
+  'No insight data available': 'Нет доступных данных инсайтов',
+  Unclear: 'Неясно',
 };

@@ -1459,4 +1459,62 @@ export default {
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
+
+  // ============================================================================
+  // Insight Report
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    'Generiere Einblicke auf {{language}}...',
+  'Qwen Code Insights': 'Qwen Code Einblicke',
+  'Your personalized coding journey and patterns':
+    'Ihre personalisierte Coding-Reise und Muster',
+  'Export Card': 'Karte exportieren',
+  'Light Theme': 'Helles Design',
+  'Dark Theme': 'Dunkles Design',
+  Messages: 'Nachrichten',
+  Lines: 'Zeilen',
+  Files: 'Dateien',
+  Days: 'Tage',
+  'Msgs/Day': 'Nachr./Tag',
+  'At a Glance': 'Auf einen Blick',
+  "What's working:": 'Was funktioniert:',
+  "What's hindering you:": 'Was Sie behindert:',
+  'Quick wins to try:': 'Schnelle Erfolge zum Ausprobieren:',
+  'Ambitious workflows:': 'Ehrgeizige Workflows:',
+  'Impressive Things You Did →': 'Beeindruckende Dinge, die Sie getan haben →',
+  'Where Things Go Wrong →': 'Wo Probleme auftreten →',
+  'Features to Try →': 'Funktionen zum Ausprobieren →',
+  'On the Horizon →': 'Am Horizont →',
+  'What You Work On': 'Woran Sie arbeiten',
+  '~{{count}} sessions': '~{{count}} Sitzungen',
+  'What You Wanted': 'Was Sie wollten',
+  'Top Tools Used': 'Meistgenutzte Werkzeuge',
+  'How You Use Qwen Code': 'Wie Sie Qwen Code nutzen',
+  'Key pattern:': 'Schlüsselmuster:',
+  'Impressive Things You Did': 'Beeindruckende Dinge, die Sie getan haben',
+  "What Helped Most (Qwen's Capabilities)":
+    "Was am meisten geholfen hat (Qwen's Fähigkeiten)",
+  Outcomes: 'Ergebnisse',
+  'Where Things Go Wrong': 'Wo Probleme auftreten',
+  'Primary Friction Types': 'Primäre Reibungsarten',
+  'Inferred Satisfaction (model-estimated)':
+    'Abgeleitete Zufriedenheit (modellgeschätzt)',
+  'Existing Qwen Code Features to Try':
+    'Vorhandene Qwen Code Funktionen zum Ausprobieren',
+  'Suggested QWEN.md Additions': 'Vorgeschlagene QWEN.md Ergänzungen',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    'Kopieren Sie dies einfach in Qwen Code, um es zu Ihrer QWEN.md hinzuzufügen.',
+  'Copy All Checked ({{count}})': 'Alle ausgewählten kopieren ({{count}})',
+  'Copied All!': 'Alles kopiert!',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    'Kopieren Sie dies einfach in Qwen Code und es wird für Sie eingerichtet.',
+  'Why for you:': 'Warum für Sie:',
+  'New Ways to Use Qwen Code': 'Neue Wege, Qwen Code zu nutzen',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    'Kopieren Sie dies einfach in Qwen Code und es führt Sie Schritt für Schritt durch.',
+  'Paste into Qwen Code:': 'In Qwen Code einfügen:',
+  'On the Horizon': 'Am Horizont',
+  'Getting started:': 'Erste Schritte:',
+  'No insight data available': 'Keine Einblicksdaten verfügbar',
+  Unclear: 'Unklar',
 };

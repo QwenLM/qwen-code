@@ -966,4 +966,59 @@ export default {
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+
+  // ============================================================================
+  // Insight Report
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    '{{language}}でインサイトを生成中...',
+  'Qwen Code Insights': 'Qwen Code インサイト',
+  'Your personalized coding journey and patterns':
+    'あなた専用のコーディングジャーニーとパターン',
+  'Export Card': 'カードをエクスポート',
+  'Light Theme': 'ライトテーマ',
+  'Dark Theme': 'ダークテーマ',
+  Messages: 'メッセージ',
+  Lines: '行数',
+  Files: 'ファイル',
+  Days: '日数',
+  'Msgs/Day': 'メッセージ/日',
+  'At a Glance': '概要',
+  "What's working:": 'うまくいっていること:',
+  "What's hindering you:": '妨げになっていること:',
+  'Quick wins to try:': '試すべき簡単な改善策:',
+  'Ambitious workflows:': '野心的なワークフロー:',
+  'Impressive Things You Did →': '素晴らしい成果 →',
+  'Where Things Go Wrong →': '問題が発生している箇所 →',
+  'Features to Try →': '試すべき機能 →',
+  'On the Horizon →': '今後の展望 →',
+  'What You Work On': '作業内容',
+  '~{{count}} sessions': '約{{count}}セッション',
+  'What You Wanted': 'あなたの希望',
+  'Top Tools Used': 'よく使うツール',
+  'How You Use Qwen Code': 'Qwen Codeの使い方',
+  'Key pattern:': '主要パターン:',
+  'Impressive Things You Did': '素晴らしい成果',
+  "What Helped Most (Qwen's Capabilities)": '最も役立った機能 (Qwenの機能)',
+  Outcomes: '成果',
+  'Where Things Go Wrong': '問題が発生している箇所',
+  'Primary Friction Types': '主な摩擦の種類',
+  'Inferred Satisfaction (model-estimated)': '推定満足度（モデル推定）',
+  'Existing Qwen Code Features to Try': '試すべき既存のQwen Code機能',
+  'Suggested QWEN.md Additions': '推奨されるQWEN.md追加項目',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    'Qwen CodeにコピーするだけでQWEN.mdに追加できます。',
+  'Copy All Checked ({{count}})': 'チェック済みをすべてコピー ({{count}})',
+  'Copied All!': 'すべてコピーしました！',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    'Qwen Codeにコピーするだけで自動的に設定されます。',
+  'Why for you:': 'あなたにおすすめの理由:',
+  'New Ways to Use Qwen Code': 'Qwen Codeの新しい使い方',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    'Qwen Codeにコピーするだけでガイドが表示されます。',
+  'Paste into Qwen Code:': 'Qwen Codeに貼り付け:',
+  'On the Horizon': '今後の展望',
+  'Getting started:': 'はじめに:',
+  'No insight data available': 'インサイトデータがありません',
+  Unclear: '不明瞭',
 };

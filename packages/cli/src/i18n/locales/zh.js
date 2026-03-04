@@ -1281,4 +1281,58 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // ============================================================================
+  // Insight Report
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    '正在使用 {{language}} 生成洞察报告...',
+  'Qwen Code Insights': 'Qwen Code 洞察报告',
+  'Your personalized coding journey and patterns': '您的个性化编程旅程和模式',
+  'Export Card': '导出卡片',
+  'Light Theme': '浅色主题',
+  'Dark Theme': '深色主题',
+  Messages: '消息数',
+  Lines: '代码行数',
+  Files: '文件数',
+  Days: '天数',
+  'Msgs/Day': '日均消息',
+  'At a Glance': '概览',
+  "What's working:": '有效做法：',
+  "What's hindering you:": '阻碍因素：',
+  'Quick wins to try:': '快速尝试：',
+  'Ambitious workflows:': '未来工作流：',
+  'Impressive Things You Did →': '查看亮点 →',
+  'Where Things Go Wrong →': '查看问题 →',
+  'Features to Try →': '查看功能 →',
+  'On the Horizon →': '查看未来 →',
+  'What You Work On': '工作内容',
+  '~{{count}} sessions': '约 {{count}} 次会话',
+  'What You Wanted': '您的需求',
+  'Top Tools Used': '常用工具',
+  'How You Use Qwen Code': '使用方式',
+  'Key pattern:': '关键模式：',
+  'Impressive Things You Did': '亮点工作',
+  "What Helped Most (Qwen's Capabilities)": '最有帮助的 Qwen 功能',
+  Outcomes: '结果',
+  'Where Things Go Wrong': '问题所在',
+  'Primary Friction Types': '主要摩擦类型',
+  'Inferred Satisfaction (model-estimated)': '满意度推断（模型估算）',
+  'Existing Qwen Code Features to Try': '值得尝试的 Qwen Code 功能',
+  'Suggested QWEN.md Additions': '建议添加到 QWEN.md',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    '复制以下内容到 Qwen Code 即可添加到 QWEN.md。',
+  'Copy All Checked ({{count}})': '复制所有选中项 ({{count}})',
+  'Copied All!': '已全部复制！',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    '复制以下内容到 Qwen Code，它将为您自动设置。',
+  'Why for you:': '为什么适合您：',
+  'New Ways to Use Qwen Code': '使用 Qwen Code 的新方式',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    '复制以下内容到 Qwen Code，它将引导您完成操作。',
+  'Paste into Qwen Code:': '粘贴到 Qwen Code：',
+  'On the Horizon': '未来展望',
+  'Getting started:': '开始使用：',
+  'No insight data available': '暂无洞察数据',
+  Unclear: '不明确',
 };

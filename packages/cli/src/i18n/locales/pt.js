@@ -1453,4 +1453,62 @@ export default {
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
+
+  // ============================================================================
+  // Insight Report
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    'Gerando insights em {{language}}...',
+  'Qwen Code Insights': 'Insights do Qwen Code',
+  'Your personalized coding journey and patterns':
+    'Sua jornada de codificação personalizada e padrões',
+  'Export Card': 'Exportar Cartão',
+  'Light Theme': 'Tema Claro',
+  'Dark Theme': 'Tema Escuro',
+  Messages: 'Mensagens',
+  Lines: 'Linhas',
+  Files: 'Arquivos',
+  Days: 'Dias',
+  'Msgs/Day': 'Msgs/Dia',
+  'At a Glance': 'Visão Geral',
+  "What's working:": 'O que está funcionando:',
+  "What's hindering you:": 'O que está dificultando:',
+  'Quick wins to try:': 'Vitórias rápidas para tentar:',
+  'Ambitious workflows:': 'Fluxos de trabalho ambiciosos:',
+  'Impressive Things You Did →': 'Coisas Impressionantes que Você Fez →',
+  'Where Things Go Wrong →': 'Onde as Coisas Dão Errado →',
+  'Features to Try →': 'Recursos para Experimentar →',
+  'On the Horizon →': 'No Horizonte →',
+  'What You Work On': 'No Que Você Trabalha',
+  '~{{count}} sessions': '~{{count}} sessões',
+  'What You Wanted': 'O Que Você Queria',
+  'Top Tools Used': 'Principais Ferramentas Usadas',
+  'How You Use Qwen Code': 'Como Você Usa o Qwen Code',
+  'Key pattern:': 'Padrão chave:',
+  'Impressive Things You Did': 'Coisas Impressionantes que Você Fez',
+  "What Helped Most (Qwen's Capabilities)":
+    'O Que Mais Ajudou (Recursos do Qwen)',
+  Outcomes: 'Resultados',
+  'Where Things Go Wrong': 'Onde as Coisas Dão Errado',
+  'Primary Friction Types': 'Tipos Primários de Atrito',
+  'Inferred Satisfaction (model-estimated)':
+    'Satisfação Inferida (estimada pelo modelo)',
+  'Existing Qwen Code Features to Try':
+    'Recursos Existentes do Qwen Code para Experimentar',
+  'Suggested QWEN.md Additions': 'Adições Sugeridas ao QWEN.md',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    'Basta copiar isso no Qwen Code para adicionar ao seu QWEN.md.',
+  'Copy All Checked ({{count}})': 'Copiar Todos Selecionados ({{count}})',
+  'Copied All!': 'Todos Copiados!',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    'Basta copiar isso no Qwen Code e ele configurará para você.',
+  'Why for you:': 'Por que para você:',
+  'New Ways to Use Qwen Code': 'Novas Formas de Usar o Qwen Code',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    'Basta copiar isso no Qwen Code e ele guiará você.',
+  'Paste into Qwen Code:': 'Colar no Qwen Code:',
+  'On the Horizon': 'No Horizonte',
+  'Getting started:': 'Começando:',
+  'No insight data available': 'Nenhum dado de insight disponível',
+  Unclear: 'Não Claro',
 };
