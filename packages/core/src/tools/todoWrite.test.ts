@@ -6,10 +6,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TodoWriteParams, TodoItem } from './todoWrite.js';
-import { TodoWriteTool } from './todoWrite.js';
+import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 
 // Mock fs modules
 vi.mock('fs/promises');
@@ -300,5 +302,122 @@ describe('TodoWriteTool', () => {
       const invocation = tool.build(params);
       expect(invocation.getDescription()).toBe('Update todos');
     });
+  });
+});
+
+describe('TodoWriteTool – runtime output directory', () => {
+  let tool: TodoWriteTool;
+  let mockAbortSignal: AbortSignal;
+  let mockConfig: Config;
+  const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
+
+  beforeEach(() => {
+    mockConfig = {
+      getSessionId: () => 'runtime-session',
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+    mockAbortSignal = new AbortController().signal;
+    Storage.setRuntimeBaseDir(null);
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    if (originalRuntimeEnv !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('should write todos to custom runtime dir when setRuntimeBaseDir is set', async () => {
+    const customRuntimeDir = path.resolve('custom', 'runtime');
+    Storage.setRuntimeBaseDir(customRuntimeDir);
+
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+
+    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue(undefined);
+
+    const invocation = tool.build(params);
+    await invocation.execute(mockAbortSignal);
+
+    // Verify the file path starts with the custom runtime dir
+    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    expect(writePath).toContain(path.join(customRuntimeDir, 'todos'));
+    expect(writePath).toContain('runtime-session.json');
+  });
+
+  it('should write todos to env var dir when QWEN_RUNTIME_DIR is set', async () => {
+    const envRuntimeDir = path.resolve('env', 'runtime');
+    process.env['QWEN_RUNTIME_DIR'] = envRuntimeDir;
+
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+
+    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue(undefined);
+
+    const invocation = tool.build(params);
+    await invocation.execute(mockAbortSignal);
+
+    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    expect(writePath).toContain(path.join(envRuntimeDir, 'todos'));
+  });
+
+  it('should use default ~/.qwen path when no custom dir is configured', async () => {
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+
+    mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue(undefined);
+
+    const invocation = tool.build(params);
+    await invocation.execute(mockAbortSignal);
+
+    const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
+    expect(writePath).toContain('.qwen/todos/');
+  });
+
+  it('should check file existence in custom runtime dir for getDescription', () => {
+    const customRuntimeDir = path.resolve('custom', 'runtime');
+    Storage.setRuntimeBaseDir(customRuntimeDir);
+    mockFsSync.existsSync.mockReturnValue(false);
+
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task', status: 'pending' }],
+    };
+    const invocation = tool.build(params);
+
+    // Verify existsSync was called with a path under the custom dir
+    const checkedPath = mockFsSync.existsSync.mock.calls[0]?.[0] as string;
+    expect(checkedPath).toContain(path.join(customRuntimeDir, 'todos'));
+    expect(invocation.getDescription()).toBe('Create todos');
+  });
+
+  it('should list todo sessions from custom runtime dir', async () => {
+    const customRuntimeDir = path.resolve('custom', 'runtime');
+    Storage.setRuntimeBaseDir(customRuntimeDir);
+    mockFs.readdir.mockResolvedValue([
+      'a.json',
+      'b.json',
+      'README.md',
+    ] as never);
+
+    const sessions = await listTodoSessions();
+
+    expect(mockFs.readdir).toHaveBeenCalledWith(
+      path.join(customRuntimeDir, 'todos'),
+    );
+    expect(sessions).toEqual(['a', 'b']);
   });
 });

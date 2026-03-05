@@ -55,6 +55,7 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
@@ -242,6 +243,39 @@ describe('Session', () => {
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
+    });
+
+    it('runs prompt inside runtime output dir context', async () => {
+      const runtimeDir = path.resolve('runtime', 'from-settings');
+      core.Storage.setRuntimeBaseDir(runtimeDir);
+      session = new Session(
+        'test-session-id',
+        mockChat,
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const runWithRuntimeBaseDirSpy = vi.spyOn(
+        core.Storage,
+        'runWithRuntimeBaseDir',
+      );
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue((async function* () {})());
+
+      const promptRequest: acp.PromptRequest = {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      };
+
+      await session.prompt(promptRequest);
+
+      expect(runWithRuntimeBaseDirSpy).toHaveBeenCalledWith(
+        runtimeDir,
+        process.cwd(),
+        expect.any(Function),
+      );
     });
   });
 });
