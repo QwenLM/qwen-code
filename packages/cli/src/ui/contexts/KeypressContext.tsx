@@ -252,7 +252,9 @@ export function KeypressProvider({
       // 3) CSI-u form: ESC [ <code> ; <mods> (u|~)
       // 3) CSI-u and tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
       //    'u' terminator: Kitty CSI-u; '~' terminator: tilde-coded function keys.
-      const csiUPrefix = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])`);
+      const csiUPrefix = new RegExp(
+        `^${ESC}\\[(\\d+)(;(\\d+))?(;([0-9:]+))?([u~])`,
+      );
       m = buffer.match(csiUPrefix);
       if (m) {
         const keyCode = parseInt(m[1], 10);
@@ -265,7 +267,8 @@ export function KeypressProvider({
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
         const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[4];
+        const textCodepoints = m[5];
+        const terminator = m[6];
 
         // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
         if (terminator === '~') {
@@ -326,6 +329,34 @@ export function KeypressProvider({
               shift,
               paste: false,
               sequence: buffer.slice(0, m[0].length),
+              kittyProtocol: true,
+            },
+            length: m[0].length,
+          };
+        }
+
+        // Printable keys may be encoded in CSI-u form when kitty protocol is enabled.
+        // Some terminals include a text parameter with codepoints (e.g. ESC[97;2;65u).
+        if (terminator === 'u' && keyCode >= 32 && !ctrl && !alt) {
+          let sequence = String.fromCodePoint(keyCode);
+          if (textCodepoints) {
+            const codepoints = textCodepoints
+              .split(':')
+              .map((value) => parseInt(value, 10))
+              .filter((value) => Number.isFinite(value) && value > 0);
+            if (codepoints.length > 0) {
+              sequence = String.fromCodePoint(...codepoints);
+            }
+          }
+
+          return {
+            key: {
+              name: '',
+              ctrl: false,
+              meta: false,
+              shift,
+              paste: false,
+              sequence,
               kittyProtocol: true,
             },
             length: m[0].length,

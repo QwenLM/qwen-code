@@ -380,6 +380,76 @@ describe('KeypressContext - Kitty Protocol', () => {
     });
   });
 
+  describe('Printable character handling', () => {
+    it('should recognize space key (keycode 32) in kitty protocol', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => {
+        stdin.sendKittySequence('\x1b[32u');
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: ' ',
+          kittyProtocol: true,
+          ctrl: false,
+          meta: false,
+          shift: false,
+        }),
+      );
+    });
+
+    it('should recognize letter keys in kitty protocol', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => {
+        stdin.sendKittySequence('\x1b[97u');
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'a',
+          kittyProtocol: true,
+          shift: false,
+        }),
+      );
+    });
+
+    it('should recognize shifted letter keys with text codepoints in kitty protocol', async () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+      act(() => result.current.subscribe(keyHandler));
+
+      // KeyCode remains unshifted (97 = 'a'); text parameter carries "A" (65).
+      act(() => {
+        stdin.sendKittySequence('\x1b[97;2;65u');
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'A',
+          kittyProtocol: true,
+          shift: true,
+          ctrl: false,
+          meta: false,
+        }),
+      );
+    });
+  });
+
   describe('paste mode', () => {
     it('should handle multiline paste as a single event', async () => {
       const keyHandler = vi.fn();
