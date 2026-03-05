@@ -1448,4 +1448,90 @@ export default {
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+
+  // ============================================================================
+  // Insight Report - CLI Messages
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
+
+  // ============================================================================
+  // Insight Report - HTML UI Text
+  // ============================================================================
+  // App.tsx
+  'Qwen Code Insights': 'Qwen Code Insights',
+  '{{count}} messages across {{sessions}} sessions':
+    '{{count}} messages across {{sessions}} sessions',
+  'Your personalized coding journey and patterns':
+    'Your personalized coding journey and patterns',
+  'Export Card': 'Export Card',
+  'Light Theme': 'Light Theme',
+  'Dark Theme': 'Dark Theme',
+
+  // Header.tsx
+  Messages: 'Messages',
+  Lines: 'Lines',
+  Files: 'Files',
+  Days: 'Days',
+  'Msgs/Day': 'Msgs/Day',
+
+  // Qualitative.tsx - AtAGlance
+  'At a Glance': 'At a Glance',
+  "What's working:": "What's working:",
+  "What's hindering you:": "What's hindering you:",
+  'Quick wins to try:': 'Quick wins to try:',
+  'Ambitious workflows:': 'Ambitious workflows:',
+  'Impressive Things You Did →': 'Impressive Things You Did →',
+  'Where Things Go Wrong →': 'Where Things Go Wrong →',
+  'Features to Try →': 'Features to Try →',
+  'On the Horizon →': 'On the Horizon →',
+
+  // Qualitative.tsx - NavToc
+  'What You Work On': 'What You Work On',
+  'How You Use Qwen Code': 'How You Use Qwen Code',
+  'Impressive Things': 'Impressive Things',
+  'Where Things Go Wrong': 'Where Things Go Wrong',
+  'Features to Try': 'Features to Try',
+  'New Usage Patterns': 'New Usage Patterns',
+  'On the Horizon': 'On the Horizon',
+
+  // Qualitative.tsx - ProjectAreas
+  '~{{count}} sessions': '~{{count}} sessions',
+  'What You Wanted': 'What You Wanted',
+  'Top Tools Used': 'Top Tools Used',
+
+  // Qualitative.tsx - InteractionStyle
+  'Key pattern:': 'Key pattern:',
+
+  // Qualitative.tsx - ImpressiveWorkflows
+  'Impressive Things You Did': 'Impressive Things You Did',
+  "What Helped Most (Qwen's Capabilities)":
+    "What Helped Most (Qwen's Capabilities)",
+  Outcomes: 'Outcomes',
+
+  // Qualitative.tsx - FrictionPoints
+  'Primary Friction Types': 'Primary Friction Types',
+  'Inferred Satisfaction (model-estimated)':
+    'Inferred Satisfaction (model-estimated)',
+
+  // Qualitative.tsx - Improvements
+  'Existing Qwen Code Features to Try': 'Existing Qwen Code Features to Try',
+  'Suggested QWEN.md Additions': 'Suggested QWEN.md Additions',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    'Just copy this into Qwen Code to add it to your QWEN.md.',
+  'Copy All Checked ({{count}})': 'Copy All Checked ({{count}})',
+  'Copied All!': 'Copied All!',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    "Just copy this into Qwen Code and it'll set it up for you.",
+  'Why for you:': 'Why for you:',
+  'New Ways to Use Qwen Code': 'New Ways to Use Qwen Code',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    "Just copy this into Qwen Code and it'll walk you through it.",
+  'Paste into Qwen Code:': 'Paste into Qwen Code:',
+
+  // Qualitative.tsx - FutureOpportunities
+  'Getting started:': 'Getting started:',
+
+  // Qualitative.tsx - MemorableMoment
+  // (No static text, only dynamic content)
 };

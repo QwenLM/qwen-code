@@ -40,7 +40,14 @@ const logger = createDebugLogger('DataProcessor');
 const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
-  constructor(private config: Config) {}
+  private language: string;
+
+  constructor(
+    private config: Config,
+    language?: string,
+  ) {
+    this.language = language || 'en';
+  }
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -193,7 +200,7 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
+    const prompt = `${getInsightPrompt('analysis', this.language)}\n\nSESSION:\n${sessionText}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -283,7 +290,13 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language?: string,
   ): Promise<InsightData> {
+    // Update language if provided
+    if (language) {
+      this.language = language;
+    }
+
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
@@ -594,49 +607,49 @@ export class DataProcessor {
       ] = await Promise.all([
         limit(() =>
           generate<InsightImpressiveWorkflows>(
-            getInsightPrompt('impressive_workflows'),
+            getInsightPrompt('impressive_workflows', this.language),
             schemaImpressiveWorkflows,
           ),
         ),
         limit(() =>
           generate<InsightProjectAreas>(
-            getInsightPrompt('project_areas'),
+            getInsightPrompt('project_areas', this.language),
             schemaProjectAreas,
           ),
         ),
         limit(() =>
           generate<InsightFutureOpportunities>(
-            getInsightPrompt('future_opportunities'),
+            getInsightPrompt('future_opportunities', this.language),
             schemaFutureOpportunities,
           ),
         ),
         limit(() =>
           generate<InsightFrictionPoints>(
-            getInsightPrompt('friction_points'),
+            getInsightPrompt('friction_points', this.language),
             schemaFrictionPoints,
           ),
         ),
         limit(() =>
           generate<InsightMemorableMoment>(
-            getInsightPrompt('memorable_moment'),
+            getInsightPrompt('memorable_moment', this.language),
             schemaMemorableMoment,
           ),
         ),
         limit(() =>
           generate<InsightImprovements>(
-            getInsightPrompt('improvements'),
+            getInsightPrompt('improvements', this.language),
             schemaImprovements,
           ),
         ),
         limit(() =>
           generate<InsightInteractionStyle>(
-            getInsightPrompt('interaction_style'),
+            getInsightPrompt('interaction_style', this.language),
             schemaInteractionStyle,
           ),
         ),
         limit(() =>
           generate<InsightAtAGlance>(
-            getInsightPrompt('at_a_glance'),
+            getInsightPrompt('at_a_glance', this.language),
             schemaAtAGlance,
           ),
         ),

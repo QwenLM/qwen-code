@@ -18,6 +18,22 @@ import type { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
+// Translation helper
+function t(key: string, params?: Record<string, string | number>): string {
+  const translations =
+    (window as unknown as { INSIGHT_TRANSLATIONS?: Record<string, string> })
+      .INSIGHT_TRANSLATIONS || {};
+  let text = translations[key] || key;
+
+  if (params) {
+    Object.entries(params).forEach(([paramKey, value]) => {
+      text = text.replace(new RegExp(`{{${paramKey}}}`, 'g'), String(value));
+    });
+  }
+
+  return text;
+}
+
 // Main App Component
 function InsightApp({ data }: { data: InsightData }) {
   const [cardTheme, setCardTheme] = useState<Theme>('dark');
@@ -102,11 +118,14 @@ function InsightApp({ data }: { data: InsightData }) {
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">Qwen Code Insights</h1>
+            <h1 className="header-title">{t('Qwen Code Insights')}</h1>
             <p className="header-subtitle">
               {data.totalMessages
-                ? `${data.totalMessages.toLocaleString()} messages across ${data.totalSessions?.toLocaleString()} sessions`
-                : 'Your personalized coding journey and patterns'}
+                ? t('{{count}} messages across {{sessions}} sessions', {
+                    count: data.totalMessages.toLocaleString(),
+                    sessions: data.totalSessions?.toLocaleString() || '0',
+                  })
+                : t('Your personalized coding journey and patterns')}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
@@ -205,7 +224,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>Export Card</span>
+        <span>{t('Export Card')}</span>
         <svg
           width="12"
           height="12"
@@ -247,7 +266,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>Light Theme</span>
+            <span>{t('Light Theme')}</span>
           </button>
           <button
             className="export-dropdown-item"
@@ -265,7 +284,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
             >
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span>Dark Theme</span>
+            <span>{t('Dark Theme')}</span>
           </button>
         </div>
       )}

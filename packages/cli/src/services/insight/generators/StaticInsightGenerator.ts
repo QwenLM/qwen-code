@@ -21,10 +21,12 @@ const logger = createDebugLogger('StaticInsightGenerator');
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private language: string;
 
-  constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
-    this.templateRenderer = new TemplateRenderer();
+  constructor(config: Config, language?: string) {
+    this.language = language || 'en';
+    this.dataProcessor = new DataProcessor(config, this.language);
+    this.templateRenderer = new TemplateRenderer(this.language);
   }
 
   // Ensure the output directory exists
@@ -105,10 +107,14 @@ export class StaticInsightGenerator {
       baseDir,
       facetsDir,
       onProgress,
+      this.language,
     );
 
     // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      this.language,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

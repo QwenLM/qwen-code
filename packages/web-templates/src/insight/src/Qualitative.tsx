@@ -6,6 +6,22 @@ import { CopyButton, MarkdownText } from './Components';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
+// Translation helper
+function t(key: string, params?: Record<string, string | number>): string {
+  const translations =
+    (window as unknown as { INSIGHT_TRANSLATIONS?: Record<string, string> })
+      .INSIGHT_TRANSLATIONS || {};
+  let text = translations[key] || key;
+
+  if (params) {
+    Object.entries(params).forEach(([paramKey, value]) => {
+      text = text.replace(new RegExp(`{{${paramKey}}}`, 'g'), String(value));
+    });
+  }
+
+  return text;
+}
+
 // -----------------------------------------------------------------------------
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
@@ -16,34 +32,34 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">At a Glance</div>
+      <div className="glance-title">{t('At a Glance')}</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
+          <strong>{t("What's working:")}</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
+            {t('Impressive Things You Did →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
+          <strong>{t("What's hindering you:")}</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
+            {t('Where Things Go Wrong →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
+          <strong>{t('Quick wins to try:')}</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
-            Features to Try →
+            {t('Features to Try →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
+          <strong>{t('Ambitious workflows:')}</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
-            On the Horizon →
+            {t('On the Horizon →')}
           </a>
         </div>
       </div>
@@ -54,13 +70,13 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 export function NavToc() {
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-work">{t('What You Work On')}</a>
+      <a href="#section-usage">{t('How You Use Qwen Code')}</a>
+      <a href="#section-wins">{t('Impressive Things')}</a>
+      <a href="#section-friction">{t('Where Things Go Wrong')}</a>
+      <a href="#section-features">{t('Features to Try')}</a>
+      <a href="#section-patterns">{t('New Usage Patterns')}</a>
+      <a href="#section-horizon">{t('On the Horizon')}</a>
     </nav>
   );
 }
@@ -87,7 +103,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        What You Work On
+        {t('What You Work On')}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -97,7 +113,7 @@ export function ProjectAreas({
               <div className="area-header">
                 <span className="area-name">{area.name}</span>
                 <span className="area-count">
-                  ~{area.session_count} sessions
+                  {t('~{{count}} sessions', { count: area.session_count })}
                 </span>
               </div>
               <div className="area-desc">
@@ -119,14 +135,14 @@ export function ProjectAreas({
         {topGoals && Object.keys(topGoals).length > 0 && (
           <HorizontalBarChart
             data={topGoals}
-            title="What You Wanted"
+            title={t('What You Wanted')}
             color="#0ea5e9"
           />
         )}
         {topToolsObj && Object.keys(topToolsObj).length > 0 && (
           <HorizontalBarChart
             data={topToolsObj}
-            title="Top Tools Used"
+            title={t('Top Tools Used')}
             color="#6366f1"
           />
         )}
@@ -151,7 +167,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        How You Use Qwen Code
+        {t('How You Use Qwen Code')}
       </h2>
       <div className="narrative">
         <p>
@@ -159,7 +175,7 @@ export function InteractionStyle({
         </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>Key pattern:</strong>{' '}
+            <strong>{t('Key pattern:')}</strong>{' '}
             <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
@@ -189,7 +205,7 @@ export function ImpressiveWorkflows({
         id="section-wins"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Impressive Things You Did
+        {t('Impressive Things You Did')}
       </h2>
       {impressiveWorkflows.intro && (
         <p className="section-intro">
@@ -220,7 +236,7 @@ export function ImpressiveWorkflows({
         {primarySuccess && Object.keys(primarySuccess).length > 0 && (
           <HorizontalBarChart
             data={primarySuccess}
-            title="What Helped Most (Qwen's Capabilities)"
+            title={t("What Helped Most (Qwen's Capabilities)")}
             color="#3b82f6"
             allowedKeys={[
               'fast_accurate_search',
@@ -235,7 +251,7 @@ export function ImpressiveWorkflows({
         {outcomes && Object.keys(outcomes).length > 0 && (
           <HorizontalBarChart
             data={outcomes}
-            title="Outcomes"
+            title={t('Outcomes')}
             color="#8b5cf6"
             allowedKeys={[
               'fully_achieved',
@@ -413,7 +429,7 @@ export function FrictionPoints({
         id="section-friction"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Where Things Go Wrong
+        {t('Where Things Go Wrong')}
       </h2>
       {frictionPoints.intro && (
         <p className="section-intro">
@@ -454,7 +470,7 @@ export function FrictionPoints({
         {friction && Object.keys(friction).length > 0 && (
           <HorizontalBarChart
             data={friction}
-            title="Primary Friction Types"
+            title={t('Primary Friction Types')}
             color="#ef4444"
             allowedKeys={[
               'misunderstood_request',
@@ -468,7 +484,7 @@ export function FrictionPoints({
         {satisfaction && Object.keys(satisfaction).length > 0 && (
           <HorizontalBarChart
             data={satisfaction}
-            title="Inferred Satisfaction (model-estimated)"
+            title={t('Inferred Satisfaction (model-estimated)')}
             color="#10b981"
             allowedKeys={[
               'happy',
@@ -522,9 +538,9 @@ function QwenMdAdditionsSection({
 
   return (
     <div className="qwen-md-section">
-      <h3>Suggested QWEN.md Additions</h3>
+      <h3>{t('Suggested QWEN.md Additions')}</h3>
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code to add it to your QWEN.md.
+        {t('Just copy this into Qwen Code to add it to your QWEN.md.')}
       </p>
 
       <div className="qwen-md-actions" style={{ marginBottom: '12px' }}>
@@ -533,7 +549,9 @@ function QwenMdAdditionsSection({
           onClick={handleCopyAll}
           disabled={checkedCount === 0}
         >
-          {copiedAll ? 'Copied All!' : `Copy All Checked (${checkedCount})`}
+          {copiedAll
+            ? t('Copied All!')
+            : t('Copy All Checked ({{count}})', { count: checkedCount })}
         </button>
       </div>
 
@@ -572,7 +590,7 @@ export function Improvements({
         id="section-features"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Existing Qwen Code Features to Try
+        {t('Existing Qwen Code Features to Try')}
       </h2>
 
       {/* QWEN.md Additions */}
@@ -582,7 +600,7 @@ export function Improvements({
         )}
 
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll set it up for you.
+        {t("Just copy this into Qwen Code and it'll set it up for you.")}
       </p>
 
       {/* Features to Try */}
@@ -595,7 +613,7 @@ export function Improvements({
                 <MarkdownText>{feat.one_liner}</MarkdownText>
               </div>
               <div className="feature-why">
-                <strong>Why for you:</strong>{' '}
+                <strong>{t('Why for you:')}</strong>{' '}
                 <MarkdownText>{feat.why_for_you}</MarkdownText>
               </div>
               <div className="feature-examples">
@@ -614,10 +632,10 @@ export function Improvements({
         id="section-patterns"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        New Ways to Use Qwen Code
+        {t('New Ways to Use Qwen Code')}
       </h2>
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll walk you through it.
+        {t("Just copy this into Qwen Code and it'll walk you through it.")}
       </p>
 
       <div className="patterns-section">
@@ -632,7 +650,7 @@ export function Improvements({
                 <MarkdownText>{pat.detail}</MarkdownText>
               </div>
               <div className="copyable-prompt-section">
-                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="prompt-label">{t('Paste into Qwen Code:')}</div>
                 <div className="copyable-prompt-row">
                   <code className="copyable-prompt">{pat.copyable_prompt}</code>
                   <CopyButton text={pat.copyable_prompt} />
@@ -659,7 +677,7 @@ export function FutureOpportunities({
         id="section-horizon"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        On the Horizon
+        {t('On the Horizon')}
       </h2>
       {futureOpportunities.intro && (
         <p className="section-intro">
@@ -676,11 +694,11 @@ export function FutureOpportunities({
                 <MarkdownText>{opp.whats_possible}</MarkdownText>
               </div>
               <div className="horizon-tip">
-                <strong>Getting started:</strong>{' '}
+                <strong>{t('Getting started:')}</strong>{' '}
                 <MarkdownText>{opp.how_to_try}</MarkdownText>
               </div>
               <div className="pattern-prompt">
-                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="prompt-label">{t('Paste into Qwen Code:')}</div>
                 <div
                   style={{
                     display: 'flex',

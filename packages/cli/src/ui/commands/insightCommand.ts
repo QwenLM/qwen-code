@@ -8,7 +8,11 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import {
+  t,
+  getLanguageNameFromLocale,
+  getCurrentLanguage,
+} from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
@@ -33,8 +37,29 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
+
+      // Get user's language preference
+      // Priority: outputLanguage setting > UI language > English
+      const uiLanguage = getCurrentLanguage();
+      const settingsGeneral = context.services.settings?.merged?.general;
+      const outputLanguageSetting = settingsGeneral?.outputLanguage;
+
+      let language: string;
+      let languageName: string;
+
+      if (outputLanguageSetting && outputLanguageSetting !== 'auto') {
+        // User has explicitly set output language
+        language = outputLanguageSetting;
+        languageName = outputLanguageSetting;
+      } else {
+        // Use UI language
+        language = uiLanguage;
+        languageName = getLanguageNameFromLocale(uiLanguage);
+      }
+
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        language,
       );
 
       const updateProgress = (
@@ -52,6 +77,17 @@ export const insightCommand: SlashCommand = {
         };
         context.ui.setPendingItem(progressItem);
       };
+
+      // Show language hint to user
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: languageName,
+          }),
+        },
+        Date.now(),
+      );
 
       context.ui.addItem(
         {

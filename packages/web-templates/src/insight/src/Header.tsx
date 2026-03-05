@@ -2,6 +2,22 @@
 import React from 'react';
 import type { InsightData } from './types';
 
+// Translation helper
+function t(key: string, params?: Record<string, string | number>): string {
+  const translations =
+    (window as unknown as { INSIGHT_TRANSLATIONS?: Record<string, string> })
+      .INSIGHT_TRANSLATIONS || {};
+  let text = translations[key] || key;
+
+  if (params) {
+    Object.entries(params).forEach(([paramKey, value]) => {
+      text = text.replace(new RegExp(`{{${paramKey}}}`, 'g'), String(value));
+    });
+  }
+
+  return text;
+}
+
 // Header Component
 export function Header({
   data,
@@ -54,25 +70,25 @@ export function StatsRow({ data }: { data: InsightData }) {
     <div className="stats-row">
       <div className="stat">
         <div className="stat-value">{totalMessages}</div>
-        <div className="stat-label">Messages</div>
+        <div className="stat-label">{t('Messages')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">
           +{totalLinesAdded}/-{totalLinesRemoved}
         </div>
-        <div className="stat-label">Lines</div>
+        <div className="stat-label">{t('Lines')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{totalFiles}</div>
-        <div className="stat-label">Files</div>
+        <div className="stat-label">{t('Files')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{daysSpan}</div>
-        <div className="stat-label">Days</div>
+        <div className="stat-label">{t('Days')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{msgsPerDay}</div>
-        <div className="stat-label">Msgs/Day</div>
+        <div className="stat-label">{t('Msgs/Day')}</div>
       </div>
     </div>
   );

@@ -1281,4 +1281,86 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // ============================================================================
+  // Insight Report - CLI Messages
+  // ============================================================================
+  'Generating insights in {{language}}...': '正在生成{{language}}洞察报告...',
+
+  // ============================================================================
+  // Insight Report - HTML UI Text
+  // ============================================================================
+  // App.tsx
+  'Qwen Code Insights': 'Qwen Code 洞察报告',
+  '{{count}} messages across {{sessions}} sessions':
+    '{{sessions}} 次会话共 {{count}} 条消息',
+  'Your personalized coding journey and patterns': '您的个性化编程之旅和模式',
+  'Export Card': '导出卡片',
+  'Light Theme': '浅色主题',
+  'Dark Theme': '深色主题',
+
+  // Header.tsx
+  Messages: '消息数',
+  Lines: '代码行数',
+  Files: '文件数',
+  Days: '天数',
+  'Msgs/Day': '消息/天',
+
+  // Qualitative.tsx - AtAGlance
+  'At a Glance': '一览',
+  "What's working:": '有效的方法：',
+  "What's hindering you:": '阻碍您的问题：',
+  'Quick wins to try:': '可尝试的快速改进：',
+  'Ambitious workflows:': '高级工作流：',
+  'Impressive Things You Did →': '您完成的出色工作 →',
+  'Where Things Go Wrong →': '问题出现的地方 →',
+  'Features to Try →': '可尝试的功能 →',
+  'On the Horizon →': '未来展望 →',
+
+  // Qualitative.tsx - NavToc
+  'What You Work On': '工作内容',
+  'How You Use Qwen Code': '如何使用 Qwen Code',
+  'Impressive Things': '出色工作',
+  'Where Things Go Wrong': '问题所在',
+  'Features to Try': '可尝试的功能',
+  'New Usage Patterns': '新使用模式',
+  'On the Horizon': '未来展望',
+
+  // Qualitative.tsx - ProjectAreas
+  '~{{count}} sessions': '约 {{count}} 次会话',
+  'What You Wanted': '您的需求',
+  'Top Tools Used': '常用工具',
+
+  // Qualitative.tsx - InteractionStyle
+  'Key pattern:': '关键模式：',
+
+  // Qualitative.tsx - ImpressiveWorkflows
+  'Impressive Things You Did': '您完成的出色工作',
+  "What Helped Most (Qwen's Capabilities)": '最有帮助的功能（Qwen 的能力）',
+  Outcomes: '结果',
+
+  // Qualitative.tsx - FrictionPoints
+  'Primary Friction Types': '主要摩擦类型',
+  'Inferred Satisfaction (model-estimated)': '推断满意度（模型估算）',
+
+  // Qualitative.tsx - Improvements
+  'Existing Qwen Code Features to Try': '可尝试的现有 Qwen Code 功能',
+  'Suggested QWEN.md Additions': '建议添加到 QWEN.md 的内容',
+  'Just copy this into Qwen Code to add it to your QWEN.md.':
+    '只需将其复制到 Qwen Code 即可添加到您的 QWEN.md。',
+  'Copy All Checked ({{count}})': '复制所有已选项（{{count}}）',
+  'Copied All!': '已全部复制！',
+  "Just copy this into Qwen Code and it'll set it up for you.":
+    '只需将其复制到 Qwen Code 即可为您设置。',
+  'Why for you:': '为什么适合您：',
+  'New Ways to Use Qwen Code': '使用 Qwen Code 的新方式',
+  "Just copy this into Qwen Code and it'll walk you through it.":
+    '只需将其复制到 Qwen Code，它将引导您完成。',
+  'Paste into Qwen Code:': '粘贴到 Qwen Code：',
+
+  // Qualitative.tsx - FutureOpportunities
+  'Getting started:': '开始使用：',
+
+  // Qualitative.tsx - MemorableMoment
+  // (No static text, only dynamic content)
 };
