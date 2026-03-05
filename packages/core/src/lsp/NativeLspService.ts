@@ -27,6 +27,7 @@ import type {
   LspWorkspaceEdit,
 } from './types.js';
 import type { EventEmitter } from 'events';
+import { DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS } from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './LspServerManager.js';
@@ -207,11 +208,22 @@ export class NativeLspService {
     );
   }
 
-  private ensureDocumentOpen(
+  /**
+   * Ensure a document is open on the given LSP server. Sends textDocument/didOpen
+   * if not already tracked, then waits for the server to process the file before
+   * returning. This delay prevents empty results when the server hasn't analyzed
+   * the file yet.
+   *
+   * @param serverName - The name of the LSP server
+   * @param handle - The server handle with an active connection
+   * @param uri - The document URI to open
+   * @returns true if a new didOpen was sent; false if already open or failed
+   */
+  private async ensureDocumentOpen(
     serverName: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
-  ): boolean {
+  ): Promise<boolean> {
     const lastConnection = this.lastConnections.get(serverName);
     if (lastConnection && lastConnection !== handle.connection) {
       this.openedDocuments.delete(serverName);
@@ -263,7 +275,27 @@ export class NativeLspService {
     const nextOpened = openedForServer ?? new Set<string>();
     nextOpened.add(uri);
     this.openedDocuments.set(serverName, nextOpened);
+
+    // Wait for the LSP server to process the newly opened document.
+    // Without this delay, requests sent immediately after didOpen may return
+    // empty results because the server hasn't finished analyzing the file.
+    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+
     return true;
+  }
+
+  /**
+   * Register a URI that was opened externally (e.g. by warmupTypescriptServer)
+   * so that ensureDocumentOpen does not send a duplicate textDocument/didOpen.
+   *
+   * @param serverName - The name of the LSP server
+   * @param uri - The document URI to track as already opened
+   */
+  private trackExternallyOpenedDocument(serverName: string, uri: string): void {
+    const openedForServer =
+      this.openedDocuments.get(serverName) ?? new Set<string>();
+    openedForServer.add(uri);
+    this.openedDocuments.set(serverName, openedForServer);
   }
 
   private resolveLanguageId(
@@ -299,7 +331,7 @@ export class NativeLspService {
     }
 
     const uri = pathToFileURL(filePath).toString();
-    const didOpen = this.ensureDocumentOpen(
+    const didOpen = await this.ensureDocumentOpen(
       serverName,
       handle as LspServerHandle & { connection: LspConnectionInterface },
       uri,
@@ -398,7 +430,11 @@ export class NativeLspService {
         continue;
       }
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(serverName, warmupUri);
+        }
         const warmedUp = this.serverManager.isTypescriptServer(handle)
           ? false
           : await this.warmupWorkspaceSymbols(serverName, handle);
@@ -420,7 +456,13 @@ export class NativeLspService {
           this.serverManager.isTypescriptServer(handle) &&
           this.isNoProjectErrorResponse(response)
         ) {
-          await this.serverManager.warmupTypescriptServer(handle, true);
+          const retryUri = await this.serverManager.warmupTypescriptServer(
+            handle,
+            true,
+          );
+          if (retryUri) {
+            this.trackExternallyOpenedDocument(serverName, retryUri);
+          }
           response = await handle.connection.request('workspace/symbol', {
             query,
           });
@@ -463,8 +505,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, location.uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, location.uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'textDocument/definition',
           {
@@ -514,8 +560,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, location.uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, location.uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'textDocument/references',
           {
@@ -562,8 +612,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, location.uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, location.uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request('textDocument/hover', {
           textDocument: { uri: location.uri },
           position: location.range.start,
@@ -592,8 +646,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'textDocument/documentSymbol',
           {
@@ -656,8 +714,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, location.uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, location.uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'textDocument/implementation',
           {
@@ -709,8 +771,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, location.uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, location.uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'textDocument/prepareCallHierarchy',
           {
@@ -763,7 +829,11 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
           {
@@ -810,7 +880,11 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
           {
@@ -856,8 +930,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
 
         // Request pull diagnostics if the server supports it
         const response = await handle.connection.request(
@@ -907,7 +985,11 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        await this.serverManager.warmupTypescriptServer(handle);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
 
         // Request workspace diagnostics if supported
         const response = await handle.connection.request(
@@ -961,8 +1043,12 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        this.ensureDocumentOpen(name, handle, uri);
-        await this.serverManager.warmupTypescriptServer(handle);
+        await this.ensureDocumentOpen(name, handle, uri);
+        const warmupUri =
+          await this.serverManager.warmupTypescriptServer(handle);
+        if (warmupUri) {
+          this.trackExternallyOpenedDocument(name, warmupUri);
+        }
 
         // Convert context diagnostics to LSP format
         const lspDiagnostics = context.diagnostics.map((d: LspDiagnostic) =>

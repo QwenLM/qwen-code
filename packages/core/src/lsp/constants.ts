@@ -19,6 +19,9 @@ export const DEFAULT_LSP_REQUEST_TIMEOUT_MS = 15000;
 /** Default delay for TypeScript server warm-up in milliseconds */
 export const DEFAULT_LSP_WARMUP_DELAY_MS = 150;
 
+/** Default delay after opening a document to allow the LSP server to process it */
+export const DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS = 200;
+
 /** Default timeout for command existence check in milliseconds */
 export const DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS = 2000;
 
