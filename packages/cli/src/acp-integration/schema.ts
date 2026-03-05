@@ -563,6 +563,15 @@ export const toolCallContentSchema = z.union([
     path: z.string(),
     type: z.literal('diff'),
   }),
+  z.object({
+    entries: z.array(
+      z.object({
+        content: z.string(),
+        status: z.enum(['pending', 'in_progress', 'completed']),
+      }),
+    ),
+    type: z.literal('entries'),
+  }),
 ]);
 
 export const toolCallSchema = z.object({
@@ -633,6 +642,7 @@ export const sessionUpdateSchema = z.union([
     content: z.array(toolCallContentSchema).optional(),
     kind: toolKindSchema,
     locations: z.array(toolCallLocationSchema).optional(),
+    name: z.string().optional(),
     rawInput: z.unknown().optional(),
     _meta: sessionUpdateMetaSchema.optional().nullable(),
     sessionUpdate: z.literal('tool_call'),
@@ -644,6 +654,7 @@ export const sessionUpdateSchema = z.union([
     content: z.array(toolCallContentSchema).optional().nullable(),
     kind: toolKindSchema.optional().nullable(),
     locations: z.array(toolCallLocationSchema).optional().nullable(),
+    name: z.string().optional(),
     rawInput: z.unknown().optional(),
     rawOutput: z.unknown().optional(),
     _meta: sessionUpdateMetaSchema.optional().nullable(),

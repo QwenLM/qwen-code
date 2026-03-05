@@ -7,10 +7,23 @@
  */
 
 /**
+ * Plan entry status type
+ */
+export type PlanEntryStatus = 'pending' | 'in_progress' | 'completed';
+
+/**
+ * Plan entry interface for UpdatedPlanToolCall
+ */
+export interface PlanEntry {
+  content: string;
+  status: PlanEntryStatus;
+}
+
+/**
  * Tool call content types
  */
 export interface ToolCallContent {
-  type: 'content' | 'diff';
+  type: 'content' | 'diff' | 'entries';
   // For content type
   content?: {
     type: string;
@@ -22,6 +35,8 @@ export interface ToolCallContent {
   path?: string;
   oldText?: string | null;
   newText?: string;
+  // For entries type (structured plan/todo entries)
+  entries?: PlanEntry[];
 }
 
 /**
@@ -80,16 +95,3 @@ export type ContainerStatus =
   | 'warning'
   | 'loading'
   | 'default';
-
-/**
- * Plan entry status type
- */
-export type PlanEntryStatus = 'pending' | 'in_progress' | 'completed';
-
-/**
- * Plan entry interface for UpdatedPlanToolCall
- */
-export interface PlanEntry {
-  content: string;
-  status: PlanEntryStatus;
-}
