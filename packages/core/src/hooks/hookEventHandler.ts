@@ -23,6 +23,8 @@ import type {
   PreToolUseInput,
   PostToolUseInput,
   PostToolUseFailureInput,
+  PreCompactInput,
+  PreCompactTrigger,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -193,6 +195,26 @@ export class HookEventHandler {
     // Pass tool name as context for matcher filtering
     return this.executeHooks(HookEventName.PostToolUseFailure, input, {
       toolName,
+    });
+  }
+
+  /**
+   * Fire a PreCompact event
+   * Called before conversation compaction begins
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+    customInstructions: string = '',
+  ): Promise<AggregatedHookResult> {
+    const input: PreCompactInput = {
+      ...this.createBaseInput(HookEventName.PreCompact),
+      trigger,
+      custom_instructions: customInstructions,
+    };
+
+    // Pass trigger as context for matcher filtering
+    return this.executeHooks(HookEventName.PreCompact, input, {
+      trigger,
     });
   }
 

@@ -640,7 +640,7 @@ export enum PreCompactTrigger {
  */
 export interface PreCompactInput extends HookInput {
   trigger: PreCompactTrigger;
-  custom_instructions?: string;
+  custom_instructions: string;
 }
 
 /**
@@ -649,7 +649,7 @@ export interface PreCompactInput extends HookInput {
 export interface PreCompactOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PreCompact';
-    additionalContext?: string;
+    additionalContext: string;
   };
 }
 

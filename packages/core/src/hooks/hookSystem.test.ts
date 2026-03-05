@@ -20,6 +20,7 @@ import {
   PermissionMode,
   AgentType,
   type HookDecision,
+  PreCompactTrigger,
 } from './types.js';
 import type { Config } from '../config/config.js';
 
@@ -476,6 +477,544 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('firePreToolUseEvent', () => {
+    it('should fire PreToolUse event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+      );
+
+      expect(mockHookEventHandler.firePreToolUseEvent).toHaveBeenCalledWith(
+        'bash',
+        { command: 'ls' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePreToolUseEvent(
+        'write_file',
+        { path: '/test.txt', content: 'test' },
+        'toolu_test456',
+        PermissionMode.Yolo,
+      );
+
+      expect(mockHookEventHandler.firePreToolUseEvent).toHaveBeenCalledWith(
+        'write_file',
+        { path: '/test.txt', content: 'test' },
+        'toolu_test456',
+        PermissionMode.Yolo,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        'toolu_test789',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with deny decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'deny' as HookDecision,
+          reason: 'Permission denied by policy',
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreToolUseEvent(
+        'bash',
+        { command: 'rm -rf /' },
+        'toolu_test999',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+      expect(result?.getEffectiveReason()).toBe(
+        'Permission denied by policies',
+      );
+    });
+
+    it('should return DefaultHookOutput with additional context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Tool execution monitored for security',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        'toolu_test111',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe(
+        'Tool execution monitored for security',
+      );
+    });
+  });
+
+  describe('firePostToolUseEvent', () => {
+    it('should fire PostToolUse event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePostToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        { output: 'file1.txt\nfile2.txt' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+      );
+
+      expect(mockHookEventHandler.firePostToolUseEvent).toHaveBeenCalledWith(
+        'bash',
+        { command: 'ls' },
+        { output: 'file1.txt\nfile2.txt' },
+        'toolu_test123',
+        PermissionMode.AutoEdit,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePostToolUseEvent(
+        'read_file',
+        { path: '/test.txt' },
+        { content: 'file content' },
+        'toolu_test456',
+        PermissionMode.Plan,
+      );
+
+      expect(mockHookEventHandler.firePostToolUseEvent).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/test.txt' },
+        { content: 'file content' },
+        'toolu_test456',
+        PermissionMode.Plan,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.firePostToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePostToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        { output: 'result' },
+        'toolu_test789',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with system message', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          systemMessage: 'Tool executed successfully',
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolUseEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePostToolUseEvent(
+        'bash',
+        { command: 'ls' },
+        { output: 'result' },
+        'toolu_test999',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.systemMessage).toBe('Tool executed successfully');
+    });
+  });
+
+  describe('firePostToolUseFailureEvent', () => {
+    it('should fire PostToolUseFailure event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test123',
+        'bash',
+        { command: 'invalid' },
+        'Command not found',
+        false,
+        PermissionMode.AutoEdit,
+      );
+
+      expect(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).toHaveBeenCalledWith(
+        'toolu_test123',
+        'bash',
+        { command: 'invalid' },
+        'Command not found',
+        false,
+        PermissionMode.AutoEdit,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test456',
+        'write_file',
+        { path: '/test.txt' },
+        'Permission denied',
+        true,
+        PermissionMode.Yolo,
+      );
+
+      expect(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).toHaveBeenCalledWith(
+        'toolu_test456',
+        'write_file',
+        { path: '/test.txt' },
+        'Permission denied',
+        true,
+        PermissionMode.Yolo,
+      );
+    });
+
+    it('should use default values for optional parameters', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test789',
+        'bash',
+        { command: 'ls' },
+        'Error occurred',
+      );
+
+      expect(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).toHaveBeenCalledWith(
+        'toolu_test789',
+        'bash',
+        { command: 'ls' },
+        'Error occurred',
+        undefined,
+        undefined,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test999',
+        'bash',
+        { command: 'ls' },
+        'Error',
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with error context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Failure due to permission issues',
+          },
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePostToolUseFailureEvent(
+        'toolu_test111',
+        'bash',
+        { command: 'ls' },
+        'Permission denied',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe(
+        'Failure due to permission issues',
+      );
+    });
+  });
+
+  describe('firePreCompactEvent', () => {
+    it('should fire PreCompact event with auto trigger and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreCompactEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+        '',
+      );
+
+      expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
+        PreCompactTrigger.Auto,
+        '',
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should fire PreCompact event with manual trigger', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreCompactEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePreCompactEvent(PreCompactTrigger.Manual, '');
+
+      expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
+        PreCompactTrigger.Manual,
+        '',
+      );
+    });
+
+    it('should pass custom instructions to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreCompactEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+        'Custom compression instructions',
+      );
+
+      expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
+        PreCompactTrigger.Auto,
+        'Custom compression instructions',
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.firePreCompactEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+        '',
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with additional context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Context before compression',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePreCompactEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.firePreCompactEvent(
+        PreCompactTrigger.Manual,
+        '',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('Context before compression');
     });
   });
 });

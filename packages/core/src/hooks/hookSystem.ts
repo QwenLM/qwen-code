@@ -19,6 +19,7 @@ import type {
   SessionEndReason,
   AgentType,
   PermissionMode,
+  PreCompactTrigger,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -196,6 +197,22 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PreCompact event - called before conversation compaction
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+    customInstructions: string = '',
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePreCompactEvent(
+      trigger,
+      customInstructions,
+    );
+    return result.finalOutput
+      ? createHookOutput('PreCompact', result.finalOutput)
       : undefined;
   }
 }

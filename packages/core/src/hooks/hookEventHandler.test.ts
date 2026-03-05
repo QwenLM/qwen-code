@@ -14,6 +14,7 @@ import {
   SessionEndReason,
   PermissionMode,
   AgentType,
+  PreCompactTrigger,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import type {
@@ -634,7 +635,13 @@ describe('HookEventHandler', () => {
     });
 
     it('should handle successful execution with final output', async () => {
-      const mockPlan = createMockExecutionPlan([]);
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
       const mockAggregated = createMockAggregatedResult(true, {
         reason: 'Processing error',
         hookSpecificOutput: {
@@ -734,6 +741,571 @@ describe('HookEventHandler', () => {
 
       expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
       expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('firePreToolUseEvent', () => {
+    it('should execute hooks for PreToolUse event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePreToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        'toolu_test123',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreToolUse,
+        { toolName: 'test-tool' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls -la' },
+        'toolu_abc456',
+        PermissionMode.Plan,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_mode: PermissionMode;
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        tool_use_id: string;
+      };
+
+      expect(input.permission_mode).toBe(PermissionMode.Plan);
+      expect(input.tool_name).toBe('shell');
+      expect(input.tool_input).toEqual({ command: 'ls -la' });
+      expect(input.tool_use_id).toBe('toolu_abc456');
+    });
+
+    it('should pass tool name as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'Bash',
+        { command: 'npm test' },
+        'toolu_xyz789',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreToolUse,
+        { toolName: 'Bash' },
+      );
+    });
+
+    it('should handle permission decision in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'Dangerous command blocked',
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePreToolUseEvent(
+        'Bash',
+        { command: 'rm -rf /' },
+        'toolu_danger',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.hookSpecificOutput).toEqual({
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'Dangerous command blocked',
+      });
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        'toolu_seq',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('PreToolUse planner error');
+      });
+
+      const result = await hookEventHandler.firePreToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        'toolu_error',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('PreToolUse planner error');
+    });
+  });
+
+  describe('firePostToolUseEvent', () => {
+    it('should execute hooks for PostToolUse event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePostToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        { result: 'success' },
+        'toolu_test123',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolUse,
+        { toolName: 'test-tool' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseEvent(
+        'shell',
+        { command: 'ls -la' },
+        { files: ['a.txt', 'b.txt'] },
+        'toolu_abc456',
+        PermissionMode.Yolo,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_mode: PermissionMode;
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        tool_response: Record<string, unknown>;
+        tool_use_id: string;
+      };
+
+      expect(input.permission_mode).toBe(PermissionMode.Yolo);
+      expect(input.tool_name).toBe('shell');
+      expect(input.tool_input).toEqual({ command: 'ls -la' });
+      expect(input.tool_response).toEqual({ files: ['a.txt', 'b.txt'] });
+      expect(input.tool_use_id).toBe('toolu_abc456');
+    });
+
+    it('should pass tool name as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.firePostToolUseEvent(
+        'Write',
+        { file_path: '/test.txt', content: 'hello' },
+        { success: true },
+        'toolu_write123',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolUse,
+        { toolName: 'Write' },
+      );
+    });
+
+    it('should handle decision block in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        decision: 'block',
+        reason: 'Lint errors detected',
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: 'Please fix the lint errors',
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePostToolUseEvent(
+        'Write',
+        { file_path: '/test.ts', content: 'const x = 1' },
+        { success: true },
+        'toolu_lint',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('Lint errors detected');
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        { result: 'ok' },
+        'toolu_seq',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('PostToolUse planner error');
+      });
+
+      const result = await hookEventHandler.firePostToolUseEvent(
+        'test-tool',
+        { param: 'value' },
+        { result: 'ok' },
+        'toolu_error',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('PostToolUse planner error');
+    });
+  });
+
+  describe('firePreCompactEvent', () => {
+    it('should execute hooks for PreCompact event with manual trigger', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePreCompactEvent(
+        PreCompactTrigger.Manual,
+        'Keep important code',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreCompact,
+        { trigger: PreCompactTrigger.Manual },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should execute hooks for PreCompact event with auto trigger', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreCompact,
+        { trigger: PreCompactTrigger.Auto },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreCompactEvent(
+        PreCompactTrigger.Manual,
+        'Custom instructions for compaction',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        trigger: PreCompactTrigger;
+        custom_instructions: string;
+      };
+
+      expect(input.trigger).toBe(PreCompactTrigger.Manual);
+      expect(input.custom_instructions).toBe(
+        'Custom instructions for compaction',
+      );
+    });
+
+    it('should use empty string for custom_instructions when not provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreCompactEvent(PreCompactTrigger.Auto);
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        trigger: PreCompactTrigger;
+        custom_instructions: string;
+      };
+
+      expect(input.trigger).toBe(PreCompactTrigger.Auto);
+      expect(input.custom_instructions).toBe('');
+    });
+
+    it('should pass trigger as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.firePreCompactEvent(PreCompactTrigger.Manual);
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PreCompact,
+        { trigger: PreCompactTrigger.Manual },
+      );
+    });
+
+    it('should handle additionalContext in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        hookSpecificOutput: {
+          hookEventName: 'PreCompact',
+          additionalContext: 'Preserve function signatures',
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.hookSpecificOutput).toEqual({
+        hookEventName: 'PreCompact',
+        additionalContext: 'Preserve function signatures',
+      });
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreCompactEvent(PreCompactTrigger.Manual);
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('PreCompact planner error');
+      });
+
+      const result = await hookEventHandler.firePreCompactEvent(
+        PreCompactTrigger.Auto,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('PreCompact planner error');
+    });
+
+    it('should handle both trigger types correctly', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Test Manual trigger
+      await hookEventHandler.firePreCompactEvent(PreCompactTrigger.Manual);
+      let mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      let input = mockCalls[mockCalls.length - 1][2] as {
+        trigger: PreCompactTrigger;
+      };
+      expect(input.trigger).toBe(PreCompactTrigger.Manual);
+
+      // Test Auto trigger
+      await hookEventHandler.firePreCompactEvent(PreCompactTrigger.Auto);
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        trigger: PreCompactTrigger;
+      };
+      expect(input.trigger).toBe(PreCompactTrigger.Auto);
     });
   });
 });
