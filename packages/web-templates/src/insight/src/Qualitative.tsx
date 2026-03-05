@@ -3,8 +3,14 @@ import { useState } from 'react';
 import { DashboardCards, HeatmapSection } from './Charts';
 import type { InsightData, QualitativeData } from './types';
 import { CopyButton, MarkdownText } from './Components';
+import { t } from './i18n';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
+
+// Get current language from window or default to 'en'
+const currentLang =
+  (typeof window !== 'undefined' && window.INSIGHT_LANGUAGE) || 'en';
+const tr = (key: string) => t(key, currentLang);
 
 // -----------------------------------------------------------------------------
 // Qualitative Insight Components
@@ -16,34 +22,34 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">At a Glance</div>
+      <div className="glance-title">{tr('At a Glance')}</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
+          <strong>{tr("What's working:")}</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
+            {tr('Impressive Things You Did →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
+          <strong>{tr("What's hindering you:")}</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
+            {tr('Where Things Go Wrong →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
+          <strong>{tr('Quick wins to try:')}</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
-            Features to Try →
+            {tr('Features to Try →')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
+          <strong>{tr('Ambitious workflows:')}</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
-            On the Horizon →
+            {tr('On the Horizon →')}
           </a>
         </div>
       </div>
@@ -54,13 +60,13 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 export function NavToc() {
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-work">{tr('What You Work On')}</a>
+      <a href="#section-usage">{tr('How You Use Qwen Code')}</a>
+      <a href="#section-wins">{tr('Impressive Things')}</a>
+      <a href="#section-friction">{tr('Where Things Go Wrong')}</a>
+      <a href="#section-features">{tr('Features to Try')}</a>
+      <a href="#section-patterns">{tr('New Usage Patterns')}</a>
+      <a href="#section-horizon">{tr('On the Horizon')}</a>
     </nav>
   );
 }
@@ -87,7 +93,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        What You Work On
+        {tr('What You Work On')}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -97,7 +103,7 @@ export function ProjectAreas({
               <div className="area-header">
                 <span className="area-name">{area.name}</span>
                 <span className="area-count">
-                  ~{area.session_count} sessions
+                  ~{area.session_count} {tr('sessions')}
                 </span>
               </div>
               <div className="area-desc">
@@ -119,14 +125,14 @@ export function ProjectAreas({
         {topGoals && Object.keys(topGoals).length > 0 && (
           <HorizontalBarChart
             data={topGoals}
-            title="What You Wanted"
+            title={tr('What You Wanted')}
             color="#0ea5e9"
           />
         )}
         {topToolsObj && Object.keys(topToolsObj).length > 0 && (
           <HorizontalBarChart
             data={topToolsObj}
-            title="Top Tools Used"
+            title={tr('Top Tools Used')}
             color="#6366f1"
           />
         )}
@@ -151,7 +157,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        How You Use Qwen Code
+        {tr('How You Use Qwen Code')}
       </h2>
       <div className="narrative">
         <p>
@@ -159,7 +165,7 @@ export function InteractionStyle({
         </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>Key pattern:</strong>{' '}
+            <strong>{tr('Key pattern:')}</strong>{' '}
             <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
@@ -189,7 +195,7 @@ export function ImpressiveWorkflows({
         id="section-wins"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Impressive Things You Did
+        {tr('Impressive Things You Did')}
       </h2>
       {impressiveWorkflows.intro && (
         <p className="section-intro">
@@ -220,7 +226,7 @@ export function ImpressiveWorkflows({
         {primarySuccess && Object.keys(primarySuccess).length > 0 && (
           <HorizontalBarChart
             data={primarySuccess}
-            title="What Helped Most (Qwen's Capabilities)"
+            title={tr("What Helped Most (Qwen's Capabilities)")}
             color="#3b82f6"
             allowedKeys={[
               'fast_accurate_search',
@@ -235,7 +241,7 @@ export function ImpressiveWorkflows({
         {outcomes && Object.keys(outcomes).length > 0 && (
           <HorizontalBarChart
             data={outcomes}
-            title="Outcomes"
+            title={tr('Outcomes')}
             color="#8b5cf6"
             allowedKeys={[
               'fully_achieved',

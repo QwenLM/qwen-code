@@ -966,4 +966,10 @@ export default {
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+
+  // ============================================================================
+  // Insight Report - Language Support
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    '{{language}} でインサイトを生成中...',
 };

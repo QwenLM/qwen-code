@@ -34,13 +34,27 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import type { SupportedLanguage } from '../../../i18n/index.js';
 
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
 
+// Language display names for prompts
+const LANGUAGE_DISPLAY_NAMES: Record<SupportedLanguage, string> = {
+  en: 'English',
+  zh: '中文 (Chinese)',
+  ja: '日本語 (Japanese)',
+  de: 'Deutsch (German)',
+  pt: 'Português (Portuguese)',
+  ru: 'Русский (Russian)',
+};
+
 export class DataProcessor {
-  constructor(private config: Config) {}
+  constructor(
+    private config: Config,
+    private language: SupportedLanguage = 'en',
+  ) {}
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -193,7 +207,8 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
+    const languageInstruction = `\n\nIMPORTANT: Respond in ${LANGUAGE_DISPLAY_NAMES[this.language]}. All output text (brief_summary, underlying_goal, friction_detail) must be written in ${LANGUAGE_DISPLAY_NAMES[this.language]}.`;
+    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}${languageInstruction}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -384,12 +399,13 @@ export class DataProcessor {
     logger.info('Generating qualitative insights...');
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
+    const languageInstruction = `\n\nIMPORTANT: Respond in ${LANGUAGE_DISPLAY_NAMES[this.language]}. All output text must be written in ${LANGUAGE_DISPLAY_NAMES[this.language]}.`;
 
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

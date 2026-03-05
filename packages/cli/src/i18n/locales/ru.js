@@ -1463,4 +1463,9 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+  // ===========================================================================
+  // Insight Report - Language Support
+  // ===========================================================================
+  'Generating insights in {{language}}...':
+    'Генерация инсайтов на {{language}}...',
 };

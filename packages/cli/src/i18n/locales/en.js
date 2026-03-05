@@ -1448,4 +1448,10 @@ export default {
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+
+  // ============================================================================
+  // Insight Report - Language Support
+  // ============================================================================
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
 };
