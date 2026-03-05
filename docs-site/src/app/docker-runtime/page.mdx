@@ -1,0 +1,23 @@
+# Docker sandbox runtime
+
+## Why Java is not available by default
+
+The official Qwen Code Docker image is intentionally minimal to keep the image
+small, secure, and fast to pull.
+
+Different users require different language runtimes (Java, Python, Node.js, etc.),
+and bundling all environments into a single image is not practical.
+
+Therefore, Java is **not included by default** in the Docker sandbox.
+
+## How to add Java to the Docker sandbox
+
+If your workflow requires Java, you can extend the base image with your own
+dependencies. For example:
+
+```dockerfile
+FROM qwenlm/qwen-code:latest
+
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jre && \
+    apt-get clean
