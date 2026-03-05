@@ -121,10 +121,16 @@ export type HistoryItemInfo = HistoryItemBase & {
 export type HistoryItemError = HistoryItemBase & {
   type: 'error';
   text: string;
+  hint?: string; // Optional inline hint (e.g., retry countdown) displayed in secondary color
 };
 
 export type HistoryItemWarning = HistoryItemBase & {
   type: 'warning';
+  text: string;
+};
+
+export type HistoryItemRetryCountdown = HistoryItemBase & {
+  type: 'retry_countdown';
   text: string;
 };
 
@@ -293,6 +299,11 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   isEstimated?: boolean;
 };
 
+export type HistoryItemInsightProgress = HistoryItemBase & {
+  type: 'insight_progress';
+  progress: InsightProgressProps;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -307,6 +318,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -321,7 +333,8 @@ export type HistoryItemWithoutId =
   | HistoryItemToolsList
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
-  | HistoryItemContextUsage;
+  | HistoryItemContextUsage
+  | HistoryItemInsightProgress;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -345,6 +358,15 @@ export enum MessageType {
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
   CONTEXT_USAGE = 'context_usage',
+  INSIGHT_PROGRESS = 'insight_progress',
+}
+
+export interface InsightProgressProps {
+  stage: string;
+  progress: number;
+  detail?: string;
+  isComplete?: boolean;
+  error?: string;
 }
 
 // Simplified message structure for internal feedback
@@ -410,6 +432,11 @@ export type Message =
   | {
       type: MessageType.SUMMARY;
       summary: SummaryProps;
+      timestamp: Date;
+    }
+  | {
+      type: MessageType.INSIGHT_PROGRESS;
+      progress: InsightProgressProps;
       timestamp: Date;
     };
 

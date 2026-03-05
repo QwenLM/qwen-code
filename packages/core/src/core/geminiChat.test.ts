@@ -18,6 +18,7 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './geminiChat.js';
+import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -928,6 +929,166 @@ describe('GeminiChat', () => {
         role: 'user',
         parts: [{ text: 'test' }],
       });
+    });
+
+    it('should retry on TPM throttling StreamContentError with fixed delay', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        async function* failingStreamGenerator() {
+          throw tpmError;
+
+          yield {} as GenerateContentResponse;
+        }
+        const failingStream = failingStreamGenerator();
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after TPM retry' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStream)
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-tpm-retry',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+
+        expect(first.done).toBe(false);
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        // Resume generator to schedule the TPM delay, then advance timers.
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        const second = await secondPromise;
+
+        expect(second.done).toBe(false);
+        expect(second.value.type).toBe(StreamEventType.RETRY);
+
+        const events: StreamEvent[] = [first.value, second.value];
+
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((e) => e.type === StreamEventType.RETRY),
+        ).toHaveLength(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Success after TPM retry',
+          ),
+        ).toBe(true);
+        expect(mockLogContentRetry).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry on GLM rate limit StreamContentError with backoff delay', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const glmError = new StreamContentError(
+          '{"error":{"code":"1302","message":"您的账户已达到速率限制，请您控制请求频率"}}',
+        );
+        async function* failingStreamGenerator() {
+          throw glmError;
+
+          yield {} as GenerateContentResponse;
+        }
+        const failingStream = failingStreamGenerator();
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after GLM retry' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStream)
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-glm-retry',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+
+        expect(first.done).toBe(false);
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        // Resume generator to schedule the rate limit delay, then advance timers.
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        const second = await secondPromise;
+
+        expect(second.done).toBe(false);
+        expect(second.value.type).toBe(StreamEventType.RETRY);
+
+        // Verify retryInfo contains retry metadata
+        if (
+          second.value.type === StreamEventType.RETRY &&
+          second.value.retryInfo
+        ) {
+          expect(second.value.retryInfo.attempt).toBe(1);
+          expect(second.value.retryInfo.maxRetries).toBe(10);
+          expect(second.value.retryInfo.delayMs).toBe(60000);
+        }
+
+        const events: StreamEvent[] = [first.value, second.value];
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.filter((e) => e.type === StreamEventType.RETRY),
+        ).toHaveLength(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Success after GLM retry',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     describe('API error retry behavior', () => {

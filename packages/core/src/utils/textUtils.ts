@@ -53,3 +53,14 @@ export function isBinary(
   // If no NULL bytes were found in the sample, we assume it's text.
   return false;
 }
+
+/**
+ * Normalizes text for cross-platform parsing.
+ * - Strips UTF-8 BOM at start.
+ * - Converts CRLF and CR to LF.
+ */
+export function normalizeContent(content: string): string {
+  let normalized = content.replace(/^\uFEFF/, '');
+  normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return normalized;
+}

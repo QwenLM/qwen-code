@@ -142,6 +142,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter で確定、Esc でキャンセル',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter で選択、↑↓ で移動、Esc で戻る',
+  'Enter to submit, Esc to go back': 'Enter で送信、Esc で戻る',
   'Invalid step: {{step}}': '無効なステップ: {{step}}',
   'No subagents found.': 'サブエージェントが見つかりません',
   "Use '/agents create' to create your first subagent.":
@@ -671,18 +672,21 @@ export default {
   '🎯 Overall Goal:': '🎯 全体目標:',
   // Dialogs - Auth
   'Get started': '始める',
-  'How would you like to authenticate for this project?':
-    'このプロジェクトの認証方法を選択してください:',
+  'Select Authentication Method': '認証方法を選択',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI認証を使用するには OpenAI APIキーが必要です',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
-  '(Use Enter to Set Auth)': '(Enter で認証を設定)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Qwen Code の利用規約とプライバシー通知',
+  'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
   'Login with QwenChat account to use daily free quota.':
     'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': '自分のAPIキーを使用',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
@@ -710,6 +714,8 @@ export default {
   'Waiting for Qwen OAuth authentication...': 'Qwen OAuth認証を待っています...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     '注: Qwen OAuthを使用しても、settings.json内の既存のAPIキーはクリアされません。必要に応じて後でOpenAI認証に切り替えることができます',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    '注: Qwen OAuthを使用しても、既存のAPIキーはクリアされません。',
   'Authentication timed out. Please try again.':
     '認証がタイムアウトしました。再度お試しください',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -731,8 +737,19 @@ export default {
   // Dialogs - Model
   'Select Model': 'モデルを選択',
   '(Press Esc to close)': '(Esc で閉じる)',
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Alibaba Cloud ModelStudioの最新Qwen Coderモデル(バージョン: qwen3-coder-plus-2025-09-23)',
+  Modality: 'モダリティ',
+  'Context Window': 'コンテキストウィンドウ',
+  text: 'テキスト',
+  'text-only': 'テキストのみ',
+  image: '画像',
+  pdf: 'PDF',
+  audio: '音声',
+  video: '動画',
+  'not set': '未設定',
+  none: 'なし',
+  unknown: '不明',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
@@ -783,6 +800,27 @@ export default {
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "MCPサーバー '{{name}}' のOAuth認証を開始中...",
   // Startup Tips
+  'Tips:': 'ヒント：',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    '会話が長くなったら /compress で履歴を要約し、コンテキストを解放できます。',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    '/clear または /new で新しいアイデアを始められます。前のセッションは履歴に残ります。',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    '問題が発生したら /bug でメンテナーに報告できます。',
+  'Switch auth type quickly with /auth.':
+    '/auth で認証タイプをすばやく切り替えられます。',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Qwen Code から ! を使って任意のシェルコマンドを実行できます（例: !ls）。',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    '/ を入力してコマンドポップアップを開きます。Tab でスラッシュコマンドと保存済みプロンプトを補完できます。',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'qwen --continue または qwen --resume で前の会話を再開できます。',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Shift+Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'Try /insight to generate personalized insights from your chat history.':
+    '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -891,32 +929,19 @@ export default {
   ],
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'モデルを手動で設定したい上級ユーザー向け。',
-  'Please configure your models in settings.json:':
-    'settings.json でモデルを設定してください：',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    '環境変数を使用して API キーを設定してください（例：OPENAI_API_KEY）',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "modelProviders['openai']（または他の認証タイプ）にモデル設定を追加してください",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    '各プロバイダーには：id、envKey（必須）、およびオプションの baseUrl、generationConfig が必要です',
-  'Use /model command to select your preferred model from the configured list':
-    '/model コマンドを使用して、設定済みリストからお好みのモデルを選択してください',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'サポートされている認証タイプ：openai、anthropic、gemini、vertex-ai など',
+  'You can configure your API key and models in settings.json':
+    'settings.json で API キーとモデルを設定できます',
+  'Refer to the documentation for setup instructions':
+    'セットアップ手順はドキュメントを参照してください',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'APIキーを入力してください：',
   'API key cannot be empty.': 'APIキーは空にできません。',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'Coding Plan の API-KEY はこちらで取得できます：',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'Bailian Coding Plan の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  'You can get your Coding Plan API key here':
+    'Coding Plan APIキーはこちらで取得できます',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Coding Plan の設定が正常に更新されました。新しいモデルが利用可能になりました。',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -927,15 +952,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Bailian Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
-  Custom: 'カスタム',
-  'More instructions about configuring `modelProviders` manually.':
-    '`modelProviders`を手動で設定する方法の詳細はこちら。',
-  'Select API-KEY configuration mode:': 'API-KEY設定モードを選択してください：',
-  '(Press Escape to go back)': '(Escapeキーで戻る)',
-  '(Press Enter to submit, Escape to cancel)':
-    '(Enterで送信、Escapeでキャンセル)',
-  'More instructions please check:': '詳細な手順はこちらをご確認ください：',
+  'Select Region for Coding Plan': 'Coding Planのリージョンを選択',
+  'Choose based on where your account is registered':
+    'アカウントの登録先に応じて選択してください',
+  'Enter Coding Plan API Key': 'Coding Plan APIキーを入力',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    '{{region}} の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
 };

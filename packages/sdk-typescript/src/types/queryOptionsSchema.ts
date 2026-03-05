@@ -167,6 +167,7 @@ export const QueryOptionsSchema = z
       .optional(),
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
+    sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

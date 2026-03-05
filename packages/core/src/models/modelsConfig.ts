@@ -11,6 +11,7 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -308,10 +309,11 @@ export class ModelsConfig {
     newModel: string,
     metadata?: ModelSwitchMetadata,
   ): Promise<void> {
-    // Special case: qwen-oauth VLM auto-switch - hot update in place
+    // Special case: qwen-oauth model switch - hot update in place
+    // coder-model supports vision capabilities and can be hot-updated
     if (
       this.currentAuthType === AuthType.QWEN_OAUTH &&
-      (newModel === DEFAULT_QWEN_MODEL || newModel === 'vision-model')
+      newModel === DEFAULT_QWEN_MODEL
     ) {
       this.strictModelProviderSelection = false;
       this._generationConfig.model = newModel;
@@ -769,6 +771,15 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+
+    // modalities fallback: auto-detect from model when not set by provider
+    if (gc.modalities === undefined) {
+      this._generationConfig.modalities = defaultModalities(model.id);
+      this.generationConfigSources['modalities'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
   }
 
   /**
@@ -782,7 +793,7 @@ export class ModelsConfig {
    * - We're checking if switching between two models within the SAME authType needs refresh
    *
    * Examples:
-   * - Qwen OAuth: coder-model -> vision-model (same authType, hot-update safe)
+   * - Qwen OAuth: coder-model switches (same authType, hot-update safe)
    * - OpenAI: model-a -> model-b with same envKey (same authType, hot-update safe)
    * - OpenAI: gpt-4 -> deepseek-chat with different envKey (same authType, needs refresh)
    *
@@ -799,7 +810,7 @@ export class ModelsConfig {
     }
 
     // For Qwen OAuth, model switches within the same authType can always be hot-updated
-    // (coder-model <-> vision-model don't require ContentGenerator recreation)
+    // (coder-model supports vision capabilities and doesn't require ContentGenerator recreation)
     if (authType === AuthType.QWEN_OAUTH) {
       return false;
     }

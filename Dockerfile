@@ -19,12 +19,12 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 COPY . /home/node/app
 WORKDIR /home/node/app
 
-# Install dependencies and build packages
-# Use scripts/build.js which handles workspace dependencies in correct order
+# Install dependencies, build workspaces, bundle into a single distributable, and pack
 RUN npm ci \
   && npm run build \
-  && npm pack -w @qwen-code/qwen-code --pack-destination ./packages/cli/dist \
-  && npm pack -w @qwen-code/qwen-code-core --pack-destination ./packages/core/dist
+  && npm run bundle \
+  && npm run prepare:package \
+  && cd dist && npm pack
 
 # Runtime stage
 FROM docker.io/library/node:20-slim
@@ -61,9 +61,8 @@ RUN mkdir -p /usr/local/share/npm-global
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=$PATH:/usr/local/share/npm-global/bin
 
-# Copy built packages from builder stage
-COPY --from=builder /home/node/app/packages/cli/dist/*.tgz /tmp/
-COPY --from=builder /home/node/app/packages/core/dist/*.tgz /tmp/
+# Copy bundled package from builder stage
+COPY --from=builder /home/node/app/dist/*.tgz /tmp/
 
 # Install built packages globally
 RUN npm install -g /tmp/*.tgz \

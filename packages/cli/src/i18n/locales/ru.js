@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ управление вложениями',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → выбрать, Delete удалить, ↓ выйти',
+  'Attachments: ': 'Вложения: ',
+
   'Basics:': 'Основы:',
   'Add context': 'Добавить контекст',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -175,6 +181,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter для подтверждения, Esc для отмены',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter для выбора, ↑↓ для навигации, Esc для возврата',
+  'Enter to submit, Esc to go back': 'Enter для отправки, Esc для возврата',
   'Invalid step: {{step}}': 'Неверный шаг: {{step}}',
   'No subagents found.': 'Подагенты не найдены.',
   "Use '/agents create' to create your first subagent.":
@@ -944,18 +951,22 @@ export default {
   // Диалоги - Авторизация
   // ============================================================================
   'Get started': 'Начать',
-  'How would you like to authenticate for this project?':
-    'Как вы хотите авторизоваться для этого проекта?',
+  'Select Authentication Method': 'Выберите метод авторизации',
   'OpenAI API key is required to use OpenAI authentication.':
     'Для использования авторизации OpenAI требуется ключ API OpenAI.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
-  '(Use Enter to Set Auth)': '(Enter для установки авторизации)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Условия обслуживания и уведомление о конфиденциальности для Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Бесплатно \u00B7 До 1 000 запросов/день \u00B7 Новейшие модели Qwen',
   'Login with QwenChat account to use daily free quota.':
     'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Используйте свой API-ключ',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Используйте учетные данные Coding Plan или свои собственные API-ключи/провайдеры.',
@@ -983,6 +994,8 @@ export default {
     'Ожидание авторизации Qwen OAuth...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Примечание: Ваш существующий ключ API в settings.json не будет удален при использовании Qwen OAuth. Вы можете переключиться обратно на авторизацию OpenAI позже при необходимости.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Примечание: Ваш существующий ключ API не будет удален при использовании Qwen OAuth.',
   'Authentication timed out. Please try again.':
     'Время ожидания авторизации истекло. Пожалуйста, попробуйте снова.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1030,10 +1043,21 @@ export default {
   '(default)': '(по умолчанию)',
   '(set)': '(установлено)',
   '(not set)': '(не задано)',
+  Modality: 'Модальность',
+  'Context Window': 'Контекстное окно',
+  text: 'текст',
+  'text-only': 'только текст',
+  image: 'изображение',
+  pdf: 'PDF',
+  audio: 'аудио',
+  video: 'видео',
+  'not set': 'не задано',
+  none: 'нет',
+  unknown: 'неизвестно',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Последняя модель Qwen Coder от Alibaba Cloud ModelStudio (версия: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Последняя модель Qwen Vision от Alibaba Cloud ModelStudio (версия: qwen3-vl-plus-2025-09-23)',
 
@@ -1378,38 +1402,43 @@ export default {
     'Открываем страницу расширений в браузере: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Используйте /compress, когда разговор становится длинным, чтобы подвести итог и освободить контекст.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Начните новую идею с /clear или /new; предыдущая сессия останется в истории.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Используйте /bug, чтобы сообщить о проблемах разработчикам.',
+  'Switch auth type quickly with /auth.':
+    'Быстро переключите тип аутентификации с помощью /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Вы можете выполнять любые shell-команды в Qwen Code с помощью ! (например, !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Введите /, чтобы открыть меню команд; Tab автодополняет слэш-команды и сохранённые промпты.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'Вы можете продолжить предыдущий разговор, запустив qwen --continue или qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'Для продвинутых пользователей, которые хотят настраивать модели вручную.',
-  'Please configure your models in settings.json:':
-    'Пожалуйста, настройте ваши модели в settings.json:',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    'Установите ключ API через переменную окружения (например, OPENAI_API_KEY)',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "Добавьте конфигурацию модели в modelProviders['openai'] (или другие типы аутентификации)",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    'Каждому провайдеру нужны: id, envKey (обязательно), а также опциональные baseUrl, generationConfig',
-  'Use /model command to select your preferred model from the configured list':
-    'Используйте команду /model, чтобы выбрать предпочитаемую модель из настроенного списка',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'Поддерживаемые типы аутентификации: openai, anthropic, gemini, vertex-ai и др.',
+  'You can configure your API key and models in settings.json':
+    'Вы можете настроить API-ключ и модели в settings.json',
+  'Refer to the documentation for setup instructions':
+    'Инструкции по настройке см. в документации',
 
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'Пожалуйста, введите ваш API-ключ:',
   'API key cannot be empty.': 'API-ключ не может быть пустым.',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'Получите свой эксклюзивный API-KEY Coding Plan здесь:',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'Доступны новые конфигурации моделей для Bailian Coding Plan. Обновить сейчас?',
+  'You can get your Coding Plan API key here':
+    'Вы можете получить API-ключ Coding Plan здесь',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Доступны новые конфигурации моделей для Alibaba Cloud Coding Plan. Обновить сейчас?',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Конфигурация Coding Plan успешно обновлена. Новые модели теперь доступны.',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1420,15 +1449,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
-  Custom: 'Пользовательский',
-  'More instructions about configuring `modelProviders` manually.':
-    'Дополнительные инструкции по ручной настройке `modelProviders`.',
-  'Select API-KEY configuration mode:': 'Выберите режим конфигурации API-KEY:',
-  '(Press Escape to go back)': '(Нажмите Escape для возврата)',
-  '(Press Enter to submit, Escape to cancel)':
-    '(Нажмите Enter для отправки, Escape для отмены)',
-  'More instructions please check:': 'Дополнительные инструкции см.:',
+  'Select Region for Coding Plan': 'Выберите регион Coding Plan',
+  'Choose based on where your account is registered':
+    'Выберите в зависимости от места регистрации вашего аккаунта',
+  'Enter Coding Plan API Key': 'Введите API-ключ Coding Plan',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Доступны новые конфигурации моделей для {{region}}. Обновить сейчас?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
 };

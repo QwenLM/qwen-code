@@ -15,6 +15,19 @@ import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { ErrorHandler, RequestContext } from './errorHandler.js';
 
+/**
+ * Error thrown when the API returns an error embedded as stream content
+ * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
+ * endpoints) return throttling errors as a normal SSE chunk with
+ * finish_reason="error_finish" and the error message in delta.content.
+ */
+export class StreamContentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StreamContentError';
+  }
+}
+
 export interface PipelineConfig {
   cliConfig: Config;
   provider: OpenAICompatibleProvider;
@@ -33,6 +46,7 @@ export class ContentGenerationPipeline {
     this.converter = new OpenAIContentConverter(
       this.contentGeneratorConfig.model,
       this.contentGeneratorConfig.schemaCompliance,
+      this.contentGeneratorConfig.modalities ?? {},
     );
   }
 
@@ -45,6 +59,7 @@ export class ContentGenerationPipeline {
     // that is not valid/available for the OpenAI-compatible backend.
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -72,6 +87,7 @@ export class ContentGenerationPipeline {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -117,6 +133,17 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        // Detect API errors returned as stream content.
+        // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
+        // with finish_reason="error_finish" and the error in delta.content,
+        // instead of returning a proper HTTP error status.
+        if ((chunk.choices?.[0]?.finish_reason as string) === 'error_finish') {
+          const errorContent =
+            chunk.choices?.[0]?.delta?.content?.trim() ||
+            'Unknown stream error';
+          throw new StreamContentError(errorContent);
+        }
+
         const response = this.converter.convertOpenAIChunkToGemini(chunk);
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -158,6 +185,12 @@ export class ContentGenerationPipeline {
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
+
+      // Re-throw StreamContentError directly so it can be handled by
+      // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
+      if (error instanceof StreamContentError) {
+        throw error;
+      }
 
       // Use shared error handling logic
       await this.handleError(error, context, request);

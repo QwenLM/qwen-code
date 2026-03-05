@@ -10,6 +10,11 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ 管理附件',
+  '← → select, Delete to remove, ↓ to exit': '← → 选择，Delete 删除，↓ 退出',
+  'Attachments: ': '附件：',
+
   'Basics:': '基础功能：',
   'Add context': '添加上下文',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -168,6 +173,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter 确认，Esc 取消',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter 选择，↑↓ 导航，Esc 返回',
+  'Enter to submit, Esc to go back': 'Enter 提交，Esc 返回',
   'Invalid step: {{step}}': '无效步骤: {{step}}',
   'No subagents found.': '未找到子智能体。',
   "Use '/agents create' to create your first subagent.":
@@ -877,18 +883,21 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': '开始使用',
-  'How would you like to authenticate for this project?':
-    '您希望如何为此项目进行身份验证？',
+  'Select Authentication Method': '选择认证方式',
   'OpenAI API key is required to use OpenAI authentication.':
     '使用 OpenAI 认证需要 OpenAI API 密钥',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
-  '(Use Enter to Set Auth)': '（使用 Enter 设置认证）',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Qwen Code 的服务条款和隐私声明',
+  'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    '免费 \u00B7 每天最多 1,000 次请求 \u00B7 Qwen 最新模型',
   'Login with QwenChat account to use daily free quota.':
     '使用 QwenChat 账号登录，享受每日免费额度。',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
+  'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
+  'Bring your own API key': '使用自己的 API 密钥',
   'Use coding plan credentials or your own api-keys/providers.':
     '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
@@ -912,6 +921,8 @@ export default {
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     '注意：使用 Qwen OAuth 时，settings.json 中现有的 API 密钥不会被清除。如果需要，您可以稍后切换回 OpenAI 认证。',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    '注意：使用 Qwen OAuth 时，现有的 API 密钥不会被清除。',
   'Authentication timed out. Please try again.': '认证超时。请重试。',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     '正在等待认证...（按 ESC 或 CTRL+C 取消）',
@@ -956,10 +967,21 @@ export default {
   '(default)': '(默认)',
   '(set)': '(已设置)',
   '(not set)': '(未设置)',
+  Modality: '模态',
+  'Context Window': '上下文窗口',
+  text: '文本',
+  'text-only': '纯文本',
+  image: '图像',
+  pdf: 'PDF',
+  audio: '音频',
+  video: '视频',
+  'not set': '未设置',
+  none: '无',
+  unknown: '未知',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "无法切换到模型 '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    '来自阿里云 ModelStudio 的最新 Qwen Coder 模型（版本：qwen3-coder-plus-2025-09-23）',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — 高效混合架构，编程性能业界领先',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
 
@@ -1047,6 +1069,8 @@ export default {
     '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
+  'Try /insight to generate personalized insights from your chat history.':
+    '试试 /insight，从聊天记录中生成个性化洞察。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1205,16 +1229,27 @@ export default {
     '打开浏览器失败。请访问扩展市场：{{url}}',
 
   // ============================================================================
+  // Retry / Rate Limit
+  // ============================================================================
+  'Rate limit error: {{reason}}': '触发限流：{{reason}}',
+  'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
+    '将于 {{seconds}} 秒后重试…（第 {{attempt}}/{{maxRetries}} 次）',
+  'Press Ctrl+Y to retry': '按 Ctrl+Y 重试。',
+  'No failed request to retry.': '没有可重试的失败请求。',
+  'to retry last request': '重试上一次请求',
+
+  // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': '请输入您的 API Key：',
   'API key cannot be empty.': 'API Key 不能为空。',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    '您可以在这里获取专属的 Coding Plan API-KEY：',
+  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
+    '无效的 API Key，Coding Plan API Key 均以 "sk-sp-" 开头，请检查',
+  'You can get your Coding Plan API key here':
+    '您可以在这里获取 Coding Plan API Key',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API Key 已存储在 settings.env 中。您可以将其迁移到 .env 文件以获得更好的安全性。',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    '百炼 Coding Plan 有新模型配置可用。是否立即更新？',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    '阿里云百炼 Coding Plan 有新模型配置可用。是否立即更新？',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Coding Plan 配置更新成功。新模型现已可用。',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1223,35 +1258,27 @@ export default {
     '更新 Coding Plan 配置失败：{{message}}',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    '适合需要手动配置模型的高级用户。',
-  'Please configure your models in settings.json:':
-    '请在 settings.json 中配置您的模型：',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    '通过环境变量设置 API Key（例如：OPENAI_API_KEY）',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "将模型配置添加到 modelProviders['openai']（或其他认证类型）",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    '每个提供商需要：id、envKey（必需），以及可选的 baseUrl、generationConfig',
-  'Use /model command to select your preferred model from the configured list':
-    '使用 /model 命令从配置列表中选择您偏好的模型',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    '支持的认证类型：openai、anthropic、gemini、vertex-ai 等',
-  'More instructions please check:': '更多说明请查看：',
+  'You can configure your API key and models in settings.json':
+    '您可以在 settings.json 中配置 API Key 和模型',
+  'Refer to the documentation for setup instructions': '请参考文档了解配置说明',
 
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
-  'API-KEY': 'API-KEY',
-  'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    '粘贴您的百炼 Coding Plan API Key，即可完成设置！',
-  Custom: '自定义',
-  'More instructions about configuring `modelProviders` manually.':
-    '关于手动配置 `modelProviders` 的更多说明。',
-  'Select API-KEY configuration mode:': '选择 API-KEY 配置模式：',
-  '(Press Escape to go back)': '(按 Escape 键返回)',
-  '(Press Enter to submit, Escape to cancel)': '(按 Enter 提交，Escape 取消)',
+  'Select Region for Coding Plan': '选择 Coding Plan 区域',
+  'Choose based on where your account is registered':
+    '请根据您的账号注册地区选择',
+  'Enter Coding Plan API Key': '输入 Coding Plan API Key',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    '{{region}} 有新的模型配置可用。是否立即更新？',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
 };

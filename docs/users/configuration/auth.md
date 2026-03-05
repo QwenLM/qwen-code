@@ -1,13 +1,12 @@
 # Authentication
 
-Qwen Code supports two authentication methods. Pick the one that matches how you want to run the CLI:
+Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
 
-- **Qwen OAuth (recommended)**: sign in with your `qwen.ai` account in a browser.
-- **API-KEY**: use an API key to connect to any supported provider. More flexible — supports OpenAI, Anthropic, Google GenAI, Alibaba Cloud Bailian, and other compatible endpoints.
+- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. Free with a daily quota.
+- **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
+- **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-![](https://gw.alicdn.com/imgextra/i4/O1CN01yXSXc91uYxJxhJXBF_!!6000000006050-2-tps-2372-916.png)
-
-## 👍 Option 1: Qwen OAuth (recommended & free)
+## Option 1: Qwen OAuth (Free)
 
 Use this if you want the simplest setup and you're using Qwen models.
 
@@ -25,49 +24,126 @@ qwen
 > [!note]
 >
 > In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.  
-> In these cases, please use the API-KEY authentication method.
+> In these cases, please use the Alibaba Cloud Coding Plan or API Key authentication method.
 
-## 🚀 Option 2: API-KEY (flexible)
+## 💳 Option 2: Alibaba Cloud Coding Plan
 
-Use this if you want more flexibility over which provider and model to use. Supports multiple protocols and providers, including OpenAI, Anthropic, Google GenAI, Alibaba Cloud Bailian, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted compatible endpoint.
-
-### Option1: Coding Plan（Aliyun Bailian）
-
-Use this if you want predictable costs with higher usage quotas for the qwen3-coder-plus model.
+Use this if you want predictable costs with diverse model options and higher usage quotas.
 
 - **How it works**: Subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
-- **Requirements**: Obtain an active Coding Plan subscription from [Alibaba Cloud Bailian](https://bailian.console.aliyun.com/cn-beijing/?tab=globalset#/efm/coding_plan).
-- **Benefits**: Higher usage quotas, predictable monthly costs, access to the latest qwen3-coder-plus model.
-- **Cost & quota**: View [Alibaba Cloud Bailian Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
+- **Requirements**: Obtain an active Coding Plan subscription from [Aliyun Bailian](https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan) or [Alibaba Cloud](https://bailian.console.alibabacloud.com/?tab=model#/efm/coding_plan), depending on the region of your account.
+- **Benefits**: Diverse model options, higher usage quotas, predictable monthly costs, access to a wide range of models (Qwen, GLM, Kimi, Minimax and more).
+- **Cost & quota**: View [Aliyun Bailian Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
 
-Enter `qwen` in the terminal to launch Qwen Code, then enter the `/auth` command and select `API-KEY`
+Alibaba Cloud Coding Plan is available in two regions:
 
-![](https://gw.alicdn.com/imgextra/i4/O1CN01yXSXc91uYxJxhJXBF_!!6000000006050-2-tps-2372-916.png)
+| Region                           | Console URL                                                                  |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| Aliyun Bailian (aliyun.com)      | [bailian.console.aliyun.com](https://bailian.console.aliyun.com)             |
+| Alibaba Cloud (alibabacloud.com) | [bailian.console.alibabacloud.com](https://bailian.console.alibabacloud.com) |
 
-After entering, select `Coding Plan`:
+### Interactive setup
 
-![](https://gw.alicdn.com/imgextra/i4/O1CN01Irk0AD1ebfop69o0r_!!6000000003890-2-tps-2308-830.png)
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command and select **Alibaba Cloud Coding Plan**. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
 
-Enter your `sk-sp-xxxxxxxxx` key, then use the `/model` command to switch between all Bailian `Coding Plan` supported models:
+After authentication, use the `/model` command to switch between all Alibaba Cloud Coding Plan supported models (including qwen3.5-plus, qwen3-coder-plus, qwen3-coder-next, qwen3-max, glm-4.7, and kimi-k2.5).
 
-![](https://gw.alicdn.com/imgextra/i4/O1CN01fWArmf1kaCEgSmPln_!!6000000004699-2-tps-2304-1374.png)
+### Alternative: configure via `settings.json`
 
-### Option2: Third-party API-KEY
+If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwen/settings.json`:
 
-Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted endpoint.
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3-coder-plus",
+        "name": "qwen3-coder-plus (Coding Plan)",
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "description": "qwen3-coder-plus from Alibaba Cloud Coding Plan",
+        "envKey": "BAILIAN_CODING_PLAN_API_KEY"
+      }
+    ]
+  },
+  "env": {
+    "BAILIAN_CODING_PLAN_API_KEY": "sk-sp-xxxxxxxxx"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3-coder-plus"
+  }
+}
+```
+
+> [!note]
+>
+> The Coding Plan uses a dedicated endpoint (`https://coding.dashscope.aliyuncs.com/v1`) that is different from the standard Dashscope endpoint. Make sure to use the correct `baseUrl`.
+
+## 🚀 Option 3: API Key (flexible)
+
+Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.
+
+### Recommended: One-file setup via `settings.json`
+
+The simplest way to get started with API Key authentication is to put everything in a single `~/.qwen/settings.json` file. Here's a complete, ready-to-use example:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3-coder-plus",
+        "name": "qwen3-coder-plus",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "description": "Qwen3-Coder via Dashscope",
+        "envKey": "DASHSCOPE_API_KEY"
+      }
+    ]
+  },
+  "env": {
+    "DASHSCOPE_API_KEY": "sk-xxxxxxxxxxxxx"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3-coder-plus"
+  }
+}
+```
+
+What each field does:
+
+| Field                        | Description                                                                                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modelProviders`             | Declares which models are available and how to connect to them. Keys (`openai`, `anthropic`, `gemini`) represent the API protocol.              |
+| `env`                        | Stores API keys directly in `settings.json` as a fallback (lowest priority — shell `export` and `.env` files take precedence).                  |
+| `security.auth.selectedType` | Tells Qwen Code which protocol to use on startup (e.g. `openai`, `anthropic`, `gemini`). Without this, you'd need to run `/auth` interactively. |
+| `model.name`                 | The default model to activate when Qwen Code starts. Must match one of the `id` values in your `modelProviders`.                                |
+
+After saving the file, just run `qwen` — no interactive `/auth` setup needed.
+
+> [!tip]
+>
+> The sections below explain each part in more detail. If the quick example above works for you, feel free to skip ahead to [Security notes](#security-notes).
 
 The key concept is **Model Providers** (`modelProviders`): Qwen Code supports multiple API protocols, not just OpenAI. You configure which providers and models are available by editing `~/.qwen/settings.json`, then switch between them at runtime with the `/model` command.
 
 #### Supported protocols
 
-| Protocol          | `modelProviders` key | Environment variables                                        | Providers                                                                                           |
-| ----------------- | -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`          | OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud Bailian, any OpenAI-compatible endpoint |
-| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` | Anthropic Claude                                                                                    |
-| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                             | Google Gemini                                                                                       |
-| Google Vertex AI  | `vertex-ai`          | `GOOGLE_API_KEY`, `GOOGLE_MODEL`                             | Google Vertex AI                                                                                    |
+| Protocol          | `modelProviders` key | Environment variables                                        | Providers                                                                                   |
+| ----------------- | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`          | OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
+| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` | Anthropic Claude                                                                            |
+| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                             | Google Gemini                                                                               |
 
-#### Step 1: Configure `modelProviders` in `~/.qwen/settings.json`
+#### Step 1: Configure models and providers in `~/.qwen/settings.json`
 
 Define which models are available for each protocol. Each model entry requires at minimum an `id` and an `envKey` (the environment variable name that holds your API key).
 
@@ -75,7 +151,7 @@ Define which models are available for each protocol. Each model entry requires a
 >
 > It is recommended to define `modelProviders` in the user-scope `~/.qwen/settings.json` to avoid merge conflicts between project and user settings.
 
-Edit `~/.qwen/settings.json` (create it if it doesn't exist):
+Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multiple protocols in a single file — here is a multi-provider example showing just the `modelProviders` section:
 
 ```json
 {
@@ -106,7 +182,11 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist):
 }
 ```
 
-You can mix multiple protocols and models in a single configuration. The `ModelConfig` fields are:
+> [!tip]
+>
+> Don't forget to also set `env`, `security.auth.selectedType`, and `model.name` alongside `modelProviders` — see the [complete example above](#recommended-one-file-setup-via-settingsjson) for reference.
+
+**`ModelConfig` fields (each entry inside `modelProviders`):**
 
 | Field              | Required | Description                                                          |
 | ------------------ | -------- | -------------------------------------------------------------------- |
@@ -118,9 +198,9 @@ You can mix multiple protocols and models in a single configuration. The `ModelC
 
 > [!note]
 >
-> Credentials are **never** stored in `settings.json`. The runtime reads them from the environment variable specified in `envKey`.
+> When using the `env` field in `settings.json`, credentials are stored in plain text. For better security, prefer `.env` files or shell `export` — see [Step 2](#step-2-set-environment-variables).
 
-For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Settings Reference → modelProviders](settings.md#modelproviders).
+For the full `modelProviders` schema and advanced options like `generationConfig`, `customHeaders`, and `extra_body`, see [Model Providers Reference](model-providers.md).
 
 #### Step 2: Set environment variables
 
@@ -165,34 +245,28 @@ If nothing is found, it falls back to your **home directory**:
 
 **3. `settings.json` → `env` field (lowest priority)**
 
-You can also define environment variables directly in `~/.qwen/settings.json` under the `env` key. These are loaded as the **lowest-priority fallback** — only applied when a variable is not already set by the system environment or `.env` files.
+You can also define API keys directly in `~/.qwen/settings.json` under the `env` key. These are loaded as the **lowest-priority fallback** — only applied when a variable is not already set by the system environment or `.env` files.
 
 ```json
 {
   "env": {
-    "DASHSCOPE_API_KEY":"sk-...",
+    "DASHSCOPE_API_KEY": "sk-...",
     "OPENAI_API_KEY": "sk-...",
-    "ANTHROPIC_API_KEY": "sk-ant-...",
-    "GEMINI_API_KEY": "AIza..."
-  },
-  "modelProviders": {
-    ...
+    "ANTHROPIC_API_KEY": "sk-ant-..."
   }
 }
 ```
 
-> [!note]
->
-> This is useful when you want to keep all configuration (providers + credentials) in a single file. However, be mindful that `settings.json` may be shared or synced — prefer `.env` files for sensitive secrets.
+This is the approach used in the [one-file setup example](#recommended-one-file-setup-via-settingsjson) above. It's convenient for keeping everything in one place, but be mindful that `settings.json` may be shared or synced — prefer `.env` files for sensitive secrets.
 
 **Priority summary:**
 
-| Priority    | Source                         | Override behavior                        |
-| ----------- | ------------------------------ | ---------------------------------------- |
-| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                              |
-| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.env`      |
-| 3           | `.env` file                    | Only sets if not in system env           |
-| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env` |
+| Priority    | Source                         | Override behavior                            |
+| ----------- | ------------------------------ | -------------------------------------------- |
+| 1 (highest) | CLI flags (`--openai-api-key`) | Always wins                                  |
+| 2           | System env (`export`, inline)  | Overrides `.env` and `settings.json` → `env` |
+| 3           | `.env` file                    | Only sets if not in system env               |
+| 4 (lowest)  | `settings.json` → `env`        | Only sets if not in system env or `.env`     |
 
 #### Step 3: Switch models with `/model`
 
@@ -213,11 +287,11 @@ qwen --model "qwen3-coder-plus"
 
 # In another terminal
 
-qwen --model "qwen3-coder-next"
+qwen --model "qwen3.5-plus"
 ```
 
 ## Security notes
 
-- Don’t commit API keys to version control.
+- Don't commit API keys to version control.
 - Prefer `.qwen/.env` for project-local secrets (and keep it out of git).
 - Treat your terminal output as sensitive if it prints credentials for verification.

@@ -454,7 +454,7 @@ describe('ModelsConfig', () => {
     });
 
     // Switching within qwen-oauth triggers applyResolvedModelDefaults().
-    await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'vision-model');
+    await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');

@@ -20,6 +20,7 @@ import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageCont
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import { WarningMessage } from './messages/WarningMessage.js';
+import { RetryCountdownMessage } from './messages/RetryCountdownMessage.js';
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
@@ -34,6 +35,7 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { ContextUsage } from './views/ContextUsage.js';
+import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -125,7 +127,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <WarningMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'error' && (
-        <ErrorMessage text={itemForDisplay.text} />
+        <ErrorMessage text={itemForDisplay.text} hint={itemForDisplay.hint} />
+      )}
+      {itemForDisplay.type === 'retry_countdown' && (
+        <RetryCountdownMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
@@ -189,6 +194,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
         />
+      )}
+      {itemForDisplay.type === 'insight_progress' && (
+        <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
     </Box>
   );
