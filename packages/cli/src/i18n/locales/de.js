@@ -1459,4 +1459,27 @@ export default {
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Kontextnutzung',
+  'No API response yet. Send a message to see actual usage.':
+    'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated pre-conversation overhead':
+    'Geschätzte Vorabkosten vor der Unterhaltung',
+  'Context window': 'Kontextfenster',
+  tokens: 'Tokens',
+  Used: 'Verwendet',
+  Free: 'Frei',
+  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Usage by category': 'Verwendung nach Kategorie',
+  'System prompt': 'System-Prompt',
+  'Built-in tools': 'Integrierte Tools',
+  'MCP tools': 'MCP-Tools',
+  'Memory files': 'Speicherdateien',
+  Skills: 'Fähigkeiten',
+  Messages: 'Nachrichten',
+  'Show context window usage breakdown.':
+    'Zeigt die Aufschlüsselung der Kontextfenster-Nutzung an.',
 };

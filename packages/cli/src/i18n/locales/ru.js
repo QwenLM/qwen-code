@@ -1463,4 +1463,27 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Использование контекста',
+  'No API response yet. Send a message to see actual usage.':
+    'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated pre-conversation overhead':
+    'Оценочные накладные расходы перед беседой',
+  'Context window': 'Контекстное окно',
+  tokens: 'токенов',
+  Used: 'Использовано',
+  Free: 'Свободно',
+  'Autocompact buffer': 'Буфер автоупаковки',
+  'Usage by category': 'Использование по категориям',
+  'System prompt': 'Системная подсказка',
+  'Built-in tools': 'Встроенные инструменты',
+  'MCP tools': 'Инструменты MCP',
+  'Memory files': 'Файлы памяти',
+  Skills: 'Навыки',
+  Messages: 'Сообщения',
+  'Show context window usage breakdown.':
+    'Показать разбивку использования контекстного окна.',
 };

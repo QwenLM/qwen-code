@@ -205,7 +205,9 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
         <>
           {/* Model name + context window info */}
           <Box width={CONTENT_WIDTH} marginBottom={1}>
-            <Text color={theme.text.secondary}>{modelName}</Text>
+            <Text color={theme.text.secondary}>
+              {t('Model')}: {modelName}
+            </Text>
             <Box flexGrow={1} justifyContent="flex-end">
               <Text color={theme.text.secondary}>
                 {t('Context window')}: {formatTokens(contextWindowSize)}{' '}
@@ -243,7 +245,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           />
           <CategoryRow
             symbol={BUFFER}
-            label={t('Autocompact')}
+            label={t('Autocompact buffer')}
             tokens={breakdown.autocompactBuffer}
             contextWindowSize={contextWindowSize}
             symbolColor={theme.status.warning}
