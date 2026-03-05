@@ -13,6 +13,8 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -303,6 +305,49 @@ export interface ProcessedFileReadResult {
 }
 
 /**
+ * Maps file type to the corresponding modality flag.
+ */
+function fileTypeToModalityKey(
+  fileType: 'image' | 'pdf' | 'audio' | 'video',
+): keyof InputModalities {
+  switch (fileType) {
+    case 'image':
+      return 'image';
+    case 'pdf':
+      return 'pdf';
+    case 'audio':
+      return 'audio';
+    case 'video':
+      return 'video';
+    default:
+      // This should never happen due to the type constraint
+      throw new Error(`Unexpected file type: ${fileType}`);
+  }
+}
+
+/**
+ * Checks if a file type is supported by the model's input modalities.
+ * @param fileType The detected file type.
+ * @param modalities The model's supported input modalities.
+ * @returns True if the file type is supported, false otherwise.
+ */
+function isFileTypeSupported(
+  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+  modalities: InputModalities,
+): boolean {
+  // Text, binary (rejected separately), and SVG (treated as text) are always supported
+  if (fileType === 'text' || fileType === 'binary' || fileType === 'svg') {
+    return true;
+  }
+
+  // Check modalities for media types
+  const modalityKey = fileTypeToModalityKey(
+    fileType as 'image' | 'pdf' | 'audio' | 'video',
+  );
+  return modalities[modalityKey] === true;
+}
+
+/**
  * Reads and processes a single file, handling text, images, and PDFs.
  * @param filePath Absolute path to the file.
  * @param config Config instance for truncation settings.
@@ -356,6 +401,25 @@ export async function processSingleFileContent(
       .replace(/\\/g, '/');
 
     const displayName = path.basename(filePath);
+
+    // Get the current model's supported modalities
+    const model = config.getModel();
+    const modalities = defaultModalities(model);
+
+    // Check if the file type is supported by the current model
+    if (!isFileTypeSupported(fileType, modalities)) {
+      // At this point, fileType must be a media type (image, pdf, audio, video)
+      // because text/binary/svg are always supported
+      const modalityName = fileTypeToModalityKey(
+        fileType as 'image' | 'pdf' | 'audio' | 'video',
+      );
+      return {
+        llmContent: `The current model "${model}" does not support ${modalityName} input. ${fileType.toUpperCase()} files cannot be read directly.`,
+        returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modalityName} input)`,
+        error: `Model "${model}" does not support ${modalityName} input. Please use a model that supports ${modalityName} or convert the file to text externally.`,
+      };
+    }
+
     switch (fileType) {
       case 'binary': {
         return {

@@ -813,7 +813,12 @@ describe('StreamingToolCallParser', () => {
 
     it('should return true when a tool call is inside a string literal', () => {
       // Simulate truncation mid-string: {"file_path": "/tmp/test.txt", "content": "some text
-      parser.addChunk(0, '{"file_path": "/tmp/test.txt"', 'call_1', 'write_file');
+      parser.addChunk(
+        0,
+        '{"file_path": "/tmp/test.txt"',
+        'call_1',
+        'write_file',
+      );
       parser.addChunk(0, ', "content": "some text');
       const state = parser.getState(0);
       expect(state.inString).toBe(true);
