@@ -25,6 +25,8 @@ import type {
   PostToolUseFailureInput,
   PreCompactInput,
   PreCompactTrigger,
+  NotificationInput,
+  NotificationType,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -215,6 +217,27 @@ export class HookEventHandler {
     // Pass trigger as context for matcher filtering
     return this.executeHooks(HookEventName.PreCompact, input, {
       trigger,
+    });
+  }
+
+  /**
+   * Fire a Notification event
+   */
+  async fireNotificationEvent(
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): Promise<AggregatedHookResult> {
+    const input: NotificationInput = {
+      ...this.createBaseInput(HookEventName.Notification),
+      message,
+      notification_type: notificationType,
+      title,
+    };
+
+    // Pass notification_type as context for matcher filtering
+    return this.executeHooks(HookEventName.Notification, input, {
+      notificationType,
     });
   }
 

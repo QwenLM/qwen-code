@@ -20,6 +20,7 @@ import type {
   AgentType,
   PermissionMode,
   PreCompactTrigger,
+  NotificationType,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -213,6 +214,24 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PreCompact', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a Notification event
+   */
+  async fireNotificationEvent(
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireNotificationEvent(
+      message,
+      notificationType,
+      title,
+    );
+    return result.finalOutput
+      ? createHookOutput('Notification', result.finalOutput)
       : undefined;
   }
 }

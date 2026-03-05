@@ -15,6 +15,7 @@ import {
   type PreToolUseHookOutput,
   type PostToolUseHookOutput,
   type PostToolUseFailureHookOutput,
+  type NotificationType,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
@@ -294,6 +295,67 @@ export async function firePostToolUseFailureHook(
     // Hook errors should not affect error handling
     debugLogger.warn(
       `PostToolUseFailure hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
+}
+
+/**
+ * Result of Notification hook execution
+ */
+export interface NotificationHookResult {
+  /** Additional context from the hook */
+  additionalContext?: string;
+}
+
+/**
+ * Fire Notification hook via MessageBus
+ * Called when Qwen Code sends a notification
+ */
+export async function fireNotificationHook(
+  messageBus: MessageBus | undefined,
+  message: string,
+  notificationType: NotificationType,
+  title?: string,
+): Promise<NotificationHookResult> {
+  if (!messageBus) {
+    return {};
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'Notification',
+        input: {
+          message,
+          notification_type: notificationType,
+          title,
+        },
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+
+    if (!response.success || !response.output) {
+      return {};
+    }
+
+    const notificationOutput = createHookOutput(
+      'Notification',
+      response.output,
+    );
+    const additionalContext = notificationOutput.getAdditionalContext();
+
+    return {
+      additionalContext,
+    };
+  } catch (error) {
+    // Notification hook errors should not affect the notification flow
+    debugLogger.warn(
+      `Notification hook error: ${error instanceof Error ? error.message : String(error)}`,
     );
     return {};
   }

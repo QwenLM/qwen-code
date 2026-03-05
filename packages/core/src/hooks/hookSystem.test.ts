@@ -21,6 +21,7 @@ import {
   AgentType,
   type HookDecision,
   PreCompactTrigger,
+  NotificationType,
 } from './types.js';
 import type { Config } from '../config/config.js';
 
@@ -70,6 +71,11 @@ describe('HookSystem', () => {
       fireStopEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
+      firePreToolUseEvent: vi.fn(),
+      firePostToolUseEvent: vi.fn(),
+      firePostToolUseFailureEvent: vi.fn(),
+      firePreCompactEvent: vi.fn(),
+      fireNotificationEvent: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -587,9 +593,7 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.isBlockingDecision()).toBe(true);
-      expect(result?.getEffectiveReason()).toBe(
-        'Permission denied by policies',
-      );
+      expect(result?.getEffectiveReason()).toBe('Permission denied by policy');
     });
 
     it('should return DefaultHookOutput with additional context', async () => {
@@ -1015,6 +1019,165 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('Context before compression');
+    });
+  });
+
+  describe('fireNotificationEvent', () => {
+    it('should fire Notification event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireNotificationEvent(
+        'Test notification message',
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      );
+
+      expect(mockHookEventHandler.fireNotificationEvent).toHaveBeenCalledWith(
+        'Test notification message',
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireNotificationEvent(
+        'Qwen Code is waiting for your input',
+        NotificationType.IdlePrompt,
+        'Waiting for input',
+      );
+
+      expect(mockHookEventHandler.fireNotificationEvent).toHaveBeenCalledWith(
+        'Qwen Code is waiting for your input',
+        NotificationType.IdlePrompt,
+        'Waiting for input',
+      );
+    });
+
+    it('should handle notification without title', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireNotificationEvent(
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+      );
+
+      expect(mockHookEventHandler.fireNotificationEvent).toHaveBeenCalledWith(
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+        undefined,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireNotificationEvent(
+        'Test message',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with additional context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Notification handled by custom handler',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireNotificationEvent(
+        'Test notification',
+        NotificationType.IdlePrompt,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe(
+        'Notification handled by custom handler',
+      );
+    });
+
+    it('should handle elicitation_dialog notification type', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireNotificationEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireNotificationEvent(
+        'Dialog shown to user',
+        NotificationType.ElicitationDialog,
+        'Dialog',
+      );
+
+      expect(mockHookEventHandler.fireNotificationEvent).toHaveBeenCalledWith(
+        'Dialog shown to user',
+        NotificationType.ElicitationDialog,
+        'Dialog',
+      );
     });
   });
 });

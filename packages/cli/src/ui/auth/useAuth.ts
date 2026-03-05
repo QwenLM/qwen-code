@@ -15,6 +15,8 @@ import {
   AuthType,
   getErrorMessage,
   logAuth,
+  fireNotificationHook,
+  NotificationType,
 } from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -167,6 +169,21 @@ export const useAuthCommand = (
       // Log authentication success
       const authEvent = new AuthEvent(authType, 'manual', 'success');
       logAuth(config, authEvent);
+
+      // Fire auth_success notification hook
+      const messageBus = config.getMessageBus();
+      const hooksEnabled = config.getEnableHooks();
+      if (hooksEnabled && messageBus) {
+        fireNotificationHook(
+          messageBus,
+          `Successfully authenticated with ${authType}`,
+          NotificationType.AuthSuccess,
+          'Authentication successful',
+        ).catch(() => {
+          // Silently ignore errors - fireNotificationHook has internal error handling
+          // and notification hooks should not block the auth flow
+        });
+      }
     },
     [settings, handleAuthFailure, config, addItem, onAuthChange],
   );

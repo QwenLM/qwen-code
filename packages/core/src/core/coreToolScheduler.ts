@@ -24,8 +24,10 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  fireNotificationHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
+import { NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -976,6 +978,24 @@ export class CoreToolScheduler {
               'awaiting_approval',
               wrappedConfirmationDetails,
             );
+
+            // Fire permission_prompt notification hook
+            const messageBus = this.config.getMessageBus() as
+              | MessageBus
+              | undefined;
+            const hooksEnabled = this.config.getEnableHooks();
+            if (hooksEnabled && messageBus) {
+              fireNotificationHook(
+                messageBus,
+                `Qwen Code needs your permission to use ${reqInfo.name}`,
+                NotificationType.PermissionPrompt,
+                'Permission needed',
+              ).catch((error) => {
+                debugLogger.warn(
+                  `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+            }
           }
         } catch (error) {
           if (signal.aborted) {

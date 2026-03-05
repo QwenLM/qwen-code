@@ -1057,6 +1057,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     elapsedTime,
     settings,
+    config,
   });
 
   // Dialog close functionality

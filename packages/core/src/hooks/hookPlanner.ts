@@ -90,7 +90,22 @@ export class HookPlanner {
       return this.matchesTrigger(matcher, context.trigger);
     }
 
+    // For notification events, match against notification type
+    if (context.notificationType) {
+      return this.matchesNotificationType(matcher, context.notificationType);
+    }
+
     return true;
+  }
+
+  /**
+   * Match notification type against matcher pattern
+   */
+  private matchesNotificationType(
+    matcher: string,
+    notificationType: string,
+  ): boolean {
+    return matcher === notificationType;
   }
 
   /**
@@ -143,4 +158,5 @@ export class HookPlanner {
 export interface HookEventContext {
   toolName?: string;
   trigger?: string;
+  notificationType?: string;
 }

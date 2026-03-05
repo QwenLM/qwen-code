@@ -520,18 +520,19 @@ export interface UserPromptSubmitOutput extends HookOutput {
  * Notification types
  */
 export enum NotificationType {
-  ToolPermission = 'ToolPermission',
+  PermissionPrompt = 'permission_prompt',
+  IdlePrompt = 'idle_prompt',
+  AuthSuccess = 'auth_success',
+  ElicitationDialog = 'elicitation_dialog',
 }
 
 /**
  * Notification hook input
  */
 export interface NotificationInput extends HookInput {
-  permission_mode?: PermissionMode;
-  notification_type: NotificationType;
   message: string;
   title?: string;
-  details: Record<string, unknown>;
+  notification_type: NotificationType;
 }
 
 /**

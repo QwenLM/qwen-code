@@ -10,9 +10,12 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  fireNotificationHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { NotificationType } from '../hooks/types.js';
+import { MessageBusType } from '../confirmation-bus/types.js';
 
 // Mock the MessageBus
 const createMockMessageBus = () =>
@@ -471,6 +474,226 @@ describe('toolHookTriggers', () => {
       const result = appendAdditionalContext(originalContent, undefined);
 
       expect(result).toEqual([{ text: 'original' }]);
+    });
+  });
+
+  describe('fireNotificationHook', () => {
+    it('should return empty object when no messageBus is provided', async () => {
+      const result = await fireNotificationHook(
+        undefined,
+        'Test notification',
+        NotificationType.PermissionPrompt,
+        'Test Title',
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should return empty object when hook execution fails', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+      });
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should return empty object when hook output is empty', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.IdlePrompt,
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should return additional context when available', async () => {
+      const mockOutput = {
+        hookSpecificOutput: {
+          additionalContext: 'Additional context from notification hook',
+        },
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.AuthSuccess,
+      );
+
+      expect(result).toEqual({
+        additionalContext: 'Additional context from notification hook',
+      });
+    });
+
+    it('should send correct parameters to MessageBus for permission_prompt', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await fireNotificationHook(
+        mockMessageBus,
+        'Qwen Code needs your permission to use Bash',
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Qwen Code needs your permission to use Bash',
+            notification_type: 'permission_prompt',
+            title: 'Permission needed',
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should send correct parameters to MessageBus for idle_prompt', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await fireNotificationHook(
+        mockMessageBus,
+        'Qwen Code is waiting for your input',
+        NotificationType.IdlePrompt,
+        'Waiting for input',
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Qwen Code is waiting for your input',
+            notification_type: 'idle_prompt',
+            title: 'Waiting for input',
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should send correct parameters to MessageBus for auth_success', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await fireNotificationHook(
+        mockMessageBus,
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Authentication successful',
+            notification_type: 'auth_success',
+            title: undefined,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should send correct parameters to MessageBus for elicitation_dialog', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await fireNotificationHook(
+        mockMessageBus,
+        'Dialog shown to user',
+        NotificationType.ElicitationDialog,
+        'Dialog',
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Dialog shown to user',
+            notification_type: 'elicitation_dialog',
+            title: 'Dialog',
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should handle hook execution errors gracefully', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('Network error'),
+      );
+
+      const result = await fireNotificationHook(
+        mockMessageBus,
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should handle notification without title', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await fireNotificationHook(
+        mockMessageBus,
+        'Test notification without title',
+        NotificationType.IdlePrompt,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Test notification without title',
+            notification_type: 'idle_prompt',
+            title: undefined,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
     });
   });
 });

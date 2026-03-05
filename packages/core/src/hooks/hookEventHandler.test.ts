@@ -15,6 +15,7 @@ import {
   PermissionMode,
   AgentType,
   PreCompactTrigger,
+  NotificationType,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import type {
@@ -1306,6 +1307,264 @@ describe('HookEventHandler', () => {
         trigger: PreCompactTrigger;
       };
       expect(input.trigger).toBe(PreCompactTrigger.Auto);
+    });
+  });
+
+  describe('fireNotificationEvent', () => {
+    it('should execute hooks for Notification event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireNotificationEvent(
+        'Test notification message',
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.Notification,
+        { notificationType: 'permission_prompt' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireNotificationEvent(
+        'Qwen Code needs your permission to use Bash',
+        NotificationType.PermissionPrompt,
+        'Permission needed',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        message: string;
+        notification_type: string;
+        title?: string;
+      };
+
+      expect(input.message).toBe('Qwen Code needs your permission to use Bash');
+      expect(input.notification_type).toBe('permission_prompt');
+      expect(input.title).toBe('Permission needed');
+    });
+
+    it('should pass notification_type as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.fireNotificationEvent(
+        'Qwen Code is waiting for your input',
+        NotificationType.IdlePrompt,
+        'Waiting for input',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.Notification,
+        { notificationType: 'idle_prompt' },
+      );
+    });
+
+    it('should handle notification without title', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireNotificationEvent(
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        message: string;
+        notification_type: string;
+        title?: string;
+      };
+
+      expect(input.message).toBe('Authentication successful');
+      expect(input.notification_type).toBe('auth_success');
+      expect(input.title).toBeUndefined();
+    });
+
+    it('should handle auth_success notification type', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireNotificationEvent(
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.Notification,
+        { notificationType: 'auth_success' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should handle elicitation_dialog notification type', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireNotificationEvent(
+        'Dialog shown to user',
+        NotificationType.ElicitationDialog,
+        'Dialog',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.Notification,
+        { notificationType: 'elicitation_dialog' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireNotificationEvent(
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('Notification planner error');
+      });
+
+      const result = await hookEventHandler.fireNotificationEvent(
+        'Test notification',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('Notification planner error');
+    });
+
+    it('should handle all notification types correctly', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Test permission_prompt
+      await hookEventHandler.fireNotificationEvent(
+        'Permission needed',
+        NotificationType.PermissionPrompt,
+      );
+      let mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      let input = mockCalls[mockCalls.length - 1][2] as {
+        notification_type: string;
+      };
+      expect(input.notification_type).toBe('permission_prompt');
+
+      // Test idle_prompt
+      await hookEventHandler.fireNotificationEvent(
+        'Waiting for input',
+        NotificationType.IdlePrompt,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        notification_type: string;
+      };
+      expect(input.notification_type).toBe('idle_prompt');
+
+      // Test auth_success
+      await hookEventHandler.fireNotificationEvent(
+        'Authentication successful',
+        NotificationType.AuthSuccess,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        notification_type: string;
+      };
+      expect(input.notification_type).toBe('auth_success');
+
+      // Test elicitation_dialog
+      await hookEventHandler.fireNotificationEvent(
+        'Dialog shown',
+        NotificationType.ElicitationDialog,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        notification_type: string;
+      };
+      expect(input.notification_type).toBe('elicitation_dialog');
     });
   });
 });

@@ -91,6 +91,7 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
+import { PermissionMode, type NotificationType } from '../hooks/types.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -758,16 +759,12 @@ export class Config {
                 );
                 break;
               case 'PreToolUse': {
-                const { PermissionMode: PM } = await import(
-                  '../hooks/types.js'
-                );
                 result = await hookSystem.firePreToolUseEvent(
                   (input['tool_name'] as string) || '',
                   (input['tool_input'] as Record<string, unknown>) || {},
                   (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as
-                    | import('../hooks/types.js').PermissionMode
-                    | undefined) ?? PM.Default,
+                  (input['permission_mode'] as PermissionMode | undefined) ??
+                    PermissionMode.Default,
                 );
                 break;
               }
@@ -777,9 +774,7 @@ export class Config {
                   (input['tool_input'] as Record<string, unknown>) || {},
                   (input['tool_response'] as Record<string, unknown>) || {},
                   (input['tool_use_id'] as string) || '',
-                  (input[
-                    'permission_mode'
-                  ] as import('../hooks/types.js').PermissionMode) || 'default',
+                  (input['permission_mode'] as PermissionMode) || 'default',
                 );
                 break;
               case 'PostToolUseFailure':
@@ -789,9 +784,15 @@ export class Config {
                   (input['tool_input'] as Record<string, unknown>) || {},
                   (input['error'] as string) || '',
                   input['is_interrupt'] as boolean | undefined,
-                  (input[
-                    'permission_mode'
-                  ] as import('../hooks/types.js').PermissionMode) || 'default',
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                );
+                break;
+              case 'Notification':
+                result = await hookSystem.fireNotificationEvent(
+                  (input['message'] as string) || '',
+                  (input['notification_type'] as NotificationType) ||
+                    'permission_prompt',
+                  (input['title'] as string) || undefined,
                 );
                 break;
               default:
