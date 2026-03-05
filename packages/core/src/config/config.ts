@@ -810,6 +810,25 @@ export class Config {
                     | undefined) || undefined,
                 );
                 break;
+              case 'SubagentStart':
+                result = await hookSystem.fireSubagentStartEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                );
+                break;
+              case 'SubagentStop':
+                result = await hookSystem.fireSubagentStopEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['agent_transcript_path'] as string) || '',
+                  (input['last_assistant_message'] as string) || '',
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                );
+                break;
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,

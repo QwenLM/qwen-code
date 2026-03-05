@@ -90,6 +90,7 @@ export class HookAggregator {
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
+      case HookEventName.SubagentStop:
         merged = this.mergeWithOrLogic(outputs, eventName);
         break;
       case HookEventName.PermissionRequest:
@@ -347,6 +348,7 @@ export class HookAggregator {
       case HookEventName.PostToolUseFailure:
         return new PostToolUseFailureHookOutput(output);
       case HookEventName.Stop:
+      case HookEventName.SubagentStop:
         return new StopHookOutput(output);
       case HookEventName.PermissionRequest:
         return new PermissionRequestHookOutput(output);

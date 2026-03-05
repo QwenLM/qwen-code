@@ -1858,4 +1858,391 @@ describe('HookEventHandler', () => {
       expect(input.permission_mode).toBe(PermissionMode.Yolo);
     });
   });
+
+  describe('fireSubagentStartEvent', () => {
+    it('should execute hooks for SubagentStart event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireSubagentStartEvent(
+        'agent-123',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SubagentStart,
+        { agentType: 'code-reviewer' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStartEvent(
+        'agent-456',
+        'qwen-tester',
+        PermissionMode.Plan,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        agent_id: string;
+        agent_type: string;
+        permission_mode: PermissionMode;
+        hook_event_name: string;
+      };
+
+      expect(input.agent_id).toBe('agent-456');
+      expect(input.agent_type).toBe('qwen-tester');
+      expect(input.permission_mode).toBe(PermissionMode.Plan);
+      expect(input.hook_event_name).toBe(HookEventName.SubagentStart);
+    });
+
+    it('should pass agentType as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.fireSubagentStartEvent(
+        'agent-789',
+        AgentType.Bash,
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SubagentStart,
+        { agentType: String(AgentType.Bash) },
+      );
+    });
+
+    it('should handle additional context in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        hookSpecificOutput: {
+          hookEventName: 'SubagentStart',
+          additionalContext: 'Injected context for subagent',
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireSubagentStartEvent(
+        'agent-111',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.hookSpecificOutput).toEqual({
+        hookEventName: 'SubagentStart',
+        additionalContext: 'Injected context for subagent',
+      });
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStartEvent(
+        'agent-seq',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('SubagentStart planner error');
+      });
+
+      const result = await hookEventHandler.fireSubagentStartEvent(
+        'agent-err',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('SubagentStart planner error');
+    });
+  });
+
+  describe('fireSubagentStopEvent', () => {
+    it('should execute hooks for SubagentStop event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireSubagentStopEvent(
+        'agent-123',
+        'code-reviewer',
+        '/path/to/transcript.jsonl',
+        'Final output from subagent',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SubagentStop,
+        { agentType: 'code-reviewer' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStopEvent(
+        'agent-456',
+        'qwen-tester',
+        '/transcript/path.jsonl',
+        'last message from agent',
+        true,
+        PermissionMode.Yolo,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        agent_id: string;
+        agent_type: string;
+        agent_transcript_path: string;
+        last_assistant_message: string;
+        stop_hook_active: boolean;
+        permission_mode: PermissionMode;
+        hook_event_name: string;
+      };
+
+      expect(input.agent_id).toBe('agent-456');
+      expect(input.agent_type).toBe('qwen-tester');
+      expect(input.agent_transcript_path).toBe('/transcript/path.jsonl');
+      expect(input.last_assistant_message).toBe('last message from agent');
+      expect(input.stop_hook_active).toBe(true);
+      expect(input.permission_mode).toBe(PermissionMode.Yolo);
+      expect(input.hook_event_name).toBe(HookEventName.SubagentStop);
+    });
+
+    it('should pass agentType as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.fireSubagentStopEvent(
+        'agent-789',
+        'custom-agent',
+        '/path/transcript.jsonl',
+        'output',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.SubagentStop,
+        { agentType: 'custom-agent' },
+      );
+    });
+
+    it('should handle block decision in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        decision: 'block',
+        reason: 'Output too short, continue working',
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireSubagentStopEvent(
+        'agent-block',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'short',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe(
+        'Output too short, continue working',
+      );
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStopEvent(
+        'agent-seq',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'output',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('SubagentStop planner error');
+      });
+
+      const result = await hookEventHandler.fireSubagentStopEvent(
+        'agent-err',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'output',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('SubagentStop planner error');
+    });
+
+    it('should handle stop_hook_active flag correctly', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Test with stop_hook_active = false
+      await hookEventHandler.fireSubagentStopEvent(
+        'agent-1',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'output',
+        false,
+        PermissionMode.Default,
+      );
+      let mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      let input = mockCalls[mockCalls.length - 1][2] as {
+        stop_hook_active: boolean;
+      };
+      expect(input.stop_hook_active).toBe(false);
+
+      // Test with stop_hook_active = true
+      await hookEventHandler.fireSubagentStopEvent(
+        'agent-2',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'output',
+        true,
+        PermissionMode.Default,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        stop_hook_active: boolean;
+      };
+      expect(input.stop_hook_active).toBe(true);
+    });
+  });
 });

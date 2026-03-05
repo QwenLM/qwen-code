@@ -245,14 +245,14 @@ describe('HookPlanner', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },
         source: HooksConfigSource.Project,
-        eventName: HookEventName.SessionStart,
-        matcher: 'user',
+        eventName: HookEventName.PreCompact,
+        matcher: 'auto',
         enabled: true,
       };
       vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
 
-      const result = planner.createExecutionPlan(HookEventName.SessionStart, {
-        trigger: 'user',
+      const result = planner.createExecutionPlan(HookEventName.PreCompact, {
+        trigger: 'auto',
       });
 
       expect(result).not.toBeNull();
@@ -262,14 +262,14 @@ describe('HookPlanner', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },
         source: HooksConfigSource.Project,
-        eventName: HookEventName.SessionStart,
-        matcher: 'user',
+        eventName: HookEventName.PreCompact,
+        matcher: 'auto',
         enabled: true,
       };
       vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
 
-      const result = planner.createExecutionPlan(HookEventName.SessionStart, {
-        trigger: 'api',
+      const result = planner.createExecutionPlan(HookEventName.PreCompact, {
+        trigger: 'manual',
       });
 
       expect(result).toBeNull();
@@ -509,6 +509,207 @@ describe('HookPlanner', () => {
       vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
 
       const result = planner.createExecutionPlan(HookEventName.Notification);
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match agent type with exact string for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: 'code-reviewer',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'code-reviewer',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match agent type with different string for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: 'code-reviewer',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'qwen-tester',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match agent type with regex for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: '^code-.*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'code-reviewer',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match agent type with wildcard for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: '*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'any-agent',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match all agent types when no context for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: 'code-reviewer',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart);
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match all agent types when no matcher for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'any-agent',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match agent type with exact string for SubagentStop', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStop,
+        matcher: 'qwen-tester',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStop, {
+        agentType: 'qwen-tester',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match agent type with different string for SubagentStop', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStop,
+        matcher: 'qwen-tester',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStop, {
+        agentType: 'code-reviewer',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match agent type with regex for SubagentStop', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStop,
+        matcher: '.*tester$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStop, {
+        agentType: 'qwen-tester',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should fallback to exact match when regex is invalid for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: '[invalid(regex',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: 'code-reviewer',
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it('should match using fallback exact match when regex is invalid for SubagentStart', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStart,
+        matcher: '[invalid(regex',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStart, {
+        agentType: '[invalid(regex',
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should match regex wildcard .* for SubagentStop', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.SubagentStop,
+        matcher: '.*',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(HookEventName.SubagentStop, {
+        agentType: 'any-agent-type',
+      });
 
       expect(result).not.toBeNull();
     });

@@ -237,6 +237,48 @@ export class HookSystem {
   }
 
   /**
+   * Fire a SubagentStart event - called when a subagent is spawned
+   */
+  async fireSubagentStartEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    permissionMode: PermissionMode,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSubagentStartEvent(
+      agentId,
+      agentType,
+      permissionMode,
+    );
+    return result.finalOutput
+      ? createHookOutput('SubagentStart', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a SubagentStop event - called when a subagent finishes
+   */
+  async fireSubagentStopEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    agentTranscriptPath: string,
+    lastAssistantMessage: string,
+    stopHookActive: boolean,
+    permissionMode: PermissionMode,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSubagentStopEvent(
+      agentId,
+      agentType,
+      agentTranscriptPath,
+      lastAssistantMessage,
+      stopHookActive,
+      permissionMode,
+    );
+    return result.finalOutput
+      ? createHookOutput('SubagentStop', result.finalOutput)
+      : undefined;
+  }
+
+  /**
    * Fire a PermissionRequest event
    */
   async firePermissionRequestEvent(

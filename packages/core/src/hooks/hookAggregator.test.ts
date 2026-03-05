@@ -621,4 +621,177 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.decision).toBe('allow');
     });
   });
+
+  describe('SubagentStop - mergeWithOrLogic', () => {
+    it('should use mergeWithOrLogic for SubagentStop event', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'first reason', decision: 'allow' },
+        { reason: 'second reason', decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.SubagentStop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+      expect(result.finalOutput?.reason).toBe('first reason\nsecond reason');
+    });
+
+    it('should block when any SubagentStop hook blocks', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'output looks good', decision: 'allow' },
+        { reason: 'output too short', decision: 'block' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.SubagentStop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+    });
+
+    it('should concatenate additionalContext for SubagentStop', () => {
+      const outputs: HookOutput[] = [
+        { hookSpecificOutput: { additionalContext: 'context from hook 1' } },
+        { hookSpecificOutput: { additionalContext: 'context from hook 2' } },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.SubagentStop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+      expect(
+        result.finalOutput?.hookSpecificOutput?.['additionalContext'],
+      ).toBe('context from hook 1\ncontext from hook 2');
+    });
+
+    it('should handle continue=false for SubagentStop', () => {
+      const outputs: HookOutput[] = [
+        { continue: true },
+        { continue: false, stopReason: 'subagent should stop' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.SubagentStop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.stopReason).toBe('subagent should stop');
+    });
+  });
+
+  describe('createSpecificHookOutput - SubagentStop', () => {
+    it('should create StopHookOutput for SubagentStop', () => {
+      const output: HookOutput = {
+        decision: 'block',
+        reason: 'Output too short',
+      };
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.SubagentStop,
+          success: true,
+          output,
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+      expect(result.finalOutput).toBeDefined();
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('Output too short');
+    });
+
+    it('should create StopHookOutput with isBlockingDecision for SubagentStop', () => {
+      const output: HookOutput = {
+        decision: 'block',
+        reason: 'Continue working on the task',
+      };
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.SubagentStop,
+          success: true,
+          output,
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+
+      // Verify the output can be consumed by StopHookOutput accessors
+      const hookOutput = createHookOutput(
+        HookEventName.SubagentStop,
+        result.finalOutput ?? {},
+      );
+      expect(hookOutput.isBlockingDecision()).toBe(true);
+      expect(hookOutput.getEffectiveReason()).toBe(
+        'Continue working on the task',
+      );
+    });
+
+    it('should create StopHookOutput with allow decision for SubagentStop', () => {
+      const output: HookOutput = {
+        decision: 'allow',
+        reason: 'Output looks complete',
+      };
+      const results: HookExecutionResult[] = [
+        {
+          hookConfig: { type: HookType.Command, command: 'echo test' },
+          eventName: HookEventName.SubagentStop,
+          success: true,
+          output,
+          duration: 100,
+        },
+      ];
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SubagentStop,
+      );
+
+      const hookOutput = createHookOutput(
+        HookEventName.SubagentStop,
+        result.finalOutput ?? {},
+      );
+      expect(hookOutput.isBlockingDecision()).toBe(false);
+    });
+  });
 });

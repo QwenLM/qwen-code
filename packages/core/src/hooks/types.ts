@@ -130,6 +130,7 @@ export function createHookOutput(
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
     case HookEventName.Stop:
+    case HookEventName.SubagentStop:
       return new StopHookOutput(data);
     case HookEventName.PermissionRequest:
       return new PermissionRequestHookOutput(data);
@@ -663,12 +664,12 @@ export enum AgentType {
 
 /**
  * SubagentStart hook input
- * Fired when a subagent (Task tool call) is started
+ * Fired when a subagent (Agent tool call) is spawned
  */
 export interface SubagentStartInput extends HookInput {
-  permission_mode?: PermissionMode;
+  permission_mode: PermissionMode;
   agent_id: string;
-  agent_type: AgentType;
+  agent_type: AgentType | string;
 }
 
 /**
@@ -683,13 +684,13 @@ export interface SubagentStartOutput extends HookOutput {
 
 /**
  * SubagentStop hook input
- * Fired right before a subagent (Task tool call) concludes its response
+ * Fired when a subagent has finished responding
  */
 export interface SubagentStopInput extends HookInput {
-  permission_mode?: PermissionMode;
+  permission_mode: PermissionMode;
   stop_hook_active: boolean;
   agent_id: string;
-  agent_type: AgentType;
+  agent_type: AgentType | string;
   agent_transcript_path: string;
   last_assistant_message: string;
 }

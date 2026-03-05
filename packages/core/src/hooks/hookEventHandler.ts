@@ -29,6 +29,8 @@ import type {
   NotificationType,
   PermissionRequestInput,
   PermissionSuggestion,
+  SubagentStartInput,
+  SubagentStopInput,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -264,6 +266,56 @@ export class HookEventHandler {
     // Pass tool name as context for matcher filtering
     return this.executeHooks(HookEventName.PermissionRequest, input, {
       toolName,
+    });
+  }
+
+  /**
+   * Fire a SubagentStart event
+   * Called when a subagent is spawned via the Agent tool
+   */
+  async fireSubagentStartEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: SubagentStartInput = {
+      ...this.createBaseInput(HookEventName.SubagentStart),
+      permission_mode: permissionMode,
+      agent_id: agentId,
+      agent_type: agentType,
+    };
+
+    // Pass agentType as context for matcher filtering
+    return this.executeHooks(HookEventName.SubagentStart, input, {
+      agentType: String(agentType),
+    });
+  }
+
+  /**
+   * Fire a SubagentStop event
+   * Called when a subagent has finished responding
+   */
+  async fireSubagentStopEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    agentTranscriptPath: string,
+    lastAssistantMessage: string,
+    stopHookActive: boolean,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: SubagentStopInput = {
+      ...this.createBaseInput(HookEventName.SubagentStop),
+      permission_mode: permissionMode,
+      stop_hook_active: stopHookActive,
+      agent_id: agentId,
+      agent_type: agentType,
+      agent_transcript_path: agentTranscriptPath,
+      last_assistant_message: lastAssistantMessage,
+    };
+
+    // Pass agentType as context for matcher filtering
+    return this.executeHooks(HookEventName.SubagentStop, input, {
+      agentType: String(agentType),
     });
   }
 

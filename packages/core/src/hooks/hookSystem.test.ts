@@ -91,6 +91,8 @@ describe('HookSystem', () => {
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
+      fireSubagentStartEvent: vi.fn(),
+      fireSubagentStopEvent: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -1324,6 +1326,266 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('fireSubagentStartEvent', () => {
+    it('should fire SubagentStart event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStartEvent(
+        'agent-123',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookEventHandler.fireSubagentStartEvent).toHaveBeenCalledWith(
+        'agent-123',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass AgentType enum as agent type', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireSubagentStartEvent(
+        'agent-456',
+        AgentType.Bash,
+        PermissionMode.Yolo,
+      );
+
+      expect(mockHookEventHandler.fireSubagentStartEvent).toHaveBeenCalledWith(
+        'agent-456',
+        AgentType.Bash,
+        PermissionMode.Yolo,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStartEvent(
+        'agent-789',
+        'test-agent',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput with additional context', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          hookSpecificOutput: {
+            additionalContext: 'Extra context injected by SubagentStart hook',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStartEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStartEvent(
+        'agent-111',
+        'code-reviewer',
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe(
+        'Extra context injected by SubagentStart hook',
+      );
+    });
+  });
+
+  describe('fireSubagentStopEvent', () => {
+    it('should fire SubagentStop event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStopEvent(
+        'agent-123',
+        'code-reviewer',
+        '/path/to/transcript.jsonl',
+        'Final output from subagent',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(mockHookEventHandler.fireSubagentStopEvent).toHaveBeenCalledWith(
+        'agent-123',
+        'code-reviewer',
+        '/path/to/transcript.jsonl',
+        'Final output from subagent',
+        false,
+        PermissionMode.Default,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should pass all parameters to event handler', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      await hookSystem.fireSubagentStopEvent(
+        'agent-456',
+        'qwen-tester',
+        '/transcript/path.jsonl',
+        'last message from agent',
+        true,
+        PermissionMode.Plan,
+      );
+
+      expect(mockHookEventHandler.fireSubagentStopEvent).toHaveBeenCalledWith(
+        'agent-456',
+        'qwen-tester',
+        '/transcript/path.jsonl',
+        'last message from agent',
+        true,
+        PermissionMode.Plan,
+      );
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStopEvent(
+        'agent-789',
+        'test-agent',
+        '/path/transcript.jsonl',
+        'output',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return StopHookOutput with blocking decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Output too short, continue working',
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStopEvent(
+        'agent-999',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'short',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+      expect(result?.getEffectiveReason()).toBe(
+        'Output too short, continue working',
+      );
+    });
+
+    it('should return StopHookOutput with allow decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          reason: 'Output looks good',
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireSubagentStopEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireSubagentStopEvent(
+        'agent-222',
+        'code-reviewer',
+        '/path/transcript.jsonl',
+        'A comprehensive review of the code...',
+        false,
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(false);
     });
   });
 });

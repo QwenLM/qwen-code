@@ -35,6 +35,8 @@ import type {
   SubAgentApprovalRequestEvent,
 } from '../subagents/subagent-events.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { PermissionMode } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
 
 export interface TaskParams {
   description: string;
@@ -516,8 +518,83 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       const contextState = new ContextState();
       contextState.set('task_prompt', this.params.prompt);
 
+      // Fire SubagentStart hook before execution
+      const hookSystem = this.config.getHookSystem();
+      const agentId = `${subagentConfig.name}-${Date.now()}`;
+      const agentType = this.params.subagent_type;
+
+      if (hookSystem) {
+        try {
+          const startHookOutput = await hookSystem.fireSubagentStartEvent(
+            agentId,
+            agentType,
+            PermissionMode.Default,
+          );
+
+          // Inject additional context from hook output into subagent context
+          const additionalContext = startHookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            contextState.set('hook_context', additionalContext);
+          }
+        } catch (hookError) {
+          debugLogger.warn(
+            `[TaskTool] SubagentStart hook failed, continuing execution: ${hookError}`,
+          );
+        }
+      }
+
       // Execute the subagent (blocking)
       await subagentScope.runNonInteractive(contextState, signal);
+
+      // Fire SubagentStop hook after execution and handle block decisions
+      if (hookSystem && !signal?.aborted) {
+        const transcriptPath = this.config.getTranscriptPath();
+        let stopHookActive = false;
+
+        // Loop to handle "block" decisions (prevent subagent from stopping)
+        let continueExecution = true;
+        while (continueExecution) {
+          try {
+            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+              agentId,
+              agentType,
+              transcriptPath,
+              subagentScope.getFinalText(),
+              stopHookActive,
+              PermissionMode.Default,
+            );
+
+            const typedStopOutput = stopHookOutput as
+              | StopHookOutput
+              | undefined;
+
+            if (
+              typedStopOutput?.isBlockingDecision() ||
+              typedStopOutput?.shouldStopExecution()
+            ) {
+              // Feed the reason back to the subagent and continue execution
+              const continueReason = typedStopOutput.getEffectiveReason();
+              stopHookActive = true;
+
+              const continueContext = new ContextState();
+              continueContext.set('task_prompt', continueReason);
+              await subagentScope.runNonInteractive(continueContext, signal);
+
+              if (signal?.aborted) {
+                continueExecution = false;
+              }
+              // Loop continues to re-check SubagentStop hook
+            } else {
+              continueExecution = false;
+            }
+          } catch (hookError) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+            );
+            continueExecution = false;
+          }
+        }
+      }
 
       // Get the results
       const finalText = subagentScope.getFinalText();
