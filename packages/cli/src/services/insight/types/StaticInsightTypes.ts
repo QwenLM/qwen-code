@@ -31,6 +31,8 @@ export interface InsightData {
   primarySuccess?: Record<string, number>;
   outcomes?: Record<string, number>;
   topGoals?: Record<string, number>;
+  /** The language used for generating the report content */
+  language?: string;
 }
 
 export interface StreakData {

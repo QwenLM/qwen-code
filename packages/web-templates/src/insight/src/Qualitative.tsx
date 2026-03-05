@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { DashboardCards, HeatmapSection } from './Charts';
 import type { InsightData, QualitativeData } from './types';
 import { CopyButton, MarkdownText } from './Components';
+import { t, type SupportedLanguage } from './i18n';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -10,40 +11,46 @@ import React from 'react';
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
 
-export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
+export function AtAGlance({
+  qualitative,
+  language,
+}: {
+  qualitative: QualitativeData;
+  language: SupportedLanguage;
+}) {
   const { atAGlance } = qualitative;
   if (!atAGlance) return null;
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">At a Glance</div>
+      <div className="glance-title">{t('at_a_glance', language)}</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
+          <strong>{t('whats_working', language)}</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
-            Impressive Things You Did →
+            {t('see_more_wins', language)}
           </a>
         </div>
         <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
+          <strong>{t('whats_hindering', language)}</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
-            Where Things Go Wrong →
+            {t('see_more_friction', language)}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
+          <strong>{t('quick_wins', language)}</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
-            Features to Try →
+            {t('see_more_features', language)}
           </a>
         </div>
         <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
+          <strong>{t('ambitious_workflows', language)}</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
-            On the Horizon →
+            {t('see_more_horizon', language)}
           </a>
         </div>
       </div>
@@ -51,16 +58,16 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
   );
 }
 
-export function NavToc() {
+export function NavToc({ language }: { language: SupportedLanguage }) {
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-work">{t('nav_work', language)}</a>
+      <a href="#section-usage">{t('nav_usage', language)}</a>
+      <a href="#section-wins">{t('nav_wins', language)}</a>
+      <a href="#section-friction">{t('nav_friction', language)}</a>
+      <a href="#section-features">{t('nav_features', language)}</a>
+      <a href="#section-patterns">{t('nav_patterns', language)}</a>
+      <a href="#section-horizon">{t('nav_horizon', language)}</a>
     </nav>
   );
 }
@@ -69,10 +76,12 @@ export function ProjectAreas({
   qualitative,
   topGoals,
   topTools,
+  language,
 }: {
   qualitative: QualitativeData;
   topGoals?: Record<string, number>;
   topTools?: Record<string, number> | Array<[string, number]>;
+  language: SupportedLanguage;
 }) {
   const { projectAreas } = qualitative;
 
@@ -87,7 +96,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        What You Work On
+        {t('section_work', language)}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -97,7 +106,7 @@ export function ProjectAreas({
               <div className="area-header">
                 <span className="area-name">{area.name}</span>
                 <span className="area-count">
-                  ~{area.session_count} sessions
+                  ~{area.session_count} {t('sessions', language)}
                 </span>
               </div>
               <div className="area-desc">
@@ -119,15 +128,17 @@ export function ProjectAreas({
         {topGoals && Object.keys(topGoals).length > 0 && (
           <HorizontalBarChart
             data={topGoals}
-            title="What You Wanted"
+            title={t('what_you_wanted', language)}
             color="#0ea5e9"
+            language={language}
           />
         )}
         {topToolsObj && Object.keys(topToolsObj).length > 0 && (
           <HorizontalBarChart
             data={topToolsObj}
-            title="Top Tools Used"
+            title={t('top_tools_used', language)}
             color="#6366f1"
+            language={language}
           />
         )}
       </div>
@@ -138,9 +149,11 @@ export function ProjectAreas({
 export function InteractionStyle({
   qualitative,
   insights,
+  language,
 }: {
   qualitative: QualitativeData;
   insights: InsightData;
+  language: SupportedLanguage;
 }) {
   const { interactionStyle } = qualitative;
   if (!interactionStyle) return null;
@@ -151,7 +164,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        How You Use Qwen Code
+        {t('section_usage', language)}
       </h2>
       <div className="narrative">
         <p>
@@ -159,7 +172,7 @@ export function InteractionStyle({
         </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>Key pattern:</strong>{' '}
+            <strong>{t('key_pattern', language)}</strong>{' '}
             <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
@@ -175,10 +188,12 @@ export function ImpressiveWorkflows({
   qualitative,
   primarySuccess,
   outcomes,
+  language,
 }: {
   qualitative: QualitativeData;
   primarySuccess: Record<string, number>;
   outcomes: Record<string, number>;
+  language: SupportedLanguage;
 }) {
   const { impressiveWorkflows } = qualitative;
   if (!impressiveWorkflows) return null;
@@ -189,7 +204,7 @@ export function ImpressiveWorkflows({
         id="section-wins"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Impressive Things You Did
+        {t('section_wins', language)}
       </h2>
       {impressiveWorkflows.intro && (
         <p className="section-intro">
@@ -220,7 +235,7 @@ export function ImpressiveWorkflows({
         {primarySuccess && Object.keys(primarySuccess).length > 0 && (
           <HorizontalBarChart
             data={primarySuccess}
-            title="What Helped Most (Qwen's Capabilities)"
+            title={t('what_helped_most', language)}
             color="#3b82f6"
             allowedKeys={[
               'fast_accurate_search',
@@ -230,12 +245,13 @@ export function ImpressiveWorkflows({
               'multi_file_changes',
               'good_debugging',
             ]}
+            language={language}
           />
         )}
         {outcomes && Object.keys(outcomes).length > 0 && (
           <HorizontalBarChart
             data={outcomes}
-            title="Outcomes"
+            title={t('outcomes', language)}
             color="#8b5cf6"
             allowedKeys={[
               'fully_achieved',
@@ -244,6 +260,7 @@ export function ImpressiveWorkflows({
               'not_achieved',
               'unclear_from_transcript',
             ]}
+            language={language}
           />
         )}
       </div>
@@ -252,10 +269,38 @@ export function ImpressiveWorkflows({
 }
 
 // Format label for display (capitalize and replace underscores with spaces)
-function formatLabel(label: string) {
-  if (label === 'unclear_from_transcript') {
-    return 'Unclear';
+function formatLabel(label: string, language: SupportedLanguage): string {
+  // Map specific keys to translation keys
+  const labelKeyMap: Record<string, string> = {
+    unclear_from_transcript: 'unclear',
+    fully_achieved: 'fully_achieved',
+    mostly_achieved: 'mostly_achieved',
+    partially_achieved: 'partially_achieved',
+    not_achieved: 'not_achieved',
+    misunderstood_request: 'misunderstood_request',
+    wrong_approach: 'wrong_approach',
+    buggy_code: 'buggy_code',
+    user_rejected_action: 'user_rejected_action',
+    excessive_changes: 'excessive_changes',
+    happy: 'happy',
+    satisfied: 'satisfied',
+    likely_satisfied: 'likely_satisfied',
+    dissatisfied: 'dissatisfied',
+    frustrated: 'frustrated',
+    fast_accurate_search: 'fast_accurate_search',
+    correct_code_edits: 'correct_code_edits',
+    good_explanations: 'good_explanations',
+    proactive_help: 'proactive_help',
+    multi_file_changes: 'multi_file_changes',
+    good_debugging: 'good_debugging',
+  };
+
+  const translationKey = labelKeyMap[label];
+  if (translationKey) {
+    return t(translationKey, language);
   }
+
+  // Fallback: capitalize and replace underscores with spaces
   return label
     .split('_')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -268,11 +313,13 @@ function HorizontalBarChart({
   title,
   color = '#3b82f6',
   allowedKeys = null,
+  language,
 }: {
   data: Record<string, number>;
   title: string;
   color?: string;
   allowedKeys?: string[] | null;
+  language: SupportedLanguage;
 }) {
   if (!data || Object.keys(data).length === 0) return null;
 
@@ -341,7 +388,7 @@ function HorizontalBarChart({
                   textOverflow: 'ellipsis',
                 }}
               >
-                {formatLabel(label)}
+                {formatLabel(label, language)}
               </div>
               <div
                 className="bar-wrapper"
@@ -399,10 +446,12 @@ export function FrictionPoints({
   qualitative,
   satisfaction,
   friction,
+  language,
 }: {
   qualitative: QualitativeData;
   satisfaction?: Record<string, number>;
   friction?: Record<string, number>;
+  language: SupportedLanguage;
 }) {
   const { frictionPoints } = qualitative;
   if (!frictionPoints) return null;
@@ -413,7 +462,7 @@ export function FrictionPoints({
         id="section-friction"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Where Things Go Wrong
+        {t('section_friction', language)}
       </h2>
       {frictionPoints.intro && (
         <p className="section-intro">
@@ -454,7 +503,7 @@ export function FrictionPoints({
         {friction && Object.keys(friction).length > 0 && (
           <HorizontalBarChart
             data={friction}
-            title="Primary Friction Types"
+            title={t('primary_friction_types', language)}
             color="#ef4444"
             allowedKeys={[
               'misunderstood_request',
@@ -463,12 +512,13 @@ export function FrictionPoints({
               'user_rejected_action',
               'excessive_changes',
             ]}
+            language={language}
           />
         )}
         {satisfaction && Object.keys(satisfaction).length > 0 && (
           <HorizontalBarChart
             data={satisfaction}
-            title="Inferred Satisfaction (model-estimated)"
+            title={t('inferred_satisfaction', language)}
             color="#10b981"
             allowedKeys={[
               'happy',
@@ -477,6 +527,7 @@ export function FrictionPoints({
               'dissatisfied',
               'frustrated',
             ]}
+            language={language}
           />
         )}
       </div>
@@ -487,10 +538,12 @@ export function FrictionPoints({
 // Qwen.md Additions Section Component
 function QwenMdAdditionsSection({
   additions,
+  language,
 }: {
   additions: NonNullable<
     NonNullable<QualitativeData['improvements']>['Qwen_md_additions']
   >;
+  language: SupportedLanguage;
 }) {
   const [checkedState, setCheckedState] = useState(
     new Array(additions.length).fill(true),
@@ -522,9 +575,9 @@ function QwenMdAdditionsSection({
 
   return (
     <div className="qwen-md-section">
-      <h3>Suggested QWEN.md Additions</h3>
+      <h3>{t('suggested_qwen_md', language)}</h3>
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code to add it to your QWEN.md.
+        {t('qwen_md_hint', language)}
       </p>
 
       <div className="qwen-md-actions" style={{ marginBottom: '12px' }}>
@@ -533,7 +586,9 @@ function QwenMdAdditionsSection({
           onClick={handleCopyAll}
           disabled={checkedCount === 0}
         >
-          {copiedAll ? 'Copied All!' : `Copy All Checked (${checkedCount})`}
+          {copiedAll
+            ? t('copied_all', language)
+            : t('copy_all_checked', language, { count: checkedCount })}
         </button>
       </div>
 
@@ -551,7 +606,7 @@ function QwenMdAdditionsSection({
               <MarkdownText>{item.why}</MarkdownText>
             </div>
           </div>
-          <CopyButton text={item.addition} />
+          <CopyButton text={item.addition} language={language} />
         </div>
       ))}
     </div>
@@ -560,8 +615,10 @@ function QwenMdAdditionsSection({
 
 export function Improvements({
   qualitative,
+  language,
 }: {
   qualitative: QualitativeData;
+  language: SupportedLanguage;
 }) {
   const { improvements } = qualitative;
   if (!improvements) return null;
@@ -572,17 +629,20 @@ export function Improvements({
         id="section-features"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        Existing Qwen Code Features to Try
+        {t('section_features', language)}
       </h2>
 
       {/* QWEN.md Additions */}
       {Array.isArray(improvements.Qwen_md_additions) &&
         improvements.Qwen_md_additions.length > 0 && (
-          <QwenMdAdditionsSection additions={improvements.Qwen_md_additions} />
+          <QwenMdAdditionsSection
+            additions={improvements.Qwen_md_additions}
+            language={language}
+          />
         )}
 
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll set it up for you.
+        {t('features_hint', language)}
       </p>
 
       {/* Features to Try */}
@@ -595,14 +655,14 @@ export function Improvements({
                 <MarkdownText>{feat.one_liner}</MarkdownText>
               </div>
               <div className="feature-why">
-                <strong>Why for you:</strong>{' '}
+                <strong>{t('why', language)}</strong>{' '}
                 <MarkdownText>{feat.why_for_you}</MarkdownText>
               </div>
               <div className="feature-examples">
                 <div className="feature-example">
                   <div className="example-code-row">
                     <code className="example-code">{feat.example_code}</code>
-                    <CopyButton text={feat.example_code} />
+                    <CopyButton text={feat.example_code} language={language} />
                   </div>
                 </div>
               </div>
@@ -614,10 +674,10 @@ export function Improvements({
         id="section-patterns"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        New Ways to Use Qwen Code
+        {t('section_patterns', language)}
       </h2>
       <p className="text-xs text-slate-500 mb-3">
-        Just copy this into Qwen Code and it&apos;ll walk you through it.
+        {t('patterns_hint', language)}
       </p>
 
       <div className="patterns-section">
@@ -632,10 +692,12 @@ export function Improvements({
                 <MarkdownText>{pat.detail}</MarkdownText>
               </div>
               <div className="copyable-prompt-section">
-                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="prompt-label">
+                  {t('paste_into_qwen', language)}
+                </div>
                 <div className="copyable-prompt-row">
                   <code className="copyable-prompt">{pat.copyable_prompt}</code>
-                  <CopyButton text={pat.copyable_prompt} />
+                  <CopyButton text={pat.copyable_prompt} language={language} />
                 </div>
               </div>
             </div>
@@ -647,8 +709,10 @@ export function Improvements({
 
 export function FutureOpportunities({
   qualitative,
+  language,
 }: {
   qualitative: QualitativeData;
+  language: SupportedLanguage;
 }) {
   const { futureOpportunities } = qualitative;
   if (!futureOpportunities) return null;
@@ -659,7 +723,7 @@ export function FutureOpportunities({
         id="section-horizon"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        On the Horizon
+        {t('section_horizon', language)}
       </h2>
       {futureOpportunities.intro && (
         <p className="section-intro">
@@ -676,11 +740,13 @@ export function FutureOpportunities({
                 <MarkdownText>{opp.whats_possible}</MarkdownText>
               </div>
               <div className="horizon-tip">
-                <strong>Getting started:</strong>{' '}
+                <strong>{t('getting_started', language)}</strong>{' '}
                 <MarkdownText>{opp.how_to_try}</MarkdownText>
               </div>
               <div className="pattern-prompt">
-                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="prompt-label">
+                  {t('paste_into_qwen', language)}
+                </div>
                 <div
                   style={{
                     display: 'flex',
@@ -689,7 +755,7 @@ export function FutureOpportunities({
                   }}
                 >
                   <code style={{ flex: 1 }}>{opp.copyable_prompt}</code>
-                  <CopyButton text={opp.copyable_prompt} />
+                  <CopyButton text={opp.copyable_prompt} language={language} />
                 </div>
               </div>
             </div>
@@ -701,8 +767,10 @@ export function FutureOpportunities({
 
 export function MemorableMoment({
   qualitative,
+  language: _language,
 }: {
   qualitative: QualitativeData;
+  language: SupportedLanguage;
 }) {
   const { memorableMoment } = qualitative;
   if (!memorableMoment) return null;

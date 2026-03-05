@@ -15,6 +15,7 @@ import {
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
 import type { InsightData } from './types';
+import { t, getLanguageFromData, type SupportedLanguage } from './i18n';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -22,6 +23,7 @@ import React from 'react';
 function InsightApp({ data }: { data: InsightData }) {
   const [cardTheme, setCardTheme] = useState<Theme>('dark');
   const pendingExport = useRef(false);
+  const language: SupportedLanguage = getLanguageFromData(data.language);
 
   const performExport = async () => {
     const card = document.getElementById('share-card');
@@ -79,7 +81,7 @@ function InsightApp({ data }: { data: InsightData }) {
   if (!data) {
     return (
       <div className="text-center text-slate-600">
-        No insight data available
+        {t('No insight data available', language)}
       </div>
     );
   }
@@ -102,27 +104,33 @@ function InsightApp({ data }: { data: InsightData }) {
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">Qwen Code Insights</h1>
+            <h1 className="header-title">{t('title', language)}</h1>
             <p className="header-subtitle">
               {data.totalMessages
-                ? `${data.totalMessages.toLocaleString()} messages across ${data.totalSessions?.toLocaleString()} sessions`
-                : 'Your personalized coding journey and patterns'}
+                ? t('subtitle_messages', language, {
+                    messages: data.totalMessages.toLocaleString(),
+                    sessions: data.totalSessions?.toLocaleString() || '0',
+                  })
+                : t('subtitle_default', language)}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
 
-          <ExportCardButton onExport={handleExportWithTheme} />
+          <ExportCardButton
+            onExport={handleExportWithTheme}
+            language={language}
+          />
         </div>
       </header>
 
       {data.qualitative && (
         <>
-          <AtAGlance qualitative={data.qualitative} />
-          <NavToc />
+          <AtAGlance qualitative={data.qualitative} language={language} />
+          <NavToc language={language} />
         </>
       )}
 
-      <StatsRow data={data} />
+      <StatsRow data={data} language={language} />
 
       {data.qualitative && (
         <>
@@ -130,13 +138,18 @@ function InsightApp({ data }: { data: InsightData }) {
             qualitative={data.qualitative}
             topGoals={data.topGoals}
             topTools={data.topTools}
+            language={language}
           />
         </>
       )}
 
       {data.qualitative && (
         <>
-          <InteractionStyle qualitative={data.qualitative} insights={data} />
+          <InteractionStyle
+            qualitative={data.qualitative}
+            insights={data}
+            language={language}
+          />
         </>
       )}
 
@@ -146,25 +159,36 @@ function InsightApp({ data }: { data: InsightData }) {
             qualitative={data.qualitative}
             primarySuccess={data.primarySuccess!}
             outcomes={data.outcomes!}
+            language={language}
           />
           <FrictionPoints
             qualitative={data.qualitative}
             satisfaction={data.satisfaction}
             friction={data.friction}
+            language={language}
           />
-          <Improvements qualitative={data.qualitative} />
-          <FutureOpportunities qualitative={data.qualitative} />
-          <MemorableMoment qualitative={data.qualitative} />
+          <Improvements qualitative={data.qualitative} language={language} />
+          <FutureOpportunities
+            qualitative={data.qualitative}
+            language={language}
+          />
+          <MemorableMoment qualitative={data.qualitative} language={language} />
         </>
       )}
 
-      <ShareCard data={data} theme={cardTheme} />
+      <ShareCard data={data} theme={cardTheme} language={language} />
     </div>
   );
 }
 
 // Export Card Button with theme dropdown
-function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
+function ExportCardButton({
+  onExport,
+  language,
+}: {
+  onExport: (theme: Theme) => void;
+  language: SupportedLanguage;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -205,7 +229,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>Export Card</span>
+        <span>{t('export_card', language)}</span>
         <svg
           width="12"
           height="12"
@@ -247,7 +271,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>Light Theme</span>
+            <span>{t('light_theme', language)}</span>
           </button>
           <button
             className="export-dropdown-item"
@@ -265,7 +289,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
             >
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span>Dark Theme</span>
+            <span>{t('dark_theme', language)}</span>
           </button>
         </div>
       )}

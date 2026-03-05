@@ -1,6 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
+import { t, type SupportedLanguage } from './i18n';
 
 /**
  * Theme configuration for the share card
@@ -53,11 +54,13 @@ const themes: Record<Theme, ThemeConfig> = {
 export function ShareCard({
   data,
   theme = 'light',
+  language = 'en',
 }: {
   data: InsightData;
   theme?: Theme;
+  language?: SupportedLanguage;
 }) {
-  const t = themes[theme];
+  const themeConfig = themes[theme];
 
   const {
     totalMessages = 0,
@@ -90,15 +93,15 @@ export function ShareCard({
   const truncatedHeadline = data.qualitative?.memorableMoment?.headline ?? null;
 
   // Mini heatmap: last 52 weeks (simplified 7-row grid)
-  const miniHeatmap = buildMiniHeatmap(data.heatmap || {}, t);
+  const miniHeatmap = buildMiniHeatmap(data.heatmap || {}, themeConfig);
 
   return (
     <div
       id="share-card"
       style={{
         width: '1200px',
-        background: t.background,
-        color: t.textPrimary,
+        background: themeConfig.background,
+        color: themeConfig.textPrimary,
         fontFamily:
           'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
         display: 'flex',
@@ -129,12 +132,12 @@ export function ShareCard({
               lineHeight: 1.2,
             }}
           >
-            Qwen Code Insights
+            {t('title', language)}
           </div>
           <div
             style={{
               fontSize: '14px',
-              color: t.textMuted,
+              color: themeConfig.textMuted,
               marginTop: '6px',
             }}
           >
@@ -144,7 +147,7 @@ export function ShareCard({
         <div
           style={{
             fontSize: '11px',
-            color: t.textMuted,
+            color: themeConfig.textMuted,
             textTransform: 'uppercase',
             letterSpacing: '0.15em',
             paddingTop: '8px',
@@ -163,17 +166,37 @@ export function ShareCard({
           marginBottom: '32px',
         }}
       >
-        <StatBox value={String(totalMessages)} label="Messages" theme={t} />
-        <StatBox value={String(totalSessions)} label="Sessions" theme={t} />
+        <StatBox
+          value={String(totalMessages)}
+          label={t('messages', language)}
+          theme={themeConfig}
+        />
+        <StatBox
+          value={String(totalSessions)}
+          label={t('sessions', language)}
+          theme={themeConfig}
+        />
         <StatBox
           value={`+${totalLinesAdded}/-${totalLinesRemoved}`}
-          label="Lines Changed"
+          label={t('lines', language)}
           small
-          theme={t}
+          theme={themeConfig}
         />
-        <StatBox value={String(totalFiles)} label="Files" theme={t} />
-        <StatBox value={`${currentStreak}d`} label="Streak" theme={t} />
-        <StatBox value={`${longestStreak}d`} label="Best Streak" theme={t} />
+        <StatBox
+          value={String(totalFiles)}
+          label={t('files', language)}
+          theme={themeConfig}
+        />
+        <StatBox
+          value={`${currentStreak}d`}
+          label={t('days', language)}
+          theme={themeConfig}
+        />
+        <StatBox
+          value={`${longestStreak}d`}
+          label={t('days', language)}
+          theme={themeConfig}
+        />
       </div>
 
       {/* Body: Heatmap + Tools + Moment */}
@@ -188,7 +211,7 @@ export function ShareCard({
         {/* Left: Mini Heatmap */}
         <div
           style={{
-            background: t.cardBackground,
+            background: themeConfig.cardBackground,
             borderRadius: '12px',
             padding: '20px',
             display: 'flex',
@@ -199,7 +222,7 @@ export function ShareCard({
             style={{
               fontSize: '12px',
               fontWeight: 600,
-              color: t.textMuted,
+              color: themeConfig.textMuted,
               textTransform: 'uppercase',
               letterSpacing: '0.08em',
               marginBottom: '12px',
@@ -217,7 +240,7 @@ export function ShareCard({
           >
             <MiniHeatmapGrid cells={miniHeatmap} />
           </div>
-          <MiniHeatmapLegend theme={t} />
+          <MiniHeatmapLegend theme={themeConfig} />
         </div>
 
         {/* Right: Active Hours + Moment */}
@@ -231,7 +254,7 @@ export function ShareCard({
           {/* Active Hours */}
           <div
             style={{
-              background: t.cardBackground,
+              background: themeConfig.cardBackground,
               borderRadius: '12px',
               padding: '20px',
               display: 'flex',
@@ -242,7 +265,7 @@ export function ShareCard({
               style={{
                 fontSize: '12px',
                 fontWeight: 600,
-                color: t.textMuted,
+                color: themeConfig.textMuted,
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 marginBottom: '12px',
@@ -259,14 +282,14 @@ export function ShareCard({
                 gap: '10px',
               }}
             >
-              <ActiveHoursChart activeHours={activeHours} theme={t} />
+              <ActiveHoursChart activeHours={activeHours} theme={themeConfig} />
             </div>
           </div>
 
           {/* Key Pattern + Memorable Moment */}
           <div
             style={{
-              background: t.cardBackgroundSecondary,
+              background: themeConfig.cardBackgroundSecondary,
               borderRadius: '12px',
               padding: '16px 16px',
               position: 'relative',
@@ -301,7 +324,7 @@ export function ShareCard({
                 <div
                   style={{
                     fontSize: '13px',
-                    color: t.textSecondary,
+                    color: themeConfig.textSecondary,
                     lineHeight: 1.6,
                     marginBottom: truncatedHeadline ? '8px' : 0,
                   }}
@@ -313,7 +336,7 @@ export function ShareCard({
                 <div
                   style={{
                     fontSize: '12px',
-                    color: t.textMuted,
+                    color: themeConfig.textMuted,
                     lineHeight: 1.5,
                     fontStyle: 'italic',
                   }}
@@ -334,14 +357,14 @@ export function ShareCard({
           alignItems: 'center',
           marginTop: 'auto',
           paddingTop: '24px',
-          borderTop: `1px solid ${t.borderColor}`,
+          borderTop: `1px solid ${themeConfig.borderColor}`,
           flexShrink: 0,
         }}
       >
-        <div style={{ fontSize: '12px', color: t.textMuted }}>
+        <div style={{ fontSize: '12px', color: themeConfig.textMuted }}>
           Generated by Qwen Code · {new Date().toISOString().split('T')[0]}
         </div>
-        <div style={{ fontSize: '12px', color: t.textMuted }}>
+        <div style={{ fontSize: '12px', color: themeConfig.textMuted }}>
           github.com/QwenLM/qwen-code
         </div>
       </div>

@@ -94,18 +94,23 @@ export class StaticInsightGenerator {
   async generateStaticInsight(
     baseDir: string,
     onProgress?: InsightProgressCallback,
-  ): Promise<string> {
+    language: string = 'English',
+  ): Promise<{ outputPath: string; language: string }> {
     // Ensure output directory exists
     const outputDir = await this.ensureOutputDirectory();
     const facetsDir = path.join(outputDir, 'facets');
     await fs.mkdir(facetsDir, { recursive: true });
 
-    // Process data
+    // Process data with language context
     const insights: InsightData = await this.dataProcessor.generateInsights(
       baseDir,
       facetsDir,
       onProgress,
+      language,
     );
+
+    // Add language to the insight data
+    insights.language = language;
 
     // Render HTML
     const html = await this.templateRenderer.renderInsightHTML(insights);
@@ -119,6 +124,6 @@ export class StaticInsightGenerator {
     // Update latest alias (symlink preferred, copy as fallback)
     await this.updateLatestAlias(outputDir, outputPath);
 
-    return outputPath;
+    return { outputPath, language };
   }
 }

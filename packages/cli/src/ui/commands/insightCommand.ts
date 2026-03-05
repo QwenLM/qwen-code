@@ -14,6 +14,7 @@ import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import open from 'open';
+import { resolveOutputLanguage } from '../../utils/languageUtils.js';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -33,6 +34,12 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
+
+      // Get the user's output language setting
+      const outputLanguageSetting =
+        context.services?.settings?.merged?.general?.outputLanguage ?? 'auto';
+      const language = resolveOutputLanguage(outputLanguageSetting);
+
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
@@ -65,9 +72,22 @@ export const insightCommand: SlashCommand = {
       updateProgress(t('Starting insight generation...'), 0);
 
       // Generate the static insight HTML file
-      const outputPath = await insightGenerator.generateStaticInsight(
-        projectsDir,
-        updateProgress,
+      const { outputPath, language: reportLanguage } =
+        await insightGenerator.generateStaticInsight(
+          projectsDir,
+          updateProgress,
+          language,
+        );
+
+      // Show language notification
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: reportLanguage,
+          }),
+        },
+        Date.now(),
       );
 
       // Clear pending item

@@ -283,6 +283,7 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language: string = 'English',
   ): Promise<InsightData> {
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
@@ -298,7 +299,11 @@ export class DataProcessor {
     );
 
     if (onProgress) onProgress('Generating personalized insights...', 80);
-    const qualitative = await this.generateQualitativeInsights(metrics, facets);
+    const qualitative = await this.generateQualitativeInsights(
+      metrics,
+      facets,
+      language,
+    );
 
     // Aggregate satisfaction, friction, success and outcome data from facets
     const {
@@ -376,12 +381,13 @@ export class DataProcessor {
   private async generateQualitativeInsights(
     metrics: Omit<InsightData, 'facets' | 'qualitative'>,
     facets: SessionFacets[],
+    language: string = 'English',
   ): Promise<QualitativeInsights | undefined> {
     if (facets.length === 0) {
       return undefined;
     }
 
-    logger.info('Generating qualitative insights...');
+    logger.info(`Generating qualitative insights in ${language}...`);
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
@@ -389,7 +395,9 @@ export class DataProcessor {
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      // Add language instruction to the prompt
+      const languageInstruction = `\n\nIMPORTANT: Generate all content in **${language}** language. All text, headings, descriptions, and narrative content must be in ${language}.`;
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),
