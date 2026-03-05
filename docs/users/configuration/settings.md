@@ -2,7 +2,7 @@
 
 > [!tip]
 >
-> **Authentication / API keys:** Authentication (Qwen OAuth vs OpenAI-compatible API) and auth-related environment variables (like `OPENAI_API_KEY`) are documented in **[Authentication](../configuration/auth)**.
+> **Authentication / API keys:** Authentication (Qwen OAuth, Alibaba Cloud Coding Plan, or API Key) and auth-related environment variables (like `OPENAI_API_KEY`) are documented in **[Authentication](../configuration/auth)**.
 
 > [!note]
 >
