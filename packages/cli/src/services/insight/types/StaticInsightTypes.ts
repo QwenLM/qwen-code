@@ -31,6 +31,9 @@ export interface InsightData {
   primarySuccess?: Record<string, number>;
   outcomes?: Record<string, number>;
   topGoals?: Record<string, number>;
+  // Localization
+  language?: string;
+  translations?: Record<string, string>;
 }
 
 export interface StreakData {

@@ -40,7 +40,10 @@ const logger = createDebugLogger('DataProcessor');
 const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
-  constructor(private config: Config) {}
+  constructor(
+    private config: Config,
+    private outputLanguage: string = 'English',
+  ) {}
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -193,7 +196,11 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
+    const languageInstruction =
+      this.outputLanguage !== 'English'
+        ? `\n\nIMPORTANT: You MUST respond entirely in ${this.outputLanguage}. All text fields in your JSON response must be in ${this.outputLanguage}.`
+        : '';
+    const prompt = `${getInsightPrompt('analysis')}${languageInstruction}\n\nSESSION:\n${sessionText}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -389,7 +396,11 @@ export class DataProcessor {
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const languageInstruction =
+        this.outputLanguage !== 'English'
+          ? `\n\nIMPORTANT: You MUST respond entirely in ${this.outputLanguage}. All text fields in your JSON response must be in ${this.outputLanguage}.`
+          : '';
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

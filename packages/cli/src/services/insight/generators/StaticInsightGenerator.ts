@@ -15,16 +15,105 @@ import type {
 } from '../types/StaticInsightTypes.js';
 
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import { t } from '../../../i18n/index.js';
 
 const logger = createDebugLogger('StaticInsightGenerator');
+
+// List of translation keys used in the insight report
+const INSIGHT_TRANSLATION_KEYS = [
+  'Qwen Code Insights',
+  'Your personalized coding journey and patterns',
+  'Export Card',
+  'Light Theme',
+  'Dark Theme',
+  'At a Glance',
+  "What's working:",
+  "What's hindering you:",
+  'Quick wins to try:',
+  'Ambitious workflows:',
+  'Impressive Things You Did →',
+  'Where Things Go Wrong →',
+  'Features to Try →',
+  'On the Horizon →',
+  'What You Work On',
+  'How You Use Qwen Code',
+  'Impressive Things You Did',
+  'Where Things Go Wrong',
+  'Existing Qwen Code Features to Try',
+  'New Ways to Use Qwen Code',
+  'On the Horizon',
+  'Messages',
+  'Lines',
+  'Files',
+  'Days',
+  'Msgs/Day',
+  '~{{count}} sessions',
+  'What You Wanted',
+  'Top Tools Used',
+  'Key pattern:',
+  "What Helped Most (Qwen's Capabilities)",
+  'Outcomes',
+  'Fully Achieved',
+  'Mostly Achieved',
+  'Partially Achieved',
+  'Not Achieved',
+  'Unclear',
+  'Primary Friction Types',
+  'Inferred Satisfaction (model-estimated)',
+  'Happy',
+  'Satisfied',
+  'Likely Satisfied',
+  'Dissatisfied',
+  'Frustrated',
+  'Misunderstood Request',
+  'Wrong Approach',
+  'Buggy Code',
+  'User Rejected Action',
+  'Excessive Changes',
+  'Fast Accurate Search',
+  'Correct Code Edits',
+  'Good Explanations',
+  'Proactive Help',
+  'Multi File Changes',
+  'Good Debugging',
+  'Suggested QWEN.md Additions',
+  'Just copy this into Qwen Code to add it to your QWEN.md.',
+  'Copy All Checked ({{count}})',
+  'Copied All!',
+  'Why for you:',
+  'Paste into Qwen Code:',
+  'Getting started:',
+  'No insight data available',
+  'messages across {{sessions}} sessions',
+];
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private outputLanguage: string;
+  private uiLanguage: string;
 
-  constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
+  constructor(
+    config: Config,
+    outputLanguage: string = 'English',
+    uiLanguage: string = 'en',
+  ) {
+    this.dataProcessor = new DataProcessor(config, outputLanguage);
     this.templateRenderer = new TemplateRenderer();
+    // outputLanguage is passed to DataProcessor for LLM prompts
+    this.outputLanguage = outputLanguage;
+    this.uiLanguage = uiLanguage;
+  }
+
+  // Get translations for the insight report
+  private getTranslations(): Record<string, string> {
+    const translations: Record<string, string> = {};
+    for (const key of INSIGHT_TRANSLATION_KEYS) {
+      translations[key] = t(key);
+    }
+    // Include output language info for reference
+    translations['__outputLanguage'] = this.outputLanguage;
+    return translations;
   }
 
   // Ensure the output directory exists
@@ -107,8 +196,15 @@ export class StaticInsightGenerator {
       onProgress,
     );
 
-    // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Add language info and translations to insights
+    insights.language = this.uiLanguage;
+    insights.translations = this.getTranslations();
+
+    // Render HTML with language info
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      this.uiLanguage,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

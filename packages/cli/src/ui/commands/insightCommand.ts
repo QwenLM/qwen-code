@@ -8,12 +8,13 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import open from 'open';
+import { resolveOutputLanguage } from '../../utils/languageUtils.js';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -33,8 +34,28 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
+
+      // Get language settings
+      const uiLanguage = getCurrentLanguage();
+      const outputLanguageSetting =
+        context.services.settings?.merged?.general?.outputLanguage;
+      const outputLanguage = resolveOutputLanguage(outputLanguageSetting);
+
+      // Show language indicator message
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: outputLanguage,
+          }),
+        },
+        Date.now(),
+      );
+
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        outputLanguage,
+        uiLanguage,
       );
 
       const updateProgress = (

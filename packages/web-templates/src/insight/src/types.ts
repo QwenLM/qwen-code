@@ -9,6 +9,7 @@ declare global {
     Chart: any;
     html2canvas: any;
     INSIGHT_DATA: InsightData;
+    INSIGHT_LANGUAGE: string;
   }
 }
 

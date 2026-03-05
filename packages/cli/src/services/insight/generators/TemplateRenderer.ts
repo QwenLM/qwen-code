@@ -9,9 +9,12 @@ import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {
   // Render the complete HTML file
-  async renderInsightHTML(insights: InsightData): Promise<string> {
+  async renderInsightHTML(
+    insights: InsightData,
+    language: string = 'en',
+  ): Promise<string> {
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${language}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -38,6 +41,7 @@ export class TemplateRenderer {
     <!-- Application Data -->
     <script>
       window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_LANGUAGE = "${language}";
     </script>
 
     <!-- App Script -->
