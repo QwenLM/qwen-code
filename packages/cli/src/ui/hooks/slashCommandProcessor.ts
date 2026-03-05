@@ -7,6 +7,7 @@
 import { useCallback, useMemo, useEffect, useRef, useState } from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { ArenaDialogType } from './useArenaCommand.js';
 import {
   type Logger,
   type Config,
@@ -65,6 +66,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
 
 interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
+  openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openSettingsDialog: () => void;
@@ -452,6 +454,18 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
                 case 'dialog':
                   switch (result.dialog) {
+                    case 'arena_start':
+                      actions.openArenaDialog?.('start');
+                      return { type: 'handled' };
+                    case 'arena_select':
+                      actions.openArenaDialog?.('select');
+                      return { type: 'handled' };
+                    case 'arena_stop':
+                      actions.openArenaDialog?.('stop');
+                      return { type: 'handled' };
+                    case 'arena_status':
+                      actions.openArenaDialog?.('status');
+                      return { type: 'handled' };
                     case 'auth':
                       actions.openAuthDialog();
                       return { type: 'handled' };

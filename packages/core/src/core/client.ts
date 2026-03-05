@@ -484,6 +484,19 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
+    // Check for arena control signal before starting a new turn
+    const arenaAgentClient = this.config.getArenaAgentClient();
+    if (arenaAgentClient) {
+      const controlSignal = await arenaAgentClient.checkControlSignal();
+      if (controlSignal) {
+        debugLogger.info(
+          `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
+        );
+        await arenaAgentClient.reportCancelled();
+        return new Turn(this.getChat(), prompt_id);
+      }
+    }
+
     const turn = new Turn(this.getChat(), prompt_id);
 
     if (!this.config.getSkipLoopDetection()) {
@@ -528,16 +541,37 @@ export class GeminiClient {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
           yield { type: GeminiEventType.LoopDetected };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
           return turn;
         }
       }
+      // Update arena status on Finished events — stats are derived
+      // automatically from uiTelemetryService by the reporter.
+      if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+        await arenaAgentClient.updateStatus();
+      }
+
       yield event;
       if (event.type === GeminiEventType.Error) {
+        if (arenaAgentClient) {
+          const errorMsg =
+            event.value instanceof Error
+              ? event.value.message
+              : 'Unknown error';
+          await arenaAgentClient.reportError(errorMsg);
+        }
         return turn;
       }
     }
+
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
+        // Report completed before returning — agent has no more work to do
+        if (arenaAgentClient) {
+          await arenaAgentClient.reportCompleted();
+        }
         return turn;
       }
 
@@ -566,7 +600,15 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
+      } else if (arenaAgentClient) {
+        // No continuation needed — agent completed its task
+        await arenaAgentClient.reportCompleted();
       }
+    }
+
+    // Report cancelled to arena when user cancelled mid-stream
+    if (signal?.aborted && arenaAgentClient) {
+      await arenaAgentClient.reportCancelled();
     }
     return turn;
   }

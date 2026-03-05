@@ -209,6 +209,22 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  /**
+   * Copies discovered (non-core) tools from another registry into this one.
+   * Used to share MCP/command-discovered tools with per-agent registries
+   * that were built with skipDiscovery.
+   */
+  copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    for (const tool of source.getAllTools()) {
+      if (
+        (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
+        !this.tools.has(tool.name)
+      ) {
+        this.tools.set(tool.name, tool);
+      }
+    }
+  }
+
   private removeDiscoveredTools(): void {
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
@@ -489,10 +505,20 @@ export class ToolRegistry {
   }
 
   /**
-   * Stops all MCP clients and cleans up resources.
+   * Stops all MCP clients, disposes tools, and cleans up resources.
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    for (const tool of this.tools.values()) {
+      if ('dispose' in tool && typeof tool.dispose === 'function') {
+        try {
+          tool.dispose();
+        } catch (error) {
+          debugLogger.error(`Error disposing tool ${tool.name}:`, error);
+        }
+      }
+    }
+
     try {
       await this.mcpClientManager.stop();
     } catch (error) {
