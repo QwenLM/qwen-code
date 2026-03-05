@@ -12,6 +12,7 @@ import {
   firePostToolUseFailureHook,
   fireNotificationHook,
   appendAdditionalContext,
+  firePermissionRequestHook,
 } from './toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { NotificationType } from '../hooks/types.js';
@@ -694,6 +695,286 @@ describe('toolHookTriggers', () => {
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
       );
+    });
+  });
+
+  describe('firePermissionRequestHook', () => {
+    it('should return hasDecision: false when no messageBus is provided', async () => {
+      const result = await firePermissionRequestHook(
+        undefined,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({ hasDecision: false });
+    });
+
+    it('should return hasDecision: false when hook execution fails', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({ hasDecision: false });
+    });
+
+    it('should return hasDecision: false when hook output is empty', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({ hasDecision: false });
+    });
+
+    it('should return hasDecision: true with allow decision when tool is allowed', async () => {
+      const mockOutput = {
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'allow',
+            updatedInput: { command: 'ls -la' },
+            message: 'Tool allowed by policy',
+          },
+        },
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'run_shell_command',
+        { command: 'ls' },
+        'auto',
+      );
+
+      expect(result).toEqual({
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: { command: 'ls -la' },
+        denyMessage: undefined,
+        shouldInterrupt: undefined,
+      });
+    });
+
+    it('should return hasDecision: true with deny decision when tool is denied', async () => {
+      const mockOutput = {
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'deny',
+            message: 'Tool denied by policy',
+            interrupt: true,
+          },
+        },
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'run_shell_command',
+        { command: 'rm -rf /' },
+        'auto',
+      );
+
+      expect(result).toEqual({
+        hasDecision: true,
+        shouldAllow: false,
+        denyMessage: 'Tool denied by policy',
+        shouldInterrupt: true,
+      });
+    });
+
+    it('should send correct parameters to MessageBus', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await firePermissionRequestHook(
+        mockMessageBus,
+        'run_shell_command',
+        { command: 'ls' },
+        'auto',
+        [
+          {
+            type: 'always_allow',
+            tool: 'run_shell_command',
+          },
+        ],
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'PermissionRequest',
+          input: {
+            tool_name: 'run_shell_command',
+            tool_input: { command: 'ls' },
+            permission_mode: 'auto',
+            permission_suggestions: [
+              {
+                type: 'always_allow',
+                tool: 'run_shell_command',
+              },
+            ],
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should handle missing updated_input in allow decision', async () => {
+      const mockOutput = {
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'allow',
+            message: 'Tool allowed',
+          },
+        },
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({
+        hasDecision: true,
+        shouldAllow: true,
+        denyMessage: undefined,
+        shouldInterrupt: undefined,
+      });
+    });
+
+    it('should handle missing message in decision', async () => {
+      const mockOutput = {
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'deny',
+          },
+        },
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({
+        hasDecision: true,
+        shouldAllow: false,
+        denyMessage: undefined,
+        shouldInterrupt: undefined,
+      });
+    });
+
+    it('should handle hook execution errors gracefully', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('Network error'),
+      );
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'auto',
+      );
+
+      expect(result).toEqual({ hasDecision: false });
+    });
+
+    it('should handle permission_suggestions being undefined', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {},
+      });
+
+      await firePermissionRequestHook(
+        mockMessageBus,
+        'run_shell_command',
+        { command: 'ls' },
+        'auto',
+        undefined,
+      );
+
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'PermissionRequest',
+          input: {
+            tool_name: 'run_shell_command',
+            tool_input: { command: 'ls' },
+            permission_mode: 'auto',
+            permission_suggestions: undefined,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should handle different permission modes', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: { hookSpecificOutput: { decision: { behavior: 'allow' } } },
+      });
+
+      const result1 = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'plan',
+      );
+
+      expect(result1.hasDecision).toBe(true);
+
+      const result2 = await firePermissionRequestHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'yolo',
+      );
+
+      expect(result2.hasDecision).toBe(true);
     });
   });
 });

@@ -22,14 +22,28 @@ import {
   type HookDecision,
   PreCompactTrigger,
   NotificationType,
+  type PermissionSuggestion,
 } from './types.js';
 import type { Config } from '../config/config.js';
+import type { AggregatedHookResult } from './hookAggregator.js';
+import type { HookOutput } from './types.js';
 
 vi.mock('./hookRegistry.js');
 vi.mock('./hookRunner.js');
 vi.mock('./hookAggregator.js');
 vi.mock('./hookPlanner.js');
 vi.mock('./hookEventHandler.js');
+
+const createMockAggregatedResult = (
+  success: boolean = true,
+  finalOutput?: HookOutput,
+): AggregatedHookResult => ({
+  success,
+  allOutputs: [],
+  errors: [],
+  totalDuration: 100,
+  finalOutput,
+});
 
 describe('HookSystem', () => {
   let mockConfig: Config;
@@ -76,6 +90,7 @@ describe('HookSystem', () => {
       firePostToolUseFailureEvent: vi.fn(),
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
+      firePermissionRequestEvent: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -1178,6 +1193,137 @@ describe('HookSystem', () => {
         NotificationType.ElicitationDialog,
         'Dialog',
       );
+    });
+  });
+
+  describe('firePermissionRequestEvent', () => {
+    it('should delegate to hookEventHandler.firePermissionRequestEvent', async () => {
+      const mockFinalOutput = {
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'allow' as const,
+          },
+        },
+      };
+      const mockAggregated = createMockAggregatedResult(true, mockFinalOutput);
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'ls -la' },
+        PermissionMode.Default,
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'ls -la' },
+        PermissionMode.Default,
+        undefined,
+      );
+      expect(result).toBeDefined();
+      // Type assertion needed because getPermissionDecision is specific to PermissionRequestHookOutput
+      const permissionResult = result as unknown as {
+        getPermissionDecision: () => { behavior: string } | undefined;
+      };
+      expect(permissionResult.getPermissionDecision()?.behavior).toBe('allow');
+    });
+
+    it('should include permission_suggestions when provided', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+      const suggestions: PermissionSuggestion[] = [
+        { type: 'toolAlwaysAllow', tool: 'Bash' },
+      ];
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'npm test' },
+        PermissionMode.Default,
+        suggestions,
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'npm test' },
+        PermissionMode.Default,
+        suggestions,
+      );
+    });
+
+    it('should return undefined when hook has no finalOutput', async () => {
+      const mockAggregated = createMockAggregatedResult(false);
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionRequestEvent(
+        'ReadFile',
+        { file_path: '/test.txt' },
+        PermissionMode.Plan,
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should handle all permission modes correctly', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      // Test Default mode
+      await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Default,
+      );
+
+      // Test Plan mode
+      await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Plan,
+      );
+
+      // Test Yolo mode
+      await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Yolo,
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).toHaveBeenCalledTimes(3);
+    });
+
+    it('should pass through hook errors', async () => {
+      const mockAggregated = createMockAggregatedResult(false);
+      mockAggregated.errors = [new Error('PermissionRequest hook error')];
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionRequestEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Default,
+      );
+
+      expect(result).toBeUndefined();
     });
   });
 });

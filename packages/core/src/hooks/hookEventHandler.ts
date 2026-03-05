@@ -27,6 +27,8 @@ import type {
   PreCompactTrigger,
   NotificationInput,
   NotificationType,
+  PermissionRequestInput,
+  PermissionSuggestion,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -238,6 +240,30 @@ export class HookEventHandler {
     // Pass notification_type as context for matcher filtering
     return this.executeHooks(HookEventName.Notification, input, {
       notificationType,
+    });
+  }
+
+  /**
+   * Fire a PermissionRequest event
+   * Called when a permission dialog is about to be shown to the user
+   */
+  async firePermissionRequestEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    permissionMode: PermissionMode,
+    permissionSuggestions?: PermissionSuggestion[],
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionRequestInput = {
+      ...this.createBaseInput(HookEventName.PermissionRequest),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      permission_suggestions: permissionSuggestions,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PermissionRequest, input, {
+      toolName,
     });
   }
 

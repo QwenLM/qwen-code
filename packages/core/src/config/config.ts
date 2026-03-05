@@ -91,7 +91,11 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
-import { PermissionMode, type NotificationType } from '../hooks/types.js';
+import {
+  PermissionMode,
+  type NotificationType,
+  type PermissionSuggestion,
+} from '../hooks/types.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -793,6 +797,17 @@ export class Config {
                   (input['notification_type'] as NotificationType) ||
                     'permission_prompt',
                   (input['title'] as string) || undefined,
+                );
+                break;
+              case 'PermissionRequest':
+                result = await hookSystem.firePermissionRequestEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  (input['permission_suggestions'] as
+                    | PermissionSuggestion[]
+                    | undefined) || undefined,
                 );
                 break;
               default:

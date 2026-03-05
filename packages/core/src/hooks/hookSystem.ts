@@ -21,6 +21,7 @@ import type {
   PermissionMode,
   PreCompactTrigger,
   NotificationType,
+  PermissionSuggestion,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -232,6 +233,26 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('Notification', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PermissionRequest event
+   */
+  async firePermissionRequestEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    permissionMode: PermissionMode,
+    permissionSuggestions?: PermissionSuggestion[],
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePermissionRequestEvent(
+      toolName,
+      toolInput,
+      permissionMode,
+      permissionSuggestions,
+    );
+    return result.finalOutput
+      ? createHookOutput('PermissionRequest', result.finalOutput)
       : undefined;
   }
 }

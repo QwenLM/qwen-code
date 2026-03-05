@@ -16,6 +16,8 @@ import {
   type PostToolUseHookOutput,
   type PostToolUseFailureHookOutput,
   type NotificationType,
+  type PermissionRequestHookOutput,
+  type PermissionSuggestion,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
@@ -358,6 +360,92 @@ export async function fireNotificationHook(
       `Notification hook error: ${error instanceof Error ? error.message : String(error)}`,
     );
     return {};
+  }
+}
+
+/**
+ * Result of PermissionRequest hook execution
+ */
+export interface PermissionRequestHookResult {
+  /** Whether the hook made a permission decision */
+  hasDecision: boolean;
+  /** If true, the tool execution should proceed */
+  shouldAllow?: boolean;
+  /** Updated tool input to use if allowed */
+  updatedInput?: Record<string, unknown>;
+  /** Deny message to pass back to the AI if denied */
+  denyMessage?: string;
+  /** Whether to interrupt the AI after denial */
+  shouldInterrupt?: boolean;
+}
+
+/**
+ * Fire PermissionRequest hook via MessageBus
+ * Called when a permission dialog is about to be shown to the user.
+ * Returns a decision that can short-circuit the normal permission flow.
+ */
+export async function firePermissionRequestHook(
+  messageBus: MessageBus | undefined,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  permissionMode: string,
+  permissionSuggestions?: PermissionSuggestion[],
+): Promise<PermissionRequestHookResult> {
+  if (!messageBus) {
+    return { hasDecision: false };
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'PermissionRequest',
+        input: {
+          tool_name: toolName,
+          tool_input: toolInput,
+          permission_mode: permissionMode,
+          permission_suggestions: permissionSuggestions,
+        },
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+
+    if (!response.success || !response.output) {
+      return { hasDecision: false };
+    }
+
+    const permissionOutput = createHookOutput(
+      'PermissionRequest',
+      response.output,
+    ) as PermissionRequestHookOutput;
+
+    const decision = permissionOutput.getPermissionDecision();
+    if (!decision) {
+      return { hasDecision: false };
+    }
+
+    if (decision.behavior === 'allow') {
+      return {
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: decision.updatedInput,
+      };
+    }
+
+    return {
+      hasDecision: true,
+      shouldAllow: false,
+      denyMessage: decision.message,
+      shouldInterrupt: decision.interrupt,
+    };
+  } catch (error) {
+    debugLogger.warn(
+      `PermissionRequest hook error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { hasDecision: false };
   }
 }
 

@@ -24,7 +24,7 @@ import type {
   HookAggregator,
   AggregatedHookResult,
 } from './index.js';
-import type { HookConfig, HookOutput } from './types.js';
+import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 
 describe('HookEventHandler', () => {
   let mockConfig: Config;
@@ -1565,6 +1565,297 @@ describe('HookEventHandler', () => {
         notification_type: string;
       };
       expect(input.notification_type).toBe('elicitation_dialog');
+    });
+  });
+
+  describe('firePermissionRequestEvent', () => {
+    it('should execute hooks for PermissionRequest event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'ls -la' },
+        PermissionMode.Default,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PermissionRequest,
+        { toolName: 'Bash' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include all parameters in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePermissionRequestEvent(
+        'Write',
+        { file_path: '/test.txt', content: 'hello' },
+        PermissionMode.Yolo,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_mode: PermissionMode;
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        permission_suggestions: PermissionSuggestion[];
+      };
+
+      expect(input.permission_mode).toBe(PermissionMode.Yolo);
+      expect(input.tool_name).toBe('Write');
+      expect(input.tool_input).toEqual({
+        file_path: '/test.txt',
+        content: 'hello',
+      });
+      expect(input.permission_suggestions).toBeUndefined();
+    });
+
+    it('should include permission_suggestions when provided', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const suggestions: PermissionSuggestion[] = [
+        { type: 'toolAlwaysAllow', tool: 'Bash' },
+      ];
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'npm test' },
+        PermissionMode.Default,
+        suggestions,
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        permission_suggestions: PermissionSuggestion[];
+      };
+
+      expect(input.permission_suggestions).toEqual(suggestions);
+    });
+
+    it('should pass tool name as context for matcher filtering', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      await hookEventHandler.firePermissionRequestEvent(
+        'ReadFile',
+        { file_path: '/test.txt' },
+        PermissionMode.Plan,
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PermissionRequest,
+        { toolName: 'ReadFile' },
+      );
+    });
+
+    it('should handle decision block in final output', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        decision: 'block',
+        reason: 'Dangerous command detected',
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision: {
+            behavior: 'deny',
+            message: 'Destructive system command blocked by security hook',
+            interrupt: true,
+          },
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'rm -rf /' },
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('Dangerous command detected');
+    });
+
+    it('should handle allow decision with updatedInput', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      const mockAggregated = createMockAggregatedResult(true, {
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision: {
+            behavior: 'allow',
+            updatedInput: { command: 'npm install --dry-run' },
+          },
+        },
+      });
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'npm install' },
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.finalOutput?.hookSpecificOutput).toEqual({
+        hookEventName: 'PermissionRequest',
+        decision: {
+          behavior: 'allow',
+          updatedInput: { command: 'npm install --dry-run' },
+        },
+      });
+    });
+
+    it('should execute hooks sequentially when plan.sequential is true', async () => {
+      const mockPlan = createMockExecutionPlan(
+        [
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ],
+        true,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksSequential).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'ls' },
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksSequential).toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors gracefully', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('PermissionRequest planner error');
+      });
+
+      const result = await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Default,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('PermissionRequest planner error');
+    });
+
+    it('should handle all permission modes correctly', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Test Default mode
+      await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Default,
+      );
+      let mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      let input = mockCalls[mockCalls.length - 1][2] as {
+        permission_mode: PermissionMode;
+      };
+      expect(input.permission_mode).toBe(PermissionMode.Default);
+
+      // Test Plan mode
+      await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Plan,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        permission_mode: PermissionMode;
+      };
+      expect(input.permission_mode).toBe(PermissionMode.Plan);
+
+      // Test Yolo mode
+      await hookEventHandler.firePermissionRequestEvent(
+        'Bash',
+        { command: 'test' },
+        PermissionMode.Yolo,
+      );
+      mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock.calls;
+      input = mockCalls[mockCalls.length - 1][2] as {
+        permission_mode: PermissionMode;
+      };
+      expect(input.permission_mode).toBe(PermissionMode.Yolo);
     });
   });
 });

@@ -25,6 +25,7 @@ import {
   firePostToolUseHook,
   firePostToolUseFailureHook,
   fireNotificationHook,
+  firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
 import { NotificationType } from '../hooks/types.js';
@@ -958,6 +959,68 @@ export class CoreToolScheduler {
               });
             }
 
+            // Fire PermissionRequest hook before showing the permission dialog.
+            const messageBus = this.config.getMessageBus() as
+              | MessageBus
+              | undefined;
+            const hooksEnabled = this.config.getEnableHooks();
+
+            if (hooksEnabled && messageBus) {
+              const permissionMode = String(this.config.getApprovalMode());
+              const hookResult = await firePermissionRequestHook(
+                messageBus,
+                reqInfo.name,
+                (reqInfo.args as Record<string, unknown>) || {},
+                permissionMode,
+              );
+
+              if (hookResult.hasDecision) {
+                if (hookResult.shouldAllow) {
+                  // Hook granted permission - apply updated input if provided and proceed
+                  if (
+                    hookResult.updatedInput &&
+                    typeof reqInfo.args === 'object'
+                  ) {
+                    reqInfo.args = hookResult.updatedInput;
+                  }
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setStatusInternal(reqInfo.callId, 'scheduled');
+                } else {
+                  // Hook denied permission - cancel with optional message
+                  const cancelPayload = hookResult.denyMessage
+                    ? { cancelMessage: hookResult.denyMessage }
+                    : undefined;
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                    cancelPayload,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        hookResult.denyMessage ||
+                          `Permission denied by hook for "${reqInfo.name}"`,
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                    ),
+                  );
+                }
+                continue;
+              }
+            }
+
             const originalOnConfirm = confirmationDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -980,10 +1043,6 @@ export class CoreToolScheduler {
             );
 
             // Fire permission_prompt notification hook
-            const messageBus = this.config.getMessageBus() as
-              | MessageBus
-              | undefined;
-            const hooksEnabled = this.config.getEnableHooks();
             if (hooksEnabled && messageBus) {
               fireNotificationHook(
                 messageBus,
