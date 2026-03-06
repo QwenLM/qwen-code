@@ -26,6 +26,7 @@ describe('getUserStartupWarnings', () => {
     workspaceRoot: string;
     useRipgrep: boolean;
     useBuiltinRipgrep: boolean;
+    suppressHomeDirectoryWarning: boolean;
   };
 
   beforeEach(async () => {
@@ -57,18 +58,6 @@ describe('getUserStartupWarnings', () => {
       );
     });
 
-    it('should not return a warning when running in a project directory', async () => {
-      const projectDir = path.join(testRootDir, 'project');
-      await fs.mkdir(projectDir);
-      const warnings = await getUserStartupWarnings({
-        ...startupOptions,
-        workspaceRoot: projectDir,
-      });
-      expect(warnings).not.toContainEqual(
-        expect.stringContaining('home directory'),
-      );
-    });
-
     it('should suppress the home directory warning when configured', async () => {
       const warnings = await getUserStartupWarnings({
         ...startupOptions,
@@ -76,6 +65,18 @@ describe('getUserStartupWarnings', () => {
         suppressHomeDirectoryWarning: true,
       });
 
+      expect(warnings).not.toContainEqual(
+        expect.stringContaining('home directory'),
+      );
+    });
+
+    it('should not return a warning when running in a project directory', async () => {
+      const projectDir = path.join(testRootDir, 'project');
+      await fs.mkdir(projectDir);
+      const warnings = await getUserStartupWarnings({
+        ...startupOptions,
+        workspaceRoot: projectDir,
+      });
       expect(warnings).not.toContainEqual(
         expect.stringContaining('home directory'),
       );
