@@ -73,6 +73,9 @@ describe('SkillManager', () => {
       if (yamlString.includes('name: regular-skill')) {
         return { name: 'regular-skill', description: 'A regular skill' };
       }
+      if (yamlString.includes('name: agents-skill')) {
+        return { name: 'agents-skill', description: 'Agents skill' };
+      }
       if (!yamlString.includes('name:')) {
         return { description: 'A test skill' }; // Missing name case
       }
@@ -413,6 +416,9 @@ You are a helpful assistant.
             isSymbolicLink: () => false,
           },
         ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        )
         .mockResolvedValueOnce([
           {
             name: 'skill3',
@@ -501,6 +507,32 @@ Skill 3 content`);
       const skills = await manager.listSkills({ force: true });
 
       expect(skills).toHaveLength(0);
+    });
+
+    it('should also discover project skills from .agents/skills', async () => {
+      vi.mocked(fs.readdir).mockReset();
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([
+          {
+            name: 'agents-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: agents-skill
+description: Agents skill
+---
+Agents skill content`);
+
+      const skills = await manager.listSkills({ level: 'project', force: true });
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('agents-skill');
+      expect(skills[0]?.level).toBe('project');
     });
   });
 
