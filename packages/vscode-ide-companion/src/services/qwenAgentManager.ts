@@ -566,12 +566,13 @@ export class QwenAgentManager {
       if (!session) {
         return [];
       }
-      return session.messages.map(
-        (msg: { type: string; content: string; timestamp: string }) => ({
-          role: msg.type === 'user' ? 'user' : 'assistant',
-          content: msg.content,
-          timestamp: new Date(msg.timestamp).getTime(),
-        }),
+      return this.expandStoredMessages(
+        session.messages as Array<{
+          type: string;
+          content: string;
+          timestamp: string;
+          thoughts?: unknown[];
+        }>,
       );
     } catch (error) {
       console.error(
@@ -580,6 +581,36 @@ export class QwenAgentManager {
       );
       return [];
     }
+  }
+
+  private expandStoredMessages(
+    messages: Array<{
+      type: string;
+      content: string;
+      timestamp: string;
+      thoughts?: unknown[];
+    }>,
+  ): ChatMessage[] {
+    return messages.flatMap<ChatMessage>((msg) => {
+      const timestamp = new Date(msg.timestamp).getTime();
+      const role = msg.type === 'user' ? 'user' : 'assistant';
+
+      if (role === 'user') {
+        return [{ role, content: msg.content, timestamp }];
+      }
+
+      const thoughtMessages = Array.isArray(msg.thoughts)
+        ? msg.thoughts
+            .filter((thought): thought is string => typeof thought === 'string' && thought.length > 0)
+            .map((thought) => ({ role: 'thinking' as const, content: thought, timestamp }))
+        : [];
+
+      if (msg.content) {
+        return [...thoughtMessages, { role: 'assistant' as const, content: msg.content, timestamp }];
+      }
+
+      return thoughtMessages;
+    });
   }
 
   // Read CLI JSONL session file and convert to ChatMessage[] for UI
@@ -1099,11 +1130,14 @@ export class QwenAgentManager {
       }
 
       // Convert message format
-      const messages: ChatMessage[] = session.messages.map((msg) => ({
-        role: msg.type === 'user' ? 'user' : 'assistant',
-        content: msg.content,
-        timestamp: new Date(msg.timestamp).getTime(),
-      }));
+      const messages = this.expandStoredMessages(
+        session.messages as Array<{
+          type: string;
+          content: string;
+          timestamp: string;
+          thoughts?: unknown[];
+        }>,
+      );
 
       return messages;
     } catch (error) {
