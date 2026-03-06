@@ -54,6 +54,10 @@ describe('getUserStartupWarnings', () => {
       expect(warnings).toContainEqual(
         expect.stringContaining('home directory'),
       );
+      expect(warnings).toContainEqual(expect.stringContaining('cd <project-dir>'));
+      expect(warnings).toContainEqual(
+        expect.stringContaining('.qwen/settings.json'),
+      );
     });
 
     it('should not return a warning when running in a project directory', async () => {
