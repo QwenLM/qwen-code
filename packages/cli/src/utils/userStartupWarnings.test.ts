@@ -82,6 +82,7 @@ describe('getUserStartupWarnings', () => {
       expect(warnings).toContainEqual(
         expect.stringContaining('folder structure will be used'),
       );
+      expect(warnings).toContainEqual(expect.stringContaining(rootDir));
     });
 
     it('should not return a warning when running in a non-root directory', async () => {
