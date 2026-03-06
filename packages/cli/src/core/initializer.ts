@@ -11,7 +11,7 @@ import {
   logIdeConnection,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import { type LoadedSettings, SettingScope } from '../config/settings.js';
+import { type LoadedSettings } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n, type SupportedLanguage } from '../i18n/index.js';
