@@ -26,6 +26,7 @@ describe('getUserStartupWarnings', () => {
     workspaceRoot: string;
     useRipgrep: boolean;
     useBuiltinRipgrep: boolean;
+    suppressRootDirectoryWarning: boolean;
   };
 
   beforeEach(async () => {
@@ -37,6 +38,7 @@ describe('getUserStartupWarnings', () => {
       workspaceRoot: testRootDir,
       useRipgrep: true,
       useBuiltinRipgrep: true,
+      suppressRootDirectoryWarning: false,
     };
   });
 
@@ -81,6 +83,19 @@ describe('getUserStartupWarnings', () => {
       );
       expect(warnings).toContainEqual(
         expect.stringContaining('folder structure will be used'),
+      );
+    });
+
+    it('should suppress the root directory warning when configured', async () => {
+      const rootDir = path.parse(testRootDir).root;
+      const warnings = await getUserStartupWarnings({
+        ...startupOptions,
+        workspaceRoot: rootDir,
+        suppressRootDirectoryWarning: true,
+      });
+
+      expect(warnings).not.toContainEqual(
+        expect.stringContaining('root directory'),
       );
     });
 
