@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FileSystemService } from '@qwen-code/qwen-code-core';
+import type { FileSystemService , FileReadResult } from '@qwen-code/qwen-code-core';
 import type * as acp from '../acp.js';
 import { ACP_ERROR_CODES } from '../errorCodes.js';
 
@@ -54,10 +54,16 @@ export class AcpFileSystemService implements FileSystemService {
     return response.content;
   }
 
+  async readTextFileWithInfo(filePath: string): Promise<FileReadResult> {
+    // ACP protocol does not expose encoding metadata; delegate to the local
+    // fallback which performs a single-pass read with encoding detection.
+    return this.fallback.readTextFileWithInfo(filePath);
+  }
+
   async writeTextFile(
     filePath: string,
     content: string,
-    options?: { bom?: boolean },
+    options?: { bom?: boolean; encoding?: string },
   ): Promise<void> {
     if (!this.capabilities.writeTextFile) {
       return this.fallback.writeTextFile(filePath, content, options);

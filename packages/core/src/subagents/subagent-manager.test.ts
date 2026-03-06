@@ -193,6 +193,21 @@ You are a helpful assistant.
       expect(config.filePath).toBe(validConfig.filePath);
     });
 
+    it('should parse valid markdown content with CRLF line endings', () => {
+      const markdownWithCRLF = `---\r\nname: test-agent\r\ndescription: A test subagent\r\n---\r\n\r\nYou are a helpful assistant.\r\n`;
+      const config = manager.parseSubagentContent(
+        markdownWithCRLF,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.name).toBe('test-agent');
+      expect(config.description).toBe('A test subagent');
+      // The system prompt logic applies .trim(), so the trailing \r is removed regardless,
+      // but the central test is that frontmatterRegex didn't throw an error.
+      expect(config.systemPrompt).toBe('You are a helpful assistant.');
+    });
+
     it('should parse content with tools', () => {
       const markdownWithTools = `---
 name: test-agent

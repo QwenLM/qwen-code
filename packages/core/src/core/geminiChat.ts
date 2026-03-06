@@ -64,6 +64,16 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
   initialDelayMs: 500,
 };
 
+// Some providers occasionally return transient stream anomalies: either an
+// empty stream (usage metadata only, no candidates), a stream that finishes
+// normally but contains no usable text, or a stream cut off without a finish
+// reason. All are retried with an independent budget (similar to rate-limit
+// retries) so they do not consume each other's retry budgets.
+const INVALID_STREAM_RETRY_CONFIG = {
+  maxRetries: 2,
+  initialDelayMs: 2000,
+};
+
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.
  * Fixed 60s delay matches the DashScope per-minute quota window.
@@ -285,6 +295,7 @@ export class GeminiChat {
       try {
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
+        let invalidStreamRetryCount = 0;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -298,7 +309,11 @@ export class GeminiChat {
           attempt++
         ) {
           try {
-            if (attempt > 0 || rateLimitRetryCount > 0) {
+            if (
+              attempt > 0 ||
+              rateLimitRetryCount > 0 ||
+              invalidStreamRetryCount > 0
+            ) {
               yield { type: StreamEventType.RETRY };
             }
 
@@ -348,10 +363,46 @@ export class GeminiChat {
               continue;
             }
 
-            const isContentError = error instanceof InvalidStreamError;
+            // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
+            // independent retry budget, similar to rate-limit handling.
+            // Does NOT consume the content retry budget.
+            const isTransientStreamError = error instanceof InvalidStreamError;
+            if (
+              isTransientStreamError &&
+              invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
+            ) {
+              invalidStreamRetryCount++;
+              const delayMs =
+                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
+                invalidStreamRetryCount;
+              debugLogger.warn(
+                `Invalid stream [${(error as InvalidStreamError).type}] ` +
+                  `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              logContentRetry(
+                self.config,
+                new ContentRetryEvent(
+                  invalidStreamRetryCount - 1,
+                  (error as InvalidStreamError).type,
+                  delayMs,
+                  model,
+                ),
+              );
+              yield { type: StreamEventType.RETRY };
+              // Don't count transient retries against content retry limit.
+              attempt--;
+              await new Promise((res) => setTimeout(res, delayMs));
+              continue;
+            }
+            // Transient budget exhausted — stop immediately.
+            if (isTransientStreamError) {
+              break;
+            }
 
+            // Other content validation errors (e.g. NO_FINISH_REASON).
+            const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
-              // Check if we have more attempts left.
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
                 logContentRetry(
                   self.config,
@@ -378,11 +429,12 @@ export class GeminiChat {
 
         if (lastError) {
           if (lastError instanceof InvalidStreamError) {
+            const totalAttempts = invalidStreamRetryCount + 1;
             logContentRetryFailure(
               self.config,
               new ContentRetryFailureEvent(
-                INVALID_CONTENT_RETRY_OPTIONS.maxAttempts,
-                (lastError as InvalidStreamError).type,
+                totalAttempts,
+                lastError.type,
                 model,
               ),
             );
@@ -563,8 +615,11 @@ export class GeminiChat {
     let hasFinishReason = false;
 
     for await (const chunk of streamResponse) {
-      hasFinishReason =
+      // Use ||= to avoid later usage-only chunks (no candidates) overwriting
+      // a finishReason that was already seen in an earlier chunk.
+      hasFinishReason ||=
         chunk?.candidates?.some((candidate) => candidate.finishReason) ?? false;
+
       if (isValidResponse(chunk)) {
         const content = chunk.candidates?.[0]?.content;
         if (content?.parts) {

@@ -11,7 +11,7 @@ import {
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
   FileEncoding,
-  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -700,8 +700,8 @@ export async function loadCliConfig(
   if (settings.context?.fileName) {
     setServerGeminiMdFilename(settings.context.fileName);
   } else {
-    // Reset to default if not provided in settings.
-    setServerGeminiMdFilename(getCurrentGeminiMdFilename());
+    // Reset to default context filenames if not provided in settings.
+    setServerGeminiMdFilename(getAllGeminiMdFilenames());
   }
 
   // Automatically load output-language.md if it exists

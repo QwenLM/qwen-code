@@ -10,7 +10,9 @@
  */
 
 import { TerminalCapture, THEMES } from './terminal-capture.js';
-import { dirname, resolve, isAbsolute } from 'node:path';
+import { dirname, resolve, isAbsolute, join } from 'node:path';
+import { execSync } from 'node:child_process';
+import { writeFileSync, unlinkSync, rmSync, existsSync } from 'node:fs';
 
 // ─────────────────────────────────────────────
 // Schema — Minimal
@@ -29,6 +31,20 @@ export interface FlowStep {
   capture?: string;
   /** Explicit screenshot: full scrollback buffer long image (standalone capture when no type) */
   captureFull?: string;
+  /**
+   * Streaming capture: capture multiple screenshots during execution at intervals.
+   * Useful for demonstrating real-time output like progress bars.
+   */
+  streaming?: {
+    /** Delay before starting captures in milliseconds (skip initial waiting phase) */
+    delayMs?: number;
+    /** Interval between captures in milliseconds */
+    intervalMs: number;
+    /** Maximum number of captures */
+    count: number;
+    /** Generate animated GIF from captured frames (default: true) */
+    gif?: boolean;
+  };
 }
 
 export interface ScenarioConfig {
@@ -105,6 +121,11 @@ export async function runScenario(
     ? resolve(basedir, config.outputDir, scenarioDir)
     : resolve(basedir, 'screenshots', scenarioDir);
 
+  // Clean previous screenshots
+  if (existsSync(outputDir)) {
+    rmSync(outputDir, { recursive: true });
+  }
+
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`▶ ${config.name}`);
   console.log('═'.repeat(60));
@@ -171,13 +192,89 @@ export async function runScenario(
         if (autoEnter) {
           // ── Auto-press Enter → Wait for stabilization → 02 screenshot ──
           await terminal.type('\n');
-          console.log(`         ⏳ waiting for output to settle...`);
-          await terminal.idle(2000, 60000);
-          console.log(`         ✅ settled`);
 
-          const resultName = step.capture ?? `${pad(seq)}-02.png`;
-          console.log(`  ${label} 📸 result: ${resultName}`);
-          screenshots.push(await terminal.capture(resultName));
+          // Streaming capture: capture multiple screenshots during execution
+          if (step.streaming) {
+            const {
+              delayMs = 0,
+              intervalMs,
+              count,
+              gif = true,
+            } = step.streaming;
+            console.log(
+              `         🎬 streaming capture: ${count} shots @ ${intervalMs}ms intervals${delayMs ? ` (delay ${delayMs}ms)` : ''}`,
+            );
+
+            // Wait before starting captures (skip initial waiting phase)
+            if (delayMs > 0) {
+              await sleep(delayMs);
+            }
+
+            // Capture frames at intervals (stop early if output stabilizes)
+            const streamingShots: string[] = [];
+            let prevOutputLen = terminal.getRawOutput().length;
+            let stableCount = 0;
+            let shotNum = 0;
+            for (let j = 0; j < count; j++) {
+              await sleep(intervalMs);
+              const curOutputLen = terminal.getRawOutput().length;
+              if (curOutputLen === prevOutputLen) {
+                stableCount++;
+                if (stableCount >= 3) {
+                  console.log(
+                    `         ⏹️  streaming stopped early: output stable for ${stableCount} intervals`,
+                  );
+                  break;
+                }
+                continue; // skip duplicate frame
+              }
+              stableCount = 0;
+              prevOutputLen = curOutputLen;
+              shotNum++;
+              const shotName = `${pad(seq)}-streaming-${pad(shotNum)}.png`;
+              console.log(
+                `         📸 streaming [${shotNum}/${count}]: ${shotName}`,
+              );
+              const shot = await terminal.capture(shotName);
+              streamingShots.push(shot);
+              screenshots.push(shot);
+            }
+
+            // Wait for completion after streaming captures
+            console.log(`         ⏳ waiting for output to settle...`);
+            await terminal.idle(2000, 60000);
+            console.log(`         ✅ settled`);
+
+            const resultName = step.capture ?? `${pad(seq)}-02.png`;
+            console.log(`  ${label} 📸 result: ${resultName}`);
+            const resultShot = await terminal.capture(resultName);
+            screenshots.push(resultShot);
+
+            // Generate animated GIF: input -> streaming frames -> result
+            if (gif && streamingShots.length > 0) {
+              // Include input and result in the GIF for complete story
+              const inputShot = screenshots.find((s) =>
+                s.endsWith(`${pad(seq)}-01.png`),
+              );
+              const gifFrames = [
+                ...(inputShot ? [inputShot] : []),
+                ...streamingShots,
+                resultShot,
+              ];
+              const gifPath = generateGif(gifFrames, outputDir);
+              if (gifPath) {
+                console.log(`         🎞️  GIF: ${gifPath}`);
+              }
+            }
+          } else {
+            console.log(`         ⏳ waiting for output to settle...`);
+            await terminal.idle(2000, 60000);
+            console.log(`         ✅ settled`);
+
+            const resultName = step.capture ?? `${pad(seq)}-02.png`;
+            console.log(`  ${label} 📸 result: ${resultName}`);
+            screenshots.push(await terminal.capture(resultName));
+          }
 
           // full-flow: Only the last type step auto-captures full-length image
           const isLastType = !config.flow.slice(i + 1).some((s) => s.type);
@@ -301,4 +398,44 @@ const KEY_MAP: Record<string, string> = {
 /** Parse key name to PTY-recognizable character sequence */
 function resolveKey(key: string): string {
   return KEY_MAP[key] ?? key;
+}
+
+/** Generate animated GIF from PNG frames using ffmpeg (concat demuxer). */
+function generateGif(frames: string[], outputDir: string): string | null {
+  if (frames.length === 0) return null;
+
+  const FRAME_DURATION = 0.3; // 300ms per frame
+  const EDGE_DURATION = 1.0; // 600ms for first/last frame
+
+  const gifPath = join(outputDir, 'streaming.gif');
+  const listFile = join(outputDir, 'frames.txt');
+
+  try {
+    const lines: string[] = [];
+    for (let i = 0; i < frames.length; i++) {
+      const isEdge = i === 0 || i === frames.length - 1;
+      lines.push(
+        `file '${resolve(frames[i])}'`,
+        `duration ${isEdge ? EDGE_DURATION : FRAME_DURATION}`,
+      );
+    }
+    // Concat demuxer requires last frame repeated without duration
+    lines.push(`file '${resolve(frames[frames.length - 1])}'`);
+    writeFileSync(listFile, lines.join('\n'));
+
+    execSync(
+      `ffmpeg -y -f concat -safe 0 -i "${listFile}" -vf "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -loop 0 "${gifPath}"`,
+      { stdio: 'pipe' },
+    );
+    return gifPath;
+  } catch {
+    console.log('         ⚠️  GIF generation requires ffmpeg');
+    return null;
+  } finally {
+    try {
+      unlinkSync(listFile);
+    } catch {
+      // ignore
+    }
+  }
 }

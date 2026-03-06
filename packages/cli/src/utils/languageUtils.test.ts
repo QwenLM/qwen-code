@@ -218,6 +218,43 @@ describe('languageUtils', () => {
         '<!-- qwen-code:llm-output-language: TestLanguage -->',
       );
     });
+
+    it('should use mandatory language rule instead of preference', () => {
+      writeOutputLanguageFile('Chinese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Chinese**',
+      );
+      expect(writtenContent).toContain(
+        'This is a mandatory requirement, not a preference.',
+      );
+      expect(writtenContent).not.toContain('Prefer responding');
+    });
+
+    it('should include exception clause for explicit user language requests', () => {
+      writeOutputLanguageFile('English');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain('## Exception');
+      expect(writtenContent).toContain(
+        "switch to the user's requested language for the remainder of the conversation",
+      );
+    });
+
+    it('should use the correct language name throughout the template', () => {
+      writeOutputLanguageFile('Japanese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Japanese**',
+      );
+      expect(writtenContent).toContain('## Rule');
+      expect(writtenContent).toContain('## Exception');
+    });
   });
 
   describe('updateOutputLanguageFile', () => {

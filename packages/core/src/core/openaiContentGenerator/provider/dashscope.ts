@@ -35,14 +35,13 @@ export class DashScopeOpenAICompatibleProvider
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const authType = contentGeneratorConfig.authType;
-    const baseUrl = contentGeneratorConfig.baseUrl;
-    return (
-      authType === AuthType.QWEN_OAUTH ||
-      baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1' ||
-      baseUrl === 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' ||
-      !baseUrl
-    );
+    const { authType, baseUrl } = contentGeneratorConfig;
+
+    if (authType === AuthType.QWEN_OAUTH) return true;
+    if (!baseUrl) return true;
+
+    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
   }
 
   buildHeaders(): Record<string, string | undefined> {

@@ -548,6 +548,43 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const setGeminiMdFilenameSpy = vi.spyOn(
+      ServerConfig,
+      'setGeminiMdFilename',
+    );
+
+    await loadCliConfig(settings, argv);
+
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+      ServerConfig.DEFAULT_CONTEXT_FILENAME,
+      ServerConfig.AGENT_CONTEXT_FILENAME,
+    ]);
+  });
+
+  it('should use configured context file name when settings.context.fileName is set', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        fileName: 'CUSTOM_AGENTS.md',
+      },
+    };
+    const setGeminiMdFilenameSpy = vi.spyOn(
+      ServerConfig,
+      'setGeminiMdFilename',
+    );
+
+    await loadCliConfig(settings, argv);
+
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+  });
+
   it('should propagate stream-json formats to config', async () => {
     process.argv = [
       'node',
@@ -565,6 +602,35 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should reset context filenames to defaults when context.fileName is not configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
+    const getAllSpy = vi
+      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .mockReturnValue(defaultContextFiles);
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+
+    await loadCliConfig(settings, argv);
+
+    expect(getAllSpy).toHaveBeenCalledTimes(1);
+    expect(setFilenameSpy).toHaveBeenCalledWith(defaultContextFiles);
+  });
+
+  it('should use context.fileName from settings when provided', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+
+    await loadCliConfig(settings, argv);
+
+    expect(setFilenameSpy).toHaveBeenCalledWith('CUSTOM_CONTEXT.md');
+    expect(getAllSpy).not.toHaveBeenCalled();
   });
 
   it('should initialize native LSP service when enabled', async () => {

@@ -21,7 +21,7 @@ import {
   type ConversationRecord,
   type DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
-import type { ApprovalModeValue } from './schema.js';
+import type { ApprovalModeValue, ConfigOption } from './schema.js';
 import * as acp from './acp.js';
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
@@ -295,6 +295,104 @@ class GeminiAgent {
     return await session.setModel(params);
   }
 
+  async setConfigOption(
+    params: acp.SetConfigOptionRequest,
+  ): Promise<acp.SetConfigOptionResponse> {
+    const { sessionId, configId, value } = params;
+
+    // Get the session's config
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${sessionId}`,
+      );
+    }
+
+    switch (configId) {
+      case 'mode': {
+        await this.setMode({
+          sessionId,
+          modeId: value as ApprovalModeValue,
+        });
+        break;
+      }
+      case 'model': {
+        await this.setModel({
+          sessionId,
+          modelId: value as string,
+        });
+        break;
+      }
+      default:
+        throw acp.RequestError.invalidParams(
+          `Unsupported configId: ${configId}`,
+        );
+    }
+
+    // Return all config options with current values
+    return {
+      configOptions: this.buildConfigOptions(session.getConfig()),
+    };
+  }
+
+  private buildConfigOptions(config: Config): ConfigOption[] {
+    const currentApprovalMode = config.getApprovalMode();
+    const allConfiguredModels = config.getAllConfiguredModels();
+    const rawCurrentModelId = (config.getModel() || '').trim();
+    const currentAuthType = config.getAuthType?.();
+
+    // Check if current model is a runtime model
+    const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+    const currentModelId = activeRuntimeSnapshot
+      ? formatAcpModelId(
+          activeRuntimeSnapshot.id,
+          activeRuntimeSnapshot.authType,
+        )
+      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
+
+    // Build mode config option
+    const modeOptions = APPROVAL_MODES.map((mode) => ({
+      value: mode,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    const modeConfigOption: ConfigOption = {
+      id: 'mode',
+      name: 'Mode',
+      description: 'Session permission mode',
+      category: 'mode',
+      type: 'select',
+      currentValue: currentApprovalMode,
+      options: modeOptions,
+    };
+
+    // Build model config option
+    const modelOptions = allConfiguredModels.map((model) => {
+      const effectiveModelId =
+        model.isRuntimeModel && model.runtimeSnapshotId
+          ? model.runtimeSnapshotId
+          : model.id;
+      return {
+        value: formatAcpModelId(effectiveModelId, model.authType),
+        name: model.label,
+        description: model.description ?? '',
+      };
+    });
+
+    const modelConfigOption: ConfigOption = {
+      id: 'model',
+      name: 'Model',
+      description: 'AI model to use',
+      category: 'model',
+      type: 'select',
+      currentValue: currentModelId,
+      options: modelOptions,
+    };
+
+    return [modeConfigOption, modelConfigOption];
+  }
+
   private async ensureAuthenticated(config: Config): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
@@ -476,55 +574,6 @@ class GeminiAgent {
       currentModeId: currentApprovalMode as ApprovalModeValue,
       availableModes,
     };
-  }
-
-  private buildConfigOptions(config: Config): acp.ConfigOption[] {
-    const currentApprovalMode = config.getApprovalMode();
-    const currentModelId = this.formatCurrentModelId(
-      config.getModel() || this.config.getModel() || '',
-      config.getAuthType(),
-    );
-
-    const modeOptions = APPROVAL_MODES.map((mode) => ({
-      value: mode,
-      name: APPROVAL_MODE_INFO[mode].name,
-      description: APPROVAL_MODE_INFO[mode].description,
-    }));
-
-    const allConfiguredModels = config.getAllConfiguredModels();
-    const modelOptions = allConfiguredModels.map((model) => {
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-
-      return {
-        value: formatAcpModelId(effectiveModelId, model.authType),
-        name: model.label,
-        description: model.description ?? '',
-      };
-    });
-
-    return [
-      {
-        id: 'mode',
-        name: 'Mode',
-        description: 'Session permission mode',
-        category: 'mode',
-        type: 'select',
-        currentValue: currentApprovalMode,
-        options: modeOptions,
-      },
-      {
-        id: 'model',
-        name: 'Model',
-        description: 'AI model to use',
-        category: 'model',
-        type: 'select',
-        currentValue: currentModelId,
-        options: modelOptions,
-      },
-    ];
   }
 
   private formatCurrentModelId(
