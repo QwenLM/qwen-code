@@ -396,7 +396,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       loadingPhraseSet: {
-        type: 'string',
+        type: 'enum',
         label: 'Loading Phrase Set',
         category: 'UI',
         requiresRestart: false,
@@ -404,6 +404,10 @@ const SETTINGS_SCHEMA = {
         description:
           'Choose which loading phrases to show while the model is thinking.',
         showInDialog: false,
+        options: [
+          { value: 'default', label: 'Default' },
+          { value: 'minimal', label: 'Minimal' },
+        ],
       },
       enableWelcomeBack: {
         type: 'boolean',
