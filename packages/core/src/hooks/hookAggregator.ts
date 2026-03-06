@@ -88,6 +88,7 @@ export class HookAggregator {
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
+      case HookEventName.UserPromptSubmit:
         merged = this.mergeWithOrLogic(outputs);
         break;
       case HookEventName.PermissionRequest:

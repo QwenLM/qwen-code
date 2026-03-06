@@ -834,23 +834,25 @@ qwen mcp add --transport sse sse-server https://api.example.com/sse/
 qwen mcp add --transport sse secure-sse https://api.example.com/sse/ --header "Authorization: Bearer abc123"
 ```
 
-### Listing Servers (`qwen mcp list`)
+### Managing Servers (`qwen mcp`)
 
-To view all MCP servers currently configured, use the `list` command. It displays each server's name, configuration details, and connection status.
+To view and manage all MCP servers currently configured, use the `manage` command or simply `qwen mcp`. This opens an interactive TUI dialog where you can:
+
+- View all MCP servers with their connection status
+- Enable/disable servers
+- Reconnect to disconnected servers
+- View tools and prompts provided by each server
+- View server logs
 
 **Command:**
 
 ```bash
-qwen mcp list
+qwen mcp
+# or
+qwen mcp manage
 ```
 
-**Example Output:**
-
-```sh
-✓ stdio-server: command: python3 server.py (stdio) - Connected
-✓ http-server: https://api.example.com/mcp (http) - Connected
-✗ sse-server: https://api.example.com/sse (sse) - Disconnected
-```
+The management dialog provides a visual interface showing each server's name, configuration details, connection status, and available tools/prompts.
 
 ### Removing a Server (`qwen mcp remove`)
 
