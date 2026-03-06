@@ -46,14 +46,6 @@ export async function initializeApp(
   const authType = config.getModelsConfig().getCurrentAuthType();
   const authError = await performInitialAuth(config, authType);
 
-  // Fallback to user select when initial authentication fails
-  if (authError) {
-    settings.setValue(
-      SettingScope.User,
-      'security.auth.selectedType',
-      undefined,
-    );
-  }
   const themeError = validateTheme(settings);
 
   const shouldOpenAuthDialog =
