@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Shell tool call component for Execute/Bash/Command
+ * Shell tool call component for shell command variants.
  * Pure UI component - platform interactions via usePlatform hook
  */
 
@@ -25,7 +25,7 @@ import './ShellToolCall.css';
 type ShellVariant = 'execute' | 'bash';
 
 /**
- * Custom container for Execute variant with different styling
+ * Custom container for the execute variant with different styling
  */
 const ExecuteToolCallContainer: FC<ToolCallContainerProps> = ({
   label,
@@ -129,7 +129,7 @@ const ShellToolCallImpl: FC<BaseToolCallProps & { variant: ShellVariant }> = ({
 
   const Container =
     variant === 'execute' ? ExecuteToolCallContainer : ToolCallContainer;
-  const label = variant === 'execute' ? 'Execute' : 'Bash';
+  const label = 'Shell';
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
