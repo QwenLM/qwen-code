@@ -106,7 +106,7 @@ describe('getUserStartupWarnings', () => {
       });
       const expectedWarning =
         'Could not verify the current directory due to a file system error.';
-      expect(warnings).toEqual([expectedWarning, expectedWarning]);
+      expect(warnings).toEqual([expectedWarning]);
     });
   });
 });
