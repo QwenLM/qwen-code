@@ -26,7 +26,6 @@ const runCommand = ({ command, args, cwd, label }) =>
     const child = spawn(command, args, {
       cwd,
       stdio: 'inherit',
-      shell: process.platform === 'win32',
     });
 
     child.on('error', reject);
