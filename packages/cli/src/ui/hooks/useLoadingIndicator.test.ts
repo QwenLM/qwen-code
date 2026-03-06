@@ -109,6 +109,14 @@ describe('useLoadingIndicator', () => {
     expect(result.current.elapsedTime).toBe(1);
   });
 
+  it('should support the minimal loading phrase set', () => {
+    const { result } = renderHook(() =>
+      useLoadingIndicator(StreamingState.Responding, undefined, 'minimal'),
+    );
+
+    expect(result.current.currentLoadingPhrase).toBeDefined();
+  });
+
   it('should reset timer and phrase when streamingState changes from Responding to Idle', async () => {
     const { result, rerender } = renderHook(
       ({ streamingState }) => useLoadingIndicator(streamingState),

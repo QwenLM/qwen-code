@@ -165,6 +165,14 @@
             "type": "string"
           }
         },
+        "loadingPhraseSet": {
+          "description": "Choose which loading phrases to show while the model is thinking. Options: default, minimal",
+          "enum": [
+            "default",
+            "minimal"
+          ],
+          "default": "default"
+        },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history.",
           "type": "boolean",

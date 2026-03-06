@@ -9,6 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import {
   usePhraseCycler,
   PHRASE_CHANGE_INTERVAL_MS,
+  MINIMAL_LOADING_PHRASES,
 } from './usePhraseCycler.js';
 import * as i18n from '../../i18n/index.js';
 
@@ -148,6 +149,14 @@ describe('usePhraseCycler', () => {
     rerender({ isActive: true, isWaiting: false, customPhrases: undefined });
 
     expect(MOCK_WITTY_PHRASES).toContain(result.current);
+  });
+
+  it('should use minimal loading phrases when configured', () => {
+    const { result } = renderHook(() =>
+      usePhraseCycler(true, false, undefined, 'minimal'),
+    );
+
+    expect(MINIMAL_LOADING_PHRASES).toContain(result.current);
   });
 
   it('should fall back to witty phrases if custom phrases are an empty array', () => {

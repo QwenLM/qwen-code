@@ -395,6 +395,20 @@ const SETTINGS_SCHEMA = {
         description: 'Custom witty phrases to display during loading.',
         showInDialog: false,
       },
+      loadingPhraseSet: {
+        type: 'enum',
+        label: 'Loading Phrase Set',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'default',
+        description:
+          'Choose which loading phrases to show while the model is thinking.',
+        showInDialog: false,
+        options: [
+          { value: 'default', label: 'Default' },
+          { value: 'minimal', label: 'Minimal' },
+        ],
+      },
       enableWelcomeBack: {
         type: 'boolean',
         label: 'Show Welcome Back Dialog',
