@@ -26,6 +26,7 @@ describe('getUserStartupWarnings', () => {
     workspaceRoot: string;
     useRipgrep: boolean;
     useBuiltinRipgrep: boolean;
+    suppressHomeDirectoryWarning: boolean;
   };
 
   beforeEach(async () => {
@@ -37,6 +38,7 @@ describe('getUserStartupWarnings', () => {
       workspaceRoot: testRootDir,
       useRipgrep: true,
       useBuiltinRipgrep: true,
+      suppressHomeDirectoryWarning: false,
     };
   });
 
@@ -52,6 +54,18 @@ describe('getUserStartupWarnings', () => {
         workspaceRoot: homeDir,
       });
       expect(warnings).toContainEqual(
+        expect.stringContaining('home directory'),
+      );
+    });
+
+    it('should suppress the home directory warning when configured', async () => {
+      const warnings = await getUserStartupWarnings({
+        ...startupOptions,
+        workspaceRoot: homeDir,
+        suppressHomeDirectoryWarning: true,
+      });
+
+      expect(warnings).not.toContainEqual(
         expect.stringContaining('home directory'),
       );
     });

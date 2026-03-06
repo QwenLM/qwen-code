@@ -13,6 +13,7 @@ type WarningCheckOptions = {
   workspaceRoot: string;
   useRipgrep: boolean;
   useBuiltinRipgrep: boolean;
+  suppressHomeDirectoryWarning?: boolean;
 };
 
 type WarningCheck = {
@@ -24,6 +25,10 @@ type WarningCheck = {
 const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
   check: async (options: WarningCheckOptions) => {
+    if (options.suppressHomeDirectoryWarning) {
+      return null;
+    }
+
     try {
       const [workspaceRealPath, homeRealPath] = await Promise.all([
         fs.realpath(options.workspaceRoot),

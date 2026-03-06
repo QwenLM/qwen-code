@@ -148,6 +148,11 @@
           "type": "boolean",
           "default": false
         },
+        "suppressHomeDirectoryWarning": {
+          "description": "Hide the startup warning shown when Qwen Code is run from your home directory.",
+          "type": "boolean",
+          "default": false
+        },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
           "type": "boolean",
