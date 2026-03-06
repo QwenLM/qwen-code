@@ -54,6 +54,7 @@ describe('getUserStartupWarnings', () => {
       expect(warnings).toContainEqual(
         expect.stringContaining('home directory'),
       );
+      expect(warnings).toContainEqual(expect.stringContaining(homeDir));
     });
 
     it('should not return a warning when running in a project directory', async () => {
