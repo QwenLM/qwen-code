@@ -27,7 +27,10 @@ import type {
   LspWorkspaceEdit,
 } from './types.js';
 import type { EventEmitter } from 'events';
-import { DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS } from './constants.js';
+import {
+  DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS,
+  DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
+} from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './LspServerManager.js';
@@ -44,41 +47,23 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
-const WORKSPACE_SYMBOL_WARMUP_DELAY_MS = 1500;
-const DEFAULT_WORKSPACE_SYMBOL_EXTENSIONS = [
-  'cpp',
-  'cc',
-  'cxx',
-  'c',
-  'h',
-  'hpp',
-  'ts',
-  'tsx',
-  'js',
-  'jsx',
-  'py',
-  'go',
-  'rs',
-  'java',
-  'cs',
-  'php',
-  'rb',
-];
-const LANGUAGE_EXTENSION_MAP: Record<string, string[]> = {
-  cpp: ['cpp', 'cc', 'cxx', 'h', 'hpp'],
-  c: ['c', 'h'],
+
+/**
+ * Mapping from LSP language identifiers to file extensions, only for cases
+ * where the language ID does NOT match the file extension directly.
+ * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
+ * are handled by the fallback in getWorkspaceSymbolExtensions().
+ */
+const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
   typescript: ['ts', 'tsx'],
   typescriptreact: ['tsx'],
   javascript: ['js', 'jsx'],
   javascriptreact: ['jsx'],
   python: ['py'],
-  go: ['go'],
-  rust: ['rs'],
-  java: ['java'],
   csharp: ['cs'],
-  php: ['php'],
   ruby: ['rb'],
 };
+
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
   '**/.git/**',
@@ -339,10 +324,17 @@ export class NativeLspService {
     if (!didOpen) {
       return false;
     }
-    await this.delay(WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+    await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
     return true;
   }
 
+  /**
+   * Find the first source file in the workspace that matches the server's
+   * language extensions. Used to open a file for workspace symbol warmup.
+   *
+   * @param handle - The LSP server handle to determine target extensions
+   * @returns Absolute path of the first matching file, or undefined
+   */
   private findWorkspaceFileForServer(
     handle: LspServerHandle,
   ): string | undefined {
@@ -350,37 +342,49 @@ export class NativeLspService {
     if (extensions.length === 0) {
       return undefined;
     }
-    const patterns = [`**/*.{${extensions.join(',')}}`];
+    // Brace expansion requires at least 2 items; use plain glob for a single ext
+    const extGlob =
+      extensions.length === 1 ? extensions[0]! : `{${extensions.join(',')}}`;
+    const pattern = `**/*.${extGlob}`;
     const roots = this.workspaceContext.getDirectories();
 
     for (const root of roots) {
-      for (const pattern of patterns) {
-        try {
-          const matches = globSync(pattern, {
-            cwd: root,
-            ignore: DEFAULT_EXCLUDE_PATTERNS,
-            absolute: true,
-            nodir: true,
-          });
-          for (const match of matches) {
-            if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
-              continue;
-            }
-            return match;
+      try {
+        // Use maxDepth to avoid scanning deeply nested directories;
+        // we only need one file to trigger server indexing.
+        const matches = globSync(pattern, {
+          cwd: root,
+          ignore: DEFAULT_EXCLUDE_PATTERNS,
+          absolute: true,
+          nodir: true,
+          maxDepth: 5,
+        });
+        for (const match of matches) {
+          if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
+            continue;
           }
-        } catch (_error) {
-          // ignore glob errors
+          return match;
         }
+      } catch (_error) {
+        // ignore glob errors
       }
     }
 
     return undefined;
   }
 
+  /**
+   * Determine file extensions this server can handle, used to find a workspace
+   * file to open for warmup. Resolution order:
+   *   1. Keys from config.extensionToLanguage (explicit user/extension mapping)
+   *   2. Derived from config.languages via LANGUAGE_ID_TO_EXTENSIONS, falling
+   *      back to treating the language ID itself as a file extension
+   */
   private getWorkspaceSymbolExtensions(handle: LspServerHandle): string[] {
     const extensions = new Set<string>();
-    const extMapping = handle.config.extensionToLanguage;
 
+    // Prefer explicit extension-to-language mapping from server config
+    const extMapping = handle.config.extensionToLanguage;
     if (extMapping) {
       for (const key of Object.keys(extMapping)) {
         const normalized = key.startsWith('.') ? key.slice(1) : key;
@@ -390,24 +394,45 @@ export class NativeLspService {
       }
     }
 
-    if (extensions.size === 0 && handle.config.languages) {
+    // Fall back to deriving extensions from language identifiers
+    if (extensions.size === 0) {
       for (const language of handle.config.languages) {
-        const mapped = LANGUAGE_EXTENSION_MAP[language];
+        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
         if (mapped) {
           for (const ext of mapped) {
             extensions.add(ext);
           }
+        } else {
+          // For languages like "cpp", "java", "go", "rust" etc.,
+          // the language ID itself is a valid file extension
+          extensions.add(language.toLowerCase());
         }
       }
     }
 
-    if (extensions.size === 0) {
-      for (const ext of DEFAULT_WORKSPACE_SYMBOL_EXTENSIONS) {
-        extensions.add(ext);
-      }
-    }
-
     return Array.from(extensions);
+  }
+
+  /**
+   * Run TypeScript server warmup and track the opened URI to prevent
+   * duplicate didOpen notifications.
+   *
+   * @param serverName - The name of the LSP server
+   * @param handle - The server handle
+   * @param force - Force re-warmup even if already warmed up
+   */
+  private async warmupAndTrack(
+    serverName: string,
+    handle: LspServerHandle,
+    force = false,
+  ): Promise<void> {
+    const warmupUri = await this.serverManager.warmupTypescriptServer(
+      handle,
+      force,
+    );
+    if (warmupUri) {
+      this.trackExternallyOpenedDocument(serverName, warmupUri);
+    }
   }
 
   private async delay(ms: number): Promise<void> {
@@ -430,11 +455,7 @@ export class NativeLspService {
         continue;
       }
       try {
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(serverName, warmupUri);
-        }
+        await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
           ? false
           : await this.warmupWorkspaceSymbols(serverName, handle);
@@ -447,7 +468,7 @@ export class NativeLspService {
           response.length === 0 &&
           warmedUp
         ) {
-          await this.delay(WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
+          await this.delay(DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS);
           response = await handle.connection.request('workspace/symbol', {
             query,
           });
@@ -456,13 +477,7 @@ export class NativeLspService {
           this.serverManager.isTypescriptServer(handle) &&
           this.isNoProjectErrorResponse(response)
         ) {
-          const retryUri = await this.serverManager.warmupTypescriptServer(
-            handle,
-            true,
-          );
-          if (retryUri) {
-            this.trackExternallyOpenedDocument(serverName, retryUri);
-          }
+          await this.warmupAndTrack(serverName, handle, true);
           response = await handle.connection.request('workspace/symbol', {
             query,
           });
@@ -506,11 +521,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, location.uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'textDocument/definition',
           {
@@ -561,11 +572,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, location.uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'textDocument/references',
           {
@@ -613,11 +620,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, location.uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request('textDocument/hover', {
           textDocument: { uri: location.uri },
           position: location.range.start,
@@ -647,11 +650,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'textDocument/documentSymbol',
           {
@@ -715,11 +714,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, location.uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'textDocument/implementation',
           {
@@ -772,11 +767,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, location.uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'textDocument/prepareCallHierarchy',
           {
@@ -829,11 +820,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
           {
@@ -880,11 +867,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
           {
@@ -931,11 +914,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
 
         // Request pull diagnostics if the server supports it
         const response = await handle.connection.request(
@@ -985,11 +964,7 @@ export class NativeLspService {
 
     for (const [name, handle] of handles) {
       try {
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
 
         // Request workspace diagnostics if supported
         const response = await handle.connection.request(
@@ -1044,11 +1019,7 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.ensureDocumentOpen(name, handle, uri);
-        const warmupUri =
-          await this.serverManager.warmupTypescriptServer(handle);
-        if (warmupUri) {
-          this.trackExternallyOpenedDocument(name, warmupUri);
-        }
+        await this.warmupAndTrack(name, handle);
 
         // Convert context diagnostics to LSP format
         const lspDiagnostics = context.diagnostics.map((d: LspDiagnostic) =>

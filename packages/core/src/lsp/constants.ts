@@ -25,6 +25,9 @@ export const DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS = 200;
 /** Default timeout for command existence check in milliseconds */
 export const DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS = 2000;
 
+/** Default delay for workspace symbol warmup after opening a file, in milliseconds */
+export const DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS = 1500;
+
 // ============================================================================
 // Retry Constants
 // ============================================================================

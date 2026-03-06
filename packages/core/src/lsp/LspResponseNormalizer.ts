@@ -522,6 +522,8 @@ export class LspResponseNormalizer {
       itemObj['range'] ??
       undefined) as { start?: unknown; end?: unknown } | undefined;
 
+    // Only require uri; range is optional per LSP 3.17 WorkspaceSymbol spec
+    // where location may be { uri } without a range.
     if (!locationObj['uri']) {
       return null;
     }
