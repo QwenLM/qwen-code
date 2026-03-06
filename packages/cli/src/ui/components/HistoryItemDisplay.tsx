@@ -38,6 +38,7 @@ import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
 import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
+import { ContextUsage } from './views/ContextUsage.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
@@ -190,6 +191,19 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'mcp_status' && (
         <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />
+      )}
+      {itemForDisplay.type === 'context_usage' && (
+        <ContextUsage
+          modelName={itemForDisplay.modelName}
+          totalTokens={itemForDisplay.totalTokens}
+          contextWindowSize={itemForDisplay.contextWindowSize}
+          breakdown={itemForDisplay.breakdown}
+          builtinTools={itemForDisplay.builtinTools}
+          mcpTools={itemForDisplay.mcpTools}
+          memoryFiles={itemForDisplay.memoryFiles}
+          skills={itemForDisplay.skills}
+          isEstimated={itemForDisplay.isEstimated}
+        />
       )}
       {itemForDisplay.type === 'insight_progress' && (
         <InsightProgressMessage progress={itemForDisplay.progress} />

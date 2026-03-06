@@ -1281,4 +1281,25 @@ export default {
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // ============================================================================
+  // Context Usage
+  // ============================================================================
+  'Context Usage': '上下文使用情况',
+  'Context window': '上下文窗口',
+  Used: '已用',
+  Free: '空闲',
+  'Autocompact buffer': '自动压缩缓冲区',
+  'Usage by category': '分类用量',
+  'System prompt': '系统提示',
+  'Built-in tools': '内置工具',
+  'MCP tools': 'MCP 工具',
+  'Memory files': '记忆文件',
+  Skills: '技能',
+  Messages: '消息',
+  tokens: 'tokens',
+  'Estimated pre-conversation overhead': '预估对话前开销',
+  'No API response yet. Send a message to see actual usage.':
+    '暂无 API 响应。发送消息以查看实际使用情况。',
+  'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
 };

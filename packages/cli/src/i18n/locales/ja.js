@@ -965,5 +965,27 @@ export default {
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+    '{{region}} での認証に成功しました。API キーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'コンテキスト使用量',
+  'No API response yet. Send a message to see actual usage.':
+    'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
+  'Context window': 'コンテキストウィンドウ',
+  tokens: 'トークン',
+  Used: '使用済み',
+  Free: '空き',
+  'Autocompact buffer': '自動圧縮バッファ',
+  'Usage by category': 'カテゴリ別の使用量',
+  'System prompt': 'システムプロンプト',
+  'Built-in tools': '組み込みツール',
+  'MCP tools': 'MCPツール',
+  'Memory files': 'メモリファイル',
+  Skills: 'スキル',
+  Messages: 'メッセージ',
+  'Show context window usage breakdown.':
+    'コンテキストウィンドウの使用状況を表示します。',
 };

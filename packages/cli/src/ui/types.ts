@@ -257,6 +257,48 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+// --- Context Usage types ---
+
+export interface ContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ContextSkillDetail {
+  name: string;
+  tokens: number;
+}
+
+export type HistoryItemContextUsage = HistoryItemBase & {
+  type: 'context_usage';
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ContextCategoryBreakdown;
+  builtinTools: ContextToolDetail[];
+  mcpTools: ContextToolDetail[];
+  memoryFiles: ContextMemoryDetail[];
+  skills: ContextSkillDetail[];
+  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  isEstimated?: boolean;
+};
+
 export type HistoryItemInsightProgress = HistoryItemBase & {
   type: 'insight_progress';
   progress: InsightProgressProps;
@@ -291,6 +333,7 @@ export type HistoryItemWithoutId =
   | HistoryItemToolsList
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
+  | HistoryItemContextUsage
   | HistoryItemInsightProgress;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
@@ -314,6 +357,7 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  CONTEXT_USAGE = 'context_usage',
   INSIGHT_PROGRESS = 'insight_progress',
 }
 
