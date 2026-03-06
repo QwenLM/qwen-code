@@ -43,6 +43,9 @@ vi.mock('vscode', () => ({
     registerWebviewPanelSerializer: vi.fn(() => ({
       dispose: vi.fn(),
     })),
+    registerWebviewViewProvider: vi.fn(() => ({
+      dispose: vi.fn(),
+    })),
   },
   workspace: {
     workspaceFolders: [],

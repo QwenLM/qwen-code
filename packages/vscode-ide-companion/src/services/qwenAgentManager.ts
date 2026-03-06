@@ -1244,6 +1244,18 @@ export class QwenAgentManager {
   }
 
   /**
+   * Clear current session to force creation of a new one
+   * This resets the session manager state so that the next createNewSession call
+   * will create a fresh session instead of reusing the existing one
+   */
+  clearCurrentSession(): void {
+    console.log('[QwenAgentManager] Clearing current session');
+    // Reset the connection's session manager state
+    this.connection.resetSessionState();
+    console.log('[QwenAgentManager] Session state cleared successfully');
+  }
+
+  /**
    * Cancel current prompt
    */
   async cancelCurrentPrompt(): Promise<void> {

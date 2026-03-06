@@ -62,6 +62,7 @@ gha-creds-*.json
 
 # Log files
 patch_output.log
+vscode-app-*.log
 
 # docs build
 docs-site/.next
