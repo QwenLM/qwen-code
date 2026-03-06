@@ -90,11 +90,15 @@ const LocationsListLocal: FC<{
 /**
  * Map tool call kind to appropriate display name
  */
-const getDisplayLabel = (kind: string): string => {
+const getDisplayLabel = (kind: string, titlePrefix?: string): string => {
+  if (titlePrefix === 'Grep' || titlePrefix === 'Glob' || titlePrefix === 'WebSearch') {
+    return titlePrefix;
+  }
+
   const normalizedKind = kind.toLowerCase();
   if (normalizedKind === 'grep' || normalizedKind === 'grep_search') {
     return 'Grep';
-  } else if (normalizedKind === 'glob') {
+  } else if (normalizedKind === 'glob' || normalizedKind === 'find') {
     return 'Glob';
   } else if (normalizedKind === 'web_search') {
     return 'WebSearch';
@@ -114,7 +118,8 @@ export const SearchToolCall: FC<BaseToolCallProps> = ({
 }) => {
   const { kind, title, content, locations } = toolCall;
   const queryText = safeTitle(title);
-  const displayLabel = getDisplayLabel(kind);
+  const titlePrefix = queryText.split(':', 1)[0];
+  const displayLabel = getDisplayLabel(kind, titlePrefix);
   const containerStatus: ContainerStatus = mapToolStatusToContainerStatus(
     toolCall.status,
   );
