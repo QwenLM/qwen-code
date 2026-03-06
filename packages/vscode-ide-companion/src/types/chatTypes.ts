@@ -11,7 +11,7 @@ import type {
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
 }
