@@ -368,6 +368,16 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      suppressHomeDirectoryWarning: {
+        type: 'boolean',
+        label: 'Suppress Home Directory Warning',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide the startup warning shown when Qwen Code is run from your home directory.',
+        showInDialog: false,
+      },
       showLineNumbers: {
         type: 'boolean',
         label: 'Show Line Numbers in Code',
