@@ -121,7 +121,7 @@ const WebFetchToolCallImpl: FC<BaseToolCallProps & { variant: WebVariant }> = ({
   const { title, content, rawInput, toolCallId } = toolCall;
 
   const webTarget = getWebTarget(variant, title, rawInput);
-  const label = variant === 'fetch' ? 'Web Fetch' : 'Web Search';
+  const label = variant === 'fetch' ? 'WebFetch' : 'WebSearch';
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
