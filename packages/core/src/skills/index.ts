@@ -11,7 +11,8 @@
  * users to define reusable skill configurations that can be loaded by the
  * model via a dedicated Skills tool.
  *
- * Skills are stored as directories in `.qwen/skills/` (project-level) or
+ * Skills are stored as directories in `.qwen/skills/` or `.agents/skills/`
+ * (project-level) or
  * `~/.qwen/skills/` (user-level), with each directory containing a SKILL.md
  * file with YAML frontmatter for metadata.
  */
