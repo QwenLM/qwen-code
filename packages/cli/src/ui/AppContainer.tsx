@@ -1025,6 +1025,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const { elapsedTime, currentLoadingPhrase } = useLoadingIndicator(
     streamingState,
     settings.merged.ui?.customWittyPhrases,
+    settings.merged.ui?.loadingPhraseSet === 'minimal' ? 'minimal' : 'default',
   );
 
   useAttentionNotifications({
