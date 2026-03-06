@@ -7,11 +7,14 @@
 import { useCallback } from 'react';
 import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
+import type { ImageAttachment } from '../utils/imageUtils.js';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
   inputText: string;
   setInputText: (text: string) => void;
+  attachedImages?: ImageAttachment[];
+  clearImages?: () => void;
   inputFieldRef: React.RefObject<HTMLDivElement>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
@@ -31,6 +34,26 @@ interface UseMessageSubmitProps {
   };
 }
 
+export const shouldSendMessage = ({
+  inputText,
+  attachedImages,
+  isStreaming,
+  isWaitingForResponse,
+}: {
+  inputText: string;
+  attachedImages?: ImageAttachment[];
+  isStreaming: boolean;
+  isWaitingForResponse: boolean;
+}): boolean => {
+  if (isStreaming || isWaitingForResponse) {
+    return false;
+  }
+
+  const hasText = inputText.replace(/\u200B/g, '').trim().length > 0;
+  const hasAttachments = (attachedImages?.length ?? 0) > 0;
+  return hasText || hasAttachments;
+};
+
 /**
  * Message submit Hook
  * Handles message submission logic and context parsing
@@ -39,6 +62,8 @@ export const useMessageSubmit = ({
   vscode,
   inputText,
   setInputText,
+  attachedImages = [],
+  clearImages,
   inputFieldRef,
   isStreaming,
   isWaitingForResponse,
@@ -50,7 +75,14 @@ export const useMessageSubmit = ({
     (e: React.FormEvent) => {
       e.preventDefault();
 
-      if (!inputText.trim() || isStreaming || isWaitingForResponse) {
+      if (
+        !shouldSendMessage({
+          inputText,
+          attachedImages,
+          isStreaming,
+          isWaitingForResponse,
+        })
+      ) {
         return;
       }
 
@@ -142,6 +174,7 @@ export const useMessageSubmit = ({
           text: inputText,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
+          attachments: attachedImages.length > 0 ? attachedImages : undefined,
         },
       });
 
@@ -153,9 +186,15 @@ export const useMessageSubmit = ({
         inputFieldRef.current.setAttribute('data-empty', 'true');
       }
       fileContext.clearFileReferences();
+      // Clear attached images after sending
+      if (clearImages) {
+        clearImages();
+      }
     },
     [
       inputText,
+      attachedImages,
+      clearImages,
       isStreaming,
       setInputText,
       inputFieldRef,
