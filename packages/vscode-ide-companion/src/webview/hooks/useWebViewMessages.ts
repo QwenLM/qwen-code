@@ -653,7 +653,7 @@ export const useWebViewMessages = ({
                   type: 'tool_call_update',
                   toolCallId: prev.id,
                   kind: 'todo_write',
-                  title: 'Updated Plan',
+                  title: 'TodoWrite',
                   status: 'completed',
                   content: [
                     {
@@ -671,7 +671,7 @@ export const useWebViewMessages = ({
                   type: 'tool_call',
                   toolCallId,
                   kind: 'todo_write',
-                  title: 'Updated Plan',
+                  title: 'TodoWrite',
                   status: 'completed',
                   content: [
                     {
