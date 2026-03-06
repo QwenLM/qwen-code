@@ -43,7 +43,7 @@ Qwen Code uses JSON settings files for persistent configuration. There are four 
 In addition to a project settings file, a project's `.qwen` directory can contain other project-specific files related to Qwen Code's operation, such as:
 
 - [Custom sandbox profiles](../features/sandbox) (e.g. `.qwen/sandbox-macos-custom.sb`, `.qwen/sandbox.Dockerfile`).
-- [Agent Skills](../features/skills) under `.qwen/skills/` (each Skill is a directory containing a `SKILL.md`).
+- [Agent Skills](../features/skills) under `.qwen/skills/` or `.agents/skills/` (each Skill is a directory containing a `SKILL.md`).
 
 ### Configuration migration
 
