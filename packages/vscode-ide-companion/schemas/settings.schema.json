@@ -166,8 +166,11 @@
           }
         },
         "loadingPhraseSet": {
-          "description": "Choose which loading phrases to show while the model is thinking.",
-          "type": "string",
+          "description": "Choose which loading phrases to show while the model is thinking. Options: default, minimal",
+          "enum": [
+            "default",
+            "minimal"
+          ],
           "default": "default"
         },
         "enableWelcomeBack": {
