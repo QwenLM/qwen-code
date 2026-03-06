@@ -257,13 +257,14 @@ export class QwenSessionReader {
             seenUuids.add(uuid);
           }
 
-          const text = this.contentToText(obj.message);
+          const { text, thoughts } = this.contentToParts(obj.message);
           if (includeMessages) {
             messages.push({
               id: uuid || `${messages.length}`,
               timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : '',
               type: type === 'user' ? 'user' : 'qwen',
               content: text,
+              ...(thoughts.length > 0 ? { thoughts } : {}),
             });
           }
 
@@ -301,6 +302,42 @@ export class QwenSessionReader {
         error,
       );
       return null;
+    }
+  }
+
+  private contentToParts(message: unknown): { text: string; thoughts: string[] } {
+    try {
+      if (typeof message !== 'object' || message === null) {
+        return { text: '', thoughts: [] };
+      }
+
+      const typed = message as { parts?: unknown[] };
+      const parts = Array.isArray(typed.parts) ? typed.parts : [];
+      const texts: string[] = [];
+      const thoughts: string[] = [];
+      for (const part of parts) {
+        if (typeof part !== 'object' || part === null) {
+          continue;
+        }
+        const p = part as Record<string, unknown>;
+        const value =
+          typeof p.text === 'string'
+            ? p.text
+            : typeof p.data === 'string'
+              ? p.data
+              : '';
+        if (!value) {
+          continue;
+        }
+        if (p.thought === true) {
+          thoughts.push(value);
+        } else {
+          texts.push(value);
+        }
+      }
+      return { text: texts.join('\n'), thoughts };
+    } catch {
+      return { text: '', thoughts: [] };
     }
   }
 
