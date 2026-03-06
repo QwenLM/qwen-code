@@ -644,12 +644,13 @@ export class QwenAgentManager {
       for (const r of allRecords) {
         // Handle user and assistant messages
         if ((r.type === 'user' || r.type === 'assistant') && r.message) {
-          msgs.push({
-            role:
+          msgs.push(
+            ...this.contentToMessages(
+              r.message,
+              new Date(r.timestamp).getTime(),
               r.type === 'user' ? ('user' as const) : ('assistant' as const),
-            content: this.contentToText(r.message),
-            timestamp: new Date(r.timestamp).getTime(),
-          });
+            ),
+          );
         }
         // Handle tool call records that might have content we want to show
         else if (r.type === 'tool_call' || r.type === 'tool_call_update') {
@@ -859,6 +860,56 @@ export class QwenAgentManager {
       }
     }
     return String(value);
+  }
+
+  private contentToMessages(
+    message: unknown,
+    timestamp: number,
+    fallbackRole: ChatMessage['role'],
+  ): ChatMessage[] {
+    try {
+      if (typeof message !== 'object' || message === null) {
+        return [];
+      }
+
+      const typedMessage = message as Record<string, unknown>;
+      const parts = Array.isArray(typedMessage.parts) ? typedMessage.parts : [];
+      const messages: ChatMessage[] = [];
+
+      for (const part of parts) {
+        if (typeof part !== 'object' || part === null) {
+          continue;
+        }
+
+        const typedPart = part as Record<string, unknown>;
+        const text =
+          typeof typedPart.text === 'string'
+            ? typedPart.text
+            : typeof typedPart.data === 'string'
+              ? typedPart.data
+              : '';
+
+        if (!text) {
+          continue;
+        }
+
+        const role: ChatMessage['role'] =
+          fallbackRole === 'assistant' && typedPart.thought === true
+            ? 'thinking'
+            : fallbackRole;
+        const previous = messages[messages.length - 1];
+
+        if (previous && previous.role === role) {
+          previous.content = `${previous.content}\n${text}`;
+        } else {
+          messages.push({ role, content: text, timestamp });
+        }
+      }
+
+      return messages;
+    } catch {
+      return [];
+    }
   }
 
   // Extract plain text from Content (genai Content)
