@@ -25,13 +25,14 @@ const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
   check: async (options: WarningCheckOptions) => {
     try {
+      const homePath = os.homedir();
       const [workspaceRealPath, homeRealPath] = await Promise.all([
         fs.realpath(options.workspaceRoot),
-        fs.realpath(os.homedir()),
+        fs.realpath(homePath),
       ]);
 
       if (workspaceRealPath === homeRealPath) {
-        return 'You are running Qwen Code in your home directory. It is recommended to run in a project-specific directory.';
+        return `You are running Qwen Code in your home directory (${homePath}). It is recommended to run in a project-specific directory.`;
       }
       return null;
     } catch (_err: unknown) {
