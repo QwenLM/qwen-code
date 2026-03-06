@@ -8,6 +8,11 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { t, ta } from '../../i18n/index.js';
 
 export const WITTY_LOADING_PHRASES: string[] = ["I'm Feeling Lucky"];
+export const MINIMAL_LOADING_PHRASES: string[] = [
+  'Thinking…',
+  'Analyzing…',
+  'Working…',
+];
 
 export const PHRASE_CHANGE_INTERVAL_MS = 15000;
 
@@ -21,17 +26,21 @@ export const usePhraseCycler = (
   isActive: boolean,
   isWaiting: boolean,
   customPhrases?: string[],
+  phraseSet: 'default' | 'minimal' = 'default',
 ) => {
   // Get phrases from translations if available
   const loadingPhrases = useMemo(() => {
     if (customPhrases && customPhrases.length > 0) {
       return customPhrases;
     }
+    if (phraseSet === 'minimal') {
+      return MINIMAL_LOADING_PHRASES;
+    }
     const translatedPhrases = ta('WITTY_LOADING_PHRASES');
     return translatedPhrases.length > 0
       ? translatedPhrases
       : WITTY_LOADING_PHRASES;
-  }, [customPhrases]);
+  }, [customPhrases, phraseSet]);
 
   const [currentLoadingPhrase, setCurrentLoadingPhrase] = useState(
     loadingPhrases[0],
