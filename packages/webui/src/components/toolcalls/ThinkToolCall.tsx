@@ -12,6 +12,7 @@ import {
   ToolCallCard,
   ToolCallRow,
   groupContent,
+  safeTitle,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
 
@@ -25,7 +26,9 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
   isFirst,
   isLast,
 }) => {
-  const { content } = toolCall;
+  const { content, title } = toolCall;
+  const resolvedTitle = safeTitle(title);
+  const label = resolvedTitle.split(':', 1)[0] || 'Think';
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
@@ -34,7 +37,7 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <ToolCallContainer
-        label="Think"
+        label={label}
         status="error"
         isFirst={isFirst}
         isLast={isLast}
@@ -55,7 +58,7 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
 
       return (
         <ToolCallCard icon="💭">
-          <ToolCallRow label="Think">
+          <ToolCallRow label={label}>
             <div className="italic opacity-90 leading-relaxed">
               {truncatedThoughts}
             </div>
@@ -71,7 +74,7 @@ export const ThinkToolCall: FC<BaseToolCallProps> = ({
         : 'default';
     return (
       <ToolCallContainer
-        label="Think"
+        label={label}
         status={status}
         isFirst={isFirst}
         isLast={isLast}
