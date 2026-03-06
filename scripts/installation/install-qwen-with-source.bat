@@ -2,8 +2,8 @@
 REM Script to install Node.js and Qwen Code with source information
 REM This script handles the installation process and sets the installation source
 REM
-REM Usage: install-qwen-with-source.bat --source [github|npm|internal|local-build]
-REM        install-qwen-with-source.bat -s [github|npm|internal|local-build]
+REM Usage: install-qwen-with-source.bat --source <source>
+REM        install-qwen-with-source.bat -s <source>
 REM
 
 setlocal enabledelayedexpansion
@@ -14,21 +14,21 @@ REM Parse command line arguments
 :parse_args
 if "%~1"=="" goto end_parse
 if /i "%~1"=="--source" (
-    set "SOURCE=%~2"
-    shift
-    shift
-    goto parse_args
+    if not "%~2"=="" (
+        set "SOURCE=%~2"
+        shift
+        shift
+        goto parse_args
+    )
 )
 if /i "%~1"=="-s" (
-    set "SOURCE=%~2"
-    shift
-    shift
-    goto parse_args
+    if not "%~2"=="" (
+        set "SOURCE=%~2"
+        shift
+        shift
+        goto parse_args
+    )
 )
-if /i "%~1"=="github" set "SOURCE=github"
-if /i "%~1"=="npm" set "SOURCE=npm"
-if /i "%~1"=="internal" set "SOURCE=internal"
-if /i "%~1"=="local-build" set "SOURCE=local-build"
 shift
 goto parse_args
 
@@ -100,8 +100,8 @@ if exist "!NODEJS_PATH!\npm.cmd" (
 
 REM Install Qwen Code with source information
 echo INFO: Installing Qwen Code with source: %SOURCE%
-echo INFO: Running: %NPM_CMD% install -g @qwen-code/qwen-code
-call "%NPM_CMD%" install -g @qwen-code/qwen-code
+echo INFO: Running: %NPM_CMD% install -g @qwen-code/qwen-code@latest --registry https://registry.npmmirror.com
+call "%NPM_CMD%" install -g @qwen-code/qwen-code@latest --registry https://registry.npmmirror.com
 
 if %ERRORLEVEL% EQU 0 (
     echo SUCCESS: Qwen Code installed successfully!
@@ -110,20 +110,24 @@ if %ERRORLEVEL% EQU 0 (
     exit /b 1
 )
 
-REM After installation, create source.json in the .qwen directory
-echo INFO: Creating source.json in %USERPROFILE%\.qwen...
+REM Create source.json only if --source or -s was explicitly provided
+if not "!SOURCE!"=="unknown" (
+    echo INFO: Creating source.json in %USERPROFILE%\.qwen...
 
-set "QWEN_DIR=%USERPROFILE%\.qwen"
-if not exist "%QWEN_DIR%" (
-    mkdir "%QWEN_DIR%"
+    set "QWEN_DIR=%USERPROFILE%\.qwen"
+    if not exist "!QWEN_DIR!" (
+        mkdir "!QWEN_DIR!"
+    )
+
+    REM Create the source.json file with the installation source
+    (
+    echo {
+    echo   "source": "!SOURCE!"
+    echo }
+    ) > "!QWEN_DIR!\source.json"
+
+    echo SUCCESS: Installation source saved to %USERPROFILE%\.qwen\source.json
 )
-
-REM Create the source.json file with the installation source
-echo { > "%QWEN_DIR%\source.json"
-echo   "source": "%SOURCE%" >> "%QWEN_DIR%\source.json"
-echo } >> "%QWEN_DIR%\source.json"
-
-echo SUCCESS: Installation source saved to %USERPROFILE%\.qwen\source.json
 
 REM Verify installation
 call :CheckCommandExists qwen
@@ -138,6 +142,7 @@ echo.
 echo ===========================================
 echo SUCCESS: Installation completed!
 echo The source information is stored in %USERPROFILE%\.qwen\source.json
+echo Tips: Please restart your terminal and run: qwen
 echo.
 echo ===========================================
 

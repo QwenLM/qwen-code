@@ -23,9 +23,14 @@ const assetBuilds = [
 
 const runCommand = ({ command, args, cwd, label }) =>
   new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const useShell = process.platform === 'win32';
+    // On Windows, quote the command path to handle spaces (e.g., "C:\Program Files\nodejs\node.exe")
+    const quotedCommand = useShell ? `"${command}"` : command;
+
+    const child = spawn(quotedCommand, args, {
       cwd,
       stdio: 'inherit',
+      shell: useShell,
     });
 
     child.on('error', reject);

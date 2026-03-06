@@ -14,8 +14,8 @@ import { TestRig } from './test-helper.js';
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
-  process.env['GEMINI_SANDBOX'] &&
-  process.env['GEMINI_SANDBOX']!.toLowerCase() !== 'false';
+  process.env['QWEN_SANDBOX'] &&
+  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -459,6 +459,156 @@ function setupAcpTest(
         response: {
           data: {
             authMethods: expect.any(Array),
+          },
+        },
+      });
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('supports session/set_config_option for mode and model', async () => {
+    const rig = new TestRig();
+    rig.setup('acp set config option');
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+
+    try {
+      // Initialize
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      // Create a new session
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as {
+        sessionId: string;
+        models: {
+          availableModels: Array<{ modelId: string }>;
+        };
+      };
+      expect(newSession.sessionId).toBeTruthy();
+
+      // Test: Set mode using set_config_option
+      const setModeResult = (await sendRequest('session/set_config_option', {
+        sessionId: newSession.sessionId,
+        configId: 'mode',
+        value: 'yolo',
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string; name: string; description: string }>;
+        }>;
+      };
+
+      expect(setModeResult).toBeDefined();
+      expect(Array.isArray(setModeResult.configOptions)).toBe(true);
+      expect(setModeResult.configOptions.length).toBeGreaterThanOrEqual(2);
+
+      // Find mode option
+      const modeOption = setModeResult.configOptions.find(
+        (opt) => opt.id === 'mode',
+      );
+      expect(modeOption).toBeDefined();
+      expect(modeOption!.currentValue).toBe('yolo');
+      expect(Array.isArray(modeOption!.options)).toBe(true);
+      expect(modeOption!.options.some((o) => o.value === 'yolo')).toBe(true);
+
+      // Find model option
+      const modelOption = setModeResult.configOptions.find(
+        (opt) => opt.id === 'model',
+      );
+      expect(modelOption).toBeDefined();
+      expect(modelOption!.currentValue).toBeTruthy();
+
+      // Test: Set model using set_config_option
+      // Use openai model to avoid auth issues
+      const openaiModel = newSession.models.availableModels.find((model) =>
+        model.modelId.includes('openai'),
+      );
+      expect(openaiModel).toBeDefined();
+
+      const setModelResult = (await sendRequest('session/set_config_option', {
+        sessionId: newSession.sessionId,
+        configId: 'model',
+        value: openaiModel!.modelId,
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string; name: string; description: string }>;
+        }>;
+      };
+
+      expect(setModelResult).toBeDefined();
+      expect(Array.isArray(setModelResult.configOptions)).toBe(true);
+
+      // Verify model was updated
+      const updatedModelOption = setModelResult.configOptions.find(
+        (opt) => opt.id === 'model',
+      );
+      expect(updatedModelOption).toBeDefined();
+      expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('returns error for invalid configId in set_config_option', async () => {
+    const rig = new TestRig();
+    rig.setup('acp set config option error');
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+
+    try {
+      // Initialize
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      // Create a new session
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      // Test: Invalid configId should return error
+      await expect(
+        sendRequest('session/set_config_option', {
+          sessionId: newSession.sessionId,
+          configId: 'invalid_config',
+          value: 'some_value',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: -32602,
+          message: 'Invalid params',
+          data: {
+            details: 'Unsupported configId: invalid_config',
           },
         },
       });

@@ -117,6 +117,28 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for DashScope coding plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for DashScope international coding plan URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://coding-intl.dashscope-intl.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
     it('should return false for non-DashScope configurations', () => {
       const configs = [
         {
@@ -733,7 +755,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   describe('output token limits', () => {
     it('should limit max_tokens when it exceeds model limit', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 100000, // Exceeds the model's output limit
       };
@@ -757,7 +779,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('should not modify max_tokens when it is within model limit', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 1000, // Within the model's output limit
       };
@@ -769,7 +791,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('should not add max_tokens when not present in request', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         // No max_tokens parameter
       };
@@ -781,7 +803,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('should handle null max_tokens parameter', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: null,
       };
@@ -800,12 +822,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(4096); // Should be limited to default output limit (4K)
+      expect(result.max_tokens).toBe(8192); // Should be limited to default output limit (8K)
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 100000, // Will be limited
         temperature: 0.8,
@@ -872,12 +894,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             ],
           },
         ],
-        max_tokens: 50000,
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(32768); // Limited to model's output limit (32K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,
@@ -904,8 +924,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      // coder-model has 64K output limit, so max_tokens should be capped
-      expect(result.max_tokens).toBe(65536);
+      expect(result.max_tokens).toBe(65536); // Limited to model's output limit (64K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,
@@ -914,7 +933,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     it('should handle streaming requests with output token limits', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-coder-plus',
+        model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 100000, // Exceeds the model's output limit
         stream: true,

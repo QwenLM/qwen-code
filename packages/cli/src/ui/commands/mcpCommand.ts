@@ -6,24 +6,17 @@
 
 import type {
   SlashCommand,
-  SlashCommandActionReturn,
   CommandContext,
   MessageActionReturn,
+  OpenDialogActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
-import type { DiscoveredMCPPrompt } from '@qwen-code/qwen-code-core';
 import {
-  DiscoveredMCPTool,
-  getMCPDiscoveryState,
-  getMCPServerStatus,
-  MCPDiscoveryState,
-  MCPServerStatus,
   getErrorMessage,
   MCPOAuthTokenStorage,
   MCPOAuthProvider,
 } from '@qwen-code/qwen-code-core';
 import { appEvents, AppEvent } from '../../utils/events.js';
-import { MessageType, type HistoryItemMcpStatus } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 const authCommand: SlashCommand = {
@@ -189,183 +182,30 @@ const authCommand: SlashCommand = {
   },
 };
 
-const listCommand: SlashCommand = {
-  name: 'list',
+const manageCommand: SlashCommand = {
+  name: 'manage',
   get description() {
-    return t('List configured MCP servers and tools');
+    return t('Open MCP management dialog');
   },
   kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<void | MessageActionReturn> => {
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const toolRegistry = config.getToolRegistry();
-    if (!toolRegistry) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Could not retrieve tool registry.'),
-      };
-    }
-
-    const lowerCaseArgs = args.toLowerCase().split(/\s+/).filter(Boolean);
-
-    const hasDesc =
-      lowerCaseArgs.includes('desc') || lowerCaseArgs.includes('descriptions');
-    const hasNodesc =
-      lowerCaseArgs.includes('nodesc') ||
-      lowerCaseArgs.includes('nodescriptions');
-    const showSchema = lowerCaseArgs.includes('schema');
-
-    const showDescriptions = !hasNodesc && (hasDesc || showSchema);
-    const showTips = lowerCaseArgs.length === 0;
-
-    const mcpServers = config.getMcpServers() || {};
-    const serverNames = Object.keys(mcpServers);
-    const blockedMcpServers = config.getBlockedMcpServers() || [];
-
-    const connectingServers = serverNames.filter(
-      (name) => getMCPServerStatus(name) === MCPServerStatus.CONNECTING,
-    );
-    const discoveryState = getMCPDiscoveryState();
-    const discoveryInProgress =
-      discoveryState === MCPDiscoveryState.IN_PROGRESS ||
-      connectingServers.length > 0;
-
-    const allTools = toolRegistry.getAllTools();
-    const mcpTools = allTools.filter(
-      (tool) => tool instanceof DiscoveredMCPTool,
-    ) as DiscoveredMCPTool[];
-
-    const promptRegistry = await config.getPromptRegistry();
-    const mcpPrompts = promptRegistry
-      .getAllPrompts()
-      .filter(
-        (prompt) =>
-          'serverName' in prompt &&
-          serverNames.includes(prompt.serverName as string),
-      ) as DiscoveredMCPPrompt[];
-
-    const authStatus: HistoryItemMcpStatus['authStatus'] = {};
-    const tokenStorage = new MCPOAuthTokenStorage();
-    for (const serverName of serverNames) {
-      const server = mcpServers[serverName];
-      if (server.oauth?.enabled) {
-        const creds = await tokenStorage.getCredentials(serverName);
-        if (creds) {
-          if (creds.token.expiresAt && creds.token.expiresAt < Date.now()) {
-            authStatus[serverName] = 'expired';
-          } else {
-            authStatus[serverName] = 'authenticated';
-          }
-        } else {
-          authStatus[serverName] = 'unauthenticated';
-        }
-      } else {
-        authStatus[serverName] = 'not-configured';
-      }
-    }
-
-    const mcpStatusItem: HistoryItemMcpStatus = {
-      type: MessageType.MCP_STATUS,
-      servers: mcpServers,
-      tools: mcpTools.map((tool) => ({
-        serverName: tool.serverName,
-        name: tool.name,
-        description: tool.description,
-        schema: tool.schema,
-      })),
-      prompts: mcpPrompts.map((prompt) => ({
-        serverName: prompt.serverName as string,
-        name: prompt.name,
-        description: prompt.description,
-      })),
-      authStatus,
-      blockedServers: blockedMcpServers,
-      discoveryInProgress,
-      connectingServers,
-      showDescriptions,
-      showSchema,
-      showTips,
-    };
-
-    context.ui.addItem(mcpStatusItem, Date.now());
-  },
-};
-
-const refreshCommand: SlashCommand = {
-  name: 'refresh',
-  get description() {
-    return t('Restarts MCP servers.');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-  ): Promise<void | SlashCommandActionReturn> => {
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const toolRegistry = config.getToolRegistry();
-    if (!toolRegistry) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Could not retrieve tool registry.'),
-      };
-    }
-
-    context.ui.addItem(
-      {
-        type: 'info',
-        text: t('Restarting MCP servers...'),
-      },
-      Date.now(),
-    );
-
-    await toolRegistry.restartMcpServers();
-
-    // Update the client with the new tools
-    const geminiClient = config.getGeminiClient();
-    if (geminiClient) {
-      await geminiClient.setTools();
-    }
-
-    // Reload the slash commands to reflect the changes.
-    context.ui.reloadCommands();
-
-    return listCommand.action!(context, '');
-  },
+  action: async (): Promise<OpenDialogActionReturn> => ({
+    type: 'dialog',
+    dialog: 'mcp',
+  }),
 };
 
 export const mcpCommand: SlashCommand = {
   name: 'mcp',
   get description() {
     return t(
-      'list configured MCP servers and tools, or authenticate with OAuth-enabled servers',
+      'Open MCP management dialog, or authenticate with OAuth-enabled servers',
     );
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [listCommand, authCommand, refreshCommand],
-  // Default action when no subcommand is provided
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<void | SlashCommandActionReturn> =>
-    // If no subcommand, run the list command
-    listCommand.action!(context, args),
+  subCommands: [manageCommand, authCommand],
+  // Default action when no subcommand is provided - open dialog
+  action: async (): Promise<OpenDialogActionReturn> => ({
+    type: 'dialog',
+    dialog: 'mcp',
+  }),
 };

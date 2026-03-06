@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Part,
-  PartListUnion,
-  GenerateContentResponse,
-  FunctionCall,
-  FunctionDeclaration,
+import {
   FinishReason,
-  GenerateContentResponseUsageMetadata,
+  type Part,
+  type PartListUnion,
+  type GenerateContentResponse,
+  type FunctionCall,
+  type FunctionDeclaration,
+  type GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import type {
   ToolCallConfirmationDetails,
@@ -64,6 +64,7 @@ export enum GeminiEventType {
   LoopDetected = 'loop_detected',
   Citation = 'citation',
   Retry = 'retry',
+  HookSystemMessage = 'hook_system_message',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -98,6 +99,8 @@ export interface ToolCallRequestInfo {
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;
+  /** Set to true when the LLM response was truncated due to max_tokens. */
+  wasOutputTruncated?: boolean;
 }
 
 export interface ToolCallResponseInfo {
@@ -200,6 +203,11 @@ export type ServerGeminiCitationEvent = {
   value: string;
 };
 
+export type ServerGeminiHookSystemMessageEvent = {
+  type: GeminiEventType.HookSystemMessage;
+  value: string;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
   | ServerGeminiChatCompressedEvent
@@ -207,6 +215,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiContentEvent
   | ServerGeminiErrorEvent
   | ServerGeminiFinishedEvent
+  | ServerGeminiHookSystemMessageEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiThoughtEvent
@@ -306,6 +315,14 @@ export class Turn {
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
+          // Mark pending tool calls so downstream can distinguish
+          // truncation from real parameter errors.
+          if (finishReason === FinishReason.MAX_TOKENS) {
+            for (const tc of this.pendingToolCalls) {
+              tc.wasOutputTruncated = true;
+            }
+          }
+
           if (this.pendingCitations.size > 0) {
             yield {
               type: GeminiEventType.Citation,

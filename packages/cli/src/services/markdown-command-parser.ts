@@ -5,7 +5,10 @@
  */
 
 import { z } from 'zod';
-import { parse as parseYaml } from '@qwen-code/qwen-code-core';
+import {
+  parse as parseYaml,
+  normalizeContent,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Defines the Zod schema for a Markdown command definition file.
@@ -31,19 +34,21 @@ export type MarkdownCommandDef = z.infer<typeof MarkdownCommandDefSchema>;
  * @returns Parsed command definition with frontmatter and prompt
  */
 export function parseMarkdownCommand(content: string): MarkdownCommandDef {
+  const normalizedContent = normalizeContent(content);
+
   // Match YAML frontmatter pattern: ---\n...\n---\n
-  // Allow empty frontmatter: ---\n---\n  // Use (?:[\s\S]*?) to make the frontmatter content optional
-  const frontmatterRegex = /^---\n([\s\S]*?)---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
+  // Allow empty frontmatter: ---\n---\n
+  const frontmatterRegex = /^---\n(?:([\s\S]*?)\n)?---(?:\n|$)([\s\S]*)$/;
+  const match = normalizedContent.match(frontmatterRegex);
 
   if (!match) {
     // No frontmatter, entire content is the prompt
     return {
-      prompt: content.trim(),
+      prompt: normalizedContent.trim(),
     };
   }
 
-  const [, frontmatterYaml, body] = match;
+  const [, frontmatterYaml = '', body] = match;
 
   // Parse YAML frontmatter if not empty
   let frontmatter: Record<string, unknown> | undefined;

@@ -20,6 +20,7 @@ import { SkillError, SkillErrorCode } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 
@@ -333,7 +334,7 @@ export class SkillManager {
     level: SkillLevel,
   ): SkillConfig {
     try {
-      const normalizedContent = normalizeSkillFileContent(content);
+      const normalizedContent = normalizeContent(content);
 
       // Split frontmatter and content
       const frontmatterRegex = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/;
@@ -648,14 +649,4 @@ export class SkillManager {
       );
     }
   }
-}
-
-function normalizeSkillFileContent(content: string): string {
-  // Strip UTF-8 BOM to ensure frontmatter starts at the first character.
-  let normalized = content.replace(/^\uFEFF/, '');
-
-  // Normalize line endings so skills authored on Windows (CRLF) parse correctly.
-  normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-
-  return normalized;
 }
