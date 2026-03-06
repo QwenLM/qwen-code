@@ -11,6 +11,9 @@ import { ACP_ERROR_CODES } from '../errorCodes.js';
 
 const createFallback = (): FileSystemService => ({
   readTextFile: vi.fn(),
+  readTextFileWithInfo: vi
+    .fn()
+    .mockResolvedValue({ content: '', encoding: 'utf-8', bom: false }),
   writeTextFile: vi.fn(),
   detectFileBOM: vi.fn().mockResolvedValue(false),
   findFiles: vi.fn().mockReturnValue([]),

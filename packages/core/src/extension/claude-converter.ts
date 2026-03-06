@@ -387,15 +387,15 @@ export async function convertClaudePluginPackage(
   const strict = marketplacePlugin.strict ?? false;
   let mergedConfig: ClaudePluginConfig;
 
-  if (strict) {
-    const pluginJsonPath = path.join(
-      pluginSource,
-      '.claude-plugin',
-      'plugin.json',
-    );
-    if (!fs.existsSync(pluginJsonPath)) {
-      throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
-    }
+  const pluginJsonPath = path.join(
+    pluginSource,
+    '.claude-plugin',
+    'plugin.json',
+  );
+  if (strict && !fs.existsSync(pluginJsonPath)) {
+    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+  }
+  if (fs.existsSync(pluginJsonPath)) {
     const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
     const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
     mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
@@ -551,6 +551,18 @@ async function collectResources(
       for (const file of files) {
         const srcFile = path.join(resolvedPath, file);
         const destFile = path.join(finalDestDir, file);
+
+        // Check if the source is a regular file (skip sockets, FIFOs, directories behind symlinks, etc.)
+        try {
+          const fileStat = fs.statSync(srcFile);
+          if (!fileStat.isFile()) {
+            debugLogger.debug(`Skipping non-regular file: ${srcFile}`);
+            continue;
+          }
+        } catch {
+          debugLogger.debug(`Failed to stat file, skipping: ${srcFile}`);
+          continue;
+        }
 
         // Ensure parent directory exists
         const destFileDir = path.dirname(destFile);

@@ -8,7 +8,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash } from '../utils/paths.js';
+import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -161,7 +161,7 @@ export class Storage {
   }
 
   getProjectDir(): string {
-    const projectId = this.sanitizeCwd(this.getProjectRoot());
+    const projectId = sanitizeCwd(this.getProjectRoot());
     const projectsDir = path.join(
       Storage.getRuntimeBaseDir(),
       PROJECT_DIR_NAME,
@@ -221,11 +221,5 @@ export class Storage {
 
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
-  }
-
-  private sanitizeCwd(cwd: string): string {
-    // On Windows, normalize to lowercase for case-insensitive matching
-    const normalizedCwd = os.platform() === 'win32' ? cwd.toLowerCase() : cwd;
-    return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
   }
 }
