@@ -74,6 +74,7 @@ export * from './utils/paths.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/errors.js';
 export * from './utils/debugLogger.js';
+export * from './utils/symlink.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/gitIgnoreParser.js';
@@ -287,6 +288,7 @@ export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/jsonl-utils.js';
+export * from './utils/symlink.js';
 
 // ============================================================================
 // OAuth & Authentication

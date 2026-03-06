@@ -360,7 +360,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
-    private readonly annotations?: McpToolAnnotations,
+    readonly annotations?: McpToolAnnotations,
   ) {
     super(
       nameOverride ??

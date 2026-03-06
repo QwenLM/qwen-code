@@ -38,7 +38,7 @@ function getSandboxCommand(
 
   // note environment variable takes precedence over argument (from command line or settings)
   const environmentConfiguredSandbox =
-    process.env['GEMINI_SANDBOX']?.toLowerCase().trim() ?? '';
+    process.env['QWEN_SANDBOX']?.toLowerCase().trim() ?? '';
   sandbox =
     environmentConfiguredSandbox?.length > 0
       ? environmentConfiguredSandbox
@@ -63,7 +63,7 @@ function getSandboxCommand(
       return sandbox;
     }
     throw new FatalSandboxError(
-      `Missing sandbox command '${sandbox}' (from GEMINI_SANDBOX)`,
+      `Missing sandbox command '${sandbox}' (from QWEN_SANDBOX)`,
     );
   }
 
@@ -80,8 +80,8 @@ function getSandboxCommand(
   // throw an error if user requested sandbox but no command was found
   if (sandbox === true) {
     throw new FatalSandboxError(
-      'GEMINI_SANDBOX is true but failed to determine command for sandbox; ' +
-        'install docker or podman or specify command in GEMINI_SANDBOX',
+      'QWEN_SANDBOX is true but failed to determine command for sandbox; ' +
+        'install docker or podman or specify command in QWEN_SANDBOX',
     );
   }
 
@@ -98,7 +98,7 @@ export async function loadSandboxConfig(
   const packageJson = await getPackageJson();
   const image =
     argv.sandboxImage ??
-    process.env['GEMINI_SANDBOX_IMAGE'] ??
+    process.env['QWEN_SANDBOX_IMAGE'] ??
     packageJson?.config?.sandboxImageUri;
 
   return command && image ? { command, image } : undefined;

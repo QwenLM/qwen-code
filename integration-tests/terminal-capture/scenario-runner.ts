@@ -42,8 +42,6 @@ export interface FlowStep {
     intervalMs: number;
     /** Maximum number of captures */
     count: number;
-    /** Generate animated GIF from captured frames (default: true) */
-    gif?: boolean;
   };
 }
 
@@ -66,6 +64,8 @@ export interface ScenarioConfig {
   };
   /** Screenshot output directory (relative to config file) */
   outputDir?: string;
+  /** Generate animated GIF from all screenshots in order (default: true) */
+  gif?: boolean;
 }
 
 // ─────────────────────────────────────────────
@@ -195,12 +195,7 @@ export async function runScenario(
 
           // Streaming capture: capture multiple screenshots during execution
           if (step.streaming) {
-            const {
-              delayMs = 0,
-              intervalMs,
-              count,
-              gif = true,
-            } = step.streaming;
+            const { delayMs = 0, intervalMs, count } = step.streaming;
             console.log(
               `         🎬 streaming capture: ${count} shots @ ${intervalMs}ms intervals${delayMs ? ` (delay ${delayMs}ms)` : ''}`,
             );
@@ -247,25 +242,7 @@ export async function runScenario(
 
             const resultName = step.capture ?? `${pad(seq)}-02.png`;
             console.log(`  ${label} 📸 result: ${resultName}`);
-            const resultShot = await terminal.capture(resultName);
-            screenshots.push(resultShot);
-
-            // Generate animated GIF: input -> streaming frames -> result
-            if (gif && streamingShots.length > 0) {
-              // Include input and result in the GIF for complete story
-              const inputShot = screenshots.find((s) =>
-                s.endsWith(`${pad(seq)}-01.png`),
-              );
-              const gifFrames = [
-                ...(inputShot ? [inputShot] : []),
-                ...streamingShots,
-                resultShot,
-              ];
-              const gifPath = generateGif(gifFrames, outputDir);
-              if (gifPath) {
-                console.log(`         🎞️  GIF: ${gifPath}`);
-              }
-            }
+            screenshots.push(await terminal.capture(resultName));
           } else {
             console.log(`         ⏳ waiting for output to settle...`);
             await terminal.idle(2000, 60000);
@@ -342,6 +319,19 @@ export async function runScenario(
       }
     }
 
+    // Generate animated GIF from all screenshots (excluding full-flow captures)
+    if (config.gif !== false) {
+      const gifFrames = screenshots.filter(
+        (s) => !s.endsWith('full-flow.png') && !s.includes('-full-'),
+      );
+      if (gifFrames.length > 0) {
+        const gifPath = generateGif(gifFrames, outputDir);
+        if (gifPath) {
+          console.log(`  🎞️  GIF: ${gifPath}`);
+        }
+      }
+    }
+
     const duration = Date.now() - startTime;
     console.log(
       `\n  ✅ ${config.name} — ${screenshots.length} screenshots, ${(duration / 1000).toFixed(1)}s`,
@@ -404,8 +394,8 @@ function resolveKey(key: string): string {
 function generateGif(frames: string[], outputDir: string): string | null {
   if (frames.length === 0) return null;
 
-  const FRAME_DURATION = 0.3; // 300ms per frame
-  const EDGE_DURATION = 1.0; // 600ms for first/last frame
+  const STREAMING_DURATION = 0.3; // 300ms for streaming frames
+  const STATIC_DURATION = 1.0; // 1s for non-streaming and edge frames
 
   const gifPath = join(outputDir, 'streaming.gif');
   const listFile = join(outputDir, 'frames.txt');
@@ -413,11 +403,9 @@ function generateGif(frames: string[], outputDir: string): string | null {
   try {
     const lines: string[] = [];
     for (let i = 0; i < frames.length; i++) {
-      const isEdge = i === 0 || i === frames.length - 1;
-      lines.push(
-        `file '${resolve(frames[i])}'`,
-        `duration ${isEdge ? EDGE_DURATION : FRAME_DURATION}`,
-      );
+      const isStreaming = frames[i].includes('-streaming-');
+      const duration = isStreaming ? STREAMING_DURATION : STATIC_DURATION;
+      lines.push(`file '${resolve(frames[i])}'`, `duration ${duration}`);
     }
     // Concat demuxer requires last frame repeated without duration
     lines.push(`file '${resolve(frames[frames.length - 1])}'`);

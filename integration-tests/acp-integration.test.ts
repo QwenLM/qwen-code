@@ -14,8 +14,8 @@ import { TestRig } from './test-helper.js';
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
-  process.env['GEMINI_SANDBOX'] &&
-  process.env['GEMINI_SANDBOX']!.toLowerCase() !== 'false';
+  process.env['QWEN_SANDBOX'] &&
+  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;

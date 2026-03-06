@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FileSystemService , FileReadResult } from '@qwen-code/qwen-code-core';
+import type {
+  FileSystemService,
+  FileReadResult,
+} from '@qwen-code/qwen-code-core';
 import type * as acp from '../acp.js';
 import { ACP_ERROR_CODES } from '../errorCodes.js';
 

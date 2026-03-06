@@ -34,13 +34,14 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { setNestedPropertySafe } from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
-const debugLogger = createDebugLogger('SETTINGS');
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
   V1_TO_V2_MIGRATION_MAP,
   V2_CONTAINER_KEYS,
 } from './migration/versions/v1-to-v2-shared.js';
 import { writeWithBackupSync } from '../utils/writeWithBackup.js';
+
+const debugLogger = createDebugLogger('SETTINGS');
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;
@@ -165,7 +166,7 @@ function getSettingsFileKeyWarnings(
     );
   }
 
-  // Unknown top-level keys.
+  // Unknown top-level keys — log silently to debug output.
   const schemaKeys = new Set(Object.keys(getSettingsSchema()));
   for (const key of Object.keys(settings)) {
     if (key === SETTINGS_VERSION_KEY) {
@@ -178,8 +179,8 @@ function getSettingsFileKeyWarnings(
       continue;
     }
 
-    warnings.push(
-      `Warning: Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
+    debugLogger.warn(
+      `Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
     );
   }
 

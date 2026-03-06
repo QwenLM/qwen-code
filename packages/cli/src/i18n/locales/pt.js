@@ -109,8 +109,8 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available Qwen Code tools. Usage: /tools [desc]':
+    'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -385,8 +385,10 @@ export default {
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
   'exit the cli': 'sair da cli',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    'listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Abrir diálogo de gerenciamento MCP ou autenticar com servidor habilitado para OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+    'Listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Adicionar diretórios ao workspace. Use vírgula para separar vários caminhos',
@@ -888,9 +890,102 @@ export default {
   'Do you want to proceed?': 'Você deseja prosseguir?',
   'Yes, allow once': 'Sim, permitir uma vez',
   'Allow always': 'Permitir sempre',
+  Yes: 'Sim',
   No: 'Não',
   'No (esc)': 'Não (esc)',
   'Yes, allow always for this session': 'Sim, permitir sempre para esta sessão',
+
+  // MCP Management - Core translations
+  'Manage MCP servers': 'Gerenciar servidores MCP',
+  'Server Detail': 'Detalhes do servidor',
+  'Disable Server': 'Desativar servidor',
+  Tools: 'Ferramentas',
+  'Tool Detail': 'Detalhes da ferramenta',
+  'MCP Management': 'Gerenciamento MCP',
+  'Loading...': 'Carregando...',
+  'Unknown step': 'Etapa desconhecida',
+  'Esc to back': 'Esc para voltar',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ navegar · Enter selecionar · Esc fechar',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ navegar · Enter selecionar · Esc voltar',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ navegar · Enter confirmar · Esc voltar',
+  'User Settings (global)': 'Configurações do usuário (global)',
+  'Workspace Settings (project-specific)':
+    'Configurações do workspace (específico do projeto)',
+  'Disable server:': 'Desativar servidor:',
+  'Select where to add the server to the exclude list:':
+    'Selecione onde adicionar o servidor à lista de exclusão:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter para confirmar, Esc para cancelar',
+  Disable: 'Desativar',
+  Enable: 'Ativar',
+  Reconnect: 'Reconectar',
+  'View tools': 'Ver ferramentas',
+  'Status:': 'Status:',
+  'Source:': 'Fonte:',
+  'Command:': 'Comando:',
+  'Working Directory:': 'Diretório de trabalho:',
+  'Capabilities:': 'Capacidades:',
+  'No server selected': 'Nenhum servidor selecionado',
+  '(disabled)': '(desativado)',
+  'Error:': 'Erro:',
+  Extension: 'Extensão',
+  tool: 'ferramenta',
+  tools: 'ferramentas',
+  connected: 'conectado',
+  connecting: 'conectando',
+  disconnected: 'desconectado',
+  error: 'erro',
+
+  // MCP Server List
+  'User MCPs': 'MCPs do usuário',
+  'Project MCPs': 'MCPs do projeto',
+  'Extension MCPs': 'MCPs de extensão',
+  server: 'servidor',
+  servers: 'servidores',
+  'Add MCP servers to your settings to get started.':
+    'Adicione servidores MCP às suas configurações para começar.',
+  'Run qwen --debug to see error logs':
+    'Execute qwen --debug para ver os logs de erro',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Nenhuma ferramenta disponível para este servidor.',
+  destructive: 'destrutivo',
+  'read-only': 'somente leitura',
+  'open-world': 'mundo aberto',
+  idempotent: 'idempotente',
+  'Tools for {{name}}': 'Ferramentas para {{name}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'obrigatório',
+  Type: 'Tipo',
+  Enum: 'Enumeração',
+  Parameters: 'Parâmetros',
+  'No tool selected': 'Nenhuma ferramenta selecionada',
+  Annotations: 'Anotações',
+  Title: 'Título',
+  'Read Only': 'Somente leitura',
+  Destructive: 'Destrutivo',
+  Idempotent: 'Idempotente',
+  'Open World': 'Mundo aberto',
+  Server: 'Servidor',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ferramentas inválidas',
+  invalid: 'inválido',
+  'invalid: {{reason}}': 'inválido: {{reason}}',
+  'missing name': 'nome ausente',
+  'missing description': 'descrição ausente',
+  '(unnamed)': '(sem nome)',
+  'Warning: This tool cannot be called by the LLM':
+    'Aviso: Esta ferramenta não pode ser chamada pelo LLM',
+  Reason: 'Motivo',
+  'Tools must have both name and description to be used by the LLM.':
+    'As ferramentas devem ter tanto nome quanto descrição para serem usadas pelo LLM.',
   'Modify in progress:': 'Modificação em progresso:',
   'Save and close external editor to continue':
     'Salve e feche o editor externo para continuar',
@@ -1451,6 +1546,10 @@ export default {
     'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
+  '{{region}} configuration updated successfully.':
+    'Configuração do {{region}} atualizada com sucesso.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Dica: Use /model para alternar entre os modelos disponíveis do Coding Plan.',
 };

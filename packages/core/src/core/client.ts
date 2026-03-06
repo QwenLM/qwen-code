@@ -541,14 +541,6 @@ export class GeminiClient {
 
     const turn = new Turn(this.getChat(), prompt_id);
 
-    if (!this.config.getSkipLoopDetection()) {
-      const loopDetected = await this.loopDetector.turnStarted(signal);
-      if (loopDetected) {
-        yield { type: GeminiEventType.LoopDetected };
-        return turn;
-      }
-    }
-
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (!options?.isContinuation) {

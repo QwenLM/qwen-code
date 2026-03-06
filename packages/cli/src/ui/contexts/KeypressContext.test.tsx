@@ -1369,6 +1369,105 @@ describe('KeypressContext - Kitty Protocol', () => {
     });
   });
 
+  describe('Kitty keypad private-use keys', () => {
+    it.each([
+      { keyCode: 57399, digit: '0' },
+      { keyCode: 57400, digit: '1' },
+      { keyCode: 57401, digit: '2' },
+      { keyCode: 57402, digit: '3' },
+      { keyCode: 57403, digit: '4' },
+      { keyCode: 57404, digit: '5' },
+      { keyCode: 57405, digit: '6' },
+      { keyCode: 57406, digit: '7' },
+      { keyCode: 57407, digit: '8' },
+      { keyCode: 57408, digit: '9' },
+    ])(
+      'parses kitty keypad digit keyCode $keyCode as "$digit"',
+      ({ keyCode, digit }) => {
+        const keyHandler = vi.fn();
+        const { result } = renderHook(() => useKeypressContext(), { wrapper });
+        act(() => result.current.subscribe(keyHandler));
+
+        act(() => stdin.sendKittySequence(`\x1b[${keyCode}u`));
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: digit,
+            sequence: digit,
+            kittyProtocol: true,
+          }),
+        );
+      },
+    );
+
+    it.each([
+      { keyCode: 57409, char: '.' },
+      { keyCode: 57410, char: '/' },
+      { keyCode: 57411, char: '*' },
+      { keyCode: 57412, char: '-' },
+      { keyCode: 57413, char: '+' },
+      { keyCode: 57415, char: '=' },
+      { keyCode: 57416, char: ',' },
+    ])(
+      'parses kitty keypad printable keyCode $keyCode as "$char"',
+      ({ keyCode, char }) => {
+        const keyHandler = vi.fn();
+        const { result } = renderHook(() => useKeypressContext(), { wrapper });
+        act(() => result.current.subscribe(keyHandler));
+
+        act(() => stdin.sendKittySequence(`\x1b[${keyCode}u`));
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: char,
+            sequence: char,
+            kittyProtocol: true,
+          }),
+        );
+      },
+    );
+
+    it.each([
+      { keyCode: 57417, name: 'left' },
+      { keyCode: 57418, name: 'right' },
+      { keyCode: 57419, name: 'up' },
+      { keyCode: 57420, name: 'down' },
+      { keyCode: 57421, name: 'pageup' },
+      { keyCode: 57422, name: 'pagedown' },
+      { keyCode: 57423, name: 'home' },
+      { keyCode: 57424, name: 'end' },
+      { keyCode: 57425, name: 'insert' },
+      { keyCode: 57426, name: 'delete' },
+    ])(
+      'parses kitty keypad functional keyCode $keyCode as $name',
+      ({ keyCode, name }) => {
+        const keyHandler = vi.fn();
+        const { result } = renderHook(() => useKeypressContext(), { wrapper });
+        act(() => result.current.subscribe(keyHandler));
+
+        act(() => stdin.sendKittySequence(`\x1b[${keyCode};5u`));
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name,
+            ctrl: true,
+            kittyProtocol: true,
+          }),
+        );
+      },
+    );
+
+    it('does not emit a placeholder for unmapped private-use keyCodes', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), { wrapper });
+      act(() => result.current.subscribe(keyHandler));
+
+      act(() => stdin.sendKittySequence(`\x1b[57398u`));
+
+      expect(keyHandler).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Shift+Tab forms', () => {
     it.each([
       { sequence: `\x1b[Z`, description: 'legacy reverse Tab' },
