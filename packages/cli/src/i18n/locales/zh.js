@@ -1419,6 +1419,16 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'API-KEY': 'API-KEY',
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    '粘贴您的百炼 Coding Plan API Key，即可完成设置！',
+  Custom: '自定义',
+  'More instructions about configuring `modelProviders` manually.':
+    '关于手动配置 `modelProviders` 的更多说明。',
+  'Select API-KEY configuration mode:': '选择 API-KEY 配置模式：',
+  '(Press Escape to go back)': '(按 Escape 键返回)',
+  '(Press Enter to submit, Escape to cancel)': '(按 Enter 提交，Escape 取消)',
   'Select Region for Coding Plan': '选择 Coding Plan 区域',
   'Choose based on where your account is registered':
     '请根据您的账号注册地区选择',
@@ -1436,4 +1446,29 @@ export default {
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json。',
   'Tip: Use /model to switch between available Coding Plan models.':
     '提示：使用 /model 切换可用的 Coding Plan 模型。',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):': '请回答以下问题：',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    '无法在非交互模式下询问用户问题。请在交互模式下运行以使用此工具。',
+  'User declined to answer the questions.': '用户拒绝回答问题。',
+  'User has provided the following answers:': '用户提供了以下答案：',
+  'Failed to process user answers:': '处理用户答案失败：',
+  'Type something...': '输入内容...',
+  Submit: '提交',
+  'Submit answers': '提交答案',
+  Cancel: '取消',
+  'Your answers:': '您的答案：',
+  '(not answered)': '(未回答)',
+  'Ready to submit your answers?': '准备好提交您的答案了吗？',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: 导航 | ←/→: 切换标签页 | Enter: 选择',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: 导航 | ←/→: 切换标签页 | Space/Enter: 切换 | Esc: 取消',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: 导航 | Space/Enter: 切换 | Esc: 取消',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: 导航 | Enter: 选择 | Esc: 取消',
 };

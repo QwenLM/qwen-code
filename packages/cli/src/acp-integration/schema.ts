@@ -378,6 +378,7 @@ export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
 
 export const requestPermissionResponseSchema = z.object({
   outcome: requestPermissionOutcomeSchema,
+  answers: z.record(z.string()).optional(),
 });
 
 export const fileSystemCapabilitySchema = z.object({

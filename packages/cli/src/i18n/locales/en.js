@@ -1595,6 +1595,16 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    "Paste your api key of Bailian Coding Plan and you're all set!",
+  Custom: 'Custom',
+  'More instructions about configuring `modelProviders` manually.':
+    'More instructions about configuring `modelProviders` manually.',
+  'Select API-KEY configuration mode:': 'Select API-KEY configuration mode:',
+  '(Press Escape to go back)': '(Press Escape to go back)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Press Enter to submit, Escape to cancel)',
   'Select Region for Coding Plan': 'Select Region for Coding Plan',
   'Choose based on where your account is registered':
     'Choose based on where your account is registered',
@@ -1613,4 +1623,32 @@ export default {
     'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Tip: Use /model to switch between available Coding Plan models.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Please answer the following question(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.',
+  'User declined to answer the questions.':
+    'User declined to answer the questions.',
+  'User has provided the following answers:':
+    'User has provided the following answers:',
+  'Failed to process user answers:': 'Failed to process user answers:',
+  'Type something...': 'Type something...',
+  Submit: 'Submit',
+  'Submit answers': 'Submit answers',
+  Cancel: 'Cancel',
+  'Your answers:': 'Your answers:',
+  '(not answered)': '(not answered)',
+  'Ready to submit your answers?': 'Ready to submit your answers?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigate | Enter: Select | Esc: Cancel',
 };

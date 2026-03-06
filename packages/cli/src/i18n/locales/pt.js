@@ -1534,6 +1534,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Cole sua chave de API do Bailian Coding Plan e pronto!',
+  Custom: 'Personalizado',
+  'More instructions about configuring `modelProviders` manually.':
+    'Mais instruções sobre como configurar `modelProviders` manualmente.',
+  'Select API-KEY configuration mode:':
+    'Selecione o modo de configuração da API-KEY:',
+  '(Press Escape to go back)': '(Pressione Escape para voltar)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Pressione Enter para enviar, Escape para cancelar)',
+  'More instructions please check:': 'Mais instruções, consulte:',
   'Select Region for Coding Plan': 'Selecionar região do Coding Plan',
   'Choose based on where your account is registered':
     'Escolha com base em onde sua conta está registrada',
@@ -1552,4 +1564,33 @@ export default {
     'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Dica: Use /model para alternar entre os modelos disponíveis do Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Por favor, responda à(s) seguinte(s) pergunta(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Não é possível fazer perguntas ao usuário no modo não interativo. Por favor, execute no modo interativo para usar esta ferramenta.',
+  'User declined to answer the questions.':
+    'O usuário recusou responder às perguntas.',
+  'User has provided the following answers:':
+    'O usuário forneceu as seguintes respostas:',
+  'Failed to process user answers:':
+    'Falha ao processar as respostas do usuário:',
+  'Type something...': 'Digite algo...',
+  Submit: 'Enviar',
+  'Submit answers': 'Enviar respostas',
+  Cancel: 'Cancelar',
+  'Your answers:': 'Suas respostas:',
+  '(not answered)': '(não respondido)',
+  'Ready to submit your answers?': 'Pronto para enviar suas respostas?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navegar | ←/→: Alternar abas | Enter: Selecionar',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | ←/→: Alternar abas | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
 };

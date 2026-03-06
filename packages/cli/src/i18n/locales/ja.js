@@ -1046,6 +1046,17 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Bailian Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
+  Custom: 'カスタム',
+  'More instructions about configuring `modelProviders` manually.':
+    '`modelProviders`を手動で設定する方法の詳細はこちら。',
+  'Select API-KEY configuration mode:': 'API-KEY設定モードを選択してください：',
+  '(Press Escape to go back)': '(Escapeキーで戻る)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enterで送信、Escapeでキャンセル)',
+  'More instructions please check:': '詳細な手順はこちらをご確認ください：',
   'Select Region for Coding Plan': 'Coding Planのリージョンを選択',
   'Choose based on where your account is registered':
     'アカウントの登録先に応じて選択してください',
@@ -1064,4 +1075,31 @@ export default {
     '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました。',
   'Tip: Use /model to switch between available Coding Plan models.':
     'ヒント: /model で利用可能な Coding Plan モデルを切り替えられます。',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):': '以下の質問に答えてください：',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    '非対話モードではユーザーに質問できません。このツールを使用するには対話モードで実行してください。',
+  'User declined to answer the questions.':
+    'ユーザーは質問への回答を拒否しました。',
+  'User has provided the following answers:':
+    'ユーザーは以下の回答を提供しました：',
+  'Failed to process user answers:': 'ユーザー回答の処理に失敗しました：',
+  'Type something...': '何か入力...',
+  Submit: '送信',
+  'Submit answers': '回答を送信',
+  Cancel: 'キャンセル',
+  'Your answers:': 'あなたの回答：',
+  '(not answered)': '(未回答)',
+  'Ready to submit your answers?': '回答を送信しますか？',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: ナビゲート | ←/→: タブ切り替え | Enter: 選択',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: ナビゲート | ←/→: タブ切り替え | Space/Enter: 切り替え | Esc: キャンセル',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: ナビゲート | Space/Enter: 切り替え | Esc: キャンセル',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: ナビゲート | Enter: 選択 | Esc: キャンセル',
 };

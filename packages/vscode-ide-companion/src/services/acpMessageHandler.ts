@@ -18,6 +18,7 @@ import type {
   AcpSessionUpdate,
   AcpPermissionRequest,
   AuthenticateUpdateNotification,
+  Question,
 } from '../types/acpTypes.js';
 import { CLIENT_METHODS } from '../constants/acpSchema.js';
 import type {
@@ -220,27 +221,71 @@ export class AcpMessageHandler {
     callbacks: AcpConnectionCallbacks,
   ): Promise<{
     outcome: { outcome: string; optionId: string };
+    answers?: Record<string, string>;
   }> {
     try {
-      const response = await callbacks.onPermissionRequest(params);
-      const optionId = response?.optionId;
-      console.log('[ACP] Permission request:', optionId);
-      // Handle cancel, deny, or allow
-      let outcome: string;
-      if (optionId && (optionId.includes('reject') || optionId === 'cancel')) {
-        outcome = 'cancelled';
-      } else {
-        outcome = 'selected';
-      }
-      console.log('[ACP] Permission outcome:', outcome);
+      // Check if this is an ask_user_question request
+      const isInteract =
+        params.toolCall?.toolCallId?.includes('ask_user_question');
 
-      return {
-        outcome: {
-          outcome,
-          // optionId: optionId === 'cancel' ? 'cancel' : optionId,
-          optionId,
-        },
-      };
+      if (isInteract) {
+        // Handle ask_user_question separately
+        const questions: Question[] =
+          params.toolCall?.rawInput?.questions || [];
+        const metadata = params.toolCall?.rawInput?.metadata;
+
+        const response = await callbacks.onAskUserQuestion({
+          sessionId: params.sessionId,
+          questions,
+          metadata,
+        });
+
+        const optionId = response?.optionId;
+        const answers = response?.answers;
+        console.log('[ACP] AskUserQuestion response:', optionId);
+
+        let outcome: string;
+        if (
+          optionId &&
+          (optionId.includes('reject') || optionId === 'cancel')
+        ) {
+          outcome = 'cancelled';
+        } else {
+          outcome = 'selected';
+        }
+        console.log('[ACP] AskUserQuestion outcome:', outcome);
+
+        return {
+          outcome: {
+            outcome,
+            optionId,
+          },
+          answers,
+        };
+      } else {
+        // Handle regular permission request
+        const response = await callbacks.onPermissionRequest(params);
+        const optionId = response?.optionId;
+        console.log('[ACP] Permission request:', optionId);
+        // Handle cancel, deny, or allow
+        let outcome: string;
+        if (
+          optionId &&
+          (optionId.includes('reject') || optionId === 'cancel')
+        ) {
+          outcome = 'cancelled';
+        } else {
+          outcome = 'selected';
+        }
+        console.log('[ACP] Permission outcome:', outcome);
+
+        return {
+          outcome: {
+            outcome,
+            optionId,
+          },
+        };
+      }
     } catch (_error) {
       return {
         outcome: {
