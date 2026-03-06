@@ -31,7 +31,7 @@ const homeDirectoryCheck: WarningCheck = {
       ]);
 
       if (workspaceRealPath === homeRealPath) {
-        return 'You are running Qwen Code in your home directory. It is recommended to run in a project-specific directory.';
+        return `You are running Qwen Code in your home directory (${homeRealPath}). It is recommended to run in a project-specific directory.`;
       }
       return null;
     } catch (_err: unknown) {
