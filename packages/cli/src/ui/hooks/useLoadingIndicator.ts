@@ -12,6 +12,7 @@ import { useState, useEffect, useRef } from 'react'; // Added useRef
 export const useLoadingIndicator = (
   streamingState: StreamingState,
   customWittyPhrases?: string[],
+  loadingPhraseSet: 'default' | 'minimal' = 'default',
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
@@ -24,6 +25,7 @@ export const useLoadingIndicator = (
     isPhraseCyclingActive,
     isWaiting,
     customWittyPhrases,
+    loadingPhraseSet,
   );
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);
