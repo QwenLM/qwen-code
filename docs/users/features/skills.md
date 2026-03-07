@@ -52,10 +52,12 @@ Use personal Skills for:
 
 ### Project Skills
 
-Project Skills are shared with your team. Store them in `.qwen/skills/` within your project:
+Project Skills are shared with your team. Store them in `.qwen/skills/` within your project. Qwen Code also discovers project skills from `.agents/skills/` for compatibility with the broader agents ecosystem:
 
 ```bash
 mkdir -p .qwen/skills/my-skill-name
+# or
+mkdir -p .agents/skills/my-skill-name
 ```
 
 Use project Skills for:
@@ -129,7 +131,7 @@ python scripts/helper.py input.txt
 Qwen Code discovers Skills from:
 
 - Personal Skills: `~/.qwen/skills/`
-- Project Skills: `.qwen/skills/`
+- Project Skills: `.qwen/skills/` or `.agents/skills/`
 - Extension Skills: Skills provided by installed extensions
 
 ### Extension Skills
@@ -154,6 +156,7 @@ ls ~/.qwen/skills/
 
 # List project Skills (if in a project directory)
 ls .qwen/skills/
+ls .agents/skills/
 
 # View a specific Skill's content
 cat ~/.qwen/skills/my-skill/SKILL.md
@@ -192,7 +195,7 @@ description: Extract text and tables from PDF files, fill forms, merge documents
 ### Verify file path
 
 - Personal Skills: `~/.qwen/skills/<skill-name>/SKILL.md`
-- Project Skills: `.qwen/skills/<skill-name>/SKILL.md`
+- Project Skills: `.qwen/skills/<skill-name>/SKILL.md` or `.agents/skills/<skill-name>/SKILL.md`
 
 ```bash
 # Personal
@@ -200,6 +203,7 @@ ls ~/.qwen/skills/my-skill/SKILL.md
 
 # Project
 ls .qwen/skills/my-skill/SKILL.md
+ls .agents/skills/my-skill/SKILL.md
 ```
 
 ### Check YAML syntax
@@ -228,12 +232,14 @@ qwen --debug
 
 You can share Skills through project repositories:
 
-1. Add the Skill under `.qwen/skills/`
+1. Add the Skill under `.qwen/skills/` or `.agents/skills/`
 2. Commit and push
 3. Teammates pull the changes
 
 ```bash
 git add .qwen/skills/
+# or
+git add .agents/skills/
 git commit -m "Add team Skill for PDF processing"
 git push
 ```
@@ -248,6 +254,7 @@ code ~/.qwen/skills/my-skill/SKILL.md
 
 # Project Skill
 code .qwen/skills/my-skill/SKILL.md
+code .agents/skills/my-skill/SKILL.md
 ```
 
 Changes take effect the next time you start Qwen Code. If Qwen Code is already running, restart it to load the updates.
@@ -262,6 +269,7 @@ rm -rf ~/.qwen/skills/my-skill
 
 # Project
 rm -rf .qwen/skills/my-skill
+rm -rf .agents/skills/my-skill
 git commit -m "Remove unused Skill"
 ```
 
