@@ -83,7 +83,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
@@ -317,7 +317,9 @@ export default {
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP管理ダイアログを開く、またはOAuth対応サーバーで認証',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '設定済みのMCPサーバーとツールを一覧表示、またはOAuth対応サーバーで認証',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -622,9 +624,101 @@ export default {
   'Do you want to proceed?': '続行しますか?',
   'Yes, allow once': 'はい(今回のみ許可)',
   'Allow always': '常に許可する',
+  Yes: 'はい',
   No: 'いいえ',
   'No (esc)': 'いいえ (Esc)',
   'Yes, allow always for this session': 'はい、このセッションで常に許可',
+
+  // MCP Management - Core translations
+  'Manage MCP servers': 'MCPサーバーを管理',
+  'Server Detail': 'サーバー詳細',
+  'Disable Server': 'サーバーを無効化',
+  Tools: 'ツール',
+  'Tool Detail': 'ツール詳細',
+  'MCP Management': 'MCP管理',
+  'Loading...': '読み込み中...',
+  'Unknown step': '不明なステップ',
+  'Esc to back': 'Esc 戻る',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ ナビゲート · Enter 選択 · Esc 閉じる',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ ナビゲート · Enter 選択 · Esc 戻る',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ ナビゲート · Enter 確認 · Esc 戻る',
+  'User Settings (global)': 'ユーザー設定（グローバル）',
+  'Workspace Settings (project-specific)':
+    'ワークスペース設定（プロジェクト固有）',
+  'Disable server:': 'サーバーを無効化:',
+  'Select where to add the server to the exclude list:':
+    'サーバーを除外リストに追加する場所を選択してください:',
+  'Press Enter to confirm, Esc to cancel': 'Enter で確認、Esc でキャンセル',
+  Disable: '無効化',
+  Enable: '有効化',
+  Reconnect: '再接続',
+  'View tools': 'ツールを表示',
+  'Status:': 'ステータス:',
+  'Source:': 'ソース:',
+  'Command:': 'コマンド:',
+  'Working Directory:': '作業ディレクトリ:',
+  'Capabilities:': '機能:',
+  'No server selected': 'サーバーが選択されていません',
+  '(disabled)': '(無効)',
+  'Error:': 'エラー:',
+  Extension: '拡張機能',
+  tool: 'ツール',
+  tools: 'ツール',
+  connected: '接続済み',
+  connecting: '接続中',
+  disconnected: '切断済み',
+  error: 'エラー',
+
+  // MCP Server List
+  'User MCPs': 'ユーザーMCP',
+  'Project MCPs': 'プロジェクトMCP',
+  'Extension MCPs': '拡張機能MCP',
+  server: 'サーバー',
+  servers: 'サーバー',
+  'Add MCP servers to your settings to get started.':
+    '設定にMCPサーバーを追加して開始してください。',
+  'Run qwen --debug to see error logs':
+    'qwen --debug を実行してエラーログを確認してください',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'このサーバーには使用可能なツールがありません。',
+  destructive: '破壊的',
+  'read-only': '読み取り専用',
+  'open-world': 'オープンワールド',
+  idempotent: '冪等',
+  'Tools for {{name}}': '{{name}} のツール',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: '必須',
+  Type: '型',
+  Enum: '列挙',
+  Parameters: 'パラメータ',
+  'No tool selected': 'ツールが選択されていません',
+  Annotations: '注釈',
+  Title: 'タイトル',
+  'Read Only': '読み取り専用',
+  Destructive: '破壊的',
+  Idempotent: '冪等',
+  'Open World': 'オープンワールド',
+  Server: 'サーバー',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 個の無効なツール',
+  invalid: '無効',
+  'invalid: {{reason}}': '無効: {{reason}}',
+  'missing name': '名前なし',
+  'missing description': '説明なし',
+  '(unnamed)': '(名前なし)',
+  'Warning: This tool cannot be called by the LLM':
+    '警告: このツールはLLMによって呼び出すことができません',
+  Reason: '理由',
+  'Tools must have both name and description to be used by the LLM.':
+    'ツールはLLMによって使用されるには名前と説明の両方が必要です。',
   'Modify in progress:': '変更中:',
   'Save and close external editor to continue':
     '続行するには外部エディタを保存して閉じてください',
@@ -964,6 +1058,10 @@ export default {
     '{{region}} の新しいモデル設定が利用可能です。今すぐ更新しますか？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+  '{{region}} configuration updated successfully.':
+    '{{region}} の設定が正常に更新されました。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました。',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'ヒント: /model で利用可能な Coding Plan モデルを切り替えられます。',
 };

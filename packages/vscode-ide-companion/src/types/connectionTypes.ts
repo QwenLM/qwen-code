@@ -6,10 +6,10 @@
 
 import type { ChildProcess } from 'child_process';
 import type {
-  AcpSessionUpdate,
-  AcpPermissionRequest,
-  AuthenticateUpdateNotification,
-} from './acpTypes.js';
+  RequestPermissionRequest,
+  SessionNotification,
+} from '@agentclientprotocol/sdk';
+import type { AuthenticateUpdateNotification } from './acpTypes.js';
 
 export interface PendingRequest<T = unknown> {
   resolve: (value: T) => void;
@@ -19,8 +19,8 @@ export interface PendingRequest<T = unknown> {
 }
 
 export interface AcpConnectionCallbacks {
-  onSessionUpdate: (data: AcpSessionUpdate) => void;
-  onPermissionRequest: (data: AcpPermissionRequest) => Promise<{
+  onSessionUpdate: (data: SessionNotification) => void;
+  onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
     optionId: string;
   }>;
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void;

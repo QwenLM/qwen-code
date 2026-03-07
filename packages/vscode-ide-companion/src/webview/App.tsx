@@ -44,7 +44,7 @@ import { InputForm } from './components/layout/InputForm.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
-import type { ModelInfo, AvailableCommand } from '../types/acpTypes.js';
+import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,

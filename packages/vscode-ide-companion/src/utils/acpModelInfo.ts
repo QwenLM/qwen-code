@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AcpMeta, ModelInfo } from '../types/acpTypes.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
+
+type AcpMeta = Record<string, unknown>;
 
 const asMeta = (value: unknown): AcpMeta | null | undefined => {
   if (value === null) {
@@ -77,6 +80,26 @@ export interface SessionModelState {
   currentModelId: string;
 }
 
+export interface SessionModeState {
+  currentModeId?: ApprovalModeValue;
+  availableModes?: Array<{
+    id: ApprovalModeValue;
+    name: string;
+    description: string;
+  }>;
+}
+
+const APPROVAL_MODE_VALUES: ApprovalModeValue[] = [
+  'plan',
+  'default',
+  'auto-edit',
+  'yolo',
+];
+
+const isApprovalModeValue = (value: unknown): value is ApprovalModeValue =>
+  typeof value === 'string' &&
+  APPROVAL_MODE_VALUES.includes(value as ApprovalModeValue);
+
 /**
  * Extract complete model state from ACP `session/new` result.
  *
@@ -130,6 +153,73 @@ export const extractSessionModelState = (
   }
 
   return null;
+};
+
+export const extractSessionModeState = (
+  result: unknown,
+): SessionModeState | null => {
+  if (!result || typeof result !== 'object') {
+    return null;
+  }
+
+  const obj = result as Record<string, unknown>;
+  const modes = obj['modes'];
+  if (!modes || typeof modes !== 'object' || Array.isArray(modes)) {
+    return null;
+  }
+
+  const state = modes as Record<string, unknown>;
+  const currentModeRaw = state['currentModeId'];
+  const availableModesRaw = state['availableModes'];
+
+  const currentModeId = isApprovalModeValue(currentModeRaw)
+    ? currentModeRaw
+    : undefined;
+
+  let availableModes:
+    | Array<{
+        id: ApprovalModeValue;
+        name: string;
+        description: string;
+      }>
+    | undefined;
+  if (Array.isArray(availableModesRaw)) {
+    availableModes = availableModesRaw
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const item = entry as Record<string, unknown>;
+        const idRaw = item['id'];
+        if (!isApprovalModeValue(idRaw)) {
+          return null;
+        }
+        return {
+          id: idRaw,
+          name: typeof item['name'] === 'string' ? item['name'] : idRaw,
+          description:
+            typeof item['description'] === 'string' ? item['description'] : '',
+        };
+      })
+      .filter(
+        (
+          item,
+        ): item is {
+          id: ApprovalModeValue;
+          name: string;
+          description: string;
+        } => Boolean(item),
+      );
+  }
+
+  if (!currentModeId && (!availableModes || availableModes.length === 0)) {
+    return null;
+  }
+
+  return {
+    ...(currentModeId ? { currentModeId } : {}),
+    ...(availableModes ? { availableModes } : {}),
+  };
 };
 
 /**

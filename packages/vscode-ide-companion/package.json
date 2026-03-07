@@ -158,6 +158,7 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/webui": "*",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cors": "^2.8.5",

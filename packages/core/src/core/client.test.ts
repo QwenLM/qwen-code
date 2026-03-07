@@ -2272,7 +2272,6 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
-        turnStarted: vi.fn().mockResolvedValue(false),
         addAndCheck: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
@@ -2303,7 +2302,6 @@ Other open files:
       }
 
       // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.turnStarted).not.toHaveBeenCalled();
       expect(ldMock.addAndCheck).not.toHaveBeenCalled();
     });
   });

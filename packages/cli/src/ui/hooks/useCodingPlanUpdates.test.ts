@@ -481,6 +481,111 @@ describe('useCodingPlanUpdates', () => {
       ).toBe(true);
     });
 
+    it('should show "model preserved" message when current model exists in new template', async () => {
+      mockSettings.merged.codingPlan = {
+        region: CodingPlanRegion.CHINA,
+        version: 'old-version-hash',
+      };
+      mockSettings.merged.modelProviders = {
+        [AuthType.USE_OPENAI]: [
+          {
+            id: 'qwen3.5-plus',
+            baseUrl: chinaConfig.baseUrl,
+            envKey: CODING_PLAN_ENV_KEY,
+          },
+        ],
+      };
+      // Simulate the user's current model being one that exists in the new template
+      mockConfig.getModel.mockReturnValue('qwen3.5-plus');
+      mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+      const { result } = renderHook(() =>
+        useCodingPlanUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.codingPlanUpdateRequest).toBeDefined();
+      });
+
+      await result.current.codingPlanUpdateRequest!.onConfirm(true);
+
+      await waitFor(() => {
+        expect(mockSettings.setValue).toHaveBeenCalled();
+      });
+
+      // Should show plain success message without "switched"
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('updated successfully'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('switched'),
+        }),
+        expect.any(Number),
+      );
+
+      // Reset mock
+      mockConfig.getModel.mockReturnValue('qwen-max');
+    });
+
+    it('should show "model switched" message when current model is not in new template', async () => {
+      mockSettings.merged.codingPlan = {
+        region: CodingPlanRegion.CHINA,
+        version: 'old-version-hash',
+      };
+      mockSettings.merged.modelProviders = {
+        [AuthType.USE_OPENAI]: [
+          {
+            id: 'removed-model',
+            baseUrl: chinaConfig.baseUrl,
+            envKey: CODING_PLAN_ENV_KEY,
+          },
+        ],
+      };
+      // The user's current model no longer exists in the new template
+      mockConfig.getModel.mockReturnValue('removed-model');
+      mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+      const { result } = renderHook(() =>
+        useCodingPlanUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.codingPlanUpdateRequest).toBeDefined();
+      });
+
+      await result.current.codingPlanUpdateRequest!.onConfirm(true);
+
+      await waitFor(() => {
+        expect(mockSettings.setValue).toHaveBeenCalled();
+      });
+
+      // Should show "model switched" message
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('switched'),
+        }),
+        expect.any(Number),
+      );
+
+      // Reset mock
+      mockConfig.getModel.mockReturnValue('qwen-max');
+    });
+
     it('should handle update errors gracefully', async () => {
       mockSettings.merged.codingPlan = {
         region: CodingPlanRegion.CHINA,

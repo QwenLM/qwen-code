@@ -33,7 +33,7 @@ export default {
   '!': '!',
   '!npm run start': '!npm run start',
   'start server': 'start server',
-  'Commands:': '命令:',
+  'Commands:': '命令：',
   'shell command': 'shell 命令',
   'Model Context Protocol command (from external servers)':
     '模型上下文协议命令（来自外部服务器）',
@@ -114,7 +114,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     '分析项目并创建定制的 QWEN.md 文件',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
@@ -279,6 +279,68 @@ export default {
     '保存并编辑子智能体失败: {{error}}',
 
   // ============================================================================
+  // Extensions - Management Dialog
+  // ============================================================================
+  'Manage Extensions': '管理扩展',
+  'Extension Details': '扩展详情',
+  'View Extension': '查看扩展',
+  'Update Extension': '更新扩展',
+  'Disable Extension': '禁用扩展',
+  'Enable Extension': '启用扩展',
+  'Uninstall Extension': '卸载扩展',
+  'Select Scope': '选择作用域',
+  'User Scope': '用户作用域',
+  'Workspace Scope': '工作区作用域',
+  'No extensions found.': '未找到扩展。',
+  Active: '已启用',
+  Disabled: '已禁用',
+  'Update available': '有可用更新',
+  'Up to date': '已是最新',
+  'Checking...': '检查中...',
+  'Updating...': '更新中...',
+  Unknown: '未知',
+  Error: '错误',
+  'Version:': '版本：',
+  'Status:': '状态：',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    '确定要卸载扩展 "{{name}}" 吗？',
+  'This action cannot be undone.': '此操作无法撤销。',
+  'Extension "{{name}}" disabled successfully.': '扩展 "{{name}}" 禁用成功。',
+  'Extension "{{name}}" enabled successfully.': '扩展 "{{name}}" 启用成功。',
+  'Extension "{{name}}" updated successfully.': '扩展 "{{name}}" 更新成功。',
+  'Failed to update extension "{{name}}": {{error}}':
+    '更新扩展 "{{name}}" 失败：{{error}}',
+  'Select the scope for this action:': '选择此操作的作用域：',
+  'User - Applies to all projects': '用户 - 应用于所有项目',
+  'Workspace - Applies to current project only': '工作区 - 仅应用于当前项目',
+  // Extension dialog - missing keys
+  'Name:': '名称：',
+  'MCP Servers:': 'MCP 服务器：',
+  'Settings:': '设置：',
+  active: '已启用',
+  disabled: '已禁用',
+  'View Details': '查看详情',
+  'Update failed:': '更新失败：',
+  'Updating {{name}}...': '正在更新 {{name}}...',
+  'Update complete!': '更新完成！',
+  'User (global)': '用户（全局）',
+  'Workspace (project-specific)': '工作区（项目特定）',
+  'Disable "{{name}}" - Select Scope': '禁用 "{{name}}" - 选择作用域',
+  'Enable "{{name}}" - Select Scope': '启用 "{{name}}" - 选择作用域',
+  'No extension selected': '未选择扩展',
+  'Press Y/Enter to confirm, N/Esc to cancel': '按 Y/Enter 确认，N/Esc 取消',
+  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter 确认，N/Esc 取消',
+  '{{count}} extensions installed': '已安装 {{count}} 个扩展',
+  "Use '/extensions install' to install your first extension.":
+    "使用 '/extensions install' 安装您的第一个扩展。",
+  // Update status values
+  'up to date': '已是最新',
+  'update available': '有可用更新',
+  'checking...': '检查中...',
+  'not updatable': '不可更新',
+  error: '错误',
+
+  // ============================================================================
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
@@ -361,7 +423,9 @@ export default {
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
   'exit the cli': '退出命令行界面',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    '打开 MCP 管理对话框，或在支持 OAuth 的服务器上进行身份验证',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '列出已配置的 MCP 服务器和工具，或使用支持 OAuth 的服务器进行身份验证',
   'Manage workspace directories': '管理工作区目录',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -685,6 +749,7 @@ export default {
     '使用支持 OAuth 的 MCP 服务器进行认证',
   'List configured MCP servers and tools': '列出已配置的 MCP 服务器和工具',
   'Restarts MCP servers.': '重启 MCP 服务器',
+  'Open MCP management dialog': '打开 MCP 管理对话框',
   'Config not loaded.': '配置未加载',
   'Could not retrieve tool registry.': '无法检索工具注册表',
   'No MCP servers configured with OAuth authentication.':
@@ -699,6 +764,92 @@ export default {
     "认证 MCP 服务器 '{{name}}' 失败：{{error}}",
   "Re-discovering tools from '{{name}}'...":
     "正在重新发现 '{{name}}' 的工具...",
+
+  // ============================================================================
+  // MCP Management Dialog
+  // ============================================================================
+  'Manage MCP servers': '管理 MCP 服务器',
+  'Server Detail': '服务器详情',
+  'Disable Server': '禁用服务器',
+  Tools: '工具',
+  'Tool Detail': '工具详情',
+  'MCP Management': 'MCP 管理',
+  'Loading...': '加载中...',
+  'Unknown step': '未知步骤',
+  'Esc to back': 'Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ 导航 · Enter 选择 · Esc 关闭',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ 导航 · Enter 选择 · Esc 返回',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ 导航 · Enter 确认 · Esc 返回',
+  'User Settings (global)': '用户设置（全局）',
+  'Workspace Settings (project-specific)': '工作区设置（项目级）',
+  'Disable server:': '禁用服务器：',
+  'Select where to add the server to the exclude list:':
+    '选择将服务器添加到排除列表的位置：',
+  'Press Enter to confirm, Esc to cancel': '按 Enter 确认，Esc 取消',
+  'View tools': '查看工具',
+  Reconnect: '重新连接',
+  Enable: '启用',
+  Disable: '禁用',
+  '(disabled)': '(已禁用)',
+  'Error:': '错误：',
+  Extension: '扩展',
+  tool: '工具',
+  tools: '个工具',
+  connected: '已连接',
+  connecting: '连接中',
+  disconnected: '已断开',
+
+  // MCP Server List
+  'User MCPs': '用户 MCP',
+  'Project MCPs': '项目 MCP',
+  'Extension MCPs': '扩展 MCP',
+  server: '个服务器',
+  servers: '个服务器',
+  'Add MCP servers to your settings to get started.':
+    '请在设置中添加 MCP 服务器以开始使用。',
+  'Run qwen --debug to see error logs': '运行 qwen --debug 查看错误日志',
+
+  // MCP Server Detail
+  'Command:': '命令：',
+  'Working Directory:': '工作目录：',
+  'Capabilities:': '功能：',
+
+  // MCP Tool List
+  'No tools available for this server.': '此服务器没有可用工具。',
+  destructive: '破坏性',
+  'read-only': '只读',
+  'open-world': '开放世界',
+  idempotent: '幂等',
+  'Tools for {{name}}': '{{name}} 的工具',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  Type: '类型',
+  Parameters: '参数',
+  'No tool selected': '未选择工具',
+  Annotations: '注解',
+  Title: '标题',
+  'Read Only': '只读',
+  Destructive: '破坏性',
+  Idempotent: '幂等',
+  'Open World': '开放世界',
+  Server: '服务器',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 个无效工具',
+  invalid: '无效',
+  'invalid: {{reason}}': '无效：{{reason}}',
+  'missing name': '缺少名称',
+  'missing description': '缺少描述',
+  '(unnamed)': '(未命名)',
+  'Warning: This tool cannot be called by the LLM':
+    '警告：此工具无法被 LLM 调用',
+  Reason: '原因',
+  'Tools must have both name and description to be used by the LLM.':
+    '工具必须同时具有名称和描述才能被 LLM 使用。',
 
   // ============================================================================
   // Commands - Chat
@@ -825,6 +976,7 @@ export default {
   'Do you want to proceed?': '是否继续？',
   'Yes, allow once': '是，允许一次',
   'Allow always': '总是允许',
+  Yes: '是',
   No: '否',
   'No (esc)': '否 (esc)',
   'Yes, allow always for this session': '是，本次会话总是允许',
@@ -1279,6 +1431,9 @@ export default {
     '{{region}} 有新的模型配置可用。是否立即更新？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+  '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json。',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    '提示：使用 /model 切换可用的 Coding Plan 模型。',
 };

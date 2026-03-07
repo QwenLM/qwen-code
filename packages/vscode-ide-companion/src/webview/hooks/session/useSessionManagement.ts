@@ -20,7 +20,6 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     useState<string>('Past Conversations');
   const [showSessionSelector, setShowSessionSelector] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [savedSessionTags, setSavedSessionTags] = useState<string[]>([]);
   const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -97,38 +96,6 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     [currentSessionId, vscode],
   );
 
-  /**
-   * Save session
-   */
-  const handleSaveSession = useCallback(
-    (tag: string) => {
-      vscode.postMessage({
-        type: 'saveSession',
-        data: { tag },
-      });
-    },
-    [vscode],
-  );
-
-  /**
-   * Handle Save session response
-   */
-  const handleSaveSessionResponse = useCallback(
-    (response: { success: boolean; message?: string }) => {
-      if (response.success) {
-        if (response.message) {
-          const tagMatch = response.message.match(/tag: (.+)$/);
-          if (tagMatch) {
-            setSavedSessionTags((prev) => [...prev, tagMatch[1]]);
-          }
-        }
-      } else {
-        console.error('Failed to save session:', response.message);
-      }
-    },
-    [],
-  );
-
   return {
     // State
     qwenSessions,
@@ -137,7 +104,6 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     showSessionSelector,
     sessionSearchQuery,
     filteredSessions,
-    savedSessionTags,
     nextCursor,
     hasMore,
     isLoading,
@@ -148,7 +114,6 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     setCurrentSessionTitle,
     setShowSessionSelector,
     setSessionSearchQuery,
-    setSavedSessionTags,
     setNextCursor,
     setHasMore,
     setIsLoading,
@@ -157,8 +122,6 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     handleLoadQwenSessions,
     handleNewQwenSession,
     handleSwitchSession,
-    handleSaveSession,
-    handleSaveSessionResponse,
     handleLoadMoreSessions,
   };
 };

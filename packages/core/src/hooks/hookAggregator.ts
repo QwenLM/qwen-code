@@ -90,6 +90,7 @@ export class HookAggregator {
       case HookEventName.PostToolUse:
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
+      case HookEventName.UserPromptSubmit:
       case HookEventName.SubagentStop:
         merged = this.mergeWithOrLogic(outputs, eventName);
         break;

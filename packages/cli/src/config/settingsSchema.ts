@@ -589,7 +589,7 @@ const SETTINGS_SCHEMA = {
         label: 'Skip Loop Detection',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
@@ -822,9 +822,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: true,
             description:
-              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
             showInDialog: true,
           },
           pager: {
