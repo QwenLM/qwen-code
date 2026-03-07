@@ -5,19 +5,19 @@
  */
 
 import * as vscode from 'vscode';
-import { QwenAgentManager } from '../services/qwenAgentManager.js';
-import { ConversationStore } from '../services/conversationStore.js';
+import { QwenAgentManager } from '../../services/qwenAgentManager.js';
+import { ConversationStore } from '../../services/conversationStore.js';
 import type {
   RequestPermissionRequest,
   ModelInfo,
 } from '@agentclientprotocol/sdk';
-import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
-import { PanelManager } from '../webview/PanelManager.js';
-import { MessageHandler } from '../webview/MessageHandler.js';
-import { WebViewContent } from '../webview/WebViewContent.js';
-import { getFileName } from './utils/webviewUtils.js';
-import { type ApprovalModeValue } from '../types/approvalModeValueTypes.js';
-import { isAuthenticationRequiredError } from '../utils/authErrors.js';
+import type { PermissionResponseMessage } from '../../types/webviewMessageTypes.js';
+import { PanelManager } from './PanelManager.js';
+import { MessageHandler } from './MessageHandler.js';
+import { WebViewContent } from './WebViewContent.js';
+import { getFileName } from '../utils/webviewUtils.js';
+import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
+import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -25,6 +25,9 @@ export class WebViewProvider {
   private agentManager: QwenAgentManager;
   private conversationStore: ConversationStore;
   private disposables: vscode.Disposable[] = [];
+  private currentWebview: vscode.Webview | null = null;
+  // Track webviews by view ID for better multi-view support
+  private webviews: Map<string, vscode.Webview> = new Map();
   private agentInitialized = false; // Track if agent has been initialized
   // Track a pending permission request and its resolver so extension commands
   // can "simulate" user choice from the command palette (e.g. after accepting
@@ -45,7 +48,7 @@ export class WebViewProvider {
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
       // Panel dispose callback
-      this.disposables.forEach((d) => d.dispose());
+      this.disposeWebviewDisposables();
     });
     this.messageHandler = new MessageHandler(
       this.agentManager,
@@ -411,6 +414,167 @@ export class WebViewProvider {
     );
   }
 
+  /**
+   * Dispose and reset all webview-scoped disposables (listeners bound per host)
+   */
+  private disposeWebviewDisposables(): void {
+    for (const disposable of this.disposables) {
+      try {
+        disposable.dispose();
+      } catch (_err) {
+        // Best-effort cleanup
+      }
+    }
+    this.disposables = [];
+    this.currentWebview = null;
+  }
+
+  private setupMessageListener(
+    webview: vscode.Webview,
+    titleSetter?: (title: string) => void,
+  ): void {
+    const disposable = webview.onDidReceiveMessage(
+      async (message: { type: string; data?: unknown }) => {
+        // Suppress UI-originated diff opens in auto/yolo mode
+        if (message.type === 'openDiff' && this.isAutoMode()) {
+          return;
+        }
+        // Sync initialization state when webview signals readiness
+        if (message.type === 'webviewReady') {
+          this.handleWebviewReady();
+          return;
+        }
+        // Allow webview to request updating the VS Code tab title
+        if (message.type === 'updatePanelTitle') {
+          const title = String(
+            (message.data as { title?: unknown } | undefined)?.title ?? '',
+          ).trim();
+          if (titleSetter) {
+            titleSetter(title || 'Qwen Code');
+          }
+          return;
+        }
+        await this.messageHandler.route(message);
+      },
+    );
+    this.disposables.push(disposable);
+  }
+
+  private setupEditorListeners(): void {
+    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
+      (editor) => {
+        // If switching to a non-text editor (like webview), keep the last state
+        if (!editor) {
+          // Don't update - keep previous state
+          return;
+        }
+
+        const filePath = editor.document.uri.fsPath || null;
+        const fileName = filePath ? getFileName(filePath) : null;
+
+        // Get selection info if there is any selected text
+        let selectionInfo = null;
+        if (editor && !editor.selection.isEmpty) {
+          const selection = editor.selection;
+          selectionInfo = {
+            startLine: selection.start.line + 1,
+            endLine: selection.end.line + 1,
+          };
+        }
+
+        this.sendMessageToWebView({
+          type: 'activeEditorChanged',
+          data: { fileName, filePath, selection: selectionInfo },
+        });
+      },
+    );
+    this.disposables.push(editorChangeDisposable);
+
+    const selectionChangeDisposable =
+      vscode.window.onDidChangeTextEditorSelection((event) => {
+        const editor = event.textEditor;
+        if (editor === vscode.window.activeTextEditor) {
+          const filePath = editor.document.uri.fsPath || null;
+          const fileName = filePath ? getFileName(filePath) : null;
+
+          // Get selection info if there is any selected text
+          let selectionInfo = null;
+          if (!event.selections[0].isEmpty) {
+            const selection = event.selections[0];
+            selectionInfo = {
+              startLine: selection.start.line + 1,
+              endLine: selection.end.line + 1,
+            };
+          }
+
+          this.sendMessageToWebView({
+            type: 'activeEditorChanged',
+            data: { fileName, filePath, selection: selectionInfo },
+          });
+        }
+      });
+    this.disposables.push(selectionChangeDisposable);
+  }
+
+  private sendInitialActiveEditorState(): void {
+    const initialEditor = vscode.window.activeTextEditor;
+    if (initialEditor) {
+      const filePath = initialEditor.document.uri.fsPath || null;
+      const fileName = filePath ? getFileName(filePath) : null;
+
+      let selectionInfo = null;
+      if (!initialEditor.selection.isEmpty) {
+        const selection = initialEditor.selection;
+        selectionInfo = {
+          startLine: selection.start.line + 1,
+          endLine: selection.end.line + 1,
+        };
+      }
+
+      this.sendMessageToWebView({
+        type: 'activeEditorChanged',
+        data: { fileName, filePath, selection: selectionInfo },
+      });
+    }
+  }
+
+  /**
+   * Common binding logic for both WebviewPanel and WebviewView hosts.
+   */
+  private async bindWebview(
+    webview: vscode.Webview,
+    options?: { titleSetter?: (title: string) => void; viewId?: string },
+  ): Promise<void> {
+    try {
+      console.log('[WebViewProvider] bindWebview start for host');
+      this.disposeWebviewDisposables();
+      this.currentWebview = webview;
+
+      // Store the webview in the map if viewId is provided
+      if (options?.viewId) {
+        this.webviews.set(options.viewId, webview);
+      }
+
+      webview.html = WebViewContent.generate(webview, this.extensionUri);
+
+      this.setupMessageListener(webview, options?.titleSetter);
+      this.setupEditorListeners();
+      this.sendInitialActiveEditorState();
+
+      // Attempt to restore authentication state and initialize connection
+      // Don't await this to prevent blocking the UI
+      this.attemptAuthStateRestoration().catch((error) => {
+        console.error('[WebViewProvider] Error in auth restoration:', error);
+      });
+      console.log('[WebViewProvider] bindWebview completed');
+    } catch (error) {
+      console.error('[WebViewProvider] Error in bindWebview:', error);
+      // Fallback to basic HTML if binding fails
+      webview.html = `<div>Initialization error: ${(error as Error).message || 'Unknown error'}</div>`;
+      throw error; // Re-throw so caller can handle it
+    }
+  }
+
   async show(): Promise<void> {
     const panel = this.panelManager.getPanel();
 
@@ -433,146 +597,75 @@ export class WebViewProvider {
       return;
     }
 
-    // Set up state serialization
-    newPanel.onDidChangeViewState(() => {
-      console.log(
-        '[WebViewProvider] Panel view state changed, triggering serialization check',
-      );
-    });
-
     // Capture the Tab that corresponds to our WebviewPanel
     this.panelManager.captureTab();
 
     // Auto-lock editor group when opened in new column
     await this.panelManager.autoLockEditorGroup();
 
-    newPanel.webview.html = WebViewContent.generate(
-      newPanel,
-      this.extensionUri,
-    );
-
-    // Handle messages from WebView
-    newPanel.webview.onDidReceiveMessage(
-      async (message: { type: string; data?: unknown }) => {
-        // Suppress UI-originated diff opens in auto/yolo mode
-        if (message.type === 'openDiff' && this.isAutoMode()) {
-          return;
+    await this.bindWebview(newPanel.webview, {
+      titleSetter: (title: string) => {
+        try {
+          newPanel.title = title || 'Qwen Code';
+        } catch (_err) {
+          // Best-effort only
         }
-        if (message.type === 'webviewReady') {
-          this.handleWebviewReady();
-          return;
-        }
-        // Allow webview to request updating the VS Code tab title
-        if (message.type === 'updatePanelTitle') {
-          const title = String(
-            (message.data as { title?: unknown } | undefined)?.title ?? '',
-          ).trim();
-          const panelRef = this.panelManager.getPanel();
-          if (panelRef) {
-            panelRef.title = title || 'Qwen Code';
-          }
-          return;
-        }
-        await this.messageHandler.route(message);
       },
-      null,
-      this.disposables,
-    );
+    });
 
     // Listen for view state changes (no pin/lock; just keep tab reference fresh)
     this.panelManager.registerViewStateChangeHandler(this.disposables);
 
     // Register panel dispose handler
     this.panelManager.registerDisposeHandler(this.disposables);
+  }
 
-    // Listen for active editor changes and notify WebView
-    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
-      (editor) => {
-        // If switching to a non-text editor (like webview), keep the last state
-        if (!editor) {
-          // Don't update - keep previous state
-          return;
-        }
-
-        const filePath = editor.document.uri.fsPath || null;
-        const fileName = filePath ? getFileName(filePath) : null;
-
-        // Get selection info if there is any selected text
-        let selectionInfo = null;
-        if (editor && !editor.selection.isEmpty) {
-          const selection = editor.selection;
-          selectionInfo = {
-            startLine: selection.start.line + 1,
-            endLine: selection.end.line + 1,
-          };
-        }
-
-        // Update last known state
-
-        this.sendMessageToWebView({
-          type: 'activeEditorChanged',
-          data: { fileName, filePath, selection: selectionInfo },
-        });
-      },
+  /**
+   * Attach the chat experience to a WebviewView (panel/secondary sidebar host)
+   */
+  async attachToView(
+    webviewView: vscode.WebviewView,
+    viewId?: string,
+  ): Promise<void> {
+    console.log(
+      `[WebViewProvider] attachToView called for ${webviewView.viewType} (id=${viewId ?? 'unknown'})`,
     );
-    this.disposables.push(editorChangeDisposable);
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.extensionUri, 'dist'),
+        vscode.Uri.joinPath(this.extensionUri, 'assets'),
+      ],
+    };
 
-    // Listen for text selection changes
-    const selectionChangeDisposable =
-      vscode.window.onDidChangeTextEditorSelection((event) => {
-        const editor = event.textEditor;
-        if (editor === vscode.window.activeTextEditor) {
-          const filePath = editor.document.uri.fsPath || null;
-          const fileName = filePath ? getFileName(filePath) : null;
-
-          // Get selection info if there is any selected text
-          let selectionInfo = null;
-          if (!event.selections[0].isEmpty) {
-            const selection = event.selections[0];
-            selectionInfo = {
-              startLine: selection.start.line + 1,
-              endLine: selection.end.line + 1,
-            };
+    try {
+      await this.bindWebview(webviewView.webview, {
+        titleSetter: (title: string) => {
+          try {
+            webviewView.title = title || 'Qwen Code';
+          } catch (_err) {
+            // Ignore title update errors
           }
-
-          // Update last known state
-
-          this.sendMessageToWebView({
-            type: 'activeEditorChanged',
-            data: { fileName, filePath, selection: selectionInfo },
-          });
-
-          // Mode callbacks are registered in constructor; no-op here
-        }
+        },
+        viewId, // Pass the viewId to bindWebview
       });
-    this.disposables.push(selectionChangeDisposable);
-
-    // Send initial active editor state to WebView
-    const initialEditor = vscode.window.activeTextEditor;
-    if (initialEditor) {
-      const filePath = initialEditor.document.uri.fsPath || null;
-      const fileName = filePath ? getFileName(filePath) : null;
-
-      let selectionInfo = null;
-      if (!initialEditor.selection.isEmpty) {
-        const selection = initialEditor.selection;
-        selectionInfo = {
-          startLine: selection.start.line + 1,
-          endLine: selection.end.line + 1,
-        };
-      }
-
-      this.sendMessageToWebView({
-        type: 'activeEditorChanged',
-        data: { fileName, filePath, selection: selectionInfo },
-      });
+    } catch (error) {
+      console.error('[WebViewProvider] Error in attachToView:', error);
+      // Ensure some content is displayed even if binding fails
+      webviewView.webview.html = `<div>Error loading chat: ${error instanceof Error ? error.message : String(error)}</div>`;
     }
 
-    // Attempt to restore authentication state and initialize connection
-    console.log(
-      '[WebViewProvider] Attempting to restore auth state and connection...',
+    webviewView.onDidDispose(
+      () => {
+        // Remove the webview from the map on dispose
+        if (viewId) {
+          this.webviews.delete(viewId);
+        }
+        this.disposeWebviewDisposables();
+      },
+      null,
+      this.disposables,
     );
-    await this.attemptAuthStateRestoration();
   }
 
   /**
@@ -998,6 +1091,33 @@ export class WebViewProvider {
    */
   private sendMessageToWebView(message: unknown): void {
     this.updateAuthStateFromMessage(message);
+
+    // Prioritize sending to current active webview
+    if (this.currentWebview) {
+      try {
+        void this.currentWebview.postMessage(message);
+        return;
+      } catch (_err) {
+        // Fallback to panel below
+      }
+    }
+
+    // If we have webviews stored by ID, try to send to all of them
+    if (this.webviews.size > 0) {
+      for (const [id, webview] of this.webviews) {
+        try {
+          void webview.postMessage(message);
+        } catch (err) {
+          console.error(
+            `[WebViewProvider] Error posting message to webview ${id}:`,
+            err,
+          );
+        }
+      }
+      return;
+    }
+
+    // Fallback to panel
     const panel = this.panelManager.getPanel();
     panel?.webview.postMessage(message);
   }
@@ -1129,34 +1249,18 @@ export class WebViewProvider {
       );
     }
 
-    panel.webview.html = WebViewContent.generate(panel, this.extensionUri);
-
-    // Handle messages from WebView (restored panel)
-    panel.webview.onDidReceiveMessage(
-      async (message: { type: string; data?: unknown }) => {
-        // Suppress UI-originated diff opens in auto/yolo mode
-        if (message.type === 'openDiff' && this.isAutoMode()) {
-          return;
-        }
-        if (message.type === 'webviewReady') {
-          this.handleWebviewReady();
-          return;
-        }
-        if (message.type === 'updatePanelTitle') {
-          const title = String(
-            (message.data as { title?: unknown } | undefined)?.title ?? '',
-          ).trim();
+    await this.bindWebview(panel.webview, {
+      titleSetter: (title: string) => {
+        try {
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
             panelRef.title = title || 'Qwen Code';
           }
-          return;
+        } catch (_err) {
+          // Ignore
         }
-        await this.messageHandler.route(message);
       },
-      null,
-      this.disposables,
-    );
+    });
 
     // Register view state change handler
     this.panelManager.registerViewStateChangeHandler(this.disposables);
@@ -1164,97 +1268,10 @@ export class WebViewProvider {
     // Register dispose handler
     this.panelManager.registerDisposeHandler(this.disposables);
 
-    // Listen for active editor changes and notify WebView
-    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
-      (editor) => {
-        // If switching to a non-text editor (like webview), keep the last state
-        if (!editor) {
-          // Don't update - keep previous state
-          return;
-        }
-
-        const filePath = editor.document.uri.fsPath || null;
-        const fileName = filePath ? getFileName(filePath) : null;
-
-        // Get selection info if there is any selected text
-        let selectionInfo = null;
-        if (editor && !editor.selection.isEmpty) {
-          const selection = editor.selection;
-          selectionInfo = {
-            startLine: selection.start.line + 1,
-            endLine: selection.end.line + 1,
-          };
-        }
-
-        // Update last known state
-
-        this.sendMessageToWebView({
-          type: 'activeEditorChanged',
-          data: { fileName, filePath, selection: selectionInfo },
-        });
-      },
-    );
-    this.disposables.push(editorChangeDisposable);
-
-    // Send initial active editor state to WebView
-    const initialEditor = vscode.window.activeTextEditor;
-    if (initialEditor) {
-      const filePath = initialEditor.document.uri.fsPath || null;
-      const fileName = filePath ? getFileName(filePath) : null;
-
-      let selectionInfo = null;
-      if (!initialEditor.selection.isEmpty) {
-        const selection = initialEditor.selection;
-        selectionInfo = {
-          startLine: selection.start.line + 1,
-          endLine: selection.end.line + 1,
-        };
-      }
-
-      this.sendMessageToWebView({
-        type: 'activeEditorChanged',
-        data: { fileName, filePath, selection: selectionInfo },
-      });
-    }
-
-    // Listen for text selection changes (restore path)
-    const selectionChangeDisposableRestore =
-      vscode.window.onDidChangeTextEditorSelection((event) => {
-        const editor = event.textEditor;
-        if (editor === vscode.window.activeTextEditor) {
-          const filePath = editor.document.uri.fsPath || null;
-          const fileName = filePath ? getFileName(filePath) : null;
-
-          // Get selection info if there is any selected text
-          let selectionInfo = null;
-          if (!event.selections[0].isEmpty) {
-            const selection = event.selections[0];
-            selectionInfo = {
-              startLine: selection.start.line + 1,
-              endLine: selection.end.line + 1,
-            };
-          }
-
-          // Update last known state
-
-          this.sendMessageToWebView({
-            type: 'activeEditorChanged',
-            data: { fileName, filePath, selection: selectionInfo },
-          });
-        }
-      });
-    this.disposables.push(selectionChangeDisposableRestore);
-
     // Capture the tab reference on restore
     this.panelManager.captureTab();
 
     console.log('[WebViewProvider] Panel restored successfully');
-
-    // Attempt to restore authentication state and initialize connection
-    console.log(
-      '[WebViewProvider] Attempting to restore auth state and connection after restore...',
-    );
-    await this.attemptAuthStateRestoration();
   }
 
   /**
@@ -1308,7 +1325,10 @@ export class WebViewProvider {
     // Reload content after restore
     const panel = this.panelManager.getPanel();
     if (panel) {
-      panel.webview.html = WebViewContent.generate(panel, this.extensionUri);
+      panel.webview.html = WebViewContent.generate(
+        panel.webview,
+        this.extensionUri,
+      );
     }
   }
 

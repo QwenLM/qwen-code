@@ -14,7 +14,13 @@ import {
   IDE_DEFINITIONS,
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
-import { WebViewProvider } from './webview/WebViewProvider.js';
+import { WebViewProvider } from './webview/providers/WebViewProvider.js';
+import { ChatWebviewViewProvider } from './webview/providers/ChatWebviewViewProvider.js';
+import {
+  CHAT_VIEW_ID_PANEL,
+  CHAT_VIEW_ID_SECONDARY,
+  CHAT_VIEW_ID_SIDEBAR,
+} from './constants/viewIds.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
 import { isWindows } from './utils/platform.js';
@@ -150,6 +156,25 @@ export async function activate(context: vscode.ExtensionContext) {
     return provider;
   };
 
+  // Register WebviewView hosts for all positions (sidebar, panel, secondary).
+  // Providers are lazily instantiated — the factory is only called when VS Code
+  // actually opens the view, keeping startup lightweight.
+  const chatViewIds = [
+    CHAT_VIEW_ID_SIDEBAR,
+    CHAT_VIEW_ID_PANEL,
+    CHAT_VIEW_ID_SECONDARY,
+  ] as const;
+
+  for (const viewId of chatViewIds) {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(
+        viewId,
+        new ChatWebviewViewProvider(createWebViewProvider),
+        { webviewOptions: { retainContextWhenHidden: true } },
+      ),
+    );
+  }
+
   // Register WebView panel serializer for persistence across reloads
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer('qwenCode.chat', {
@@ -194,6 +219,7 @@ export async function activate(context: vscode.ExtensionContext) {
     diffManager,
     () => webViewProviders,
     createWebViewProvider,
+    logger,
   );
 
   context.subscriptions.push(

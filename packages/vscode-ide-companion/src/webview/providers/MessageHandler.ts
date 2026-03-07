@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { QwenAgentManager } from '../services/qwenAgentManager.js';
-import type { ConversationStore } from '../services/conversationStore.js';
-import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
-import { MessageRouter } from './handlers/MessageRouter.js';
+import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
+import type { ConversationStore } from '../../services/conversationStore.js';
+import type { PermissionResponseMessage } from '../../types/webviewMessageTypes.js';
+import { MessageRouter } from '../handlers/MessageRouter.js';
 
 /**
  * MessageHandler (Refactored Version)

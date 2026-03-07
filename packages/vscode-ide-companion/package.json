@@ -28,7 +28,14 @@
     "ide companion"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:qwenCode.chatView.panel",
+    "onView:qwenCode.chatView.secondary",
+    "onView:qwenCode.chatView.sidebar",
+    "onCommand:qwen-code.openChat",
+    "onCommand:qwen-code.focusChat",
+    "onCommand:qwen-code.newConversation",
+    "onCommand:qwen-code.showLogs"
   ],
   "contributes": {
     "jsonValidation": [
@@ -37,6 +44,52 @@
         "url": "./schemas/settings.schema.json"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qwenCodeSidebar",
+          "title": "Qwen Code",
+          "icon": "assets/sidebar-icon.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "qwenCodePanel",
+          "title": "Qwen Code",
+          "icon": "assets/icon.png"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "qwenCodeSecondary",
+          "title": "Qwen Code",
+          "icon": "assets/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "qwenCodeSidebar": [
+        {
+          "type": "webview",
+          "id": "qwenCode.chatView.sidebar",
+          "name": "Qwen Code"
+        }
+      ],
+      "qwenCodePanel": [
+        {
+          "id": "qwenCode.chatView.panel",
+          "name": "Qwen Code",
+          "icon": "assets/icon.png"
+        }
+      ],
+      "qwenCodeSecondary": [
+        {
+          "id": "qwenCode.chatView.secondary",
+          "name": "Qwen Code",
+          "icon": "assets/icon.png"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "qwen-diff-editable"
@@ -69,6 +122,18 @@
       {
         "command": "qwen-code.login",
         "title": "Qwen Code: Login"
+      },
+      {
+        "command": "qwen-code.focusChat",
+        "title": "Qwen Code: Focus Chat Input"
+      },
+      {
+        "command": "qwen-code.newConversation",
+        "title": "Qwen Code: New Conversation"
+      },
+      {
+        "command": "qwen-code.showLogs",
+        "title": "Qwen Code: Show Logs"
       }
     ],
     "menus": {
@@ -113,6 +178,11 @@
         "command": "qwen.diff.accept",
         "key": "cmd+s",
         "when": "qwen.diff.isVisible"
+      },
+      {
+        "command": "qwen-code.focusChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
       }
     ]
   },
