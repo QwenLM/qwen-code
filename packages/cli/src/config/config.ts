@@ -158,6 +158,11 @@ export interface CliArgs {
   excludeTools: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+  /**
+   * Enable git worktree mode for parallel session execution.
+   * Each session runs in an isolated worktree with its own working directory.
+   */
+  worktree: boolean | string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -344,6 +349,18 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Enable experimental hooks feature for lifecycle event customization',
           default: false,
+        })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Enable git worktree mode for parallel session execution. Creates an isolated worktree for this session. Optionally provide a worktree name.',
+          coerce: (value: string | boolean) => {
+            // Handle both --worktree (boolean) and --worktree <name> (string)
+            if (typeof value === 'boolean') {
+              return value ? true : undefined;
+            }
+            return value;
+          },
         })
         .option('channel', {
           type: 'string',
