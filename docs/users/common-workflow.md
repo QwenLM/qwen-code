@@ -400,6 +400,8 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 
 Suppose you need to work on multiple tasks simultaneously with complete code isolation between Qwen Code instances.
 
+### Option 1: Manual worktree management
+
 **1. Understand Git worktrees**
 
 Git worktrees allow you to check out multiple branches from the same repository into separate directories. Each worktree has its own working directory with isolated files, while sharing the same Git history. Learn more in the [official Git worktree documentation](https://git-scm.com/docs/git-worktree).
@@ -442,6 +444,27 @@ git worktree list
 # Remove a worktree when done
 git worktree remove ../project-feature-a
 ```
+
+### Option 2: Using the `--worktree` flag (recommended)
+
+Qwen Code can automatically create and manage worktrees for you using the `--worktree` flag:
+
+```bash
+# Create a new worktree automatically and start Qwen Code
+qwen --worktree
+
+# Or provide a custom name for the worktree
+qwen --worktree feature-auth
+
+# The worktree is created in .qwen/worktrees/ within your project
+```
+
+When you use `--worktree`:
+
+- Qwen Code automatically creates a new git worktree in `.qwen/worktrees/<name>`
+- A new branch is created for the worktree (named `worktree/<name>`)
+- The session runs in the isolated worktree directory
+- Each session has completely isolated file changes
 
 > [!tip]
 >

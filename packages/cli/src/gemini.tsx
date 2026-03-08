@@ -60,6 +60,11 @@ import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  setupWorktree,
+  isGitRepository,
+  generateWorktreeName,
+} from './utils/worktree.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -212,6 +217,45 @@ export async function main() {
   await cleanupCheckpoints();
 
   let argv = await parseArguments();
+
+  // Handle --worktree flag: create isolated worktree for parallel session execution
+  if (argv.worktree) {
+    const cwd = process.cwd();
+
+    // Check if we're in a git repository
+    if (!isGitRepository(cwd)) {
+      writeStderrLine(
+        'Error: --worktree requires a git repository. Please initialize git first.',
+      );
+      process.exit(1);
+    }
+
+    try {
+      // Generate worktree name if not provided
+      const worktreeName =
+        typeof argv.worktree === 'string' && argv.worktree !== 'true'
+          ? argv.worktree
+          : generateWorktreeName();
+
+      // Setup the worktree
+      const result = setupWorktree(cwd, worktreeName);
+
+      if (result.created) {
+        writeStderrLine(`Created worktree at: ${result.worktreePath}`);
+        writeStderrLine(`Branch: ${result.branch}`);
+        writeStderrLine(`Starting Qwen Code in isolated worktree...`);
+      } else {
+        writeStderrLine(`Using existing worktree: ${result.worktreePath}`);
+      }
+
+      // Change to the worktree directory
+      process.chdir(result.worktreePath);
+    } catch (error) {
+      const err = error as Error;
+      writeStderrLine(`Error setting up worktree: ${err.message}`);
+      process.exit(1);
+    }
+  }
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
