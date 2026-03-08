@@ -2526,6 +2526,75 @@ describe('useGeminiStream', () => {
         expect.any(String),
       );
     });
+
+    it('should clear a static retry error when a new query starts', async () => {
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'First error' } },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'Recovered response',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('First query');
+      });
+
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+      });
+
+      await act(async () => {
+        await result.current.submitQuery('Second query');
+      });
+
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeUndefined();
+      });
+    });
   });
 
   describe('Concurrent Execution Prevention', () => {

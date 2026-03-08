@@ -1108,7 +1108,10 @@ export const useGeminiStream = (
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn
-        if (pendingRetryCountdownItemRef.current) {
+        if (
+          pendingRetryCountdownItemRef.current ||
+          pendingRetryErrorItemRef.current
+        ) {
           clearRetryCountdown();
         }
       }
@@ -1250,6 +1253,7 @@ export const useGeminiStream = (
       handleLoopDetectedEvent,
       clearRetryCountdown,
       pendingRetryCountdownItemRef,
+      pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
     ],
   );
