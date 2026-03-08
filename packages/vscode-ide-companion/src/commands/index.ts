@@ -65,8 +65,8 @@ export function registerNewCommands(
   disposables.push(
     vscode.commands.registerCommand(openNewChatTabCommand, async () => {
       const provider = createWebViewProvider();
-      // Session restoration is now disabled by default, so no need to suppress it
       await provider.show();
+      await provider.createNewSession();
     }),
   );
 
