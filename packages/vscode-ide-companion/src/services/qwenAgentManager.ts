@@ -37,6 +37,29 @@ import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
+export function extractSessionListItems(
+  response: unknown,
+): Array<Record<string, unknown>> {
+  if (!response || typeof response !== 'object') {
+    return [];
+  }
+
+  const payload = response as {
+    sessions?: unknown;
+    items?: unknown;
+  };
+
+  if (Array.isArray(payload.sessions)) {
+    return payload.sessions as Array<Record<string, unknown>>;
+  }
+
+  if (Array.isArray(payload.items)) {
+    return payload.items as Array<Record<string, unknown>>;
+  }
+
+  return [];
+}
+
 /**
  * Qwen Agent Manager
  *
@@ -400,14 +423,7 @@ export class QwenAgentManager {
       console.log('[QwenAgentManager] ACP session list response:', response);
 
       const res: unknown = response;
-      let items: Array<Record<string, unknown>> = [];
-
-      if (res && typeof res === 'object' && 'sessions' in res) {
-        const sessionsValue = (res as { sessions?: unknown }).sessions;
-        items = Array.isArray(sessionsValue)
-          ? (sessionsValue as Array<Record<string, unknown>>)
-          : [];
-      }
+      const items = extractSessionListItems(res);
 
       console.log(
         '[QwenAgentManager] Sessions retrieved via ACP:',
@@ -501,14 +517,7 @@ export class QwenAgentManager {
         ...(cursor !== undefined ? { cursor } : {}),
       });
       const res: unknown = response;
-      let items: Array<Record<string, unknown>> = [];
-
-      if (res && typeof res === 'object' && 'sessions' in res) {
-        const sessionsValue = (res as { sessions?: unknown }).sessions;
-        items = Array.isArray(sessionsValue)
-          ? (sessionsValue as Array<Record<string, unknown>>)
-          : [];
-      }
+      const items = extractSessionListItems(res);
 
       const mapped = items.map((item) => ({
         id: item.sessionId || item.id,
