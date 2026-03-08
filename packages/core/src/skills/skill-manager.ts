@@ -427,6 +427,18 @@ export class SkillManager {
     return baseDir;
   }
 
+  private async listProjectLevelSkills(): Promise<SkillConfig[]> {
+    const primaryDir = this.getSkillsBaseDir('project');
+    const fallbackDir = path.join(this.config.getProjectRoot(), '.agents', SKILLS_CONFIG_DIR);
+
+    const [primarySkills, agentsSkills] = await Promise.all([
+      this.loadSkillsFromDir(primaryDir, 'project'),
+      this.loadSkillsFromDir(fallbackDir, 'project'),
+    ]);
+
+    return [...primarySkills, ...agentsSkills];
+  }
+
   /**
    * Lists skills at a specific level.
    *
@@ -458,6 +470,12 @@ export class SkillManager {
       debugLogger.debug(
         `Loaded ${skills.length} extension-level skills from ${extensions.length} extensions`,
       );
+      return skills;
+    }
+
+    if (level === 'project') {
+      const skills = await this.listProjectLevelSkills();
+      debugLogger.debug(`Loaded ${skills.length} ${level} level skills`);
       return skills;
     }
 
