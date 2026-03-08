@@ -15,6 +15,7 @@ import {
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
 import { WebViewProvider } from './webview/WebViewProvider.js';
+import { SidebarWebviewProvider } from './webview/SidebarWebviewProvider.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
 import { isWindows } from './utils/platform.js';
@@ -36,6 +37,7 @@ const HIDE_INSTALLATION_GREETING_IDES: ReadonlySet<IdeInfo['name']> = new Set([
 let ideServer: IDEServer;
 let logger: vscode.OutputChannel;
 let webViewProviders: WebViewProvider[] = []; // Track multiple chat tabs
+let sidebarProvider: SidebarWebviewProvider | null = null;
 
 let log: (message: string) => void = () => {};
 
@@ -125,15 +127,18 @@ export async function activate(context: vscode.ExtensionContext) {
   );
   log('Readonly file system provider registered');
 
+  const getPermissionAwareProviders = () =>
+    sidebarProvider ? [...webViewProviders, sidebarProvider] : webViewProviders;
+
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(
     log,
     diffContentProvider,
     // Delay when any chat tab has a pending permission drawer
-    () => webViewProviders.some((p) => p.hasPendingPermission()),
+    () => getPermissionAwareProviders().some((p) => p.hasPendingPermission()),
     // Suppress diffs when active mode is auto or yolo in any chat tab
     () => {
-      const providers = webViewProviders.filter(
+      const providers = getPermissionAwareProviders().filter(
         (p) => typeof p.shouldSuppressDiff === 'function',
       );
       if (providers.length === 0) {
@@ -149,6 +154,20 @@ export async function activate(context: vscode.ExtensionContext) {
     webViewProviders.push(provider);
     return provider;
   };
+
+  sidebarProvider = new SidebarWebviewProvider(context, context.extensionUri);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'qwen-code-chat',
+      sidebarProvider,
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      },
+    ),
+    sidebarProvider,
+  );
 
   // Register WebView panel serializer for persistence across reloads
   context.subscriptions.push(
@@ -213,7 +232,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       // If WebView is requesting permission, actively select an allow option (prefer once)
       try {
-        for (const provider of webViewProviders) {
+        for (const provider of getPermissionAwareProviders()) {
           if (provider?.hasPendingPermission()) {
             provider.respondToPendingPermission('allow');
           }
@@ -230,7 +249,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       // If WebView is requesting permission, actively select reject/cancel
       try {
-        for (const provider of webViewProviders) {
+        for (const provider of getPermissionAwareProviders()) {
           if (provider?.hasPendingPermission()) {
             provider.respondToPendingPermission('cancel');
           }
@@ -369,6 +388,8 @@ export async function deactivate(): Promise<void> {
       provider.dispose();
     });
     webViewProviders = [];
+    sidebarProvider?.dispose();
+    sidebarProvider = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`Failed to stop IDE server during deactivation: ${message}`);

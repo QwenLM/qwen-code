@@ -43,6 +43,9 @@ vi.mock('vscode', () => ({
     registerWebviewPanelSerializer: vi.fn(() => ({
       dispose: vi.fn(),
     })),
+    registerWebviewViewProvider: vi.fn(() => ({
+      dispose: vi.fn(),
+    })),
   },
   workspace: {
     workspaceFolders: [],
@@ -132,6 +135,19 @@ describe('activate', () => {
   it('should register a handler for onDidGrantWorkspaceTrust', async () => {
     await activate(context);
     expect(vscode.workspace.onDidGrantWorkspaceTrust).toHaveBeenCalled();
+  });
+
+  it('should register the sidebar webview provider', async () => {
+    await activate(context);
+    expect(vscode.window.registerWebviewViewProvider).toHaveBeenCalledWith(
+      'qwen-code-chat',
+      expect.anything(),
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      },
+    );
   });
 
   it('should launch the Qwen Code when the user clicks the button', async () => {
