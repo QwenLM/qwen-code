@@ -32,6 +32,43 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
 
+const LANGUAGE_MAP: Record<string, string> = {
+  '.c': 'c',
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+  '.h': 'c',
+  '.hpp': 'cpp',
+  '.hxx': 'cpp',
+  '.cs': 'csharp',
+  '.go': 'go',
+  '.java': 'java',
+  '.js': 'javascript',
+  '.jsx': 'javascriptreact',
+  '.ts': 'typescript',
+  '.tsx': 'typescriptreact',
+  '.py': 'python',
+  '.rs': 'rust',
+  '.rb': 'ruby',
+  '.php': 'php',
+  '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.scala': 'scala',
+  '.vue': 'vue',
+  '.svelte': 'svelte',
+  '.html': 'html',
+  '.css': 'css',
+  '.json': 'json',
+  '.xml': 'xml',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.md': 'markdown',
+  '.sql': 'sql',
+  '.sh': 'shell',
+  '.bash': 'shell',
+  '.zsh': 'shell',
+};
+
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
   workspaceRoot: string;
@@ -139,9 +176,47 @@ export class LspServerManager {
       // Only mark as warmed up after successful completion
       handle.warmedUp = true;
     } catch (error) {
-      // Do not set warmedUp to true on failure, allowing retry
       debugLogger.warn('TypeScript server warm-up failed:', error);
     }
+  }
+
+  /**
+   * Open a document in the LSP server by sending textDocument/didOpen.
+   * This is required for operations like documentSymbol to work properly.
+   */
+  async openDocument(handle: LspServerHandle, filePath: string): Promise<void> {
+    if (!handle.connection) {
+      return;
+    }
+
+    try {
+      const uri = pathToFileURL(filePath).toString();
+      const languageId = this.getLanguageId(filePath);
+      const text = await fs.promises.readFile(filePath, 'utf-8');
+
+      handle.connection.send({
+        jsonrpc: '2.0',
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri,
+            languageId,
+            version: 1,
+            text,
+          },
+        },
+      });
+    } catch (error) {
+      debugLogger.warn(`Failed to open document ${filePath}:`, error);
+    }
+  }
+
+  /**
+   * Get the language ID for a file based on its extension.
+   */
+  private getLanguageId(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    return LANGUAGE_MAP[ext] || 'plaintext';
   }
 
   /**
