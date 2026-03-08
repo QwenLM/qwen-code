@@ -6,7 +6,7 @@
 
 /**
  * Represents the storage level for a skill configuration.
- * - 'project': Stored in `.qwen/skills/` within the project directory
+ * - 'project': Stored in `.qwen/skills/` or `.agents/skills/` within the project directory
  * - 'user': Stored in `~/.qwen/skills/` in the user's home directory
  * - 'extension': Provided by an installed extension
  */
