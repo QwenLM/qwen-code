@@ -147,16 +147,25 @@ function ensureNewlineSeparation(currentContent: string): string {
 /**
  * Reads the current content of the memory file
  */
-async function readMemoryFileContent(
-  scope: 'global' | 'project' = 'global',
-): Promise<string> {
+async function readMemoryFileContent(): Promise<string> {
+  const globalPath = getMemoryFilePath('global');
+  const projectPath = getMemoryFilePath('project');
+  
+  let content = '';
+  
   try {
-    return await fs.readFile(getMemoryFilePath(scope), 'utf-8');
-  } catch (err) {
-    const error = err as Error & { code?: string };
-    if (!(error instanceof Error) || error.code !== 'ENOENT') throw err;
-    return '';
-  }
+    content += await fs.readFile(globalPath, 'utf-8');
+  } catch (e) {}
+
+  if (content) content += '\n';
+
+  try {
+    if (projectPath !== globalPath) {
+      content += await fs.readFile(projectPath, 'utf-8');
+    }
+  } catch (e) {}
+
+  return content;
 }
 
 /**
