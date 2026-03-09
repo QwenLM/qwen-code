@@ -47,6 +47,42 @@ export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100m
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
+// Kitty keypad private-use keycodes (0xE000-0xE026)
+// Reference: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+const KITTY_KEYPAD_PRINTABLE_KEYCODE_TO_CHAR: Record<number, string> = {
+  57399: '0',
+  57400: '1',
+  57401: '2',
+  57402: '3',
+  57403: '4',
+  57404: '5',
+  57405: '6',
+  57406: '7',
+  57407: '8',
+  57408: '9',
+  57409: '.',
+  57410: '/',
+  57411: '*',
+  57412: '-',
+  57413: '+',
+  // 57414 is keypad Enter - handled separately via CSI~ sequence
+  57415: '=',
+  57416: ',',
+};
+
+const KITTY_KEYPAD_FUNCTIONAL_KEYCODE_TO_NAME: Record<number, string> = {
+  57417: 'left',
+  57418: 'right',
+  57419: 'up',
+  57420: 'down',
+  57421: 'pageup',
+  57422: 'pagedown',
+  57423: 'home',
+  57424: 'end',
+  57425: 'insert',
+  57426: 'delete',
+};
+
 export interface Key {
   name: string;
   ctrl: boolean;
@@ -326,6 +362,74 @@ export function KeypressProvider({
               shift,
               paste: false,
               sequence: buffer.slice(0, m[0].length),
+              kittyProtocol: true,
+            },
+            length: m[0].length,
+          };
+        }
+
+        if (!ctrl) {
+          const keypadChar = KITTY_KEYPAD_PRINTABLE_KEYCODE_TO_CHAR[keyCode];
+          if (keypadChar) {
+            return {
+              key: {
+                name: keypadChar,
+                ctrl: false,
+                meta: alt,
+                shift,
+                paste: false,
+                sequence: keypadChar,
+                kittyProtocol: true,
+              },
+              length: m[0].length,
+            };
+          }
+        }
+
+        const keypadName = KITTY_KEYPAD_FUNCTIONAL_KEYCODE_TO_NAME[keyCode];
+        if (keypadName) {
+          return {
+            key: {
+              name: keypadName,
+              ctrl,
+              meta: alt,
+              shift,
+              paste: false,
+              sequence: buffer.slice(0, m[0].length),
+              kittyProtocol: true,
+            },
+            length: m[0].length,
+          };
+        }
+
+        // Printable CSI-u keys (including space) should behave like regular
+        // character input so downstream text inputs receive the literal char.
+        // Kitty uses the Unicode private use area for some functional keys
+        // such as keypad events, so exclude that range from generic printable
+        // conversion and handle mapped keys explicitly above.
+        if (
+          terminator === 'u' &&
+          !ctrl &&
+          keyCode >= 32 &&
+          keyCode !== 127 &&
+          keyCode <= 0x10ffff &&
+          !(keyCode >= 0xe000 && keyCode <= 0xf8ff)
+        ) {
+          const char = String.fromCodePoint(keyCode);
+          const printableName =
+            char === ' '
+              ? 'space'
+              : /^[A-Za-z]$/.test(char)
+                ? char.toLowerCase()
+                : char;
+          return {
+            key: {
+              name: printableName,
+              ctrl: false,
+              meta: alt,
+              shift,
+              paste: false,
+              sequence: char,
               kittyProtocol: true,
             },
             length: m[0].length,

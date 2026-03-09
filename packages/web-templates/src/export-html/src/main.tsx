@@ -1,5 +1,6 @@
 import './styles.css';
 import logoSvg from './favicon.svg';
+import { TempFileModal, useModalState } from './components/TempFileModal';
 
 declare global {
   interface Window {
@@ -35,9 +36,11 @@ type PlatformContextValue = {
   postMessage: (message: unknown) => void;
   onMessage: (handler: (event: MessageEvent) => void) => () => void;
   openFile: (path: string) => void;
+  openTempFile?: (content: string, fileName?: string) => void;
   getResourceUrl: () => string | undefined;
   features: {
     canOpenFile: boolean;
+    canOpenTempFile?: boolean;
     canCopy: boolean;
   };
 };
@@ -56,24 +59,38 @@ const logoSvgWithGradient = (() => {
   return withDefs.replace(/fill="[^"]*"/, 'fill="url(#qwen-logo-gradient)"');
 })();
 
-const platformContext = {
-  platform: 'web' as PlatformContextValue['platform'],
-  postMessage: (message: unknown) => {
-    console.log('Posted message:', message);
-  },
-  onMessage: (handler: (event: MessageEvent) => void) => {
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  },
-  openFile: (path: string) => {
-    console.log('Opening file:', path);
-  },
-  getResourceUrl: () => undefined,
-  features: {
-    canOpenFile: false,
-    canCopy: true,
-  },
-} satisfies PlatformContextValue;
+const React = window.React;
+
+const usePlatformContext = () => {
+  const { modalState, openModal, closeModal } = useModalState();
+
+  const platformContext = React.useMemo(
+    () =>
+      ({
+        platform: 'web' as PlatformContextValue['platform'],
+        postMessage: (message: unknown) => {
+          console.log('Posted message:', message);
+        },
+        onMessage: (handler: (event: MessageEvent) => void) => {
+          window.addEventListener('message', handler);
+          return () => window.removeEventListener('message', handler);
+        },
+        openFile: (path: string) => {
+          console.log('Opening file:', path);
+        },
+        openTempFile: openModal,
+        getResourceUrl: () => undefined,
+        features: {
+          canOpenFile: false,
+          canOpenTempFile: true,
+          canCopy: true,
+        },
+      }) satisfies PlatformContextValue,
+    [openModal],
+  );
+
+  return { platformContext, modalState, closeModal };
+};
 
 const isChatViewerMessage = (value: unknown): value is ChatViewerMessage =>
   Boolean(value) && typeof value === 'object';
@@ -123,6 +140,7 @@ const App = () => {
     .filter((record) => record.type !== 'system');
   const sessionId = chatData.sessionId ?? '-';
   const sessionDate = formatSessionDate(chatData.startTime);
+  const { platformContext, modalState, closeModal } = usePlatformContext();
 
   return (
     <div className="page-wrapper">
@@ -155,6 +173,7 @@ const App = () => {
           <ChatViewer messages={messages} autoScroll={false} theme="dark" />
         </PlatformProvider>
       </div>
+      <TempFileModal state={modalState} onClose={closeModal} />
     </div>
   );
 };

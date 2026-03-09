@@ -11,7 +11,7 @@ import {
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
   FileEncoding,
-  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
@@ -33,6 +33,7 @@ import {
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -124,6 +125,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  experimentalHooks: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -335,6 +337,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
+          default: false,
+        })
+        .option('experimental-hooks', {
+          type: 'boolean',
+          description:
+            'Enable experimental hooks feature for lifecycle event customization',
           default: false,
         })
         .option('channel', {
@@ -564,7 +572,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register MCP subcommands
     .command(mcpCommand)
     // Register Extension subcommands
-    .command(extensionsCommand);
+    .command(extensionsCommand)
+    // Register Hooks subcommands
+    .command(hooksCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -583,9 +593,11 @@ export async function parseArguments(): Promise<CliArgs> {
   // and not return to main CLI logic
   if (
     result._.length > 0 &&
-    (result._[0] === 'mcp' || result._[0] === 'extensions')
+    (result._[0] === 'mcp' ||
+      result._[0] === 'extensions' ||
+      result._[0] === 'hooks')
   ) {
-    // MCP commands handle their own execution and process exit
+    // MCP/Extensions/Hooks commands handle their own execution and process exit
     process.exit(0);
   }
 
@@ -691,8 +703,8 @@ export async function loadCliConfig(
   if (settings.context?.fileName) {
     setServerGeminiMdFilename(settings.context.fileName);
   } else {
-    // Reset to default if not provided in settings.
-    setServerGeminiMdFilename(getCurrentGeminiMdFilename());
+    // Reset to default context filenames if not provided in settings.
+    setServerGeminiMdFilename(getAllGeminiMdFilenames());
   }
 
   // Automatically load output-language.md if it exists
@@ -1014,7 +1026,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    skipLoopDetection: settings.model?.skipLoopDetection ?? false,
+    skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
@@ -1024,6 +1036,10 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
+    hooks: settings.hooks,
+    hooksConfig: settings.hooksConfig,
+    enableHooks:
+      argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

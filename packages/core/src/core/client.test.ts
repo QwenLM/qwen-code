@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -357,6 +357,8 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getMessageBus: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
@@ -2271,7 +2273,6 @@ Other open files:
 
       // Replace loop detector with spies
       const ldMock = {
-        turnStarted: vi.fn().mockResolvedValue(false),
         addAndCheck: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
       };
@@ -2302,7 +2303,6 @@ Other open files:
       }
 
       // Assert - loop detection methods should not be called when skipLoopDetection is true
-      expect(ldMock.turnStarted).not.toHaveBeenCalled();
       expect(ldMock.addAndCheck).not.toHaveBeenCalled();
     });
   });

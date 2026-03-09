@@ -57,7 +57,7 @@ export const StatusMessage: React.FC<StatusMessageProps> = ({
 export const InfoMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="•"
+    prefix="●"
     prefixColor={theme.text.primary}
     textColor={theme.text.primary}
   />

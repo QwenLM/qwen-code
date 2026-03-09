@@ -368,4 +368,69 @@ describe('convertClaudePluginPackage', () => {
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+
+  it('should successfully convert agent files with Windows CRLF endings', async () => {
+    // Setup: Create a plugin with a source agents folder containing a CRLF agent
+    const pluginSourceDir = path.join(testDir, 'plugin-crlf-agents');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+
+    // Create source agents directory (renamed to src-agents to avoid skip-logic bug)
+    const agentsDir = path.join(pluginSourceDir, 'src-agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+
+    // Write a .md file with CRLF endings
+    const crlfAgentContent = `---\r\nname: cool-agent\r\ndescription: A cool agent\r\n---\r\n\r\nSystem prompt body\r\n`;
+    fs.writeFileSync(
+      path.join(agentsDir, 'agent.md'),
+      crlfAgentContent,
+      'utf-8',
+    );
+
+    // Create marketplace.json specifying to load this agent
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'crlf-agents-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          agents: ['./src-agents/agent.md'],
+        },
+      ],
+    };
+
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Act: Convert
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'crlf-agents-plugin',
+    );
+
+    // Verify: agent file was properly parsed and converted into .qwen/agents folder structure
+    const convertedAgentsDir = path.join(result.convertedDir, 'agents');
+    expect(fs.existsSync(convertedAgentsDir)).toBe(true);
+
+    const convertedFiles = fs.readdirSync(convertedAgentsDir);
+    expect(convertedFiles).toContain('agent.md'); // The filename is preserved from source
+
+    // Verify it was actually parsed by checking the converted content format
+    const convertedContent = fs.readFileSync(
+      path.join(convertedAgentsDir, 'agent.md'),
+      'utf-8',
+    );
+    expect(convertedContent).toContain('name: cool-agent');
+
+    // Clean up
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
 });

@@ -117,7 +117,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Анализ проекта и создание адаптированного файла QWEN.md',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
@@ -380,7 +380,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
   'exit the cli': 'Выход из CLI',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Открыть диалог управления MCP или авторизоваться на сервере с поддержкой OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Показать настроенные MCP-серверы и инструменты, или авторизоваться на серверах с поддержкой OAuth',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
@@ -889,9 +891,36 @@ export default {
   'Do you want to proceed?': 'Вы хотите продолжить?',
   'Yes, allow once': 'Да, разрешить один раз',
   'Allow always': 'Всегда разрешать',
+  Yes: 'Да',
   No: 'Нет',
   'No (esc)': 'Нет (esc)',
   'Yes, allow always for this session': 'Да, всегда разрешать для этой сессии',
+
+  // MCP Management - Core translations
+  Disable: 'Отключить',
+  Enable: 'Включить',
+  Reconnect: 'Переподключить',
+  'View tools': 'Просмотреть инструменты',
+  '(disabled)': '(отключен)',
+  'Error:': 'Ошибка:',
+  Extension: 'Расширение',
+  tool: 'инструмент',
+  connected: 'подключен',
+  connecting: 'подключение',
+  disconnected: 'отключен',
+  error: 'ошибка',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} недействительных инструментов',
+  invalid: 'недействительный',
+  'invalid: {{reason}}': 'недействительно: {{reason}}',
+  'missing name': 'отсутствует имя',
+  'missing description': 'отсутствует описание',
+  '(unnamed)': '(без имени)',
+  'Warning: This tool cannot be called by the LLM':
+    'Предупреждение: Этот инструмент не может быть вызван LLM',
+  Reason: 'Причина',
+  'Tools must have both name and description to be used by the LLM.':
+    'Инструменты должны иметь как имя, так и описание, чтобы использоваться LLM.',
   'Modify in progress:': 'Идет изменение:',
   'Save and close external editor to continue':
     'Сохраните и закройте внешний редактор для продолжения',
@@ -1449,6 +1478,17 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
+  Custom: 'Пользовательский',
+  'More instructions about configuring `modelProviders` manually.':
+    'Дополнительные инструкции по ручной настройке `modelProviders`.',
+  'Select API-KEY configuration mode:': 'Выберите режим конфигурации API-KEY:',
+  '(Press Escape to go back)': '(Нажмите Escape для возврата)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Нажмите Enter для отправки, Escape для отмены)',
+  'More instructions please check:': 'Дополнительные инструкции см.:',
   'Select Region for Coding Plan': 'Выберите регион Coding Plan',
   'Choose based on where your account is registered':
     'Выберите в зависимости от места регистрации вашего аккаунта',
@@ -1463,4 +1503,106 @@ export default {
     'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+
+  // ============================================================================
+  // MCP Management Dialog
+  // ============================================================================
+  'MCP Management': 'Управление MCP',
+  'Server List': 'Список серверов',
+  'Server Detail': 'Детали сервера',
+  'Disable Server': 'Отключить сервер',
+  'Tool List': 'Список инструментов',
+  'Tool Detail': 'Детали инструмента',
+  'Loading...': 'Загрузка...',
+  'Unknown step': 'Неизвестный шаг',
+  'Esc to back': 'Esc для возврата',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ навигация · Enter выбрать · Esc закрыть',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ навигация · Enter выбрать · Esc назад',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ навигация · Enter подтвердить · Esc назад',
+  'User Settings (global)': 'Настройки пользователя (глобальные)',
+  'Workspace Settings (project-specific)':
+    'Настройки рабочего пространства (проектные)',
+  'Disable server:': 'Отключить сервер:',
+  'Select where to add the server to the exclude list:':
+    'Выберите, где добавить сервер в список исключений:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter для подтверждения, Esc для отмены',
+  'Status:': 'Статус:',
+  'Command:': 'Команда:',
+  'Working Directory:': 'Рабочий каталог:',
+  'Capabilities:': 'Возможности:',
+  'No server selected': 'Сервер не выбран',
+
+  // MCP Server List
+  'User MCPs': 'MCP пользователя',
+  'Project MCPs': 'MCP проекта',
+  'Extension MCPs': 'MCP расширений',
+  server: 'сервер',
+  servers: 'серверов',
+  'Add MCP servers to your settings to get started.':
+    'Добавьте серверы MCP в настройки, чтобы начать.',
+  'Run qwen --debug to see error logs':
+    'Запустите qwen --debug для просмотра журналов ошибок',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Для этого сервера нет доступных инструментов.',
+  destructive: 'деструктивный',
+  'read-only': 'только чтение',
+  'open-world': 'открытый мир',
+  idempotent: 'идемпотентный',
+  'Tools for {{name}}': 'Инструменты для {{name}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'обязательный',
+  Type: 'Тип',
+  Enum: 'Перечисление',
+  Parameters: 'Параметры',
+  'No tool selected': 'Инструмент не выбран',
+  Annotations: 'Аннотации',
+  Title: 'Заголовок',
+  'Read Only': 'Только чтение',
+  Destructive: 'Деструктивный',
+  Idempotent: 'Идемпотентный',
+  'Open World': 'Открытый мир',
+  Server: 'Сервер',
+  '{{region}} configuration updated successfully.':
+    'Конфигурация {{region}} успешно обновлена.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Совет: Используйте /model для переключения между доступными моделями Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Пожалуйста, ответьте на следующий(ие) вопрос(ы):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Невозможно задавать вопросы пользователю в неинтерактивном режиме. Пожалуйста, запустите в интерактивном режиме для использования этого инструмента.',
+  'User declined to answer the questions.':
+    'Пользователь отказался отвечать на вопросы.',
+  'User has provided the following answers:':
+    'Пользователь предоставил следующие ответы:',
+  'Failed to process user answers:':
+    'Не удалось обработать ответы пользователя:',
+  'Type something...': 'Введите что-то...',
+  Submit: 'Отправить',
+  'Submit answers': 'Отправить ответы',
+  Cancel: 'Отмена',
+  'Your answers:': 'Ваши ответы:',
+  '(not answered)': '(не отвечено)',
+  'Ready to submit your answers?': 'Готовы отправить свои ответы?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Enter: Выбор',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
 };

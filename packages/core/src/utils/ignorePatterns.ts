@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getCurrentGeminiMdFilename } from '../tools/memoryTool.js';
+import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
 
 /**
  * Common ignore patterns used across multiple tools for basic exclusions.
@@ -119,7 +119,7 @@ export interface ExcludeOptions {
   runtimePatterns?: string[];
 
   /**
-   * Whether to include dynamic patterns like the current Gemini MD filename. Defaults to true.
+   * Whether to include dynamic patterns like configured context filenames. Defaults to true.
    */
   includeDynamicPatterns?: boolean;
 }
@@ -158,9 +158,11 @@ export class FileExclusions {
       patterns.push(...DEFAULT_FILE_EXCLUDES);
     }
 
-    // Add dynamic patterns (like current Gemini MD filename)
+    // Add dynamic patterns (like context filenames)
     if (includeDynamicPatterns) {
-      patterns.push(`**/${getCurrentGeminiMdFilename()}`);
+      for (const filename of getAllGeminiMdFilenames()) {
+        patterns.push(`**/${filename}`);
+      }
     }
 
     // Add custom patterns from configuration

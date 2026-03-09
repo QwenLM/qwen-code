@@ -108,6 +108,10 @@ interface CalculatedEdit {
   occurrences: number;
   error?: { display: string; raw: string; type: ToolErrorType };
   isNewFile: boolean;
+  /** Detected encoding of the existing file (e.g. 'utf-8', 'gbk') */
+  encoding: string;
+  /** Whether the existing file has a UTF-8 BOM */
+  bom: boolean;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -134,17 +138,22 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
     let occurrences = 0;
+    let encoding = 'utf-8';
+    let bom = false;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
 
     try {
-      currentContent = await this.config
+      const fileInfo = await this.config
         .getFileSystemService()
-        .readTextFile(params.file_path);
+        .readTextFileWithInfo(params.file_path);
       // Normalize line endings to LF for consistent processing.
-      currentContent = currentContent.replace(/\r\n/g, '\n');
+      currentContent = fileInfo.content.replace(/\r\n/g, '\n');
       fileExists = true;
+      // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
+      encoding = fileInfo.encoding;
+      bom = fileInfo.bom;
     } catch (err: unknown) {
       if (!isNodeError(err) || err.code !== 'ENOENT') {
         // Rethrow unexpected FS errors (permissions, etc.)
@@ -238,6 +247,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       occurrences,
       error,
       isNewFile,
+      encoding,
+      bom,
     };
   }
 
@@ -373,7 +384,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       this.ensureParentDirectoriesExist(this.params.file_path);
 
       // For new files, apply default file encoding setting
-      // For existing files, keep original content as-is (including any BOM character)
+      // For existing files, preserve the original encoding (BOM and charset)
       if (editData.isNewFile) {
         const useBOM =
           this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
@@ -385,7 +396,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       } else {
         await this.config
           .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent);
+          .writeTextFile(this.params.file_path, editData.newContent, {
+            bom: editData.bom,
+            encoding: editData.encoding,
+          });
       }
 
       const fileName = path.basename(this.params.file_path);

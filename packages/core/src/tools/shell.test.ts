@@ -268,10 +268,10 @@ describe('ShellTool', () => {
       resolveExecutionPromise(fullResult);
     };
 
-    it('should wrap command on linux and parse pgrep output', async () => {
+    it('should wrap background command on linux and parse pgrep output', async () => {
       const invocation = shellTool.build({
-        command: 'my-command &',
-        is_background: false,
+        command: 'my-command',
+        is_background: true,
       });
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
@@ -291,7 +291,7 @@ describe('ShellTool', () => {
         false,
         {},
       );
-      expect(result.llmContent).toContain('Background PIDs: 54322');
+      expect(result.llmContent).toContain('PIDs: 54322');
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
@@ -353,15 +353,11 @@ describe('ShellTool', () => {
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('54321\n54322\n');
-
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ npm test; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'npm test',
         expect.any(String),
         expect.any(Function),
         expect.any(AbortSignal),
@@ -383,10 +379,9 @@ describe('ShellTool', () => {
       resolveShellExecution();
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ ls; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'ls',
         '/test/dir/subdir',
         expect.any(Function),
         expect.any(AbortSignal),
@@ -733,7 +728,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('npm install'),
           expect.any(String),
@@ -762,7 +756,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit'),
           expect.any(String),
@@ -828,7 +821,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit -m "Initial commit"'),
           expect.any(String),

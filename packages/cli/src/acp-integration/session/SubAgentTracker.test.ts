@@ -23,7 +23,7 @@ import {
   ToolConfirmationOutcome,
   TodoWriteTool,
 } from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
+import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { EventEmitter } from 'node:events';
 
 // Helper to create a mock AgentToolCallEvent with required fields
@@ -116,7 +116,7 @@ function createStreamTextEvent(
 
 describe('SubAgentTracker', () => {
   let mockContext: SessionContext;
-  let mockClient: acp.Client;
+  let mockClient: AgentSideConnection;
   let sendUpdateSpy: ReturnType<typeof vi.fn>;
   let requestPermissionSpy: ReturnType<typeof vi.fn>;
   let tracker: SubAgentTracker;
@@ -143,7 +143,7 @@ describe('SubAgentTracker', () => {
 
     mockClient = {
       requestPermission: requestPermissionSpy,
-    } as unknown as acp.Client;
+    } as unknown as AgentSideConnection;
 
     tracker = new SubAgentTracker(
       mockContext,

@@ -14,9 +14,7 @@ import type {
   InsightProgressCallback,
 } from '../types/StaticInsightTypes.js';
 
-import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
-
-const logger = createDebugLogger('StaticInsightGenerator');
+import { updateSymlink, type Config } from '@qwen-code/qwen-code-core';
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
@@ -54,40 +52,12 @@ export class StaticInsightGenerator {
     return outputPath;
   }
 
-  // Create or update the "latest" alias (symlink preferred, copy as fallback)
-  private async updateLatestAlias(
+  private async updateInsightSymlink(
     outputDir: string,
     targetPath: string,
   ): Promise<void> {
     const latestPath = path.join(outputDir, 'insight.html');
-    const relativeTarget = path.relative(outputDir, targetPath);
-
-    // Remove existing file/symlink if it exists
-    try {
-      await fs.unlink(latestPath);
-    } catch {
-      // File doesn't exist, ignore
-    }
-
-    // Try symlink first (preferred - lightweight, always points to latest)
-    try {
-      await fs.symlink(relativeTarget, latestPath);
-      logger.debug('Created insight symlink:', relativeTarget);
-      return;
-    } catch (error) {
-      logger.debug(
-        'Failed to create insight symlink, falling back to copy:',
-        error,
-      );
-    }
-
-    // Fallback: copy file (works everywhere, uses more disk space)
-    try {
-      await fs.copyFile(targetPath, latestPath);
-      logger.debug('Created insight copy:', targetPath);
-    } catch (error) {
-      logger.debug('Failed to create insight latest alias:', error);
-    }
+    await updateSymlink(latestPath, targetPath);
   }
 
   // Generate the static insight HTML file
@@ -116,8 +86,7 @@ export class StaticInsightGenerator {
     // Write the HTML file
     await fs.writeFile(outputPath, html, 'utf-8');
 
-    // Update latest alias (symlink preferred, copy as fallback)
-    await this.updateLatestAlias(outputDir, outputPath);
+    await this.updateInsightSymlink(outputDir, outputPath);
 
     return outputPath;
   }

@@ -759,6 +759,7 @@ describe('WriteFileTool', () => {
       // Verify writeTextFile was called with bom: true
       expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
         bom: true,
+        encoding: 'utf-8',
       });
 
       // Cleanup
@@ -785,6 +786,7 @@ describe('WriteFileTool', () => {
       // Verify writeTextFile was called with bom: false
       expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
         bom: false,
+        encoding: 'utf-8',
       });
 
       // Cleanup

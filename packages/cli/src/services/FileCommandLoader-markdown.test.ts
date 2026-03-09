@@ -77,6 +77,30 @@ This is a test prompt from markdown.`;
     }
   });
 
+  it('should load markdown commands with BOM and CRLF frontmatter', async () => {
+    const mdContent =
+      '\uFEFF---\r\ndescription: Windows markdown command\r\n---\r\n\r\nPrompt from windows markdown.\r\n';
+
+    const commandPath = path.join(tempDir, 'windows-command.md');
+    await fs.writeFile(commandPath, mdContent, 'utf-8');
+
+    const loader = new FileCommandLoader(null);
+    const originalMethod = loader['getCommandDirectories'];
+    loader['getCommandDirectories'] = () => [{ path: tempDir }];
+
+    try {
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const windowsCommand = commands.find(
+        (cmd) => cmd.name === 'windows-command',
+      );
+
+      expect(windowsCommand).toBeDefined();
+      expect(windowsCommand?.description).toBe('Windows markdown command');
+    } finally {
+      loader['getCommandDirectories'] = originalMethod;
+    }
+  });
+
   it('should load both toml and markdown commands', async () => {
     // Create both TOML and Markdown files
     const tomlContent = `prompt = "TOML prompt"

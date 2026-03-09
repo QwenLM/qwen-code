@@ -78,6 +78,10 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Extensions manager dialog
+  closeExtensionsManagerDialog: () => void;
+  // MCP dialog
+  closeMcpDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

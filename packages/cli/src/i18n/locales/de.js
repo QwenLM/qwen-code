@@ -97,7 +97,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Verfügbare Qwen Code CLI-Werkzeuge:',
   'No tools available': 'Keine Werkzeuge verfügbar',
@@ -360,7 +360,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Werkzeugspezifische Nutzungsstatistiken anzeigen.',
   'exit the cli': 'CLI beenden',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP-Verwaltungsdialog öffnen oder mit OAuth-fähigem Server authentifizieren',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Konfigurierte MCP-Server und Werkzeuge auflisten oder mit OAuth-fähigen Servern authentifizieren',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -882,9 +884,101 @@ export default {
   'Do you want to proceed?': 'Möchten Sie fortfahren?',
   'Yes, allow once': 'Ja, einmal erlauben',
   'Allow always': 'Immer erlauben',
+  Yes: 'Ja',
   No: 'Nein',
   'No (esc)': 'Nein (Esc)',
   'Yes, allow always for this session': 'Ja, für diese Sitzung immer erlauben',
+
+  // MCP Management Dialog (translations for MCP UI components)
+  'Manage MCP servers': 'MCP-Server verwalten',
+  'Server Detail': 'Serverdetails',
+  'Disable Server': 'Server deaktivieren',
+  Tools: 'Werkzeuge',
+  'Tool Detail': 'Werkzeugdetails',
+  'MCP Management': 'MCP-Verwaltung',
+  'Loading...': 'Lädt...',
+  'Unknown step': 'Unbekannter Schritt',
+  'Esc to back': 'Esc zurück',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ navigieren · Enter auswählen · Esc schließen',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ navigieren · Enter auswählen · Esc zurück',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ navigieren · Enter bestätigen · Esc zurück',
+  'User Settings (global)': 'Benutzereinstellungen (global)',
+  'Workspace Settings (project-specific)':
+    'Arbeitsbereichseinstellungen (projektspezifisch)',
+  'Disable server:': 'Server deaktivieren:',
+  'Select where to add the server to the exclude list:':
+    'Wählen Sie, wo der Server zur Ausschlussliste hinzugefügt werden soll:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter zum Bestätigen, Esc zum Abbrechen',
+  Disable: 'Deaktivieren',
+  Enable: 'Aktivieren',
+  Reconnect: 'Neu verbinden',
+  'View tools': 'Werkzeuge anzeigen',
+  'Status:': 'Status:',
+  'Command:': 'Befehl:',
+  'Working Directory:': 'Arbeitsverzeichnis:',
+  'Capabilities:': 'Fähigkeiten:',
+  'No server selected': 'Kein Server ausgewählt',
+  '(disabled)': '(deaktiviert)',
+  'Error:': 'Fehler:',
+  Extension: 'Erweiterung',
+  tool: 'Werkzeug',
+  tools: 'Werkzeuge',
+  connected: 'verbunden',
+  connecting: 'verbindet',
+  disconnected: 'getrennt',
+  error: 'Fehler',
+
+  // MCP Server List
+  'User MCPs': 'Benutzer-MCPs',
+  'Project MCPs': 'Projekt-MCPs',
+  'Extension MCPs': 'Erweiterungs-MCPs',
+  server: 'Server',
+  servers: 'Server',
+  'Add MCP servers to your settings to get started.':
+    'Fügen Sie MCP-Server zu Ihren Einstellungen hinzu, um zu beginnen.',
+  'Run qwen --debug to see error logs':
+    'Führen Sie qwen --debug aus, um Fehlerprotokolle anzuzeigen',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Keine Werkzeuge für diesen Server verfügbar.',
+  destructive: 'destruktiv',
+  'read-only': 'schreibgeschützt',
+  'open-world': 'offene Welt',
+  idempotent: 'idempotent',
+  'Tools for {{name}}': 'Werkzeuge für {{name}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'erforderlich',
+  Type: 'Typ',
+  Enum: 'Aufzählung',
+  Parameters: 'Parameter',
+  'No tool selected': 'Kein Werkzeug ausgewählt',
+  Annotations: 'Anmerkungen',
+  Title: 'Titel',
+  'Read Only': 'Schreibgeschützt',
+  Destructive: 'Destruktiv',
+  Idempotent: 'Idempotent',
+  'Open World': 'Offene Welt',
+  Server: 'Server',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ungültige Werkzeuge',
+  invalid: 'ungültig',
+  'invalid: {{reason}}': 'ungültig: {{reason}}',
+  'missing name': 'Name fehlt',
+  'missing description': 'Beschreibung fehlt',
+  '(unnamed)': '(unbenannt)',
+  'Warning: This tool cannot be called by the LLM':
+    'Warnung: Dieses Werkzeug kann nicht vom LLM aufgerufen werden',
+  Reason: 'Grund',
+  'Tools must have both name and description to be used by the LLM.':
+    'Werkzeuge müssen sowohl einen Namen als auch eine Beschreibung haben, um vom LLM verwendet zu werden.',
   'Modify in progress:': 'Änderung in Bearbeitung:',
   'Save and close external editor to continue':
     'Speichern und externen Editor schließen, um fortzufahren',
@@ -1445,6 +1539,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  Custom: 'Benutzerdefiniert',
+  'More instructions about configuring `modelProviders` manually.':
+    'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
+  'Select API-KEY configuration mode:':
+    'API-KEY-Konfigurationsmodus auswählen:',
+  '(Press Escape to go back)': '(Escape drücken zum Zurückgehen)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enter zum Absenden, Escape zum Abbrechen)',
+  'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
   'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
   'Choose based on where your account is registered':
     'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
@@ -1457,6 +1563,39 @@ export default {
     'Neue Modellkonfigurationen sind für {{region}} verfügbar. Jetzt aktualisieren?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
+  '{{region}} configuration updated successfully.':
+    '{{region}}-Konfiguration erfolgreich aktualisiert.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Tipp: Verwenden Sie /model, um zwischen verfügbaren Coding Plan-Modellen zu wechseln.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Bitte beantworten Sie die folgende(n) Frage(n):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Benutzerfragen können im nicht-interaktiven Modus nicht gestellt werden. Bitte führen Sie das Tool im interaktiven Modus aus.',
+  'User declined to answer the questions.':
+    'Benutzer hat die Beantwortung der Fragen abgelehnt.',
+  'User has provided the following answers:':
+    'Benutzer hat die folgenden Antworten bereitgestellt:',
+  'Failed to process user answers:':
+    'Fehler beim Verarbeiten der Benutzerantworten:',
+  'Type something...': 'Etwas eingeben...',
+  Submit: 'Senden',
+  'Submit answers': 'Antworten senden',
+  Cancel: 'Abbrechen',
+  'Your answers:': 'Ihre Antworten:',
+  '(not answered)': '(nicht beantwortet)',
+  'Ready to submit your answers?': 'Bereit, Ihre Antworten zu senden?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Enter: Auswählen',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
 };

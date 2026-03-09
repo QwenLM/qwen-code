@@ -59,6 +59,7 @@ import {
   type TrackedToolCall,
   type TrackedCompletedToolCall,
   type TrackedCancelledToolCall,
+  type TrackedExecutingToolCall,
   type TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
 import { promises as fs } from 'node:fs';
@@ -356,6 +357,23 @@ export const useGeminiStream = (
 
   const streamingState = useMemo(() => {
     if (toolCalls.some((tc) => tc.status === 'awaiting_approval')) {
+      return StreamingState.WaitingForConfirmation;
+    }
+    // Check if any executing subagent task has a pending confirmation
+    if (
+      toolCalls.some((tc) => {
+        if (tc.status !== 'executing') return false;
+        const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
+        return (
+          typeof liveOutput === 'object' &&
+          liveOutput !== null &&
+          'type' in liveOutput &&
+          liveOutput.type === 'task_execution' &&
+          'pendingConfirmation' in liveOutput &&
+          liveOutput.pendingConfirmation != null
+        );
+      })
+    ) {
       return StreamingState.WaitingForConfirmation;
     }
     if (
@@ -1025,6 +1043,15 @@ export const useGeminiStream = (
             } else if (!pendingRetryCountdownItemRef.current) {
               clearRetryCountdown();
             }
+            break;
+          case ServerGeminiEventType.HookSystemMessage:
+            // Display system message from hooks (e.g., Ralph Loop iteration info)
+            // This is handled as a content event to show in the UI
+            geminiMessageBuffer = handleContentEvent(
+              event.value + '\n',
+              geminiMessageBuffer,
+              userMessageTimestamp,
+            );
             break;
           default: {
             // enforces exhaustive switch-case
