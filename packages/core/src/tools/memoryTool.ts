@@ -152,18 +152,23 @@ async function readMemoryFileContent(): Promise<string> {
   const projectPath = getMemoryFilePath('project');
   
   let content = '';
-  
+
   try {
     content += await fs.readFile(globalPath, 'utf-8');
-  } catch (e) {}
+  } catch (err) {
+    const error = err as Error & { code?: string };
+    if (error.code !== 'ENOENT') throw err;
+  }
 
-  if (content) content += '\n';
-
-  try {
-    if (projectPath !== globalPath) {
-      content += await fs.readFile(projectPath, 'utf-8');
+  if (projectPath !== globalPath) {
+    try {
+      const projectContent = await fs.readFile(projectPath, 'utf-8');
+      content += (content ? '\n' : '') + projectContent;
+    } catch (err) {
+      const error = err as Error & { code?: string };
+      if (error.code !== 'ENOENT') throw err;
     }
-  } catch (e) {}
+  }
 
   return content;
 }
