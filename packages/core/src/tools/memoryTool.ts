@@ -152,7 +152,7 @@ async function readMemoryFileContent(): Promise<string> {
   const projectPath = getMemoryFilePath('project');
   
   let content = '';
-
+  
   try {
     content += await fs.readFile(globalPath, 'utf-8');
   } catch (err) {
