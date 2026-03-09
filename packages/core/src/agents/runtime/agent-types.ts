@@ -99,27 +99,33 @@ export enum AgentTerminateMode {
  * Canonical lifecycle status for any agent (headless, interactive, arena).
  *
  * State machine:
- *   INITIALIZING → RUNNING ⇄ COMPLETED / FAILED / CANCELLED
+ *   INITIALIZING → RUNNING → IDLE ⇄ RUNNING → … → COMPLETED / FAILED / CANCELLED
  *
  * - INITIALIZING: Setting up (creating chat, loading tools).
  * - RUNNING:      Actively processing (model thinking / tool execution).
- * - COMPLETED:    Finished successfully (may re-enter RUNNING on new input).
+ * - IDLE:         Finished current work, waiting — can accept new messages.
+ * - COMPLETED:    Finished for good (explicit shutdown). No further interaction.
  * - FAILED:       Finished with error (API failure, process crash, etc.).
  * - CANCELLED:    Cancelled by user or system.
  */
 export enum AgentStatus {
   INITIALIZING = 'initializing',
   RUNNING = 'running',
+  IDLE = 'idle',
   COMPLETED = 'completed',
   FAILED = 'failed',
   CANCELLED = 'cancelled',
 }
 
-/** True for COMPLETED, FAILED, CANCELLED — agent is done working. */
+/** True for COMPLETED, FAILED, CANCELLED — agent is done for good. */
 export const isTerminalStatus = (s: AgentStatus): boolean =>
   s === AgentStatus.COMPLETED ||
   s === AgentStatus.FAILED ||
   s === AgentStatus.CANCELLED;
+
+/** True for terminal statuses OR IDLE — agent has settled (not actively working). */
+export const isSettledStatus = (s: AgentStatus): boolean =>
+  s === AgentStatus.IDLE || isTerminalStatus(s);
 
 /**
  * Lightweight configuration for an AgentInteractive instance.

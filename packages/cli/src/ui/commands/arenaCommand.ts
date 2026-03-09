@@ -334,7 +334,7 @@ function executeArenaCommand(
     })
     .then(
       () => {
-        debugLogger.debug('Arena session completed');
+        debugLogger.debug('Arena agents settled');
       },
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -344,13 +344,18 @@ function executeArenaCommand(
         // Clear the stored manager so subsequent /arena start calls
         // are not blocked by the stale reference after a startup failure.
         config.setArenaManager(null);
+
+        // Detach listeners on failure — session is done for good.
+        for (const detach of detachListeners) {
+          detach();
+        }
       },
-    )
-    .finally(() => {
-      for (const detach of detachListeners) {
-        detach();
-      }
-    });
+    );
+
+  // NOTE: listeners are NOT detached when start() resolves because agents
+  // may still be alive (IDLE) and accept follow-up tasks. The listeners
+  // reference this manager's emitter, so they are garbage collected when
+  // the manager is cleaned up and replaced.
 
   // Store so that stop can wait for start() to fully unwind before cleanup
   manager.setLifecyclePromise(lifecycle);

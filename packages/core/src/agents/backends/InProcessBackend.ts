@@ -20,7 +20,7 @@ import {
   createContentGenerator,
 } from '../../core/contentGenerator.js';
 import { AUTH_ENV_MAPPINGS } from '../../models/constants.js';
-import { AgentStatus } from '../runtime/agent-types.js';
+import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { AgentEventEmitter } from '../runtime/agent-events.js';
 import { ContextState } from '../runtime/agent-headless.js';
@@ -130,9 +130,14 @@ export class InProcessBackend implements Backend {
       const context = new ContextState();
       await interactive.start(context);
 
-      // Watch for completion and fire exit callback
+      // Watch for completion and fire exit callback — but only for
+      // truly terminal statuses. IDLE means the agent is still alive
+      // and can accept follow-up messages.
       void interactive.waitForCompletion().then(() => {
         const status = interactive.getStatus();
+        if (!isTerminalStatus(status)) {
+          return;
+        }
         const exitCode =
           status === AgentStatus.COMPLETED
             ? 0

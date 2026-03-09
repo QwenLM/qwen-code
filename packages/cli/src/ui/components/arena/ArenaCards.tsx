@@ -148,11 +148,13 @@ export const ArenaSessionCard: React.FC<ArenaSessionCardProps> = ({
   const colChanges = 10;
 
   const titleLabel =
-    sessionStatus === 'completed'
-      ? 'Arena Complete'
-      : sessionStatus === 'cancelled'
-        ? 'Arena Cancelled'
-        : 'Arena Failed';
+    sessionStatus === 'idle'
+      ? 'Agents Status · Idle'
+      : sessionStatus === 'completed'
+        ? 'Arena Complete'
+        : sessionStatus === 'cancelled'
+          ? 'Arena Cancelled'
+          : 'Arena Failed';
 
   return (
     <Box
@@ -266,6 +268,15 @@ export const ArenaSessionCard: React.FC<ArenaSessionCardProps> = ({
       <Box height={1} />
 
       {/* Hint */}
+      {sessionStatus === 'idle' && (
+        <Box flexDirection="column">
+          <Text color={theme.text.secondary}>
+            Switch to an agent tab to continue, or{' '}
+            <Text color={theme.text.accent}>/arena select</Text> to pick a
+            winner.
+          </Text>
+        </Box>
+      )}
       {sessionStatus === 'completed' && (
         <Box>
           <Text color={theme.text.secondary}>

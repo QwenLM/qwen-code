@@ -67,8 +67,8 @@ export const DefaultAppLayout: React.FC = () => {
         <ExitWarning />
       </Box>
 
-      {/* Tab bar: visible whenever in-process agents exist */}
-      {hasAgents && <AgentTabBar />}
+      {/* Tab bar: visible whenever in-process agents exist and input is active */}
+      {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
     </Box>
   );
 };

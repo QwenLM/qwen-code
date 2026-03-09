@@ -21,7 +21,9 @@ export enum ArenaSessionStatus {
   INITIALIZING = 'initializing',
   /** Session is running */
   RUNNING = 'running',
-  /** Session completed (all agents finished) */
+  /** All agents finished their current task and are idle (can accept follow-ups) */
+  IDLE = 'idle',
+  /** Session completed for good (winner selected or explicit end) */
   COMPLETED = 'completed',
   /** Session was cancelled */
   CANCELLED = 'cancelled',

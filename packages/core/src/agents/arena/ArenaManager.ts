@@ -36,7 +36,11 @@ import {
   ARENA_MAX_AGENTS,
   safeAgentId,
 } from './types.js';
-import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  isSettledStatus,
+} from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
   logArenaAgentCompleted,
@@ -374,9 +378,10 @@ export class ArenaManager {
       this.sessionStatus = ArenaSessionStatus.RUNNING;
       await this.runAgents();
 
-      // Only mark as completed if not already cancelled/timed out
+      // Mark session as idle (agents finished but still alive) unless
+      // already cancelled/timed out.
       if (this.sessionStatus === ArenaSessionStatus.RUNNING) {
-        this.sessionStatus = ArenaSessionStatus.COMPLETED;
+        this.sessionStatus = ArenaSessionStatus.IDLE;
       }
 
       // Collect results (uses this.sessionStatus for result status)
@@ -1114,6 +1119,25 @@ export class ArenaManager {
       timestamp: Date.now(),
     });
 
+    // Emit progress messages for follow-up transitions (only after
+    // the initial task — the session is IDLE once all agents first settle).
+    if (this.sessionStatus === ArenaSessionStatus.IDLE) {
+      const displayName = agent.model.displayName || agent.model.modelId;
+      if (
+        previousStatus === AgentStatus.IDLE &&
+        newStatus === AgentStatus.RUNNING
+      ) {
+        this.emitProgress(
+          `Agent ${displayName} is working on a follow-up task…`,
+        );
+      } else if (
+        previousStatus === AgentStatus.RUNNING &&
+        newStatus === AgentStatus.IDLE
+      ) {
+        this.emitProgress(`Agent ${displayName} finished follow-up task.`);
+      }
+    }
+
     // Emit AGENT_COMPLETE when agent reaches a terminal status
     if (isTerminalStatus(newStatus)) {
       const result = this.buildAgentResult(agent);
@@ -1194,7 +1218,7 @@ export class ArenaManager {
     return new Promise<boolean>((resolve) => {
       const checkSettled = () => {
         for (const agent of this.agents.values()) {
-          if (!isTerminalStatus(agent.status)) {
+          if (!isSettledStatus(agent.status)) {
             return false;
           }
         }
@@ -1283,7 +1307,7 @@ export class ArenaManager {
           agent.error =
             interactive.getLastRoundError() || interactive.getError();
         }
-        if (isTerminalStatus(resolved)) {
+        if (isSettledStatus(resolved)) {
           agent.stats.durationMs = Date.now() - agent.startedAt;
         }
         this.updateAgentStatus(agent.agentId, resolved);
@@ -1337,9 +1361,9 @@ export class ArenaManager {
     const consolidatedAgents: Record<string, ArenaStatusFile> = {};
 
     for (const agent of this.agents.values()) {
-      // Only poll agents that are still alive (RUNNING)
+      // Only poll agents that are actively working
       if (
-        isTerminalStatus(agent.status) ||
+        isSettledStatus(agent.status) ||
         agent.status === AgentStatus.INITIALIZING
       ) {
         continue;

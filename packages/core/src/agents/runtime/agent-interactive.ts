@@ -323,12 +323,16 @@ export class AgentInteractive {
 
   // ─── Private Helpers ───────────────────────────────────────
 
-  /** Emit terminal status for the just-completed round. */
+  /**
+   * Settle status after the run loop empties.
+   * On success → IDLE (agent stays alive for follow-up messages).
+   * On error → FAILED (terminal).
+   */
   private settleRoundStatus(): void {
     if (this.lastRoundError) {
       this.setStatus(AgentStatus.FAILED);
     } else {
-      this.setStatus(AgentStatus.COMPLETED);
+      this.setStatus(AgentStatus.IDLE);
     }
   }
 

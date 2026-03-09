@@ -18,9 +18,11 @@
 import { useEffect, useRef } from 'react';
 import {
   ArenaEventType,
+  ArenaSessionStatus,
   DISPLAY_MODE,
   type ArenaManager,
   type ArenaAgentStartEvent,
+  type ArenaSessionCompleteEvent,
   type Config,
   type InProcessBackend,
 } from '@qwen-code/qwen-code-core';
@@ -123,9 +125,9 @@ export function useArenaInProcess(config: Config): void {
         tryRegister(MAX_AGENT_RETRIES);
       };
 
-      // On session end, unregister agents, remove listeners from this
-      // manager, and resume polling for a genuinely new manager instance.
-      const onSessionEnd = () => {
+      // Tear down agent tabs, remove listeners, and resume polling for
+      // a genuinely new manager instance.
+      const teardown = () => {
         actionsRef.current.unregisterAll();
         for (const timeout of retryTimeouts) {
           clearTimeout(timeout);
@@ -133,8 +135,8 @@ export function useArenaInProcess(config: Config): void {
         retryTimeouts.clear();
         // Remove listeners eagerly so they don't fire again
         emitter.off(ArenaEventType.AGENT_START, onAgentStart);
-        emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionEnd);
-        emitter.off(ArenaEventType.SESSION_ERROR, onSessionEnd);
+        emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
+        emitter.off(ArenaEventType.SESSION_ERROR, teardown);
         detachListeners = null;
         // Keep attachedManager reference — prevents reattach to this
         // same (completed) manager on the next poll tick.
@@ -144,14 +146,24 @@ export function useArenaInProcess(config: Config): void {
         }
       };
 
+      // When agents settle to IDLE the session is still alive — keep
+      // the tab bar so users can continue interacting with agents.
+      // Only tear down on truly terminal session statuses.
+      const onSessionComplete = (event: ArenaSessionCompleteEvent) => {
+        if (event.result.status === ArenaSessionStatus.IDLE) {
+          return;
+        }
+        teardown();
+      };
+
       emitter.on(ArenaEventType.AGENT_START, onAgentStart);
-      emitter.on(ArenaEventType.SESSION_COMPLETE, onSessionEnd);
-      emitter.on(ArenaEventType.SESSION_ERROR, onSessionEnd);
+      emitter.on(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
+      emitter.on(ArenaEventType.SESSION_ERROR, teardown);
 
       detachListeners = () => {
         emitter.off(ArenaEventType.AGENT_START, onAgentStart);
-        emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionEnd);
-        emitter.off(ArenaEventType.SESSION_ERROR, onSessionEnd);
+        emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
+        emitter.off(ArenaEventType.SESSION_ERROR, teardown);
       };
     };
 

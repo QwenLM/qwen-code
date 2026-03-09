@@ -114,7 +114,7 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     expect(core.runReasoningLoop).toHaveBeenCalledOnce();
@@ -123,6 +123,7 @@ describe('AgentInteractive', () => {
     expect(agent.getMessages()[0]?.content).toBe('Do something');
 
     await agent.shutdown();
+    expect(agent.getStatus()).toBe('completed');
   });
 
   it('should process enqueued messages', async () => {
@@ -134,7 +135,7 @@ describe('AgentInteractive', () => {
 
     agent.enqueueMessage('Hello');
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     expect(core.runReasoningLoop).toHaveBeenCalledOnce();
@@ -197,7 +198,7 @@ describe('AgentInteractive', () => {
     // Second message works fine
     agent.enqueueMessage('recover');
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
       expect(callCount).toBe(2);
     });
 
@@ -313,7 +314,7 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     const assistantMsgs = agent
@@ -352,12 +353,12 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     agent.enqueueMessage('second message');
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
       expect(runCount).toBe(2);
     });
 
@@ -399,7 +400,7 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     const messages = agent.getMessages();
@@ -458,7 +459,7 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     const messages = agent.getMessages();
@@ -517,7 +518,7 @@ describe('AgentInteractive', () => {
 
     await agent.start(context);
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('completed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     const messages = agent.getMessages();

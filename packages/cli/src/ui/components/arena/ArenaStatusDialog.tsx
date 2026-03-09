@@ -12,7 +12,7 @@ import {
   type ArenaAgentState,
   type InProcessBackend,
   type AgentStatsSummary,
-  isTerminalStatus,
+  isSettledStatus,
   ArenaSessionStatus,
   DISPLAY_MODE,
 } from '@qwen-code/qwen-code-core';
@@ -46,7 +46,7 @@ function pad(
 }
 
 function getElapsedMs(agent: ArenaAgentState): number {
-  if (isTerminalStatus(agent.status)) {
+  if (isSettledStatus(agent.status)) {
     return agent.stats.durationMs;
   }
   return Date.now() - agent.startedAt;
@@ -61,6 +61,8 @@ function getSessionStatusLabel(status: ArenaSessionStatus): {
       return { text: 'Running', color: theme.status.success };
     case ArenaSessionStatus.INITIALIZING:
       return { text: 'Initializing', color: theme.status.warning };
+    case ArenaSessionStatus.IDLE:
+      return { text: 'Idle', color: theme.status.success };
     case ArenaSessionStatus.COMPLETED:
       return { text: 'Completed', color: theme.status.success };
     case ArenaSessionStatus.CANCELLED:

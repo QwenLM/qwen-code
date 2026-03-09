@@ -17,6 +17,8 @@ export interface StatusLabel {
 
 export function getArenaStatusLabel(status: AgentStatus): StatusLabel {
   switch (status) {
+    case AgentStatus.IDLE:
+      return { icon: '✓', text: 'Idle', color: theme.status.success };
     case AgentStatus.COMPLETED:
       return { icon: '✓', text: 'Done', color: theme.status.success };
     case AgentStatus.CANCELLED:
