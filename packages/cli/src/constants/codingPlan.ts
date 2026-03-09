@@ -5,7 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { ProviderModelConfig as ModelConfig } from '@qwen-code/qwen-code-core';
+import type {
+  ModelConfig,
+  ProviderModelConfig,
+  ProviderConfig,
+} from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
 
 /**
  * Coding plan regions
@@ -19,7 +24,7 @@ export enum CodingPlanRegion {
  * Coding plan template - array of model configurations
  * When user provides an api-key, these configs will be cloned with envKey pointing to the stored api-key
  */
-export type CodingPlanTemplate = ModelConfig[];
+export type CodingPlanTemplate = ProviderModelConfig[];
 
 /**
  * Environment variable key for storing the coding plan API key.
@@ -245,7 +250,7 @@ export function generateCodingPlanTemplate(
  * @param region - The region to use
  * @returns Object containing template, baseUrl, and version
  */
-export function getCodingPlanConfig(region: CodingPlanRegion) {
+function getCodingPlanTemplateConfig(region: CodingPlanRegion) {
   const template = generateCodingPlanTemplate(region);
   const baseUrl =
     region === CodingPlanRegion.CHINA
@@ -318,4 +323,60 @@ export function getRegionFromBaseUrl(
   }
 
   return null;
+}
+
+/** Fixed provider IDs for Coding Plan */
+export const CP_CHINA_PROVIDER_ID = '_cp-china';
+export const CP_GLOBAL_PROVIDER_ID = '_cp-global';
+
+export function getCodingPlanProviderId(region: CodingPlanRegion): string {
+  return region === CodingPlanRegion.CHINA
+    ? CP_CHINA_PROVIDER_ID
+    : CP_GLOBAL_PROVIDER_ID;
+}
+
+/**
+ * Generate a ProviderConfig for Coding Plan.
+ * Provider-level fields: authType, baseUrl, envKey, managed.
+ * Models contain only model-level fields (id, name, generationConfig).
+ */
+export function generateCodingPlanProviderConfig(
+  region: CodingPlanRegion,
+): ProviderConfig {
+  const template = generateCodingPlanTemplate(region);
+  const baseUrl =
+    region === CodingPlanRegion.CHINA
+      ? 'https://coding.dashscope.aliyuncs.com/v1'
+      : 'https://coding-intl.dashscope.aliyuncs.com/v1';
+
+  const models: ModelConfig[] = template.map((m) => {
+    const model: ModelConfig = { id: m.id };
+    if (m.name !== undefined) model.name = m.name;
+    if (m.generationConfig !== undefined) {
+      model.generationConfig = m.generationConfig;
+    }
+    return model;
+  });
+
+  return {
+    authType: AuthType.USE_OPENAI,
+    baseUrl,
+    envKey: CODING_PLAN_ENV_KEY,
+    managed: true,
+    models,
+  };
+}
+
+/**
+ * Get provider config with version for a specific region.
+ */
+export function getCodingPlanConfig(region: CodingPlanRegion) {
+  const providerConfig = generateCodingPlanProviderConfig(region);
+  const providerId = getCodingPlanProviderId(region);
+  const template = getCodingPlanTemplateConfig(region).template;
+  return {
+    providerId,
+    providerConfig,
+    version: computeCodingPlanVersion(template),
+  };
 }

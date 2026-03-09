@@ -41,7 +41,7 @@ import {
   QWEN_OAUTH_ALLOWED_MODELS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
-import type { ModelConfig as ModelProviderConfig } from './types.js';
+import type { ProviderModelConfig as ModelProviderConfig } from './types.js';
 export {
   validateModelConfig,
   type ModelConfigValidationResult,
@@ -76,6 +76,9 @@ export interface ModelConfigSettingsInput {
 export interface ModelConfigSourcesInput {
   /** Authentication type */
   authType?: AuthType;
+
+  /** Provider ID (modelProviders key) */
+  providerId?: string;
 
   /** CLI arguments (highest priority for user-provided values) */
   cli?: ModelConfigCliInput;
@@ -119,7 +122,8 @@ export interface ModelConfigResolutionResult {
 export function resolveModelConfig(
   input: ModelConfigSourcesInput,
 ): ModelConfigResolutionResult {
-  const { authType, cli, settings, env, modelProvider, proxy } = input;
+  const { authType, providerId, cli, settings, env, modelProvider, proxy } =
+    input;
   const warnings: string[] = [];
   const sources: ConfigSources = {};
 
@@ -250,6 +254,7 @@ export function resolveModelConfig(
   // Build final config
   const config: ContentGeneratorConfig = {
     authType,
+    providerId,
     model: modelResult.value || '',
     apiKey: apiKeyResult?.value,
     apiKeyEnvKey,

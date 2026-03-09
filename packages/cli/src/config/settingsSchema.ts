@@ -103,7 +103,7 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
-  // Model providers configuration grouped by authType
+  // Model providers configuration keyed by providerId (current) or authType (legacy)
   modelProviders: {
     type: 'object',
     label: 'Model Providers',
@@ -111,7 +111,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
+      'Model providers configuration. Current format is keyed by providerId, each value is a ProviderConfig with authType, baseUrl, envKey, managed flag, and models array. Legacy authType-keyed format (authType -> ModelConfig[]) is auto-migrated on startup.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -527,6 +527,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings related to the generative model.',
     showInDialog: false,
     properties: {
+      providerId: {
+        type: 'string',
+        label: 'Provider ID',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'The provider ID for the currently selected model. Used together with model.name to uniquely identify a model across providers.',
+        showInDialog: false,
+      },
       name: {
         type: 'string',
         label: 'Model',

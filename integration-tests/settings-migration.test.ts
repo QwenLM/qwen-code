@@ -8,6 +8,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TestRig } from './test-helper.js';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// @ts-expect-error integration-tests tsconfig excludes packages/cli sources
+import { SETTINGS_VERSION } from '../packages/cli/src/config/settings.js';
 
 // Import settings fixtures from unified workspace file
 import workspacesSettings from './fixtures/settings-migration/workspaces.json' with { type: 'json' };
@@ -27,12 +29,12 @@ const {
 } = workspacesSettings;
 
 /**
- * Integration tests for settings migration chain (V1 -> V2 -> V3)
+ * Integration tests for settings migration chain (V1 -> V2 -> current version)
  *
  * These tests verify that:
- * 1. V1 settings are automatically migrated to V3 on CLI startup
- * 2. V2 settings are automatically migrated to V3 on CLI startup
- * 3. V3 settings remain unchanged
+ * 1. V1 settings are automatically migrated to current version on CLI startup
+ * 2. V2 settings are automatically migrated to current version on CLI startup
+ * 3. Current-version settings remain unchanged
  * 4. Migration is idempotent (running multiple times produces same result)
  */
 describe('settings-migration', () => {
@@ -77,7 +79,7 @@ describe('settings-migration', () => {
   };
 
   describe('V1 settings migration', () => {
-    it('should migrate V1 settings to V3 on CLI startup', async () => {
+    it('should migrate V1 settings to current version on CLI startup', async () => {
       rig.setup('v1-to-v3-migration');
 
       // Write V1 settings directly (overwrites the one created by setup)
@@ -94,8 +96,8 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V3
-      expect(migratedSettings['$version']).toBe(3);
+      // Verify migration to current version
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       expect(migratedSettings['ui']).toEqual({
         theme: 'dark',
         hideTips: false,
@@ -137,7 +139,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       expect(migratedSettings['tools']).toEqual({ autoAccept: false });
       expect(migratedSettings['context']).toEqual({ includeDirectories: [] });
       expect(migratedSettings['model']).toEqual({ name: ['gemini', 'claude'] });
@@ -161,8 +163,8 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be migrated to V3
-      expect(migratedSettings['$version']).toBe(3);
+      // Should be migrated to current version
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       // Legacy string values for ui/general should be preserved as-is (user data)
       expect(migratedSettings['ui']).toBe('legacy-ui-string');
       expect(migratedSettings['general']).toBe('legacy-general-string');
@@ -189,7 +191,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       expect(migratedSettings['model']).toEqual({ name: 'qwen-plus' });
       expect(migratedSettings['ui']).toEqual({
         hideWindowTitle: true,
@@ -209,7 +211,7 @@ describe('settings-migration', () => {
   });
 
   describe('V2 settings migration', () => {
-    it('should migrate V2 settings to V3 on CLI startup', async () => {
+    it('should migrate V2 settings to current version on CLI startup', async () => {
       rig.setup('v2-to-v3-migration');
 
       // Write V2 settings directly (overwrites the one created by setup)
@@ -225,8 +227,8 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Verify migration to V3
-      expect(migratedSettings['$version']).toBe(3);
+      // Verify migration to current version
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
 
       // Verify disable* -> enable* conversion with inversion
       expect(
@@ -302,8 +304,8 @@ describe('settings-migration', () => {
       // Read migrated settings
       const migratedSettings = readSettingsFile(rig);
 
-      // Should be updated to V3 version
-      expect(migratedSettings['$version']).toBe(3);
+      // Should be updated to current version
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       // Other settings should remain unchanged
       expect(migratedSettings['ui']).toEqual({ theme: 'dark' });
       expect(migratedSettings['model']).toEqual({ name: 'gemini' });
@@ -330,12 +332,12 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Version metadata should still be normalized to current version
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       // Existing user content should be preserved
       expect(migratedSettings['customOnlyKey']).toBe('value');
     });
 
-    it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 to V3', async () => {
+    it('should coerce valid string booleans and remove invalid deprecated keys while bumping V2 to current version', async () => {
       rig.setup('v2-non-boolean-disable-values-migration');
 
       // Cover both coercible string booleans and invalid non-boolean values:
@@ -372,7 +374,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Coercible strings are migrated; invalid disable* values are removed.
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       expect(migratedSettings['general']).toEqual({
         enableAutoUpdate: false,
       });
@@ -437,7 +439,7 @@ describe('settings-migration', () => {
       const migratedSettings = readSettingsFile(rig);
 
       // Expected output based on stable test output
-      expect(migratedSettings['$version']).toBe(3);
+      expect(migratedSettings['$version']).toBe(SETTINGS_VERSION);
       // Migration converts disable* to enable* by inverting the value
       // disableAutoUpdate: false -> enableAutoUpdate: true (inverted)
       // But disableUpdateNag: true may affect the consolidation
@@ -484,11 +486,11 @@ describe('settings-migration', () => {
     });
   });
 
-  describe('V3 settings handling', () => {
-    it('should handle V3 settings with legacy disable* keys', async () => {
+  describe('Current-version settings handling', () => {
+    it('should handle previous-version settings with legacy disable* keys', async () => {
       rig.setup('v3-legacy-disable-keys');
 
-      // Use fixture with V3 format but still has legacy disable* keys
+      // Use fixture with previous-version format but still has legacy disable* keys
       overwriteSettingsFile(rig, v3LegacyDisableSettings);
 
       // Run CLI with --help to trigger migration without API calls
@@ -501,11 +503,9 @@ describe('settings-migration', () => {
       // Read settings
       const finalSettings = readSettingsFile(rig);
 
-      // Should remain V3
-      expect(finalSettings['$version']).toBe(3);
-      // Note: V3 settings with legacy disable* keys are left as-is
-      // Migration only runs when version < current version
-      // Since this is already V3, no migration logic is applied
+      // Should be normalized to current version
+      expect(finalSettings['$version']).toBe(SETTINGS_VERSION);
+      // Legacy disable* keys should remain as-is for this fixture content
       expect(
         (finalSettings['general'] as Record<string, unknown>)?.[
           'disableAutoUpdate'

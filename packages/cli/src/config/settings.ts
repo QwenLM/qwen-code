@@ -66,7 +66,7 @@ export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 // Settings version to track migration state
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 export const SETTINGS_VERSION_KEY = '$version';
 
 export function getSystemSettingsPath(): string {

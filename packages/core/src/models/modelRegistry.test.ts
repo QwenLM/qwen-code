@@ -29,13 +29,11 @@ describe('ModelRegistry', () => {
 
     it('should initialize with custom models config', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4-turbo',
-            name: 'GPT-4 Turbo',
-            baseUrl: 'https://api.openai.com/v1',
-          },
-        ],
+        openai: {
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+          models: [{ id: 'gpt-4-turbo', name: 'GPT-4 Turbo' }],
+        },
       };
 
       const registry = new ModelRegistry(modelProvidersConfig);
@@ -47,12 +45,10 @@ describe('ModelRegistry', () => {
 
     it('should ignore qwen-oauth models in config (hard-coded)', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        'qwen-oauth': [
-          {
-            id: 'custom-qwen',
-            name: 'Custom Qwen',
-          },
-        ],
+        'qwen-oauth': {
+          authType: 'qwen-oauth',
+          models: [{ id: 'custom-qwen', name: 'Custom Qwen' }],
+        },
       };
 
       const registry = new ModelRegistry(modelProvidersConfig);
@@ -69,20 +65,19 @@ describe('ModelRegistry', () => {
 
     beforeEach(() => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4-turbo',
-            name: 'GPT-4 Turbo',
-            description: 'Most capable GPT-4',
-            baseUrl: 'https://api.openai.com/v1',
-            capabilities: { vision: true },
-          },
-          {
-            id: 'gpt-3.5-turbo',
-            name: 'GPT-3.5 Turbo',
-            capabilities: { vision: false },
-          },
-        ],
+        openai: {
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+          models: [
+            {
+              id: 'gpt-4-turbo',
+              name: 'GPT-4 Turbo',
+              description: 'Most capable GPT-4',
+              capabilities: { vision: true },
+            },
+            { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
+          ],
+        },
       };
       registry = new ModelRegistry(modelProvidersConfig);
     });
@@ -114,19 +109,22 @@ describe('ModelRegistry', () => {
 
     beforeEach(() => {
       const modelProvidersConfig: ModelProvidersConfig = {
-        openai: [
-          {
-            id: 'gpt-4-turbo',
-            name: 'GPT-4 Turbo',
-            baseUrl: 'https://api.openai.com/v1',
-            generationConfig: {
-              samplingParams: {
-                temperature: 0.8,
-                max_tokens: 4096,
+        openai: {
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+          models: [
+            {
+              id: 'gpt-4-turbo',
+              name: 'GPT-4 Turbo',
+              generationConfig: {
+                samplingParams: {
+                  temperature: 0.8,
+                  max_tokens: 4096,
+                },
               },
             },
-          },
-        ],
+          ],
+        },
       };
       registry = new ModelRegistry(modelProvidersConfig);
     });
@@ -167,7 +165,10 @@ describe('ModelRegistry', () => {
 
     beforeEach(() => {
       registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
     });
 
@@ -197,10 +198,13 @@ describe('ModelRegistry', () => {
 
     it('should return first model for other authTypes', () => {
       const registry = new ModelRegistry({
-        openai: [
-          { id: 'gpt-4', name: 'GPT-4' },
-          { id: 'gpt-3.5', name: 'GPT-3.5' },
-        ],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'gpt-4', name: 'GPT-4' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+        },
       });
 
       const defaultModel = registry.getDefaultModelForAuthType(
@@ -215,7 +219,10 @@ describe('ModelRegistry', () => {
       expect(
         () =>
           new ModelRegistry({
-            openai: [{ id: '', name: 'No ID' }],
+            openai: {
+              authType: 'openai',
+              models: [{ id: '', name: 'No ID' }],
+            },
           }),
       ).toThrow('missing required field: id');
     });
@@ -230,7 +237,10 @@ describe('ModelRegistry', () => {
 
     it('should apply default openai URL when not specified', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4');
@@ -239,13 +249,11 @@ describe('ModelRegistry', () => {
 
     it('should use custom baseUrl when specified', () => {
       const registry = new ModelRegistry({
-        openai: [
-          {
-            id: 'deepseek',
-            name: 'DeepSeek',
-            baseUrl: 'https://api.deepseek.com/v1',
-          },
-        ],
+        openai: {
+          authType: 'openai',
+          baseUrl: 'https://api.deepseek.com/v1',
+          models: [{ id: 'deepseek', name: 'DeepSeek' }],
+        },
       });
 
       const model = registry.getModel(AuthType.USE_OPENAI, 'deepseek');
@@ -256,8 +264,14 @@ describe('ModelRegistry', () => {
   describe('authType key validation', () => {
     it('should accept valid authType keys', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+        gemini: {
+          authType: 'gemini',
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
       });
 
       const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -271,8 +285,14 @@ describe('ModelRegistry', () => {
 
     it('should skip invalid authType keys', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
-        'invalid-key': [{ id: 'some-model', name: 'Some Model' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+        'invalid-key': {
+          authType: 'invalid-key',
+          models: [{ id: 'some-model', name: 'Some Model' }],
+        },
       } as unknown as ModelProvidersConfig);
 
       // Valid key should be registered
@@ -285,10 +305,22 @@ describe('ModelRegistry', () => {
 
     it('should handle mixed valid and invalid keys', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
-        'bad-key-1': [{ id: 'model-1', name: 'Model 1' }],
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
-        'bad-key-2': [{ id: 'model-2', name: 'Model 2' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+        'bad-key-1': {
+          authType: 'bad-key-1',
+          models: [{ id: 'model-1', name: 'Model 1' }],
+        },
+        gemini: {
+          authType: 'gemini',
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
+        'bad-key-2': {
+          authType: 'bad-key-2',
+          models: [{ id: 'model-2', name: 'Model 2' }],
+        },
       } as unknown as ModelProvidersConfig);
 
       // Valid keys should be registered
@@ -305,11 +337,17 @@ describe('ModelRegistry', () => {
 
     it('should work correctly with getModelsForAuthType after validation', () => {
       const registry = new ModelRegistry({
-        openai: [
-          { id: 'gpt-4', name: 'GPT-4' },
-          { id: 'gpt-3.5', name: 'GPT-3.5' },
-        ],
-        'invalid-key': [{ id: 'invalid-model', name: 'Invalid Model' }],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'gpt-4', name: 'GPT-4' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+        },
+        'invalid-key': {
+          authType: 'invalid-key',
+          models: [{ id: 'invalid-model', name: 'Invalid Model' }],
+        },
       } as unknown as ModelProvidersConfig);
 
       const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -323,11 +361,14 @@ describe('ModelRegistry', () => {
   describe('duplicate model id handling', () => {
     it('should skip duplicate model ids and use first registered config', () => {
       const registry = new ModelRegistry({
-        openai: [
-          { id: 'gpt-4', name: 'GPT-4 First', description: 'First config' },
-          { id: 'gpt-4', name: 'GPT-4 Second', description: 'Second config' },
-          { id: 'gpt-3.5', name: 'GPT-3.5' },
-        ],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'gpt-4', name: 'GPT-4 First', description: 'First config' },
+            { id: 'gpt-4', name: 'GPT-4 Second', description: 'Second config' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+        },
       });
 
       const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -341,13 +382,16 @@ describe('ModelRegistry', () => {
 
     it('should handle multiple duplicate ids in same authType', () => {
       const registry = new ModelRegistry({
-        openai: [
-          { id: 'model-a', name: 'Model A First' },
-          { id: 'model-a', name: 'Model A Second' },
-          { id: 'model-b', name: 'Model B First' },
-          { id: 'model-b', name: 'Model B Second' },
-          { id: 'model-c', name: 'Model C' },
-        ],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'model-a', name: 'Model A First' },
+            { id: 'model-a', name: 'Model A Second' },
+            { id: 'model-b', name: 'Model B First' },
+            { id: 'model-b', name: 'Model B Second' },
+            { id: 'model-c', name: 'Model C' },
+          ],
+        },
       });
 
       const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -366,8 +410,14 @@ describe('ModelRegistry', () => {
 
     it('should treat same id in different authTypes as different models', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'shared-model', name: 'OpenAI Shared' }],
-        gemini: [{ id: 'shared-model', name: 'Gemini Shared' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'shared-model', name: 'OpenAI Shared' }],
+        },
+        gemini: {
+          authType: 'gemini',
+          models: [{ id: 'shared-model', name: 'Gemini Shared' }],
+        },
       });
 
       const openaiModel = registry.getModel(
@@ -387,7 +437,10 @@ describe('ModelRegistry', () => {
   describe('reloadModels', () => {
     it('should reload models from new config', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
@@ -395,7 +448,10 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeUndefined();
 
       registry.reloadModels({
-        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        },
       });
 
       // After reload, only new models should exist
@@ -406,7 +462,10 @@ describe('ModelRegistry', () => {
 
     it('should preserve hard-coded qwen-oauth models after reload', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
@@ -414,7 +473,10 @@ describe('ModelRegistry', () => {
       );
 
       registry.reloadModels({
-        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        },
       });
 
       // qwen-oauth models should still exist
@@ -428,8 +490,14 @@ describe('ModelRegistry', () => {
 
     it('should clear user-configured models when reload with empty config', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+        gemini: {
+          authType: 'gemini',
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
       });
 
       expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
@@ -451,7 +519,10 @@ describe('ModelRegistry', () => {
       const registry = new ModelRegistry();
 
       registry.reloadModels({
-        'qwen-oauth': [{ id: 'custom-qwen', name: 'Custom Qwen' }],
+        'qwen-oauth': {
+          authType: 'qwen-oauth',
+          models: [{ id: 'custom-qwen', name: 'Custom Qwen' }],
+        },
       });
 
       // qwen-oauth should still use hard-coded models
@@ -462,15 +533,24 @@ describe('ModelRegistry', () => {
 
     it('should handle reload with multiple authTypes', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       registry.reloadModels({
-        openai: [
-          { id: 'gpt-4', name: 'GPT-4 Updated' },
-          { id: 'gpt-3.5', name: 'GPT-3.5' },
-        ],
-        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'gpt-4', name: 'GPT-4 Updated' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+        },
+        gemini: {
+          authType: 'gemini',
+          models: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
       });
 
       const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -485,12 +565,21 @@ describe('ModelRegistry', () => {
 
     it('should skip invalid authType keys during reload', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       registry.reloadModels({
-        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
-        'invalid-key': [{ id: 'invalid-model', name: 'Invalid Model' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        },
+        'invalid-key': {
+          authType: 'invalid-key',
+          models: [{ id: 'invalid-model', name: 'Invalid Model' }],
+        },
       } as unknown as ModelProvidersConfig);
 
       const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
@@ -500,7 +589,10 @@ describe('ModelRegistry', () => {
 
     it('should handle reload with undefined config', () => {
       const registry = new ModelRegistry({
-        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        openai: {
+          authType: 'openai',
+          models: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
       });
 
       registry.reloadModels(undefined);
@@ -517,10 +609,13 @@ describe('ModelRegistry', () => {
       const registry = new ModelRegistry();
 
       registry.reloadModels({
-        openai: [
-          { id: 'model-a', name: 'Model A First' },
-          { id: 'model-a', name: 'Model A Second' },
-        ],
+        openai: {
+          authType: 'openai',
+          models: [
+            { id: 'model-a', name: 'Model A First' },
+            { id: 'model-a', name: 'Model A Second' },
+          ],
+        },
       });
 
       const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);

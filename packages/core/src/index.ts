@@ -23,7 +23,8 @@ export {
 export {
   type AvailableModel,
   type ModelCapabilities,
-  type ModelConfig as ProviderModelConfig,
+  type ModelConfig,
+  type ProviderModelConfig,
   type ModelConfigCliInput,
   type ModelConfigResolutionResult,
   type ModelConfigSettingsInput,
@@ -34,6 +35,7 @@ export {
   ModelsConfig,
   type ModelsConfigOptions,
   type ModelProvidersConfig,
+  type ProviderConfig,
   type ModelSwitchMetadata,
   type OnModelChangeCallback,
   QWEN_OAUTH_MODELS,

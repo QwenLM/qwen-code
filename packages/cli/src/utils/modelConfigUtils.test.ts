@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AuthType,
   resolveModelConfig,
-  type ProviderModelConfig,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   getAuthTypeFromEnv,
@@ -365,16 +365,20 @@ describe('modelConfigUtils', () => {
 
     it('should find modelProvider from settings when authType and model match', () => {
       const argv = { model: 'provider-model' };
-      const modelProvider: ProviderModelConfig = {
-        id: 'provider-model',
-        name: 'Provider Model',
-        generationConfig: {
-          samplingParams: { temperature: 0.8 },
-        },
-      };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          openai: {
+            authType: AuthType.USE_OPENAI,
+            models: [
+              {
+                id: 'provider-model',
+                name: 'Provider Model',
+                generationConfig: {
+                  samplingParams: { temperature: 0.8 },
+                },
+              },
+            ],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -397,24 +401,31 @@ describe('modelConfigUtils', () => {
 
       expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
         expect.objectContaining({
-          modelProvider,
+          modelProvider: expect.objectContaining({
+            id: 'provider-model',
+            name: 'Provider Model',
+          }),
         }),
       );
     });
 
     it('should find modelProvider from settings.model.name when argv.model is not provided', () => {
       const argv = {};
-      const modelProvider: ProviderModelConfig = {
-        id: 'settings-model',
-        name: 'Settings Model',
-        generationConfig: {
-          samplingParams: { temperature: 0.9 },
-        },
-      };
       const settings = makeMockSettings({
         model: { name: 'settings-model' },
         modelProviders: {
-          [AuthType.USE_OPENAI]: [modelProvider],
+          openai: {
+            authType: AuthType.USE_OPENAI,
+            models: [
+              {
+                id: 'settings-model',
+                name: 'Settings Model',
+                generationConfig: {
+                  samplingParams: { temperature: 0.9 },
+                },
+              },
+            ],
+          },
         },
       });
       const selectedAuthType = AuthType.USE_OPENAI;
@@ -437,7 +448,10 @@ describe('modelConfigUtils', () => {
 
       expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
         expect.objectContaining({
-          modelProvider,
+          modelProvider: expect.objectContaining({
+            id: 'settings-model',
+            name: 'Settings Model',
+          }),
         }),
       );
     });
@@ -446,7 +460,10 @@ describe('modelConfigUtils', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: [{ id: 'test-model', name: 'Test Model' }],
+          openai: {
+            authType: AuthType.USE_OPENAI,
+            models: [{ id: 'test-model', name: 'Test Model' }],
+          },
         },
       });
       const selectedAuthType = undefined;
@@ -474,12 +491,12 @@ describe('modelConfigUtils', () => {
       );
     });
 
-    it('should not find modelProvider when modelProviders is not an array', () => {
+    it('should not find modelProvider when provider has no models', () => {
       const argv = { model: 'test-model' };
       const settings = makeMockSettings({
         modelProviders: {
-          [AuthType.USE_OPENAI]: null as unknown as ProviderModelConfig[],
-        },
+          openai: { authType: AuthType.USE_OPENAI },
+        } as unknown as ModelProvidersConfig,
       });
       const selectedAuthType = AuthType.USE_OPENAI;
 

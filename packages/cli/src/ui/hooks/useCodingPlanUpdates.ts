@@ -10,10 +10,8 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
-  isCodingPlanConfig,
   getCodingPlanConfig,
   CodingPlanRegion,
-  CODING_PLAN_ENV_KEY,
 } from '../../constants/codingPlan.js';
 import { t } from '../../i18n/index.js';
 
@@ -50,71 +48,37 @@ export function useCodingPlanUpdates(
       try {
         const persistScope = getPersistScopeForModelSelection(settings);
 
-        // Get current configs
-        const currentConfigs =
-          (
-            settings.merged.modelProviders as
-              | Record<string, Array<Record<string, unknown>>>
-              | undefined
-          )?.[AuthType.USE_OPENAI] || [];
-
-        // Filter out all Coding Plan configs (since they are mutually exclusive)
-        // Keep only non-Coding-Plan user custom configs
-        const nonCodingPlanConfigs = currentConfigs.filter(
-          (cfg) =>
-            !isCodingPlanConfig(
-              cfg['baseUrl'] as string | undefined,
-              cfg['envKey'] as string | undefined,
-            ),
-        );
-
-        // Get the configuration for the current region
-        const { template, version } = getCodingPlanConfig(region);
-
-        // Generate new configs from template
-        const newConfigs = template.map((templateConfig) => ({
-          ...templateConfig,
-          envKey: CODING_PLAN_ENV_KEY,
-        }));
-
-        // Combine: new Coding Plan configs at the front, user configs preserved
-        const updatedConfigs = [
-          ...newConfigs,
-          ...(nonCodingPlanConfigs as Array<Record<string, unknown>>),
-        ] as Array<Record<string, unknown>>;
+        // Replace the managed Coding Plan provider by providerId
+        const { providerId, providerConfig, version } =
+          getCodingPlanConfig(region);
 
         // Record the user's current model before the update
         const previousModel = config.getModel();
-        const previousModelStillAvailable = newConfigs.some(
+        const previousModelStillAvailable = providerConfig.models.some(
           (cfg) => cfg.id === previousModel,
         );
 
-        // Hot-reload model providers configuration first (in-memory only)
-        const updatedModelProviders = {
-          ...(settings.merged.modelProviders as
-            | Record<string, unknown>
-            | undefined),
-          [AuthType.USE_OPENAI]: updatedConfigs,
+        // Build updated modelProviders: replace only the managed provider, preserve all others
+        const currentProviders = (settings.merged.modelProviders ??
+          {}) as ModelProvidersConfig;
+        const updatedModelProviders: ModelProvidersConfig = {
+          ...currentProviders,
+          [providerId]: providerConfig,
         };
-        config.reloadModelProvidersConfig(
-          updatedModelProviders as unknown as ModelProvidersConfig,
-        );
 
-        // Refresh auth with the new configuration
-        // This validates the configuration before persisting
+        // Hot-reload model providers configuration (in-memory only)
+        config.reloadModelProvidersConfig(updatedModelProviders);
+
         await config.refreshAuth(AuthType.USE_OPENAI);
 
-        // Persist to settings only after successful auth refresh
+        // Persist the managed provider by providerId
         settings.setValue(
           persistScope,
-          `modelProviders.${AuthType.USE_OPENAI}`,
-          updatedConfigs,
+          `modelProviders.${providerId}`,
+          providerConfig,
         );
 
-        // Update the version (single version field for backward compatibility)
         settings.setValue(persistScope, 'codingPlan.version', version);
-
-        // Update the region
         settings.setValue(persistScope, 'codingPlan.region', region);
 
         const activeModel = config.getModel();

@@ -24,7 +24,8 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
 };
 
 /**
- * Find model configuration from modelProviders by authType and modelId
+ * Find model configuration from modelProviders by authType and modelId.
+ * Expects provider-keyed format: providerId -> ProviderConfig.
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
@@ -35,12 +36,19 @@ function findModelConfig(
     return undefined;
   }
 
-  const models = modelProviders[authType];
-  if (!Array.isArray(models)) {
-    return undefined;
+  for (const provider of Object.values(modelProviders)) {
+    if (provider.authType !== authType) continue;
+    const found = provider.models.find((m) => m.id === modelId);
+    if (found) {
+      return {
+        ...found,
+        baseUrl: provider.baseUrl,
+        envKey: provider.envKey,
+      } as ProviderModelConfig;
+    }
   }
 
-  return models.find((m) => m.id === modelId);
+  return undefined;
 }
 
 /**
