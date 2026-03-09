@@ -58,6 +58,7 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
 import { SettingScope } from '../config/settings.js';
+import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
@@ -523,13 +524,13 @@ class QwenAgent implements Agent {
     const currentApprovalMode = config.getApprovalMode();
 
     const availableModes = APPROVAL_MODES.map((mode) => ({
-      id: mode as acp.ApprovalModeValue,
+      id: mode as ApprovalModeValue,
       name: APPROVAL_MODE_INFO[mode].name,
       description: APPROVAL_MODE_INFO[mode].description,
     }));
 
     return {
-      currentModeId: currentApprovalMode as acp.ApprovalModeValue,
+      currentModeId: currentApprovalMode as ApprovalModeValue,
       availableModes,
     };
   }
