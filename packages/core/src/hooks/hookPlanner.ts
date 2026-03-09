@@ -114,11 +114,20 @@ export class HookPlanner {
           ? this.matchesNotificationType(matcher, context.notificationType)
           : true;
 
+      // SessionStart/SessionEnd: match against source/reason
+      case HookEventName.SessionStart:
+        return context.trigger
+          ? this.matchesSessionTrigger(matcher, context.trigger)
+          : true;
+
+      case HookEventName.SessionEnd:
+        return context.trigger
+          ? this.matchesSessionTrigger(matcher, context.trigger)
+          : true;
+
       // Events that don't support matchers: always match
       case HookEventName.UserPromptSubmit:
       case HookEventName.Stop:
-      case HookEventName.SessionStart:
-      case HookEventName.SessionEnd:
       default:
         return true;
     }
@@ -132,6 +141,23 @@ export class HookPlanner {
     notificationType: string,
   ): boolean {
     return matcher === notificationType;
+  }
+
+  /**
+   * Match session source or end reason against matcher pattern
+   */
+  private matchesSessionTrigger(matcher: string, trigger: string): boolean {
+    try {
+      // Attempt to treat the matcher as a regular expression.
+      const regex = new RegExp(matcher);
+      return regex.test(trigger);
+    } catch (error) {
+      // If it's not a valid regex, treat it as a literal string for an exact match.
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for session trigger "${trigger}", falling back to exact match: ${error}`,
+      );
+      return matcher === trigger;
+    }
   }
 
   /**

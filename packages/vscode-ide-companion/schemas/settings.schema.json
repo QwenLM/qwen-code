@@ -609,6 +609,76 @@
           "items": {
             "type": "string"
           }
+        },
+        "Notification": {
+          "description": "Hooks that execute when notifications are sent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreToolUse": {
+          "description": "Hooks that execute before tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUse": {
+          "description": "Hooks that execute after successful tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUseFailure": {
+          "description": "Hooks that execute when tool execution fails. ",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionStart": {
+          "description": "Hooks that execute when a new session starts or resumes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionEnd": {
+          "description": "Hooks that execute when a session ends.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreCompact": {
+          "description": "Hooks that execute before conversation compaction.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStart": {
+          "description": "Hooks that execute when a subagent (Task tool call) is started.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStop": {
+          "description": "Hooks that execute right before a subagent (Task tool call) concludes its response.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PermissionRequest": {
+          "description": "Hooks that execute when a permission dialog is displayed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

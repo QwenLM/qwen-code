@@ -220,7 +220,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SessionStart,
-        undefined,
+        { trigger: SessionStartSource.Startup },
       );
       expect(result.success).toBe(true);
     });
@@ -337,7 +337,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SessionEnd,
-        undefined,
+        { trigger: SessionEndReason.Clear },
       );
       expect(result.success).toBe(true);
     });

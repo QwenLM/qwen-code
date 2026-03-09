@@ -108,7 +108,10 @@ export class HookEventHandler {
       agent_type: agentType,
     };
 
-    return this.executeHooks(HookEventName.SessionStart, input);
+    // Pass source as context for matcher filtering
+    return this.executeHooks(HookEventName.SessionStart, input, {
+      trigger: source,
+    });
   }
 
   /**
@@ -123,7 +126,10 @@ export class HookEventHandler {
       reason,
     };
 
-    return this.executeHooks(HookEventName.SessionEnd, input);
+    // Pass reason as context for matcher filtering
+    return this.executeHooks(HookEventName.SessionEnd, input, {
+      trigger: reason,
+    });
   }
 
   /**
