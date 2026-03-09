@@ -259,7 +259,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   async shouldConfirmExecute(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT ||
+      this.config.getApprovalMode() === ApprovalMode.YOLO
+    ) {
       return false;
     }
 
