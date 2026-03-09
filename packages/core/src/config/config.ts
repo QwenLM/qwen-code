@@ -856,6 +856,8 @@ export class Config {
       );
 
       this.debugLogger.debug('MessageBus initialized with hook subscription');
+    } else {
+      this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
 
     this.subagentManager = new SubagentManager(this);

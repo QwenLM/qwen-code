@@ -358,6 +358,13 @@ describe('Gemini Client (client.ts)', () => {
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getEnableHooks: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);

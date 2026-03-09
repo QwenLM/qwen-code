@@ -68,6 +68,15 @@ const mockConfig = {
   getGeminiClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
   getChatRecordingService: () => undefined,
+  getMessageBus: vi.fn().mockReturnValue(undefined),
+  getEnableHooks: vi.fn().mockReturnValue(false),
+  getHookSystem: vi.fn().mockReturnValue(undefined),
+  getDebugLogger: vi.fn().mockReturnValue({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
 } as unknown as Config;
 
 const mockTool = new MockTool({

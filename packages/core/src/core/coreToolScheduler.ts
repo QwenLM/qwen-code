@@ -981,7 +981,10 @@ export class CoreToolScheduler {
                     hookResult.updatedInput &&
                     typeof reqInfo.args === 'object'
                   ) {
-                    reqInfo.args = hookResult.updatedInput;
+                    this.setArgsInternal(
+                      reqInfo.callId,
+                      hookResult.updatedInput,
+                    );
                   }
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,

@@ -257,6 +257,16 @@ describe('CoreToolScheduler', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -745,6 +755,8 @@ describe('CoreToolScheduler with payload', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1081,6 +1093,8 @@ describe('CoreToolScheduler edit cancellation', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1187,6 +1201,16 @@ describe('CoreToolScheduler YOLO mode', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1328,6 +1352,9 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalHeight: 30,
       }),
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
+      isInteractive: () => true,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1428,6 +1455,16 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1560,6 +1597,16 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1662,6 +1709,16 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1737,6 +1794,8 @@ describe('CoreToolScheduler request queueing', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1900,6 +1959,8 @@ describe('CoreToolScheduler truncated output protection', () => {
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2097,6 +2158,8 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2217,6 +2280,8 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getEnableHooks: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2545,7 +2610,11 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       request: vi.fn().mockResolvedValue({
         success: true,
         output: {
-          decision: 'allow',
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'allow',
+            },
+          },
           message: 'Tool allowed by hook',
         },
       }),
@@ -2577,6 +2646,16 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: () => mockMessageBus,
       getEnableHooks: () => true,
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue('text'),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2640,7 +2719,12 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       request: vi.fn().mockResolvedValue({
         success: true,
         output: {
-          decision: 'deny',
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'deny',
+              message: 'Tool denied by hook',
+            },
+          },
           message: 'Tool denied by hook',
         },
       }),
@@ -2672,6 +2756,16 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: () => mockMessageBus,
       getEnableHooks: () => true,
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue('text'),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2740,8 +2834,12 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       request: vi.fn().mockResolvedValue({
         success: true,
         output: {
-          decision: 'allow',
-          updated_input: { param: 'updated_value' },
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'allow',
+              updatedInput: { param: 'updated_value' },
+            },
+          },
           message: 'Tool allowed with updated input',
         },
       }),
@@ -2773,6 +2871,16 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: () => mockMessageBus,
       getEnableHooks: () => true,
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue('text'),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2951,6 +3059,16 @@ describe('CoreToolScheduler PermissionRequest Hook Integration', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: () => mockMessageBus,
       getEnableHooks: () => true,
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+      isInteractive: vi.fn().mockReturnValue(true),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue('text'),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
