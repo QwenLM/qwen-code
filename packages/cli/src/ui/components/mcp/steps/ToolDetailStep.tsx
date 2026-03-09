@@ -11,14 +11,6 @@ import { t } from '../../../../i18n/index.js';
 import type { ToolDetailStepProps } from '../types.js';
 
 /**
- * 截断过长的字符串
- */
-const truncate = (str: string, maxLen: number = 50): string => {
-  if (str.length <= maxLen) return str;
-  return str.substring(0, maxLen - 3) + '...';
-};
-
-/**
  * 渲染单个参数
  */
 const renderParameter = (
@@ -28,45 +20,15 @@ const renderParameter = (
 ): React.ReactNode => {
   const type = (param['type'] as string) || 'any';
   const description = (param['description'] as string) || '';
-  const defaultValue = param['default'];
-  const enumValues = param['enum'] as string[] | undefined;
+  // const defaultValue = param['default'];
+  // const enumValues = param['enum'] as string[] | undefined;
+  const text = `• ${name}${isRequired ? t('required') : ''}: ${type} ${description ? `- ${description}` : ''}`;
 
   return (
-    <Box key={name} flexDirection="column" marginTop={1}>
-      <Box>
-        <Text color={theme.text.primary}>• {name}</Text>
-        {isRequired && (
-          <Text color={theme.status.error}> ({t('required')})</Text>
-        )}
-      </Box>
-      <Box marginLeft={2}>
-        <Text color={theme.text.secondary}>{t('Type')}: </Text>
-        <Text color={theme.status.success}>{type}</Text>
-      </Box>
-      {description && (
-        <Box marginLeft={2}>
-          <Text color={theme.text.secondary} wrap="wrap">
-            {truncate(description, 80)}
-          </Text>
-        </Box>
-      )}
-      {enumValues && enumValues.length > 0 && (
-        <Box marginLeft={2}>
-          <Text color={theme.text.secondary}>
-            {t('Enum')}: {enumValues.join(', ')}
-          </Text>
-        </Box>
-      )}
-      {defaultValue !== undefined && (
-        <Box marginLeft={2}>
-          <Text color={theme.text.secondary}>
-            {t('Default')}:{' '}
-            {typeof defaultValue === 'string'
-              ? `"${truncate(defaultValue, 30)}"`
-              : String(defaultValue)}
-          </Text>
-        </Box>
-      )}
+    <Box key={name}>
+      <Text color={theme.text.secondary} wrap="wrap">
+        {text}
+      </Text>
     </Box>
   );
 };
@@ -82,8 +44,10 @@ const ParametersList: React.FC<{
 
   return (
     <Box flexDirection="column">
-      <Text color={theme.text.secondary}>{t('Parameters')}:</Text>
-      <Box marginLeft={2} flexDirection="column">
+      <Text color={theme.text.primary} bold>
+        {t('Parameters')}:
+      </Text>
+      <Box flexDirection="column" marginLeft={1}>
         {Object.entries(properties).map(([name, param]) =>
           renderParameter(
             name,
@@ -156,62 +120,20 @@ export const ToolDetailStep: React.FC<ToolDetailStepProps> = ({
 
       {/* 工具描述 */}
       {tool.description && (
-        <Box>
+        <Box flexDirection="column">
+          <Text color={theme.text.primary} bold>
+            {t('Description')}:
+          </Text>
           <Text wrap="wrap">{tool.description}</Text>
-        </Box>
-      )}
-
-      {/* 工具注解 */}
-      {tool.annotations && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Annotations')}:</Text>
-          <Box marginLeft={2} flexDirection="column">
-            {tool.annotations.title && (
-              <Text color={theme.text.secondary}>
-                • {t('Title')}: {tool.annotations.title}
-              </Text>
-            )}
-            {tool.annotations.readOnlyHint !== undefined && (
-              <Text color={theme.text.secondary}>
-                • {t('Read Only')}:{' '}
-                {tool.annotations.readOnlyHint ? t('Yes') : t('No')}
-              </Text>
-            )}
-            {tool.annotations.destructiveHint !== undefined && (
-              <Text color={theme.text.secondary}>
-                • {t('Destructive')}:{' '}
-                {tool.annotations.destructiveHint ? t('Yes') : t('No')}
-              </Text>
-            )}
-            {tool.annotations.idempotentHint !== undefined && (
-              <Text color={theme.text.secondary}>
-                • {t('Idempotent')}:{' '}
-                {tool.annotations.idempotentHint ? t('Yes') : t('No')}
-              </Text>
-            )}
-            {tool.annotations.openWorldHint !== undefined && (
-              <Text color={theme.text.secondary}>
-                • {t('Open World')}:{' '}
-                {tool.annotations.openWorldHint ? t('Yes') : t('No')}
-              </Text>
-            )}
-          </Box>
         </Box>
       )}
 
       {/* Schema */}
       {tool.schema && (
-        <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="column">
           <SchemaSummary schema={tool.schema} />
         </Box>
       )}
-
-      {/* 所属服务器 */}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          {t('Server')}: {tool.serverName}
-        </Text>
-      </Box>
     </Box>
   );
 };

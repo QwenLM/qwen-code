@@ -318,7 +318,6 @@ export default {
   'MCP Servers:': 'MCP 服务器：',
   'Settings:': '设置：',
   active: '已启用',
-  disabled: '已禁用',
   'View Details': '查看详情',
   'Update failed:': '更新失败：',
   'Updating {{name}}...': '正在更新 {{name}}...',
@@ -793,6 +792,9 @@ export default {
   Reconnect: '重新连接',
   Enable: '启用',
   Disable: '禁用',
+  Authenticate: '认证',
+  disabled: '已禁用',
+  'Server:': '服务器：',
   '(disabled)': '(已禁用)',
   'Error:': '错误：',
   Extension: '扩展',
@@ -812,6 +814,14 @@ export default {
     '请在设置中添加 MCP 服务器以开始使用。',
   'Run qwen --debug to see error logs': '运行 qwen --debug 查看错误日志',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth 认证',
+  'Press Enter to start authentication, Esc to go back':
+    '按 Enter 开始认证，Esc 返回',
+  'Authenticating... Please complete the login in your browser.':
+    '认证中... 请在浏览器中完成登录。',
+  'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
+
   // MCP Server Detail
   'Command:': '命令：',
   'Working Directory:': '工作目录：',
@@ -824,6 +834,7 @@ export default {
   'open-world': '开放世界',
   idempotent: '幂等',
   'Tools for {{name}}': '{{name}} 的工具',
+  'Tools for {{serverName}}': '{{serverName}} 的工具',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail

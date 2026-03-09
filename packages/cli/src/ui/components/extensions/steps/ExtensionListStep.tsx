@@ -160,17 +160,17 @@ export const ExtensionListStep = ({
 
   return (
     <Box flexDirection="column">
-      <Box flexDirection="column" marginBottom={1}>
-        {extensions.map((extension, index) =>
-          renderExtensionItem(extension, index, index === selectedIndex),
-        )}
-      </Box>
-      <Box marginTop={1}>
+      <Box marginBottom={1}>
         <Text color={theme.text.secondary}>
           {t('{{count}} extensions installed', {
             count: extensions.length.toString(),
           })}
         </Text>
+      </Box>
+      <Box flexDirection="column">
+        {extensions.map((extension, index) =>
+          renderExtensionItem(extension, index, index === selectedIndex),
+        )}
       </Box>
     </Box>
   );

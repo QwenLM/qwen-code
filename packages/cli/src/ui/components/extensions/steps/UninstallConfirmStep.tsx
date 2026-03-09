@@ -60,9 +60,6 @@ export function UninstallConfirmStep({
       <Text color={theme.text.secondary}>
         {t('This action cannot be undone.')}
       </Text>
-      <Box marginTop={1}>
-        <Text>{t('Press Y/Enter to confirm, N/Esc to cancel')}</Text>
-      </Box>
     </Box>
   );
 }

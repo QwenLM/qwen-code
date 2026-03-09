@@ -654,6 +654,9 @@ export default {
   'Press Enter to confirm, Esc to cancel': 'Enter で確認、Esc でキャンセル',
   Disable: '無効化',
   Enable: '有効化',
+  Authenticate: '認証',
+  disabled: '無効',
+  'Server:': 'サーバー:',
   Reconnect: '再接続',
   'View tools': 'ツールを表示',
   'Status:': 'ステータス:',
@@ -683,6 +686,14 @@ export default {
   'Run qwen --debug to see error logs':
     'qwen --debug を実行してエラーログを確認してください',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth 認証',
+  'Press Enter to start authentication, Esc to go back':
+    'Enter で認証開始、Esc で戻る',
+  'Authenticating... Please complete the login in your browser.':
+    '認証中... ブラウザでログインを完了してください。',
+  'Press Enter or Esc to go back': 'Enter または Esc で戻る',
+
   // MCP Tool List
   'No tools available for this server.':
     'このサーバーには使用可能なツールがありません。',
@@ -691,6 +702,7 @@ export default {
   'open-world': 'オープンワールド',
   idempotent: '冪等',
   'Tools for {{name}}': '{{name}} のツール',
+  'Tools for {{serverName}}': '{{serverName}} のツール',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
