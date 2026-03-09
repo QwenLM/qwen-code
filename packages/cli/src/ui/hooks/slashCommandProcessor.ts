@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useState } from 'react';
+import { useCallback, useMemo, useEffect, useRef, useState } from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -35,6 +35,7 @@ import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
+import { useKeypress } from './useKeypress.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -77,6 +78,8 @@ interface SlashCommandProcessorActions {
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
+  openExtensionsManagerDialog: () => void;
+  openMcpDialog: () => void;
 }
 
 /**
@@ -90,6 +93,7 @@ export const useSlashCommandProcessor = (
   loadHistory: UseHistoryManagerReturn['loadHistory'],
   refreshStatic: () => void,
   toggleVimEnabled: () => Promise<boolean>,
+  isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
@@ -129,6 +133,34 @@ export const useSlashCommandProcessor = (
 
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
     null,
+  );
+
+  // AbortController for cancelling async slash commands via ESC
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelSlashCommand = useCallback(() => {
+    if (!abortControllerRef.current) {
+      return;
+    }
+    abortControllerRef.current.abort();
+    addItem(
+      {
+        type: MessageType.INFO,
+        text: 'Command cancelled.',
+      },
+      Date.now(),
+    );
+    setPendingItem(null);
+    setIsProcessing(false);
+  }, [addItem, setIsProcessing]);
+
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') {
+        cancelSlashCommand();
+      }
+    },
+    { isActive: isProcessing },
   );
 
   const pendingHistoryItems = useMemo(() => {
@@ -180,6 +212,11 @@ export const useSlashCommandProcessor = (
         historyItemContent = {
           type: 'summary',
           summary: message.summary,
+        };
+      } else if (message.type === MessageType.INSIGHT_PROGRESS) {
+        historyItemContent = {
+          type: 'insight_progress',
+          progress: message.progress,
         };
       } else {
         historyItemContent = {
@@ -319,6 +356,10 @@ export const useSlashCommandProcessor = (
 
       setIsProcessing(true);
 
+      // Create a new AbortController for this command execution
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       const userMessageTimestamp = Date.now();
       addItemWithRecording(
         { type: MessageType.USER, text: trimmed },
@@ -352,6 +393,7 @@ export const useSlashCommandProcessor = (
                 args,
               },
               overwriteConfirmed,
+              abortSignal: abortController.signal,
             };
 
             // If a one-time list is provided for a "Proceed" action, temporarily
@@ -365,10 +407,27 @@ export const useSlashCommandProcessor = (
                 ]),
               };
             }
-            const result = await commandToExecute.action(
-              fullCommandContext,
-              args,
-            );
+            // Race the command action against the abort signal so that
+            // ESC cancellation immediately unblocks the await chain.
+            // Without this, commands like /compress whose underlying
+            // operation (tryCompressChat) doesn't accept an AbortSignal
+            // would keep submitQuery stuck until the operation completes.
+            const abortPromise = new Promise<undefined>((resolve) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => resolve(undefined),
+                { once: true },
+              );
+            });
+            const result = await Promise.race([
+              commandToExecute.action(fullCommandContext, args),
+              abortPromise,
+            ]);
+
+            // If the command was cancelled via ESC while executing, skip result processing
+            if (abortController.signal.aborted) {
+              return { type: 'handled' };
+            }
 
             if (result) {
               switch (result.type) {
@@ -419,11 +478,17 @@ export const useSlashCommandProcessor = (
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
                       return { type: 'handled' };
+                    case 'mcp':
+                      actions.openMcpDialog();
+                      return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
                       actions.openResumeDialog();
+                      return { type: 'handled' };
+                    case 'extensions_manage':
+                      actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
@@ -561,6 +626,10 @@ export const useSlashCommandProcessor = (
 
         return { type: 'handled' };
       } catch (e: unknown) {
+        // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
+        if (abortController.signal.aborted) {
+          return { type: 'handled' };
+        }
         hasError = true;
         if (config) {
           const event = makeSlashCommandEvent({

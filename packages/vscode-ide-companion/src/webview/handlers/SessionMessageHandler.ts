@@ -27,7 +27,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
-      'saveSession',
       'resumeSession',
       'cancelStreaming',
       // UI action: open a new chat tab (new WebviewPanel)
@@ -85,10 +84,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
           (data?.cursor as number | undefined) ?? undefined,
           (data?.size as number | undefined) ?? undefined,
         );
-        break;
-
-      case 'saveSession':
-        await this.handleSaveSession((data?.tag as string) || '');
         break;
 
       case 'resumeSession':
@@ -246,6 +241,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
     },
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
+
+    // Guard: do not process empty or whitespace-only messages.
+    // This prevents ghost user-message bubbles when slash-command completions
+    // or model-selector interactions clear the input but still trigger a submit.
+    const trimmedText = text.replace(/\u200B/g, '').trim();
+    if (!trimmedText) {
+      console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
 
     // Format message with file context if present
     let formattedText = text;
@@ -808,87 +812,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         this.sendToWebView({
           type: 'error',
           data: { message: `Failed to get sessions: ${error}` },
-        });
-      }
-    }
-  }
-
-  /**
-   * Handle save session request
-   */
-  private async handleSaveSession(tag: string): Promise<void> {
-    try {
-      if (!this.currentConversationId) {
-        throw new Error('No active conversation to save');
-      }
-
-      // Try ACP save first
-      try {
-        const response = await this.agentManager.saveSessionViaAcp(
-          this.currentConversationId,
-          tag,
-        );
-
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: response,
-        });
-      } catch (acpError) {
-        // Safely convert error to string
-        const errorMsg = acpError ? String(acpError) : 'Unknown error';
-        // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
-          // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to save sessions.',
-          );
-
-          // Send a specific error to the webview for better UI handling
-          this.sendToWebView({
-            type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
-          });
-          return;
-        }
-      }
-
-      await this.handleGetQwenSessions();
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to save session:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to save sessions.',
-        );
-
-        // Send a specific error to the webview for better UI handling
-        this.sendToWebView({
-          type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
-        });
-      } else {
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: {
-            success: false,
-            message: `Failed to save session: ${error}`,
-          },
         });
       }
     }

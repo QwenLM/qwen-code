@@ -154,13 +154,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
-        JSON.stringify(response),
       );
       await this.logOpenAIInteraction(openaiRequest, response);
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
       await this.logOpenAIInteraction(openaiRequest, undefined, error);
       throw error;
     }
@@ -179,7 +178,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       stream = await this.wrapped.generateContentStream(req, userPromptId);
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
       await this.logOpenAIInteraction(openaiRequest, undefined, error);
       throw error;
     }
@@ -219,7 +218,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses[0]?.modelVersion || model,
         userPromptId,
         lastUsageMetadata,
-        JSON.stringify(responses),
       );
       const consolidatedResponse =
         this.consolidateGeminiResponsesForLogging(responses);
@@ -227,7 +225,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
-        undefined,
+        responses[0]?.responseId ?? '',
         durationMs,
         error,
         responses[0]?.modelVersion || model,

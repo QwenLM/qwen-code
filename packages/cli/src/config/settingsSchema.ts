@@ -116,6 +116,29 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  // Coding Plan configuration
+  codingPlan: {
+    type: 'object',
+    label: 'Coding Plan',
+    category: 'Model',
+    requiresRestart: false,
+    default: {},
+    description: 'Coding Plan template version tracking and configuration.',
+    showInDialog: false,
+    properties: {
+      version: {
+        type: 'string',
+        label: 'Coding Plan Template Version',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
+        showInDialog: false,
+      },
+    },
+  },
+
   // Environment variables fallback
   env: {
     type: 'object',
@@ -124,7 +147,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, string>,
     description:
-      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
@@ -350,7 +373,7 @@ const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
       },
@@ -566,7 +589,7 @@ const SETTINGS_SCHEMA = {
         label: 'Skip Loop Detection',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
@@ -799,9 +822,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: true,
             description:
-              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
             showInDialog: true,
           },
           pager: {
@@ -1154,34 +1177,71 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
-  experimental: {
+  hooksConfig: {
     type: 'object',
-    label: 'Experimental',
-    category: 'Experimental',
-    requiresRestart: true,
+    label: 'Hooks Config',
+    category: 'Advanced',
+    requiresRestart: false,
     default: {},
-    description: 'Setting to enable experimental features',
+    description:
+      'Hook configurations for intercepting and customizing agent behavior.',
     showInDialog: false,
     properties: {
-      visionModelPreview: {
+      enabled: {
         type: 'boolean',
-        label: 'Vision Model Preview',
-        category: 'Experimental',
-        requiresRestart: false,
+        label: 'Enable Hooks',
+        category: 'Advanced',
+        requiresRestart: true,
         default: true,
         description:
-          'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
+          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
         showInDialog: false,
       },
-      vlmSwitchMode: {
-        type: 'string',
-        label: 'VLM Switch Mode',
-        category: 'Experimental',
+      disabled: {
+        type: 'array',
+        label: 'Disabled Hooks',
+        category: 'Advanced',
         requiresRestart: false,
-        default: undefined as string | undefined,
+        default: [] as string[],
         description:
-          'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
+          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  hooks: {
+    type: 'object',
+    label: 'Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook event configurations for extending CLI behavior at various lifecycle points.',
+    showInDialog: false,
+    properties: {
+      UserPromptSubmit: {
+        type: 'array',
+        label: 'Before Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+      },
+      Stop: {
+        type: 'array',
+        label: 'After Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
     },
   },

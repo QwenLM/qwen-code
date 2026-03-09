@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ управление вложениями',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → выбрать, Delete удалить, ↓ выйти',
+  'Attachments: ': 'Вложения: ',
+
   'Basics:': 'Основы:',
   'Add context': 'Добавить контекст',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -111,7 +117,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Анализ проекта и создание адаптированного файла QWEN.md',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
@@ -143,6 +149,8 @@ export default {
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
   'change the auth method': 'Изменение метода авторизации',
+  'Configure authentication information for login':
+    'Настройка аутентификационной информации для входа',
   'Copy the last result or code snippet to clipboard':
     'Копирование последнего результата или фрагмента кода в буфер обмена',
 
@@ -173,6 +181,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter для подтверждения, Esc для отмены',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter для выбора, ↑↓ для навигации, Esc для возврата',
+  'Enter to submit, Esc to go back': 'Enter для отправки, Esc для возврата',
   'Invalid step: {{step}}': 'Неверный шаг: {{step}}',
   'No subagents found.': 'Подагенты не найдены.',
   "Use '/agents create' to create your first subagent.":
@@ -371,7 +380,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
   'exit the cli': 'Выход из CLI',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Открыть диалог управления MCP или авторизоваться на сервере с поддержкой OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Показать настроенные MCP-серверы и инструменты, или авторизоваться на серверах с поддержкой OAuth',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
@@ -880,9 +891,36 @@ export default {
   'Do you want to proceed?': 'Вы хотите продолжить?',
   'Yes, allow once': 'Да, разрешить один раз',
   'Allow always': 'Всегда разрешать',
+  Yes: 'Да',
   No: 'Нет',
   'No (esc)': 'Нет (esc)',
   'Yes, allow always for this session': 'Да, всегда разрешать для этой сессии',
+
+  // MCP Management - Core translations
+  Disable: 'Отключить',
+  Enable: 'Включить',
+  Reconnect: 'Переподключить',
+  'View tools': 'Просмотреть инструменты',
+  '(disabled)': '(отключен)',
+  'Error:': 'Ошибка:',
+  Extension: 'Расширение',
+  tool: 'инструмент',
+  connected: 'подключен',
+  connecting: 'подключение',
+  disconnected: 'отключен',
+  error: 'ошибка',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} недействительных инструментов',
+  invalid: 'недействительный',
+  'invalid: {{reason}}': 'недействительно: {{reason}}',
+  'missing name': 'отсутствует имя',
+  'missing description': 'отсутствует описание',
+  '(unnamed)': '(без имени)',
+  'Warning: This tool cannot be called by the LLM':
+    'Предупреждение: Этот инструмент не может быть вызван LLM',
+  Reason: 'Причина',
+  'Tools must have both name and description to be used by the LLM.':
+    'Инструменты должны иметь как имя, так и описание, чтобы использоваться LLM.',
   'Modify in progress:': 'Идет изменение:',
   'Save and close external editor to continue':
     'Сохраните и закройте внешний редактор для продолжения',
@@ -942,16 +980,25 @@ export default {
   // Диалоги - Авторизация
   // ============================================================================
   'Get started': 'Начать',
-  'How would you like to authenticate for this project?':
-    'Как вы хотите авторизоваться для этого проекта?',
+  'Select Authentication Method': 'Выберите метод авторизации',
   'OpenAI API key is required to use OpenAI authentication.':
     'Для использования авторизации OpenAI требуется ключ API OpenAI.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
-  '(Use Enter to Set Auth)': '(Enter для установки авторизации)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Условия обслуживания и уведомление о конфиденциальности для Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Бесплатно \u00B7 До 1 000 запросов/день \u00B7 Новейшие модели Qwen',
+  'Login with QwenChat account to use daily free quota.':
+    'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Используйте свой API-ключ',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Используйте учетные данные Coding Plan или свои собственные API-ключи/провайдеры.',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'Не удалось войти. Сообщение: {{message}}',
@@ -976,6 +1023,8 @@ export default {
     'Ожидание авторизации Qwen OAuth...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Примечание: Ваш существующий ключ API в settings.json не будет удален при использовании Qwen OAuth. Вы можете переключиться обратно на авторизацию OpenAI позже при необходимости.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Примечание: Ваш существующий ключ API не будет удален при использовании Qwen OAuth.',
   'Authentication timed out. Please try again.':
     'Время ожидания авторизации истекло. Пожалуйста, попробуйте снова.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1023,10 +1072,21 @@ export default {
   '(default)': '(по умолчанию)',
   '(set)': '(установлено)',
   '(not set)': '(не задано)',
+  Modality: 'Модальность',
+  'Context Window': 'Контекстное окно',
+  text: 'текст',
+  'text-only': 'только текст',
+  image: 'изображение',
+  pdf: 'PDF',
+  audio: 'аудио',
+  video: 'видео',
+  'not set': 'не задано',
+  none: 'нет',
+  unknown: 'неизвестно',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Последняя модель Qwen Coder от Alibaba Cloud ModelStudio (версия: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Последняя модель Qwen Vision от Alibaba Cloud ModelStudio (версия: qwen3-vl-plus-2025-09-23)',
 
@@ -1371,8 +1431,138 @@ export default {
     'Открываем страницу расширений в браузере: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Используйте /compress, когда разговор становится длинным, чтобы подвести итог и освободить контекст.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Начните новую идею с /clear или /new; предыдущая сессия останется в истории.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Используйте /bug, чтобы сообщить о проблемах разработчикам.',
+  'Switch auth type quickly with /auth.':
+    'Быстро переключите тип аутентификации с помощью /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Вы можете выполнять любые shell-команды в Qwen Code с помощью ! (например, !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Введите /, чтобы открыть меню команд; Tab автодополняет слэш-команды и сохранённые промпты.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'Вы можете продолжить предыдущий разговор, запустив qwen --continue или qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+
+  // ============================================================================
+  // Custom API Key Configuration
+  // ============================================================================
+  'You can configure your API key and models in settings.json':
+    'Вы можете настроить API-ключ и модели в settings.json',
+  'Refer to the documentation for setup instructions':
+    'Инструкции по настройке см. в документации',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'API key cannot be empty.': 'API-ключ не может быть пустым.',
+  'You can get your Coding Plan API key here':
+    'Вы можете получить API-ключ Coding Plan здесь',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Доступны новые конфигурации моделей для Alibaba Cloud Coding Plan. Обновить сейчас?',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Конфигурация Coding Plan успешно обновлена. Новые модели теперь доступны.',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'API-ключ Coding Plan не найден. Пожалуйста, повторно авторизуйтесь с Coding Plan.',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Не удалось обновить конфигурацию Coding Plan: {{message}}',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Select Region for Coding Plan': 'Выберите регион Coding Plan',
+  'Choose based on where your account is registered':
+    'Выберите в зависимости от места регистрации вашего аккаунта',
+  'Enter Coding Plan API Key': 'Введите API-ключ Coding Plan',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Доступны новые конфигурации моделей для {{region}}. Обновить сейчас?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    'Конфигурация {{region}} успешно обновлена. Модель переключена на "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
+
+  // ============================================================================
+  // MCP Management Dialog
+  // ============================================================================
+  'MCP Management': 'Управление MCP',
+  'Server List': 'Список серверов',
+  'Server Detail': 'Детали сервера',
+  'Disable Server': 'Отключить сервер',
+  'Tool List': 'Список инструментов',
+  'Tool Detail': 'Детали инструмента',
+  'Loading...': 'Загрузка...',
+  'Unknown step': 'Неизвестный шаг',
+  'Esc to back': 'Esc для возврата',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ навигация · Enter выбрать · Esc закрыть',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ навигация · Enter выбрать · Esc назад',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ навигация · Enter подтвердить · Esc назад',
+  'User Settings (global)': 'Настройки пользователя (глобальные)',
+  'Workspace Settings (project-specific)':
+    'Настройки рабочего пространства (проектные)',
+  'Disable server:': 'Отключить сервер:',
+  'Select where to add the server to the exclude list:':
+    'Выберите, где добавить сервер в список исключений:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter для подтверждения, Esc для отмены',
+  'Status:': 'Статус:',
+  'Command:': 'Команда:',
+  'Working Directory:': 'Рабочий каталог:',
+  'Capabilities:': 'Возможности:',
+  'No server selected': 'Сервер не выбран',
+
+  // MCP Server List
+  'User MCPs': 'MCP пользователя',
+  'Project MCPs': 'MCP проекта',
+  'Extension MCPs': 'MCP расширений',
+  server: 'сервер',
+  servers: 'серверов',
+  'Add MCP servers to your settings to get started.':
+    'Добавьте серверы MCP в настройки, чтобы начать.',
+  'Run qwen --debug to see error logs':
+    'Запустите qwen --debug для просмотра журналов ошибок',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Для этого сервера нет доступных инструментов.',
+  destructive: 'деструктивный',
+  'read-only': 'только чтение',
+  'open-world': 'открытый мир',
+  idempotent: 'идемпотентный',
+  'Tools for {{name}}': 'Инструменты для {{name}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'обязательный',
+  Type: 'Тип',
+  Enum: 'Перечисление',
+  Parameters: 'Параметры',
+  'No tool selected': 'Инструмент не выбран',
+  Annotations: 'Аннотации',
+  Title: 'Заголовок',
+  'Read Only': 'Только чтение',
+  Destructive: 'Деструктивный',
+  Idempotent: 'Идемпотентный',
+  'Open World': 'Открытый мир',
+  Server: 'Сервер',
+  '{{region}} configuration updated successfully.':
+    'Конфигурация {{region}} успешно обновлена.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Совет: Используйте /model для переключения между доступными моделями Coding Plan.',
 };

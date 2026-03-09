@@ -15,6 +15,19 @@ import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { ErrorHandler, RequestContext } from './errorHandler.js';
 
+/**
+ * Error thrown when the API returns an error embedded as stream content
+ * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
+ * endpoints) return throttling errors as a normal SSE chunk with
+ * finish_reason="error_finish" and the error message in delta.content.
+ */
+export class StreamContentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StreamContentError';
+  }
+}
+
 export interface PipelineConfig {
   cliConfig: Config;
   provider: OpenAICompatibleProvider;
@@ -33,6 +46,7 @@ export class ContentGenerationPipeline {
     this.converter = new OpenAIContentConverter(
       this.contentGeneratorConfig.model,
       this.contentGeneratorConfig.schemaCompliance,
+      this.contentGeneratorConfig.modalities ?? {},
     );
   }
 
@@ -45,6 +59,7 @@ export class ContentGenerationPipeline {
     // that is not valid/available for the OpenAI-compatible backend.
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -72,6 +87,7 @@ export class ContentGenerationPipeline {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const effectiveModel = this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
+    this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -111,12 +127,30 @@ export class ContentGenerationPipeline {
     // Reset streaming tool calls to prevent data pollution from previous streams
     this.converter.resetStreamingToolCalls();
 
-    // State for handling chunk merging
+    // State for handling chunk merging.
+    // pendingFinishResponse holds a finish chunk waiting to be merged with
+    // a subsequent usage-metadata chunk before yielding.
+    // finishYielded is set to true once the merged finish response has been
+    // yielded, so that any further trailing chunks are treated as normal
+    // chunks instead of triggering another merge (which would duplicate the
+    // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
+    let finishYielded = false;
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        // Detect API errors returned as stream content.
+        // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
+        // with finish_reason="error_finish" and the error in delta.content,
+        // instead of returning a proper HTTP error status.
+        if ((chunk.choices?.[0]?.finish_reason as string) === 'error_finish') {
+          const errorContent =
+            chunk.choices?.[0]?.delta?.content?.trim() ||
+            'Unknown stream error';
+          throw new StreamContentError(errorContent);
+        }
+
         const response = this.converter.convertOpenAIChunkToGemini(chunk);
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -128,7 +162,29 @@ export class ContentGenerationPipeline {
           continue;
         }
 
-        // Stage 2c: Handle chunk merging for providers that send finishReason and usageMetadata separately
+        // Stage 2c: Handle chunk merging for providers that send
+        // finishReason and usageMetadata in separate chunks.
+        // Once the merged finish response has been yielded, skip
+        // further merging so trailing chunks don't duplicate the
+        // function-call parts carried by the finish chunk.
+        if (finishYielded) {
+          // Finish already yielded — absorb any remaining usage
+          // metadata but do NOT yield another response.
+          // Note: pendingFinishResponse is guaranteed non-null here because
+          // finishYielded is only set to true inside the `if (pendingFinishResponse)`
+          // block below. TypeScript cannot infer this through the callback
+          // assignment in handleChunkMerging, so an explicit cast is needed.
+          if (response.usageMetadata) {
+            const pending =
+              pendingFinishResponse as GenerateContentResponse | null;
+            if (pending) {
+              pending.usageMetadata = response.usageMetadata;
+            }
+          }
+          collectedGeminiResponses.push(response);
+          continue;
+        }
+
         const shouldYield = this.handleChunkMerging(
           response,
           collectedGeminiResponses,
@@ -141,15 +197,18 @@ export class ContentGenerationPipeline {
           // If we have a pending finish response, yield it instead
           if (pendingFinishResponse) {
             yield pendingFinishResponse;
-            pendingFinishResponse = null;
+            finishYielded = true;
+            // Keep pendingFinishResponse alive so late-arriving usage
+            // metadata can still be merged (see finishYielded block above).
           } else {
             yield response;
           }
         }
       }
 
-      // Stage 2d: If there's still a pending finish response at the end, yield it
-      if (pendingFinishResponse) {
+      // Stage 2d: If there's still a pending finish response at the end
+      // (e.g. no usage chunk arrived after the finish chunk), yield it.
+      if (pendingFinishResponse && !finishYielded) {
         yield pendingFinishResponse;
       }
 
@@ -158,6 +217,12 @@ export class ContentGenerationPipeline {
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
+
+      // Re-throw StreamContentError directly so it can be handled by
+      // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
+      if (error instanceof StreamContentError) {
+        throw error;
+      }
 
       // Use shared error handling logic
       await this.handleError(error, context, request);

@@ -18,6 +18,7 @@ export {
   DEFAULT_QWEN_MODEL,
   DEFAULT_QWEN_FLASH_MODEL,
   DEFAULT_QWEN_EMBEDDING_MODEL,
+  MAINLINE_CODER_MODEL,
 } from './config/models.js';
 export {
   type AvailableModel,
@@ -73,6 +74,7 @@ export * from './utils/paths.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/errors.js';
 export * from './utils/debugLogger.js';
+export * from './utils/symlink.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/gitIgnoreParser.js';
@@ -285,6 +287,8 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/jsonl-utils.js';
+export * from './utils/symlink.js';
 
 // ============================================================================
 // OAuth & Authentication
@@ -298,3 +302,8 @@ export * from './qwen/qwenOAuth2.js';
 
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
+
+// Export hook types and components
+export * from './hooks/types.js';
+export { HookSystem, HookRegistry } from './hooks/index.js';
+export type { HookRegistryEntry } from './hooks/index.js';

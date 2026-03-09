@@ -28,6 +28,8 @@ import {
   processSingleFileContent,
   detectBOM,
   readFileWithEncoding,
+  readFileWithEncodingInfo,
+  detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
@@ -406,6 +408,153 @@ describe('fileUtils', () => {
 
         const result = await readFileWithEncoding(filePath);
         expect(result).toBe('');
+      });
+
+      it('should read GBK-encoded file with Chinese characters correctly', async () => {
+        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
+        // Needs enough content for chardet to reliably detect the encoding
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'gbk-chinese.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncoding(filePath);
+        expect(result).toBe('你好世界这是中文内容用于测试编码检测');
+      });
+
+      it('should read GBK-encoded file with mixed ASCII and Chinese correctly', async () => {
+        // GBK encoding of "// 这是注释内容用于测试\nhello你好世界测试中文编码检测\n函数返回值正确"
+        // Needs enough Chinese content for chardet to reliably detect as GB18030/GBK
+        const gbkBuffer = Buffer.from([
+          0x2f, 0x2f, 0x20, 0xd5, 0xe2, 0xca, 0xc7, 0xd7, 0xa2, 0xca, 0xcd,
+          0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3, 0xd3, 0xda, 0xb2, 0xe2, 0xca,
+          0xd4, 0x0a, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xc4, 0xe3, 0xba, 0xc3,
+          0xca, 0xc0, 0xbd, 0xe7, 0xb2, 0xe2, 0xca, 0xd4, 0xd6, 0xd0, 0xce,
+          0xc4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc, 0xec, 0xb2, 0xe2, 0x0a, 0xba,
+          0xaf, 0xca, 0xfd, 0xb7, 0xb5, 0xbb, 0xd8, 0xd6, 0xb5, 0xd5, 0xfd,
+          0xc8, 0xb7,
+        ]);
+        const filePath = path.join(testDir, 'gbk-mixed.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncoding(filePath);
+        expect(result).toContain('hello');
+        expect(result).toContain('你好世界');
+        expect(result).toContain('函数返回值正确');
+      });
+    });
+
+    describe('readFileWithEncodingInfo', () => {
+      it('should return bom: false and encoding utf-8 for plain UTF-8 file', async () => {
+        const filePath = path.join(testDir, 'info-utf8.txt');
+        await fsPromises.writeFile(filePath, 'Hello', 'utf8');
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hello');
+        expect(result.encoding).toBe('utf-8');
+        expect(result.bom).toBe(false);
+      });
+
+      it('should return bom: true and encoding utf-8 for UTF-8 BOM file', async () => {
+        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
+        const filePath = path.join(testDir, 'info-utf8-bom.txt');
+        await fsPromises.writeFile(
+          filePath,
+          Buffer.concat([utf8Bom, Buffer.from('Hello', 'utf8')]),
+        );
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hello');
+        expect(result.encoding).toBe('utf-8');
+        expect(result.bom).toBe(true);
+      });
+
+      it('should return bom: true and encoding utf-16le for UTF-16LE BOM file', async () => {
+        const utf16leBom = Buffer.from([0xff, 0xfe]);
+        const utf16leContent = Buffer.from('Hi', 'utf16le');
+        const filePath = path.join(testDir, 'info-utf16le.txt');
+        await fsPromises.writeFile(
+          filePath,
+          Buffer.concat([utf16leBom, utf16leContent]),
+        );
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.content).toBe('Hi');
+        expect(result.encoding).toBe('utf-16le');
+        // Non-UTF-8 BOM should also be flagged so it is preserved on write-back
+        expect(result.bom).toBe(true);
+      });
+
+      it('should return bom: false for GBK file (no BOM)', async () => {
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'info-gbk.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const result = await readFileWithEncodingInfo(filePath);
+        expect(result.bom).toBe(false);
+        expect(result.encoding).toBe('gb18030');
+        expect(result.content).toBe('你好世界这是中文内容用于测试编码检测');
+      });
+    });
+
+    describe('detectFileEncoding', () => {
+      it('should detect UTF-8 for plain ASCII file', async () => {
+        const filePath = path.join(testDir, 'ascii.txt');
+        await fsPromises.writeFile(filePath, 'Hello World', 'utf8');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should detect UTF-8 for file with UTF-8 BOM', async () => {
+        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
+        const content = Buffer.from('Hello', 'utf8');
+        const filePath = path.join(testDir, 'utf8-bom-detect.txt');
+        await fsPromises.writeFile(filePath, Buffer.concat([utf8Bom, content]));
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should detect GBK encoding for Chinese text in GBK', async () => {
+        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
+        // Needs enough content for chardet to reliably detect
+        const gbkBuffer = Buffer.from([
+          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
+          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
+          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
+          0xec, 0xb2, 0xe2,
+        ]);
+        const filePath = path.join(testDir, 'gbk-detect.txt');
+        await fsPromises.writeFile(filePath, gbkBuffer);
+
+        const encoding = await detectFileEncoding(filePath);
+        // chardet detects GBK as 'gb18030' (its superset)
+        expect(encoding).toBe('gb18030');
+      });
+
+      it('should return utf-8 for empty file', async () => {
+        const filePath = path.join(testDir, 'empty-detect.txt');
+        await fsPromises.writeFile(filePath, '');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
+      });
+
+      it('should return utf-8 for non-existent file', async () => {
+        const filePath = path.join(testDir, 'nonexistent-detect.txt');
+
+        const encoding = await detectFileEncoding(filePath);
+        expect(encoding).toBe('utf-8');
       });
     });
 
@@ -948,13 +1097,13 @@ describe('fileUtils', () => {
       );
     });
 
-    it('should return an error if the file size exceeds 20MB', async () => {
+    it('should return an error if the file size exceeds 10MB', async () => {
       // Create a small test file
       actualNodeFs.writeFileSync(testTextFilePath, 'test content');
 
       // Spy on fs.promises.stat to return a large file size
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 21 * 1024 * 1024,
+        size: 11 * 1024 * 1024,
         isDirectory: () => false,
       } as fs.Stats);
 
@@ -964,11 +1113,11 @@ describe('fileUtils', () => {
           mockConfig,
         );
 
-        expect(result.error).toContain('File size exceeds the 20MB limit');
+        expect(result.error).toContain('File size exceeds the 10MB limit');
         expect(result.returnDisplay).toContain(
-          'File size exceeds the 20MB limit',
+          'File size exceeds the 10MB limit',
         );
-        expect(result.llmContent).toContain('File size exceeds the 20MB limit');
+        expect(result.llmContent).toContain('File size exceeds the 10MB limit');
       } finally {
         statSpy.mockRestore();
       }

@@ -261,9 +261,13 @@ export class ProcessTransport implements Transport {
     }
 
     if (this.options.resume) {
+      // Resume existing session
       args.push('--resume', this.options.resume);
     } else if (this.options.continue) {
       args.push('--continue');
+    } else if (this.options.sessionId) {
+      // Start new session with specific session ID (for SDK-CLI alignment)
+      args.push('--session-id', this.options.sessionId);
     }
 
     return args;

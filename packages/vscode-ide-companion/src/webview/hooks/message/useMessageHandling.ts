@@ -107,24 +107,17 @@ export const useMessageHandling = () => {
     streamingMessageIndexRef.current = null;
   }, []);
 
+  const breakThinkingSegment = useCallback(() => {
+    thinkingMessageIndexRef.current = null;
+  }, []);
+
   /**
    * End streaming response
    */
   const endStreaming = useCallback(() => {
-    // Finalize streaming; content already lives in the placeholder message
     setIsStreaming(false);
     streamingMessageIndexRef.current = null;
-    // Remove the thinking message if it exists (collapse thoughts)
-    setMessages((prev) => {
-      const idx = thinkingMessageIndexRef.current;
-      thinkingMessageIndexRef.current = null;
-      if (idx === null || idx < 0 || idx >= prev.length) {
-        return prev;
-      }
-      const next = prev.slice();
-      next.splice(idx, 1);
-      return next;
-    });
+    thinkingMessageIndexRef.current = null;
   }, []);
 
   /**
@@ -178,18 +171,10 @@ export const useMessageHandling = () => {
       });
     },
     clearThinking: () => {
-      setMessages((prev) => {
-        const idx = thinkingMessageIndexRef.current;
-        thinkingMessageIndexRef.current = null;
-        if (idx === null || idx < 0 || idx >= prev.length) {
-          return prev;
-        }
-        const next = prev.slice();
-        next.splice(idx, 1);
-        return next;
-      });
+      thinkingMessageIndexRef.current = null;
     },
     breakAssistantSegment,
+    breakThinkingSegment,
     setWaitingForResponse,
     clearWaitingForResponse,
     setMessages,

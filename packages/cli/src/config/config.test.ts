@@ -242,9 +242,14 @@ describe('parseArguments', () => {
   });
 
   it('should allow -r flag as alias for --resume', async () => {
-    process.argv = ['node', 'script.js', '-r', 'session-123'];
+    process.argv = [
+      'node',
+      'script.js',
+      '-r',
+      '123e4567-e89b-12d3-a456-426614174000',
+    ];
     const argv = await parseArguments();
-    expect(argv.resume).toBe('session-123');
+    expect(argv.resume).toBe('123e4567-e89b-12d3-a456-426614174000');
   });
 
   it('should allow -c flag as alias for --continue', async () => {
@@ -543,6 +548,43 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const setGeminiMdFilenameSpy = vi.spyOn(
+      ServerConfig,
+      'setGeminiMdFilename',
+    );
+
+    await loadCliConfig(settings, argv);
+
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+      ServerConfig.DEFAULT_CONTEXT_FILENAME,
+      ServerConfig.AGENT_CONTEXT_FILENAME,
+    ]);
+  });
+
+  it('should use configured context file name when settings.context.fileName is set', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        fileName: 'CUSTOM_AGENTS.md',
+      },
+    };
+    const setGeminiMdFilenameSpy = vi.spyOn(
+      ServerConfig,
+      'setGeminiMdFilename',
+    );
+
+    await loadCliConfig(settings, argv);
+
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+  });
+
   it('should propagate stream-json formats to config', async () => {
     process.argv = [
       'node',
@@ -560,6 +602,35 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should reset context filenames to defaults when context.fileName is not configured', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
+    const getAllSpy = vi
+      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .mockReturnValue(defaultContextFiles);
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+
+    await loadCliConfig(settings, argv);
+
+    expect(getAllSpy).toHaveBeenCalledTimes(1);
+    expect(setFilenameSpy).toHaveBeenCalledWith(defaultContextFiles);
+  });
+
+  it('should use context.fileName from settings when provided', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+
+    await loadCliConfig(settings, argv);
+
+    expect(setFilenameSpy).toHaveBeenCalledWith('CUSTOM_CONTEXT.md');
+    expect(getAllSpy).not.toHaveBeenCalled();
   });
 
   it('should initialize native LSP service when enabled', async () => {
@@ -1251,7 +1322,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     });
   });
 
-  it('should read excludeMCPServers from settings', async () => {
+  it('should read excludeMCPServers from settings but still return all servers', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -1259,12 +1330,18 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       mcp: { excluded: ['server1', 'server2'] },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
+    // getMcpServers() now returns all servers, use isMcpServerDisabled() to check status
     expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
       server3: { url: 'http://localhost:8082' },
     });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
-  it('should override allowMCPServers with excludeMCPServers if overlapping', async () => {
+  it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -1275,9 +1352,14 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
+    // allowedMcpServers filters which servers are available
+    // but excluded servers are still returned by getMcpServers()
     expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
       server2: { url: 'http://localhost:8081' },
     });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
   });
 
   it('should prioritize mcp server flag if set', async () => {
@@ -2173,8 +2255,8 @@ describe('parseArguments with positional prompt', () => {
 });
 
 describe('Telemetry configuration via environment variables', () => {
-  it('should prioritize GEMINI_TELEMETRY_ENABLED over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_ENABLED', 'true');
+  it('should prioritize QWEN_TELEMETRY_ENABLED over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_ENABLED', 'true');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: false } };
@@ -2182,8 +2264,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
-  it('should prioritize GEMINI_TELEMETRY_TARGET over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_TARGET', 'gcp');
+  it('should prioritize QWEN_TELEMETRY_TARGET over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_TARGET', 'gcp');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2193,8 +2275,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryTarget()).toBe('gcp');
   });
 
-  it('should throw when GEMINI_TELEMETRY_TARGET is invalid', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_TARGET', 'bogus');
+  it('should throw when QWEN_TELEMETRY_TARGET is invalid', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_TARGET', 'bogus');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2206,9 +2288,9 @@ describe('Telemetry configuration via environment variables', () => {
     vi.unstubAllEnvs();
   });
 
-  it('should prioritize GEMINI_TELEMETRY_OTLP_ENDPOINT over settings and default env var', async () => {
+  it('should prioritize QWEN_TELEMETRY_OTLP_ENDPOINT over settings and default env var', async () => {
     vi.stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://default.env.com');
-    vi.stubEnv('GEMINI_TELEMETRY_OTLP_ENDPOINT', 'http://gemini.env.com');
+    vi.stubEnv('QWEN_TELEMETRY_OTLP_ENDPOINT', 'http://gemini.env.com');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2218,8 +2300,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryOtlpEndpoint()).toBe('http://gemini.env.com');
   });
 
-  it('should prioritize GEMINI_TELEMETRY_OTLP_PROTOCOL over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_OTLP_PROTOCOL', 'http');
+  it('should prioritize QWEN_TELEMETRY_OTLP_PROTOCOL over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_OTLP_PROTOCOL', 'http');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { otlpProtocol: 'grpc' } };
@@ -2227,8 +2309,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryOtlpProtocol()).toBe('http');
   });
 
-  it('should prioritize GEMINI_TELEMETRY_LOG_PROMPTS over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', 'false');
+  it('should prioritize QWEN_TELEMETRY_LOG_PROMPTS over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_LOG_PROMPTS', 'false');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { logPrompts: true } };
@@ -2236,8 +2318,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
-  it('should prioritize GEMINI_TELEMETRY_OUTFILE over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
+  it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2247,8 +2329,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
   });
 
-  it('should prioritize GEMINI_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_USE_COLLECTOR', 'true');
+  it('should prioritize QWEN_TELEMETRY_USE_COLLECTOR over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_USE_COLLECTOR', 'true');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { useCollector: false } };
@@ -2256,8 +2338,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryUseCollector()).toBe(true);
   });
 
-  it('should use settings value when GEMINI_TELEMETRY_ENABLED is not set', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_ENABLED', undefined);
+  it('should use settings value when QWEN_TELEMETRY_ENABLED is not set', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_ENABLED', undefined);
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
@@ -2265,8 +2347,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
-  it('should use settings value when GEMINI_TELEMETRY_TARGET is not set', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_TARGET', undefined);
+  it('should use settings value when QWEN_TELEMETRY_TARGET is not set', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_TARGET', undefined);
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -2276,16 +2358,16 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryTarget()).toBe('local');
   });
 
-  it("should treat GEMINI_TELEMETRY_ENABLED='1' as true", async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_ENABLED', '1');
+  it("should treat QWEN_TELEMETRY_ENABLED='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_ENABLED', '1');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
-  it("should treat GEMINI_TELEMETRY_ENABLED='0' as false", async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_ENABLED', '0');
+  it("should treat QWEN_TELEMETRY_ENABLED='0' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_ENABLED', '0');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -2297,16 +2379,16 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it("should treat GEMINI_TELEMETRY_LOG_PROMPTS='1' as true", async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', '1');
+  it("should treat QWEN_TELEMETRY_LOG_PROMPTS='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_LOG_PROMPTS', '1');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
 
-  it("should treat GEMINI_TELEMETRY_LOG_PROMPTS='false' as false", async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', 'false');
+  it("should treat QWEN_TELEMETRY_LOG_PROMPTS='false' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_LOG_PROMPTS', 'false');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(

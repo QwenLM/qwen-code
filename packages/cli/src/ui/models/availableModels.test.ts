@@ -9,42 +9,30 @@ import {
   getAvailableModelsForAuthType,
   getFilteredQwenModels,
   getOpenAIAvailableModelFromEnv,
-  isVisionModel,
-  getDefaultVisionModel,
-  AVAILABLE_MODELS_QWEN,
-  MAINLINE_VLM,
-  MAINLINE_CODER,
 } from './availableModels.js';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 
 describe('availableModels', () => {
-  describe('AVAILABLE_MODELS_QWEN', () => {
-    it('should include coder model', () => {
-      const coderModel = AVAILABLE_MODELS_QWEN.find(
-        (m) => m.id === MAINLINE_CODER,
-      );
-      expect(coderModel).toBeDefined();
-      expect(coderModel?.isVision).toBeFalsy();
+  describe('Qwen models', () => {
+    const qwenModels = getFilteredQwenModels();
+
+    it('should include only coder-model', () => {
+      expect(qwenModels.length).toBe(1);
+      expect(qwenModels[0].id).toBe('coder-model');
     });
 
-    it('should include vision model', () => {
-      const visionModel = AVAILABLE_MODELS_QWEN.find(
-        (m) => m.id === MAINLINE_VLM,
-      );
-      expect(visionModel).toBeDefined();
-      expect(visionModel?.isVision).toBe(true);
+    it('should have coder-model with vision capability', () => {
+      const coderModel = qwenModels[0];
+      expect(coderModel.isVision).toBe(true);
     });
   });
 
   describe('getFilteredQwenModels', () => {
-    it('should return all models when vision preview is enabled', () => {
-      const models = getFilteredQwenModels(true);
-      expect(models.length).toBe(AVAILABLE_MODELS_QWEN.length);
-    });
-
-    it('should filter out vision models when preview is disabled', () => {
-      const models = getFilteredQwenModels(false);
-      expect(models.every((m) => !m.isVision)).toBe(true);
+    it('should return coder-model with vision capability', () => {
+      const models = getFilteredQwenModels();
+      expect(models.length).toBe(1);
+      expect(models[0].id).toBe('coder-model');
+      expect(models[0].isVision).toBe(true);
     });
   });
 
@@ -91,23 +79,36 @@ describe('availableModels', () => {
 
     it('should return hard-coded qwen models for qwen-oauth', () => {
       const models = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
+      expect(models.length).toBe(1);
+      expect(models[0].id).toBe('coder-model');
+      expect(models[0].isVision).toBe(true);
     });
 
-    it('should return hard-coded qwen models even when config is provided', () => {
+    it('should use config models for qwen-oauth when config is provided', () => {
       const mockConfig = {
-        getAvailableModels: vi
-          .fn()
-          .mockReturnValue([
-            { id: 'custom', label: 'Custom', authType: AuthType.QWEN_OAUTH },
-          ]),
+        getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+          {
+            id: 'custom',
+            label: 'Custom',
+            description: 'Custom model',
+            authType: AuthType.QWEN_OAUTH,
+            isVision: false,
+          },
+        ]),
       } as unknown as Config;
 
       const models = getAvailableModelsForAuthType(
         AuthType.QWEN_OAUTH,
         mockConfig,
       );
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
+      expect(models).toEqual([
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: 'Custom model',
+          isVision: false,
+        },
+      ]);
     });
 
     it('should use config.getAvailableModels for openai authType when available', () => {
@@ -180,26 +181,6 @@ describe('availableModels', () => {
     it('should return empty array for other auth types', () => {
       const models = getAvailableModelsForAuthType(AuthType.USE_GEMINI);
       expect(models).toEqual([]);
-    });
-  });
-
-  describe('isVisionModel', () => {
-    it('should return true for vision model', () => {
-      expect(isVisionModel(MAINLINE_VLM)).toBe(true);
-    });
-
-    it('should return false for non-vision model', () => {
-      expect(isVisionModel(MAINLINE_CODER)).toBe(false);
-    });
-
-    it('should return false for unknown model', () => {
-      expect(isVisionModel('unknown-model')).toBe(false);
-    });
-  });
-
-  describe('getDefaultVisionModel', () => {
-    it('should return the vision model ID', () => {
-      expect(getDefaultVisionModel()).toBe(MAINLINE_VLM);
     });
   });
 });

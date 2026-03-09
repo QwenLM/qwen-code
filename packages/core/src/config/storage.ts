@@ -6,8 +6,8 @@
 
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -82,15 +82,16 @@ export class Storage {
   }
 
   getProjectDir(): string {
-    const projectId = this.sanitizeCwd(this.getProjectRoot());
+    const projectId = sanitizeCwd(this.getProjectRoot());
     const projectsDir = path.join(Storage.getGlobalQwenDir(), PROJECT_DIR_NAME);
     return path.join(projectsDir, projectId);
   }
 
   getProjectTempDir(): string {
-    const hash = this.getFilePathHash(this.getProjectRoot());
+    const hash = getProjectHash(this.getProjectRoot());
     const tempDir = Storage.getGlobalTempDir();
-    return path.join(tempDir, hash);
+    const targetDir = path.join(tempDir, hash);
+    return targetDir;
   }
 
   ensureProjectTempDirExists(): void {
@@ -105,14 +106,11 @@ export class Storage {
     return this.targetDir;
   }
 
-  private getFilePathHash(filePath: string): string {
-    return crypto.createHash('sha256').update(filePath).digest('hex');
-  }
-
   getHistoryDir(): string {
-    const hash = this.getFilePathHash(this.getProjectRoot());
+    const hash = getProjectHash(this.getProjectRoot());
     const historyDir = path.join(Storage.getGlobalQwenDir(), 'history');
-    return path.join(historyDir, hash);
+    const targetDir = path.join(historyDir, hash);
+    return targetDir;
   }
 
   getWorkspaceSettingsPath(): string {
@@ -141,9 +139,5 @@ export class Storage {
 
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
-  }
-
-  private sanitizeCwd(cwd: string): string {
-    return cwd.replace(/[^a-zA-Z0-9]/g, '-');
   }
 }

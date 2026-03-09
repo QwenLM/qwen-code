@@ -89,6 +89,8 @@ export interface CommandContext {
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;
+  /** Abort signal for cancelling long-running slash command operations via ESC. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -146,7 +148,9 @@ export interface OpenDialogActionReturn {
     | 'subagent_list'
     | 'permissions'
     | 'approval-mode'
-    | 'resume';
+    | 'resume'
+    | 'extensions_manage'
+    | 'mcp';
 }
 
 /**

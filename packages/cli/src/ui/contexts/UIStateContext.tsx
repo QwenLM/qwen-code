@@ -32,6 +32,7 @@ import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
+import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -60,6 +61,7 @@ export interface UIState {
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
+  codingPlanUpdateRequest: CodingPlanUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
@@ -113,8 +115,6 @@ export interface UIState {
   extensionsUpdateState: Map<string, ExtensionUpdateState>;
   activePtyId: number | undefined;
   embeddedShellFocused: boolean;
-  // Vision switch dialog
-  isVisionSwitchDialogOpen: boolean;
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   welcomeBackInfo: {
@@ -125,6 +125,10 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Extensions manager dialog
+  isExtensionsManagerDialogOpen: boolean;
+  // MCP dialog
+  isMcpDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
 }

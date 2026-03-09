@@ -10,7 +10,7 @@ import {
   validateModelConfig,
 } from './modelConfigResolver.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
 
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
@@ -95,7 +95,7 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.model).toBe('qwen3-coder-plus');
+        expect(result.config.model).toBe(MAINLINE_CODER_MODEL);
         expect(result.sources['model'].kind).toBe('default');
       });
 
@@ -157,17 +157,17 @@ describe('modelConfigResolver', () => {
         expect(result.sources['apiKey'].kind).toBe('computed');
       });
 
-      it('allows vision-model for Qwen OAuth', () => {
+      it('allows coder-model for Qwen OAuth', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {
-            model: 'vision-model',
+            model: 'coder-model',
           },
           settings: {},
           env: {},
         });
 
-        expect(result.config.model).toBe('vision-model');
+        expect(result.config.model).toBe('coder-model');
         expect(result.sources['model'].kind).toBe('cli');
       });
 

@@ -26,11 +26,11 @@ export class Stream<T> implements AsyncIterable<T> {
         value: this.queue.shift()!,
       });
     }
-    if (this.isDone) {
-      return Promise.resolve({ done: true, value: undefined });
-    }
     if (this.hasError) {
       return Promise.reject(this.hasError);
+    }
+    if (this.isDone) {
+      return Promise.resolve({ done: true, value: undefined });
     }
     return new Promise<IteratorResult<T>>((resolve, reject) => {
       this.readResolve = resolve;

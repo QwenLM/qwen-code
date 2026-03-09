@@ -190,11 +190,35 @@ export function unescapePath(filePath: string): string {
 
 /**
  * Generates a unique hash for a project based on its root path.
+ * On Windows, paths are case-insensitive, so we normalize to lowercase
+ * to ensure the same physical path always produces the same hash.
  * @param projectRoot The absolute path to the project's root directory.
  * @returns A SHA256 hash of the project root path.
  */
 export function getProjectHash(projectRoot: string): string {
-  return crypto.createHash('sha256').update(projectRoot).digest('hex');
+  // On Windows, normalize path to lowercase for case-insensitive matching
+  const normalizedPath =
+    os.platform() === 'win32' ? projectRoot.toLowerCase() : projectRoot;
+  return crypto.createHash('sha256').update(normalizedPath).digest('hex');
+}
+
+/**
+ * Sanitizes a directory path to create a safe project ID.
+ *
+ * - On Windows: normalizes to lowercase for case-insensitive matching
+ * - Replaces all non-alphanumeric characters with hyphens
+ *
+ * This is used for:
+ * - Creating project-specific directories
+ * - Generating session IDs for debug logging during startup
+ *
+ * @param cwd - The directory path to sanitize
+ * @returns A sanitized string safe for use as a project identifier
+ */
+export function sanitizeCwd(cwd: string): string {
+  // On Windows, normalize to lowercase for case-insensitive matching
+  const normalizedCwd = os.platform() === 'win32' ? cwd.toLowerCase() : cwd;
+  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /**

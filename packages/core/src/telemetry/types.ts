@@ -362,7 +362,6 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
 export enum LoopType {
   CONSECUTIVE_IDENTICAL_TOOL_CALLS = 'consecutive_identical_tool_calls',
   CHANTING_IDENTICAL_SENTENCES = 'chanting_identical_sentences',
-  LLM_DETECTED_LOOP = 'llm_detected_loop',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -763,13 +762,13 @@ export class AuthEvent implements BaseTelemetryEvent {
   'event.name': 'auth';
   'event.timestamp': string;
   auth_type: AuthType;
-  action_type: 'auto' | 'manual';
+  action_type: 'auto' | 'manual' | 'coding-plan';
   status: 'success' | 'error' | 'cancelled';
   error_message?: string;
 
   constructor(
     auth_type: AuthType,
-    action_type: 'auto' | 'manual',
+    action_type: 'auto' | 'manual' | 'coding-plan',
     status: 'success' | 'error' | 'cancelled',
     error_message?: string,
   ) {

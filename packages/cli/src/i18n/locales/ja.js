@@ -83,7 +83,7 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
@@ -110,6 +110,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'change the auth method': '認証方式を変更',
+  'Configure authentication information for login':
+    'ログイン用の認証情報を設定',
   'Copy the last result or code snippet to clipboard':
     '最後の結果またはコードスニペットをクリップボードにコピー',
 
@@ -140,6 +142,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter で確定、Esc でキャンセル',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter で選択、↑↓ で移動、Esc で戻る',
+  'Enter to submit, Esc to go back': 'Enter で送信、Esc で戻る',
   'Invalid step: {{step}}': '無効なステップ: {{step}}',
   'No subagents found.': 'サブエージェントが見つかりません',
   "Use '/agents create' to create your first subagent.":
@@ -314,7 +317,9 @@ export default {
     'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP管理ダイアログを開く、またはOAuth対応サーバーで認証',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '設定済みのMCPサーバーとツールを一覧表示、またはOAuth対応サーバーで認証',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -619,9 +624,101 @@ export default {
   'Do you want to proceed?': '続行しますか?',
   'Yes, allow once': 'はい(今回のみ許可)',
   'Allow always': '常に許可する',
+  Yes: 'はい',
   No: 'いいえ',
   'No (esc)': 'いいえ (Esc)',
   'Yes, allow always for this session': 'はい、このセッションで常に許可',
+
+  // MCP Management - Core translations
+  'Manage MCP servers': 'MCPサーバーを管理',
+  'Server Detail': 'サーバー詳細',
+  'Disable Server': 'サーバーを無効化',
+  Tools: 'ツール',
+  'Tool Detail': 'ツール詳細',
+  'MCP Management': 'MCP管理',
+  'Loading...': '読み込み中...',
+  'Unknown step': '不明なステップ',
+  'Esc to back': 'Esc 戻る',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ ナビゲート · Enter 選択 · Esc 閉じる',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ ナビゲート · Enter 選択 · Esc 戻る',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ ナビゲート · Enter 確認 · Esc 戻る',
+  'User Settings (global)': 'ユーザー設定（グローバル）',
+  'Workspace Settings (project-specific)':
+    'ワークスペース設定（プロジェクト固有）',
+  'Disable server:': 'サーバーを無効化:',
+  'Select where to add the server to the exclude list:':
+    'サーバーを除外リストに追加する場所を選択してください:',
+  'Press Enter to confirm, Esc to cancel': 'Enter で確認、Esc でキャンセル',
+  Disable: '無効化',
+  Enable: '有効化',
+  Reconnect: '再接続',
+  'View tools': 'ツールを表示',
+  'Status:': 'ステータス:',
+  'Source:': 'ソース:',
+  'Command:': 'コマンド:',
+  'Working Directory:': '作業ディレクトリ:',
+  'Capabilities:': '機能:',
+  'No server selected': 'サーバーが選択されていません',
+  '(disabled)': '(無効)',
+  'Error:': 'エラー:',
+  Extension: '拡張機能',
+  tool: 'ツール',
+  tools: 'ツール',
+  connected: '接続済み',
+  connecting: '接続中',
+  disconnected: '切断済み',
+  error: 'エラー',
+
+  // MCP Server List
+  'User MCPs': 'ユーザーMCP',
+  'Project MCPs': 'プロジェクトMCP',
+  'Extension MCPs': '拡張機能MCP',
+  server: 'サーバー',
+  servers: 'サーバー',
+  'Add MCP servers to your settings to get started.':
+    '設定にMCPサーバーを追加して開始してください。',
+  'Run qwen --debug to see error logs':
+    'qwen --debug を実行してエラーログを確認してください',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'このサーバーには使用可能なツールがありません。',
+  destructive: '破壊的',
+  'read-only': '読み取り専用',
+  'open-world': 'オープンワールド',
+  idempotent: '冪等',
+  'Tools for {{name}}': '{{name}} のツール',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: '必須',
+  Type: '型',
+  Enum: '列挙',
+  Parameters: 'パラメータ',
+  'No tool selected': 'ツールが選択されていません',
+  Annotations: '注釈',
+  Title: 'タイトル',
+  'Read Only': '読み取り専用',
+  Destructive: '破壊的',
+  Idempotent: '冪等',
+  'Open World': 'オープンワールド',
+  Server: 'サーバー',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} 個の無効なツール',
+  invalid: '無効',
+  'invalid: {{reason}}': '無効: {{reason}}',
+  'missing name': '名前なし',
+  'missing description': '説明なし',
+  '(unnamed)': '(名前なし)',
+  'Warning: This tool cannot be called by the LLM':
+    '警告: このツールはLLMによって呼び出すことができません',
+  Reason: '理由',
+  'Tools must have both name and description to be used by the LLM.':
+    'ツールはLLMによって使用されるには名前と説明の両方が必要です。',
   'Modify in progress:': '変更中:',
   'Save and close external editor to continue':
     '続行するには外部エディタを保存して閉じてください',
@@ -669,16 +766,24 @@ export default {
   '🎯 Overall Goal:': '🎯 全体目標:',
   // Dialogs - Auth
   'Get started': '始める',
-  'How would you like to authenticate for this project?':
-    'このプロジェクトの認証方法を選択してください:',
+  'Select Authentication Method': '認証方法を選択',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI認証を使用するには OpenAI APIキーが必要です',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
-  '(Use Enter to Set Auth)': '(Enter で認証を設定)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Qwen Code の利用規約とプライバシー通知',
+  'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
+  'Login with QwenChat account to use daily free quota.':
+    'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': '自分のAPIキーを使用',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'ログインに失敗しました。メッセージ: {{message}}',
@@ -703,6 +808,8 @@ export default {
   'Waiting for Qwen OAuth authentication...': 'Qwen OAuth認証を待っています...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     '注: Qwen OAuthを使用しても、settings.json内の既存のAPIキーはクリアされません。必要に応じて後でOpenAI認証に切り替えることができます',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    '注: Qwen OAuthを使用しても、既存のAPIキーはクリアされません。',
   'Authentication timed out. Please try again.':
     '認証がタイムアウトしました。再度お試しください',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -724,8 +831,19 @@ export default {
   // Dialogs - Model
   'Select Model': 'モデルを選択',
   '(Press Esc to close)': '(Esc で閉じる)',
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Alibaba Cloud ModelStudioの最新Qwen Coderモデル(バージョン: qwen3-coder-plus-2025-09-23)',
+  Modality: 'モダリティ',
+  'Context Window': 'コンテキストウィンドウ',
+  text: 'テキスト',
+  'text-only': 'テキストのみ',
+  image: '画像',
+  pdf: 'PDF',
+  audio: '音声',
+  video: '動画',
+  'not set': '未設定',
+  none: 'なし',
+  unknown: '不明',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
@@ -776,6 +894,27 @@ export default {
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "MCPサーバー '{{name}}' のOAuth認証を開始中...",
   // Startup Tips
+  'Tips:': 'ヒント：',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    '会話が長くなったら /compress で履歴を要約し、コンテキストを解放できます。',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    '/clear または /new で新しいアイデアを始められます。前のセッションは履歴に残ります。',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    '問題が発生したら /bug でメンテナーに報告できます。',
+  'Switch auth type quickly with /auth.':
+    '/auth で認証タイプをすばやく切り替えられます。',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Qwen Code から ! を使って任意のシェルコマンドを実行できます（例: !ls）。',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    '/ を入力してコマンドポップアップを開きます。Tab でスラッシュコマンドと保存済みプロンプトを補完できます。',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'qwen --continue または qwen --resume で前の会話を再開できます。',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Shift+Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
+  'Try /insight to generate personalized insights from your chat history.':
+    '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -882,4 +1021,47 @@ export default {
     'コードが壊れた?叩けば治るさ',
     'USBの差し込みに挑戦中...',
   ],
+
+  // ============================================================================
+  // Custom API Key Configuration
+  // ============================================================================
+  'You can configure your API key and models in settings.json':
+    'settings.json で API キーとモデルを設定できます',
+  'Refer to the documentation for setup instructions':
+    'セットアップ手順はドキュメントを参照してください',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'API key cannot be empty.': 'APIキーは空にできません。',
+  'You can get your Coding Plan API key here':
+    'Coding Plan APIキーはこちらで取得できます',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Coding Plan の設定が正常に更新されました。新しいモデルが利用可能になりました。',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'Coding Plan の API キーが見つかりません。Coding Plan で再認証してください。',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Coding Plan の設定更新に失敗しました: {{message}}',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Select Region for Coding Plan': 'Coding Planのリージョンを選択',
+  'Choose based on where your account is registered':
+    'アカウントの登録先に応じて選択してください',
+  'Enter Coding Plan API Key': 'Coding Plan APIキーを入力',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    '{{region}} の新しいモデル設定が利用可能です。今すぐ更新しますか？',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
+  '{{region}} configuration updated successfully.':
+    '{{region}} の設定が正常に更新されました。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました。',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'ヒント: /model で利用可能な Coding Plan モデルを切り替えられます。',
 };

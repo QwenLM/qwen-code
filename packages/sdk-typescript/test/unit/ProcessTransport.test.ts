@@ -222,6 +222,32 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should include --session-id argument when sessionId is provided without resume', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--session-id',
+          '123e4567-e89b-12d3-a456-426614174000',
+        ]),
+        expect.any(Object),
+      );
+    });
+
     it('should throw if aborted before initialization', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

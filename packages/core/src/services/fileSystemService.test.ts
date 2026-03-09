@@ -10,6 +10,20 @@ import { StandardFileSystemService } from './fileSystemService.js';
 
 vi.mock('fs/promises');
 
+vi.mock('../utils/fileUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
+  return {
+    ...actual,
+    readFileWithEncoding: vi.fn(),
+    readFileWithEncodingInfo: vi.fn(),
+  };
+});
+
+import {
+  readFileWithEncoding,
+  readFileWithEncodingInfo,
+} from '../utils/fileUtils.js';
+
 describe('StandardFileSystemService', () => {
   let fileSystem: StandardFileSystemService;
 
@@ -23,23 +37,59 @@ describe('StandardFileSystemService', () => {
   });
 
   describe('readTextFile', () => {
-    it('should read file content using fs', async () => {
+    it('should read file content using readFileWithEncoding', async () => {
       const testContent = 'Hello, World!';
-      vi.mocked(fs.readFile).mockResolvedValue(testContent);
+      vi.mocked(readFileWithEncoding).mockResolvedValue(testContent);
 
       const result = await fileSystem.readTextFile('/test/file.txt');
 
-      expect(fs.readFile).toHaveBeenCalledWith('/test/file.txt', 'utf-8');
+      expect(readFileWithEncoding).toHaveBeenCalledWith('/test/file.txt');
       expect(result).toBe(testContent);
     });
 
-    it('should propagate fs.readFile errors', async () => {
+    it('should propagate readFileWithEncoding errors', async () => {
       const error = new Error('ENOENT: File not found');
-      vi.mocked(fs.readFile).mockRejectedValue(error);
+      vi.mocked(readFileWithEncoding).mockRejectedValue(error);
 
       await expect(fileSystem.readTextFile('/test/file.txt')).rejects.toThrow(
         'ENOENT: File not found',
       );
+    });
+  });
+
+  describe('readTextFileWithInfo', () => {
+    it('should return content, encoding, and bom via readFileWithEncodingInfo', async () => {
+      const mockResult = { content: 'Hello', encoding: 'utf-8', bom: false };
+      vi.mocked(readFileWithEncodingInfo).mockResolvedValue(mockResult);
+
+      const result = await fileSystem.readTextFileWithInfo('/test/file.txt');
+
+      expect(readFileWithEncodingInfo).toHaveBeenCalledWith('/test/file.txt');
+      expect(result).toEqual(mockResult);
+    });
+
+    it('should return non-UTF-8 encoding info for GBK file', async () => {
+      const mockResult = {
+        content: '你好世界',
+        encoding: 'gb18030',
+        bom: false,
+      };
+      vi.mocked(readFileWithEncodingInfo).mockResolvedValue(mockResult);
+
+      const result = await fileSystem.readTextFileWithInfo('/test/gbk.txt');
+
+      expect(result.encoding).toBe('gb18030');
+      expect(result.bom).toBe(false);
+      expect(result.content).toBe('你好世界');
+    });
+
+    it('should propagate readFileWithEncodingInfo errors', async () => {
+      const error = new Error('ENOENT: File not found');
+      vi.mocked(readFileWithEncodingInfo).mockRejectedValue(error);
+
+      await expect(
+        fileSystem.readTextFileWithInfo('/test/file.txt'),
+      ).rejects.toThrow('ENOENT: File not found');
     });
   });
 
@@ -119,6 +169,67 @@ describe('StandardFileSystemService', () => {
         }
       }
       expect(bomCount).toBe(1);
+    });
+    it('should write file with non-UTF-8 encoding using iconv-lite', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile('/test/file.txt', '你好世界', {
+        encoding: 'gbk',
+      });
+
+      // Verify that fs.writeFile was called with a Buffer (iconv-encoded)
+      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+      expect(writeCall[0]).toBe('/test/file.txt');
+      expect(writeCall[1]).toBeInstanceOf(Buffer);
+    });
+
+    it('should write file as UTF-8 when encoding is utf-8', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile('/test/file.txt', 'Hello', {
+        encoding: 'utf-8',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/file.txt',
+        'Hello',
+        'utf-8',
+      );
+    });
+
+    it('should preserve UTF-16LE BOM when writing back a UTF-16LE file', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile('/test/file.txt', 'Hello', {
+        encoding: 'utf-16le',
+        bom: true,
+      });
+
+      // iconv-lite encodes as UTF-16LE; with bom:true the FF FE BOM is prepended
+      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+      expect(writeCall[0]).toBe('/test/file.txt');
+      expect(writeCall[1]).toBeInstanceOf(Buffer);
+      const buf = writeCall[1] as Buffer;
+      // First two bytes must be the UTF-16LE BOM: FF FE
+      expect(buf[0]).toBe(0xff);
+      expect(buf[1]).toBe(0xfe);
+    });
+
+    it('should not add BOM when writing UTF-16LE file without bom flag', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile('/test/file.txt', 'Hello', {
+        encoding: 'utf-16le',
+        bom: false,
+      });
+
+      // No BOM prepended — raw iconv-encoded buffer written directly
+      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+      expect(writeCall[0]).toBe('/test/file.txt');
+      expect(writeCall[1]).toBeInstanceOf(Buffer);
+      const buf = writeCall[1] as Buffer;
+      // First two bytes should NOT be FF FE (the UTF-16LE BOM)
+      expect(!(buf[0] === 0xff && buf[1] === 0xfe)).toBe(true);
     });
   });
 

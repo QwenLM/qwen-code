@@ -5,12 +5,12 @@
  */
 import { AcpConnection } from './acpConnection.js';
 import type {
-  AcpSessionUpdate,
-  AcpPermissionRequest,
-  AuthenticateUpdateNotification,
   ModelInfo,
   AvailableCommand,
-} from '../types/acpTypes.js';
+  RequestPermissionRequest,
+  SessionNotification,
+} from '@agentclientprotocol/sdk';
+import type { AuthenticateUpdateNotification } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
@@ -29,6 +29,7 @@ import { QwenSessionUpdateHandler } from './qwenSessionUpdateHandler.js';
 import { authMethod } from '../types/acpTypes.js';
 import {
   extractModelInfoFromNewSessionResult,
+  extractSessionModeState,
   extractSessionModelState,
 } from '../utils/acpModelInfo.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
@@ -65,6 +66,18 @@ export class QwenAgentManager {
 
   // Callback storage
   private callbacks: QwenAgentCallbacks = {};
+  // Baseline state from session/new (default/settings-backed), used to clear stale
+  // UI mode/model when session/load response omits optional fields.
+  private baselineModeId: ApprovalModeValue = 'default';
+  private baselineAvailableModes:
+    | Array<{
+        id: ApprovalModeValue;
+        name: string;
+        description: string;
+      }>
+    | undefined;
+  private baselineModelInfo: ModelInfo | null = null;
+  private baselineAvailableModels: ModelInfo[] = [];
 
   constructor() {
     this.connection = new AcpConnection();
@@ -74,9 +87,13 @@ export class QwenAgentManager {
     this.sessionUpdateHandler = new QwenSessionUpdateHandler({});
 
     // Set ACP connection callbacks
-    this.connection.onSessionUpdate = (data: AcpSessionUpdate) => {
+    this.connection.onSessionUpdate = (data: SessionNotification) => {
       // If we are rehydrating a loaded session, map message chunks into
-      // full messages for the UI, instead of streaming behavior.
+      // discrete messages for the UI instead of streaming behavior.
+      // During rehydration the webview is NOT in streaming mode, so
+      // streaming-only callbacks (onStreamChunk, onThoughtChunk) would be
+      // silently dropped by the UI.  Route all text-bearing updates through
+      // onMessage which calls addMessage() regardless of streaming state.
       try {
         const targetId = this.rehydratingSessionId;
         if (
@@ -91,19 +108,18 @@ export class QwenAgentManager {
               update: {
                 sessionUpdate: string;
                 content?: { text?: string };
-                _meta?: { timestamp?: number };
+                _meta?: Record<string, unknown>;
               };
             }
           ).update;
           const text = update?.content?.text || '';
+          const metaObj = update?._meta ?? {};
           const timestamp =
-            typeof update?._meta?.timestamp === 'number'
-              ? update._meta.timestamp
+            typeof metaObj['timestamp'] === 'number'
+              ? (metaObj['timestamp'] as number)
               : Date.now();
+
           if (update?.sessionUpdate === 'user_message_chunk' && text) {
-            console.log(
-              '[QwenAgentManager] Rehydration: routing user message chunk',
-            );
             this.callbacks.onMessage?.({
               role: 'user',
               content: text,
@@ -111,10 +127,8 @@ export class QwenAgentManager {
             });
             return;
           }
+
           if (update?.sessionUpdate === 'agent_message_chunk' && text) {
-            console.log(
-              '[QwenAgentManager] Rehydration: routing agent message chunk',
-            );
             this.callbacks.onMessage?.({
               role: 'assistant',
               content: text,
@@ -122,10 +136,44 @@ export class QwenAgentManager {
             });
             return;
           }
-          // For other types during rehydration, fall through to normal handler
-          console.log(
-            '[QwenAgentManager] Rehydration: non-text update, forwarding to handler',
-          );
+
+          if (update?.sessionUpdate === 'agent_thought_chunk' && text) {
+            this.callbacks.onMessage?.({
+              role: 'thinking',
+              content: text,
+              timestamp,
+            });
+            return;
+          }
+
+          // Usage-only agent_message_chunk (empty text): forward usage but
+          // skip the empty stream chunk that would be discarded anyway.
+          if (
+            update?.sessionUpdate === 'agent_message_chunk' &&
+            !text &&
+            metaObj['usage']
+          ) {
+            if (this.callbacks.onUsageUpdate) {
+              const raw = metaObj['usage'] as Record<string, unknown>;
+              this.callbacks.onUsageUpdate({
+                usage: {
+                  inputTokens: raw['inputTokens'] as number | undefined,
+                  outputTokens: raw['outputTokens'] as number | undefined,
+                  totalTokens: raw['totalTokens'] as number | undefined,
+                  thoughtTokens: raw['thoughtTokens'] as number | undefined,
+                  cachedReadTokens: raw['cachedReadTokens'] as
+                    | number
+                    | undefined,
+                },
+                durationMs: metaObj['durationMs'] as number | undefined,
+              });
+            }
+            return;
+          }
+
+          // Tool calls, plans, mode/model updates: fall through to the
+          // normal handler which emits them via dedicated callbacks that
+          // the webview can process independently of streaming state.
         }
       } catch (err) {
         console.warn('[QwenAgentManager] Rehydration routing failed:', err);
@@ -136,13 +184,18 @@ export class QwenAgentManager {
     };
 
     this.connection.onPermissionRequest = async (
-      data: AcpPermissionRequest,
+      data: RequestPermissionRequest,
     ) => {
       if (this.callbacks.onPermissionRequest) {
         const optionId = await this.callbacks.onPermissionRequest(data);
-        return { optionId };
+        return {
+          optionId:
+            this.resolvePermissionOptionId(data, optionId) ||
+            this.resolvePermissionOptionId(data) ||
+            '',
+        };
       }
-      return { optionId: 'allow_once' };
+      return { optionId: this.resolvePermissionOptionId(data) || '' };
     };
 
     this.connection.onEndTurn = (reason?: string) => {
@@ -217,10 +270,12 @@ export class QwenAgentManager {
       options,
     );
     if (res.modelInfo && this.callbacks.onModelInfo) {
+      this.baselineModelInfo = res.modelInfo;
       this.callbacks.onModelInfo(res.modelInfo);
     }
     // Emit available models from connect result
     if (res.availableModels && res.availableModels.length > 0) {
+      this.baselineAvailableModels = res.availableModels;
       console.log(
         '[QwenAgentManager] Emitting availableModels from connect():',
         res.availableModels.map((m) => m.modelId),
@@ -228,6 +283,21 @@ export class QwenAgentManager {
       if (this.callbacks.onAvailableModels) {
         this.callbacks.onAvailableModels(res.availableModels);
       }
+    }
+    if (res.currentModeId) {
+      this.baselineModeId = res.currentModeId;
+      this.callbacks.onModeChanged?.(res.currentModeId);
+    }
+    if (res.availableModes) {
+      this.baselineAvailableModes = res.availableModes;
+      this.callbacks.onModeInfo?.({
+        currentModeId: res.currentModeId ?? this.baselineModeId,
+        availableModes: res.availableModes,
+      });
+    } else if (res.currentModeId) {
+      this.callbacks.onModeInfo?.({
+        currentModeId: res.currentModeId,
+      });
     }
     return res;
   }
@@ -249,16 +319,9 @@ export class QwenAgentManager {
   ): Promise<ApprovalModeValue> {
     const modeId = mode;
     try {
-      const res = await this.connection.setMode(modeId);
-      // Optimistically notify UI using response
-      const result = (res?.result || {}) as { modeId?: string };
-      const confirmed =
-        (result.modeId as
-          | 'plan'
-          | 'default'
-          | 'auto-edit'
-          | 'yolo'
-          | undefined) || modeId;
+      await this.connection.setMode(modeId);
+      // set_mode response has no mode payload; use requested value.
+      const confirmed = modeId;
       this.callbacks.onModeChanged?.(confirmed);
       return confirmed;
     } catch (err) {
@@ -272,10 +335,8 @@ export class QwenAgentManager {
    */
   async setModelFromUi(modelId: string): Promise<ModelInfo | null> {
     try {
-      const res = await this.connection.setModel(modelId);
-      // Parse response and notify UI
-      const result = (res?.result || {}) as { modelId?: string };
-      const confirmedModelId = result.modelId || modelId;
+      await this.connection.setModel(modelId);
+      const confirmedModelId = modelId;
       const modelInfo: ModelInfo = {
         modelId: confirmedModelId,
         name: confirmedModelId,
@@ -338,19 +399,13 @@ export class QwenAgentManager {
       const response = await this.connection.listSessions();
       console.log('[QwenAgentManager] ACP session list response:', response);
 
-      // sendRequest resolves with the JSON-RPC "result" directly
-      // Newer CLI returns an object: { items: [...], nextCursor?, hasMore }
-      // Older prototypes might return an array. Support both.
       const res: unknown = response;
       let items: Array<Record<string, unknown>> = [];
 
-      // Note: AcpSessionManager resolves `sendRequest` with the JSON-RPC
-      // "result" directly (not the full AcpResponse). Treat it as unknown
-      // and carefully narrow before accessing `items` to satisfy strict TS.
-      if (res && typeof res === 'object' && 'items' in res) {
-        const itemsValue = (res as { items?: unknown }).items;
-        items = Array.isArray(itemsValue)
-          ? (itemsValue as Array<Record<string, unknown>>)
+      if (res && typeof res === 'object' && 'sessions' in res) {
+        const sessionsValue = (res as { sessions?: unknown }).sessions;
+        items = Array.isArray(sessionsValue)
+          ? (sessionsValue as Array<Record<string, unknown>>)
           : [];
       }
 
@@ -366,7 +421,7 @@ export class QwenAgentManager {
           title: item.title || item.name || item.prompt || 'Untitled Session',
           name: item.title || item.name || item.prompt || 'Untitled Session',
           startTime: item.startTime,
-          lastUpdated: item.mtime || item.lastUpdated,
+          lastUpdated: item.updatedAt || item.mtime || item.lastUpdated,
           messageCount: item.messageCount || 0,
           projectHash: item.projectHash,
           filePath: item.filePath,
@@ -445,17 +500,14 @@ export class QwenAgentManager {
         size,
         ...(cursor !== undefined ? { cursor } : {}),
       });
-      // sendRequest resolves with the JSON-RPC "result" directly
       const res: unknown = response;
       let items: Array<Record<string, unknown>> = [];
 
-      if (Array.isArray(res)) {
-        items = res;
-      } else if (typeof res === 'object' && res !== null && 'items' in res) {
-        const responseObject = res as {
-          items?: Array<Record<string, unknown>>;
-        };
-        items = Array.isArray(responseObject.items) ? responseObject.items : [];
+      if (res && typeof res === 'object' && 'sessions' in res) {
+        const sessionsValue = (res as { sessions?: unknown }).sessions;
+        items = Array.isArray(sessionsValue)
+          ? (sessionsValue as Array<Record<string, unknown>>)
+          : [];
       }
 
       const mapped = items.map((item) => ({
@@ -464,25 +516,29 @@ export class QwenAgentManager {
         title: item.title || item.name || item.prompt || 'Untitled Session',
         name: item.title || item.name || item.prompt || 'Untitled Session',
         startTime: item.startTime,
-        lastUpdated: item.mtime || item.lastUpdated,
+        lastUpdated: item.updatedAt || item.mtime || item.lastUpdated,
         messageCount: item.messageCount || 0,
         projectHash: item.projectHash,
         filePath: item.filePath,
         cwd: item.cwd,
       }));
 
-      const nextCursor: number | undefined =
-        typeof res === 'object' && res !== null && 'nextCursor' in res
-          ? typeof res.nextCursor === 'number'
-            ? res.nextCursor
-            : undefined
-          : undefined;
-      const hasMore: boolean =
-        typeof res === 'object' && res !== null && 'hasMore' in res
-          ? Boolean(res.hasMore)
-          : false;
+      // SDK returns nextCursor as string; convert to numeric cursor for paging
+      let nextCursorNum: number | undefined;
+      if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
+        const raw = (res as { nextCursor?: unknown }).nextCursor;
+        if (typeof raw === 'number') {
+          nextCursorNum = raw;
+        } else if (typeof raw === 'string') {
+          const parsed = Number(raw);
+          if (!Number.isNaN(parsed)) {
+            nextCursorNum = parsed;
+          }
+        }
+      }
+      const hasMore = nextCursorNum !== undefined;
 
-      return { sessions: mapped, nextCursor, hasMore };
+      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
     } catch (error) {
       console.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
@@ -894,63 +950,6 @@ export class QwenAgentManager {
   }
 
   /**
-   * Save session via /chat save command
-   * Since CLI doesn't support session/save ACP method, we send /chat save command directly
-   *
-   * @param sessionId - Session ID
-   * @param tag - Save tag
-   * @returns Save response
-   */
-  async saveSessionViaCommand(
-    sessionId: string,
-    tag: string,
-  ): Promise<{ success: boolean; message?: string }> {
-    try {
-      console.log(
-        '[QwenAgentManager] Saving session via /chat save command:',
-        sessionId,
-        'with tag:',
-        tag,
-      );
-
-      // Send /chat save command as a prompt
-      // The CLI will handle this as a special command
-      await this.connection.sendPrompt(`/chat save "${tag}"`);
-
-      console.log('[QwenAgentManager] /chat save command sent successfully');
-      return {
-        success: true,
-        message: `Session saved with tag: ${tag}`,
-      };
-    } catch (error) {
-      console.error('[QwenAgentManager] /chat save command failed:', error);
-      return {
-        success: false,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  /**
-   * Save session via ACP session/save method (deprecated, CLI doesn't support)
-   *
-   * @deprecated Use saveSessionViaCommand instead
-   * @param sessionId - Session ID
-   * @param tag - Save tag
-   * @returns Save response
-   */
-  async saveSessionViaAcp(
-    sessionId: string,
-    tag: string,
-  ): Promise<{ success: boolean; message?: string }> {
-    // Fallback to command-based save since CLI doesn't support session/save ACP method
-    console.warn(
-      '[QwenAgentManager] saveSessionViaAcp is deprecated, using command-based save instead',
-    );
-    return this.saveSessionViaCommand(sessionId, tag);
-  }
-
-  /**
    * Try to load session via ACP session/load method
    * This method will only be used if CLI version supports it
    *
@@ -980,6 +979,9 @@ export class QwenAgentManager {
         '[QwenAgentManager] Session load succeeded. Response:',
         JSON.stringify(response).substring(0, 200),
       );
+      this.applySessionStateFromResult(response);
+      this.restoreBaselineSessionStateAfterLoad(response);
+
       return response;
     } catch (error) {
       const errorMessage =
@@ -1190,35 +1192,7 @@ export class QwenAgentManager {
           }
         }
 
-        const modelInfo =
-          extractModelInfoFromNewSessionResult(newSessionResult);
-        if (modelInfo && this.callbacks.onModelInfo) {
-          this.callbacks.onModelInfo(modelInfo);
-        }
-
-        // Extract and emit available models
-        const modelState = extractSessionModelState(newSessionResult);
-        console.log(
-          '[QwenAgentManager] Extracted model state from session/new:',
-          modelState,
-        );
-        if (
-          modelState?.availableModels &&
-          modelState.availableModels.length > 0
-        ) {
-          console.log(
-            '[QwenAgentManager] Emitting availableModels:',
-            modelState.availableModels,
-          );
-          if (this.callbacks.onAvailableModels) {
-            this.callbacks.onAvailableModels(modelState.availableModels);
-          }
-        } else {
-          console.warn(
-            '[QwenAgentManager] No availableModels found in session/new response. Raw models field:',
-            (newSessionResult as Record<string, unknown>)?.models,
-          );
-        }
+        this.applySessionStateFromResult(newSessionResult);
 
         const newSessionId = this.connection.currentSessionId;
         console.log(
@@ -1307,7 +1281,7 @@ export class QwenAgentManager {
    * @param callback - Permission request callback function
    */
   onPermissionRequest(
-    callback: (request: AcpPermissionRequest) => Promise<string>,
+    callback: (request: RequestPermissionRequest) => Promise<string>,
   ): void {
     this.callbacks.onPermissionRequest = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
@@ -1367,7 +1341,7 @@ export class QwenAgentManager {
   }
 
   /**
-   * Register callback for model changed updates (from ACP current_model_update)
+   * Register callback for model changed updates.
    */
   onModelChanged(callback: (model: ModelInfo) => void): void {
     this.callbacks.onModelChanged = callback;
@@ -1409,5 +1383,86 @@ export class QwenAgentManager {
    */
   get currentSessionId(): string | null {
     return this.connection.currentSessionId;
+  }
+
+  private applySessionStateFromResult(result: unknown): void {
+    const modelInfo = extractModelInfoFromNewSessionResult(result);
+    if (modelInfo) {
+      this.baselineModelInfo = modelInfo;
+      this.callbacks.onModelInfo?.(modelInfo);
+    }
+
+    const modelState = extractSessionModelState(result);
+    if (modelState?.availableModels && modelState.availableModels.length > 0) {
+      this.baselineAvailableModels = modelState.availableModels;
+      this.callbacks.onAvailableModels?.(modelState.availableModels);
+    }
+
+    const modeState = extractSessionModeState(result);
+    if (modeState?.currentModeId) {
+      this.baselineModeId = modeState.currentModeId;
+      this.callbacks.onModeChanged?.(modeState.currentModeId);
+    }
+    if (modeState?.availableModes && modeState.availableModes.length > 0) {
+      this.baselineAvailableModes = modeState.availableModes;
+    }
+    if (modeState) {
+      this.callbacks.onModeInfo?.({
+        currentModeId: modeState.currentModeId ?? this.baselineModeId,
+        availableModes: modeState.availableModes ?? this.baselineAvailableModes,
+      });
+    }
+  }
+
+  private restoreBaselineSessionStateAfterLoad(result: unknown): void {
+    const obj = (result || {}) as Record<string, unknown>;
+    const hasModes = !!obj['modes'];
+    const hasModels = !!obj['models'];
+
+    if (!hasModes) {
+      this.callbacks.onModeInfo?.({
+        currentModeId: this.baselineModeId,
+        availableModes: this.baselineAvailableModes,
+      });
+      this.callbacks.onModeChanged?.(this.baselineModeId);
+    }
+
+    if (!hasModels) {
+      if (this.baselineModelInfo) {
+        this.callbacks.onModelInfo?.(this.baselineModelInfo);
+      }
+      if (this.baselineAvailableModels.length > 0) {
+        this.callbacks.onAvailableModels?.(this.baselineAvailableModels);
+      }
+    }
+  }
+
+  private resolvePermissionOptionId(
+    request: RequestPermissionRequest,
+    preferredOptionId?: string,
+  ): string | undefined {
+    // Keep this mapping aligned with AcpConnection.resolvePermissionOptionId:
+    // Webview callbacks may provide a semantic choice (allow/reject) while the
+    // CLI requires a concrete ToolConfirmationOutcome optionId.
+    // Always normalize to an optionId that exists in request.options.
+    const options = Array.isArray(request.options) ? request.options : [];
+    if (options.length === 0) {
+      return undefined;
+    }
+
+    if (
+      preferredOptionId &&
+      options.some((option) => option.optionId === preferredOptionId)
+    ) {
+      return preferredOptionId;
+    }
+
+    return (
+      options.find((option) => option.kind === 'allow_once')?.optionId ||
+      options.find((option) => option.optionId === 'proceed_once')?.optionId ||
+      options.find((option) => option.optionId.includes('proceed_once'))
+        ?.optionId ||
+      options[0]?.optionId
+    );
   }
 }

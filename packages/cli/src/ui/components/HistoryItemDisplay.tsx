@@ -8,18 +8,23 @@ import type React from 'react';
 import { useMemo } from 'react';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 import type { HistoryItem } from '../types.js';
-import { UserMessage } from './messages/UserMessage.js';
-import { UserShellMessage } from './messages/UserShellMessage.js';
-import { GeminiMessage } from './messages/GeminiMessage.js';
-import { InfoMessage } from './messages/InfoMessage.js';
-import { ErrorMessage } from './messages/ErrorMessage.js';
+import {
+  UserMessage,
+  UserShellMessage,
+  AssistantMessage,
+  AssistantMessageContent,
+  ThinkMessage,
+  ThinkMessageContent,
+} from './messages/ConversationMessages.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
-import { GeminiMessageContent } from './messages/GeminiMessageContent.js';
-import { GeminiThoughtMessage } from './messages/GeminiThoughtMessage.js';
-import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageContent.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
-import { WarningMessage } from './messages/WarningMessage.js';
+import {
+  InfoMessage,
+  WarningMessage,
+  ErrorMessage,
+  RetryCountdownMessage,
+} from './messages/StatusMessages.js';
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
@@ -33,6 +38,7 @@ import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
 import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
+import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -59,6 +65,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   embeddedShellFocused,
   availableTerminalHeightGemini,
 }) => {
+  const marginTop =
+    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
+      ? 0
+      : 1;
+
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
@@ -67,6 +78,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     <Box
       flexDirection="column"
       key={itemForDisplay.id}
+      marginTop={marginTop}
       marginLeft={2}
       marginRight={2}
     >
@@ -78,7 +90,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <UserShellMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'gemini' && (
-        <GeminiMessage
+        <AssistantMessage
           text={itemForDisplay.text}
           isPending={isPending}
           availableTerminalHeight={
@@ -88,7 +100,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_content' && (
-        <GeminiMessageContent
+        <AssistantMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
           availableTerminalHeight={
@@ -98,7 +110,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
-        <GeminiThoughtMessage
+        <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
           availableTerminalHeight={
@@ -108,7 +120,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
-        <GeminiThoughtMessageContent
+        <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
           availableTerminalHeight={
@@ -124,7 +136,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <WarningMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'error' && (
-        <ErrorMessage text={itemForDisplay.text} />
+        <ErrorMessage text={itemForDisplay.text} hint={itemForDisplay.hint} />
+      )}
+      {itemForDisplay.type === 'retry_countdown' && (
+        <RetryCountdownMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
@@ -175,6 +190,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'mcp_status' && (
         <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />
+      )}
+      {itemForDisplay.type === 'insight_progress' && (
+        <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
     </Box>
   );

@@ -763,7 +763,7 @@ export class ExtensionManager {
       let tempDir: string | undefined;
 
       if (
-        installMetadata.type === 'marketplace' &&
+        installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
         !installMetadata.pluginName
       ) {
@@ -774,7 +774,6 @@ export class ExtensionManager {
       }
 
       if (
-        installMetadata.type === 'marketplace' ||
         installMetadata.type === 'git' ||
         installMetadata.type === 'github-release'
       ) {
@@ -793,10 +792,7 @@ export class ExtensionManager {
           }
         } catch (_error) {
           await cloneFromGit(installMetadata, tempDir);
-          if (
-            installMetadata.type === 'git' ||
-            installMetadata.type === 'github-release'
-          ) {
+          if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
         }
@@ -1242,7 +1238,21 @@ export async function copyExtension(
   source: string,
   destination: string,
 ): Promise<void> {
-  await fs.promises.cp(source, destination, { recursive: true });
+  await fs.promises.cp(source, destination, {
+    recursive: true,
+    dereference: true,
+    filter: async (src: string) => {
+      try {
+        const stats = await fs.promises.stat(src);
+        // Only copy regular files and directories
+        // Skip sockets, FIFOs, block devices, and character devices
+        return stats.isFile() || stats.isDirectory();
+      } catch {
+        // If we can't stat the file, skip it
+        return false;
+      }
+    },
+  });
 }
 
 export function getExtensionId(

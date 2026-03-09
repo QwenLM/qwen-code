@@ -56,6 +56,7 @@ index 0000000..e69de29
       80,
       undefined,
       mockSettings,
+      4,
     );
   });
 
@@ -86,6 +87,7 @@ index 0000000..e69de29
       80,
       undefined,
       mockSettings,
+      4,
     );
   });
 
@@ -115,6 +117,7 @@ index 0000000..e69de29
       80,
       undefined,
       mockSettings,
+      4,
     );
   });
 

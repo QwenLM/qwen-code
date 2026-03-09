@@ -10,7 +10,7 @@ import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
 import type { PipelineConfig } from './pipeline.js';
-import { ContentGenerationPipeline } from './pipeline.js';
+import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
@@ -47,6 +47,7 @@ describe('ContentGenerationPipeline', () => {
     // Mock converter
     mockConverter = {
       setModel: vi.fn(),
+      setModalities: vi.fn(),
       convertGeminiRequestToOpenAI: vi.fn(),
       convertOpenAIResponseToGemini: vi.fn(),
       convertOpenAIChunkToGemini: vi.fn(),
@@ -104,6 +105,7 @@ describe('ContentGenerationPipeline', () => {
       expect(OpenAIContentConverter).toHaveBeenCalledWith(
         'test-model',
         undefined,
+        {},
       );
     });
   });
@@ -508,6 +510,51 @@ describe('ContentGenerationPipeline', () => {
         expect.any(Object),
         request,
       );
+    });
+
+    it('should throw StreamContentError when stream chunk contains error_finish', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            object: 'chat.completion.chunk',
+            created: Date.now(),
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { content: 'Throttling: TPM(1/1)' },
+                finish_reason: 'error_finish',
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // consume stream
+        }
+      }).rejects.toThrow(StreamContentError);
+
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+      expect(mockConverter.convertOpenAIChunkToGemini).not.toHaveBeenCalled();
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
@@ -932,6 +979,147 @@ describe('ContentGenerationPipeline', () => {
         candidatesTokenCount: 20,
         totalTokenCount: 30,
       });
+    });
+
+    it('should not duplicate function calls when trailing chunks arrive after finish+usage merge', async () => {
+      // Reproduces the real-world bug: some providers (e.g. bailian/glm-5)
+      // send trailing empty chunks AFTER the finish+usage pair. Before the
+      // fix, each trailing chunk re-triggered the merge logic and yielded
+      // the finish response again (with the same function-call parts),
+      // causing duplicate tool-call execution in the UI.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      // Chunk 1: content text
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [
+          { delta: { content: 'I will create a todo' }, finish_reason: null },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      // Chunk 2: finish reason (with tool calls)
+      const mockChunk2 = {
+        id: 'chunk-2',
+        choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      // Chunk 3: usage metadata only
+      const mockChunk3 = {
+        id: 'chunk-3',
+        choices: [],
+        usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      // Chunk 4: trailing empty chunk (the problematic one)
+      const mockChunk4 = {
+        id: 'chunk-4',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk1;
+          yield mockChunk2;
+          yield mockChunk3;
+          yield mockChunk4;
+        },
+      };
+
+      // Converter output for chunk 1: text content
+      const mockContentResponse = new GenerateContentResponse();
+      mockContentResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'I will create a todo' }],
+            role: 'model',
+          },
+        },
+      ];
+
+      // Converter output for chunk 2: finish + function call
+      const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.candidates = [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: {
+                  name: 'todoWrite',
+                  args: { text: 'buy milk' },
+                },
+              },
+            ],
+            role: 'model',
+          },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      // Converter output for chunk 3: usage only
+      const mockUsageResponse = new GenerateContentResponse();
+      mockUsageResponse.candidates = [];
+      mockUsageResponse.usageMetadata = {
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        totalTokenCount: 30,
+      };
+
+      // Converter output for chunk 4: trailing empty
+      const mockTrailingResponse = new GenerateContentResponse();
+      mockTrailingResponse.candidates = [];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock)
+        .mockReturnValueOnce(mockContentResponse)
+        .mockReturnValueOnce(mockFinishResponse)
+        .mockReturnValueOnce(mockUsageResponse)
+        .mockReturnValueOnce(mockTrailingResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      // Act
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const results = [];
+      for await (const result of resultGenerator) {
+        results.push(result);
+      }
+
+      // Assert: exactly 2 results — content chunk + ONE merged finish chunk.
+      // Before the fix this was 3 (the trailing chunk triggered a duplicate).
+      expect(results).toHaveLength(2);
+      expect(results[0]).toBe(mockContentResponse);
+
+      // The merged result should have the function call and usage metadata
+      const mergedResult = results[1]!;
+      expect(mergedResult.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+      expect(
+        mergedResult.candidates?.[0]?.content?.parts?.[0]?.functionCall?.name,
+      ).toBe('todoWrite');
+      expect(mergedResult.usageMetadata).toEqual({
+        promptTokenCount: 10,
+        candidatesTokenCount: 20,
+        totalTokenCount: 30,
+      });
+
+      // Count function-call parts across ALL yielded results — must be exactly 1
+      let totalFunctionCalls = 0;
+      for (const result of results) {
+        const parts = result.candidates?.[0]?.content?.parts ?? [];
+        totalFunctionCalls += parts.filter(
+          (p: { functionCall?: unknown }) => p.functionCall,
+        ).length;
+      }
+      expect(totalFunctionCalls).toBe(1);
     });
   });
 

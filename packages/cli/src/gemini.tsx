@@ -385,17 +385,16 @@ export async function main() {
     setMaxSizedBoxDebugging(isDebugMode);
 
     // Check input format early to determine initialization flow
-    const inputFormat =
-      typeof config.getInputFormat === 'function'
+    // In TTY mode, ignore stream-json input format to prevent process from hanging
+    const inputFormat = process.stdin.isTTY
+      ? InputFormat.TEXT
+      : typeof config.getInputFormat === 'function'
         ? config.getInputFormat()
         : InputFormat.TEXT;
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    let initializationResult: InitializationResult | undefined;
-    if (inputFormat !== InputFormat.STREAM_JSON) {
-      initializationResult = await initializeApp(config, settings);
-    }
+    const initializationResult = await initializeApp(config, settings);
 
     if (config.getExperimentalZedIntegration()) {
       return runAcpAgent(config, settings, argv);
@@ -411,6 +410,7 @@ export async function main() {
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
         })),
         ...getSettingsWarnings(settings),
+        ...config.getWarnings(),
       ]),
     ];
 

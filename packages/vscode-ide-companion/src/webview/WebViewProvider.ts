@@ -7,8 +7,10 @@
 import * as vscode from 'vscode';
 import { QwenAgentManager } from '../services/qwenAgentManager.js';
 import { ConversationStore } from '../services/conversationStore.js';
-import type { AcpPermissionRequest } from '../types/acpTypes.js';
-import type { ModelInfo } from '../types/acpTypes.js';
+import type {
+  RequestPermissionRequest,
+  ModelInfo,
+} from '@agentclientprotocol/sdk';
 import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
 import { PanelManager } from '../webview/PanelManager.js';
 import { MessageHandler } from '../webview/MessageHandler.js';
@@ -27,7 +29,7 @@ export class WebViewProvider {
   // Track a pending permission request and its resolver so extension commands
   // can "simulate" user choice from the command palette (e.g. after accepting
   // a diff, auto-allow read/execute, or auto-reject on cancel).
-  private pendingPermissionRequest: AcpPermissionRequest | null = null;
+  private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
@@ -137,7 +139,7 @@ export class WebViewProvider {
       });
     });
 
-    // Surface model changes (from ACP current_model_update or set_model response)
+    // Surface model changes (primarily from set_model response path)
     this.agentManager.onModelChanged((model) => {
       this.sendMessageToWebView({
         type: 'modelChanged',
@@ -218,7 +220,7 @@ export class WebViewProvider {
     });
 
     this.agentManager.onPermissionRequest(
-      async (request: AcpPermissionRequest) => {
+      async (request: RequestPermissionRequest) => {
         // Auto-approve in auto/yolo mode (no UI, no diff)
         if (this.isAutoMode()) {
           const options = request.options || [];
