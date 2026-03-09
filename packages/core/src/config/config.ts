@@ -681,7 +681,13 @@ export class Config {
     }
 
     if (this.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
+      const noProxy = process.env['NO_PROXY'] || process.env['no_proxy'];
+      setGlobalDispatcher(
+        new ProxyAgent({
+          uri: this.getProxy() as string,
+          ...(noProxy ? { noProxy } : {}),
+        }),
+      );
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled

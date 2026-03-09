@@ -136,11 +136,13 @@ function buildFetchOptionsWithDispatcher(
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   try {
+    const noProxy = process.env['NO_PROXY'] || process.env['no_proxy'];
     const dispatcher = proxyUrl
       ? new ProxyAgent({
           uri: proxyUrl,
           headersTimeout: 0,
           bodyTimeout: 0,
+          ...(noProxy ? { noProxy } : {}),
         })
       : new Agent({
           headersTimeout: 0,
