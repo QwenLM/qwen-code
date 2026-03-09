@@ -136,9 +136,7 @@ function buildArenaExecutionInput(
   const models: ArenaModelConfig[] = parsed.models.map((parsedModel) => ({
     modelId: parsedModel.modelId,
     authType: parsedModel.authType ?? defaultAuthType,
-    displayName: parsedModel.authType
-      ? `${parsedModel.authType}:${parsedModel.modelId}`
-      : parsedModel.modelId,
+    displayName: parsedModel.modelId,
   }));
 
   return {

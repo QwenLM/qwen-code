@@ -50,7 +50,10 @@ vi.mock('../../services/gitWorktreeService.js', () => {
 });
 
 // Mock the Config class
-const createMockConfig = (workingDir: string) => ({
+const createMockConfig = (
+  workingDir: string,
+  arenaSettings: Record<string, unknown> = {},
+) => ({
   getWorkingDir: () => workingDir,
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
@@ -60,7 +63,7 @@ const createMockConfig = (workingDir: string) => ({
     getFunctionDeclarationsFiltered: () => [],
     getTool: () => undefined,
   }),
-  getAgentsSettings: () => ({}),
+  getAgentsSettings: () => ({ arena: arenaSettings }),
   getUsageStatisticsEnabled: () => false,
   getTelemetryEnabled: () => false,
   getTelemetryLogPromptsEnabled: () => false,
@@ -74,7 +77,8 @@ describe('ArenaManager', () => {
   beforeEach(async () => {
     // Create a temp directory - no need for git repo since we mock GitWorktreeService
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'arena-test-'));
-    mockConfig = createMockConfig(tempDir);
+    // Use tempDir as worktreeBaseDir to avoid slow filesystem access in deriveWorktreeDirName
+    mockConfig = createMockConfig(tempDir, { worktreeBaseDir: tempDir });
 
     mockBackend = createMockBackend();
     hoistedMockDetectBackend.mockResolvedValue({ backend: mockBackend });
@@ -362,13 +366,14 @@ describe('ArenaManager', () => {
 
       // auto-exit is on by default, so agents terminate quickly.
       await manager.start(createValidStartOptions());
-      const sessionIdBeforeCleanup = manager.getSessionId();
 
       await manager.cleanup();
 
       expect(mockBackend.cleanup).toHaveBeenCalledTimes(1);
+      // cleanupSession is called with worktreeDirName (short ID), not the full sessionId.
+      // For 'test-session', the short ID is 'testsess' (first 8 chars with dashes removed).
       expect(hoistedMockCleanupSession).toHaveBeenCalledWith(
-        sessionIdBeforeCleanup,
+        'testsess',
         'arena',
       );
       expect(manager.getBackend()).toBeNull();
@@ -439,8 +444,15 @@ function createValidStartOptions() {
 }
 
 async function waitForMicrotask(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  // Use setImmediate (or setTimeout fallback) to yield to the event loop
+  // and allow other async operations (like the start() method) to progress.
+  await new Promise<void>((resolve) => {
+    if (typeof setImmediate === 'function') {
+      setImmediate(resolve);
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
 }
 
 async function waitForCondition(

@@ -71,6 +71,8 @@ export class ArenaManager {
   private cachedResult: ArenaSessionResult | null = null;
 
   private sessionId: string | undefined;
+  /** Short directory name used for worktree paths (derived from sessionId). */
+  private worktreeDirName: string | undefined;
   private sessionStatus: ArenaSessionStatus = ArenaSessionStatus.INITIALIZING;
   private agents: Map<string, ArenaAgentState> = new Map();
   private arenaConfig: ArenaConfig | undefined;
@@ -271,6 +273,7 @@ export class ArenaManager {
     }
 
     this.sessionId = this.config.getSessionId();
+    this.worktreeDirName = await this.deriveWorktreeDirName(this.sessionId);
     this.startedAt = Date.now();
     this.sessionStatus = ArenaSessionStatus.INITIALIZING;
     this.masterAbortController = new AbortController();
@@ -357,8 +360,17 @@ export class ArenaManager {
         return result;
       }
 
+      // Emit worktree info for each agent
+      const worktreeInfo = Array.from(this.agents.values())
+        .map(
+          (agent, i) =>
+            `  ${i + 1}. ${agent.model.displayName || agent.model.modelId} → ${agent.worktree.path}`,
+        )
+        .join('\n');
+      this.emitProgress(`Environment ready. Agent worktrees:\n${worktreeInfo}`);
+
       // Start all agents in parallel via PTY
-      this.emitProgress('Environment ready. Launching agents…');
+      this.emitProgress('Launching agents…');
       this.sessionStatus = ArenaSessionStatus.RUNNING;
       await this.runAgents();
 
@@ -489,11 +501,12 @@ export class ArenaManager {
     }
 
     // Clean up worktrees
-    await this.worktreeService.cleanupSession(this.sessionId, 'arena');
+    await this.worktreeService.cleanupSession(this.worktreeDirName!, 'arena');
 
     this.agents.clear();
     this.cachedResult = null;
     this.sessionId = undefined;
+    this.worktreeDirName = undefined;
     this.arenaConfig = undefined;
     this.backend = null;
     this.sessionEndedLogged = false;
@@ -531,6 +544,7 @@ export class ArenaManager {
     this.agents.clear();
     this.cachedResult = null;
     this.sessionId = undefined;
+    this.worktreeDirName = undefined;
     this.arenaConfig = undefined;
     this.backend = null;
     this.sessionEndedLogged = false;
@@ -705,6 +719,28 @@ export class ArenaManager {
 
   // ─── Private: Worktree Setup ───────────────────────────────────
 
+  /**
+   * Derive a short, filesystem-friendly directory name from the full session ID.
+   * Uses the first 8 hex characters of the UUID. If that path already exists,
+   * appends a numeric suffix (-2, -3, …) until an unused name is found.
+   */
+  private async deriveWorktreeDirName(sessionId: string): Promise<string> {
+    const shortId = sessionId.replaceAll('-', '').slice(0, 8);
+    let candidate = shortId;
+    let suffix = 2;
+
+    while (true) {
+      const candidatePath = path.join(this.arenaBaseDir, candidate);
+      try {
+        await fs.access(candidatePath);
+        candidate = `${shortId}-${suffix}`;
+        suffix++;
+      } catch {
+        return candidate;
+      }
+    }
+  }
+
   private async setupWorktrees(): Promise<void> {
     if (!this.arenaConfig) {
       throw new Error('Arena config not initialized');
@@ -717,7 +753,7 @@ export class ArenaManager {
     );
 
     const result = await this.worktreeService.setupWorktrees({
-      sessionId: this.arenaConfig.sessionId,
+      sessionId: this.worktreeDirName!,
       sourceRepoPath: this.arenaConfig.sourceRepoPath,
       worktreeNames,
       branchPrefix: 'arena',
@@ -1143,7 +1179,7 @@ export class ArenaManager {
       throw new Error('Arena config not initialized');
     }
     return GitWorktreeService.getSessionDir(
-      this.arenaConfig.sessionId,
+      this.worktreeDirName!,
       this.arenaBaseDir,
     );
   }

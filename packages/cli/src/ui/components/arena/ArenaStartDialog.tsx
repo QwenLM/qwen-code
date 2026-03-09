@@ -49,7 +49,9 @@ export function ArenaStartDialog({
   const selectableModelCount = modelItems.filter(
     (item) => !item.disabled,
   ).length;
-  const shouldShowMoreModelsHint = selectableModelCount < 3;
+  const needsMoreModels = selectableModelCount < 2;
+  const shouldShowMoreModelsHint =
+    selectableModelCount >= 2 && selectableModelCount < 3;
 
   useKeypress(
     (key) => {
@@ -107,13 +109,28 @@ export function ArenaStartDialog({
         </Box>
       )}
 
-      {hasDisabledQwenOauth && (
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t(
-              'qwen-oauth models are disabled because they are not supported in Arena.',
-            )}
-          </Text>
+      {(hasDisabledQwenOauth || needsMoreModels) && (
+        <Box marginTop={1} flexDirection="column">
+          {hasDisabledQwenOauth && (
+            <Text color={theme.status.warning}>
+              {t('Note: qwen-oauth models are not supported in Arena.')}
+            </Text>
+          )}
+          {needsMoreModels && (
+            <>
+              <Text color={theme.status.warning}>
+                {t('Arena requires at least 2 models. To add more:')}
+              </Text>
+              <Text color={theme.status.warning}>
+                {t(
+                  '  - Run /auth to set up a Coding Plan (includes multiple models)',
+                )}
+              </Text>
+              <Text color={theme.status.warning}>
+                {t('  - Or configure modelProviders in settings.json')}
+              </Text>
+            </>
+          )}
         </Box>
       )}
 
