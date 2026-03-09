@@ -157,9 +157,10 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       });
     });
 
-    it('should prioritize NO_PROXY over no_proxy when both are set', () => {
+    it('should use NO_PROXY or no_proxy when either is set', () => {
+      // On Windows, environment variables are case-insensitive, so we can only
+      // reliably test that one of them is used when both are set
       process.env['NO_PROXY'] = 'priority.local';
-      process.env['no_proxy'] = 'fallback.local';
 
       const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
 
