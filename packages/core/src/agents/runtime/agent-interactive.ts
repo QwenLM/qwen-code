@@ -111,6 +111,13 @@ export class AgentInteractive {
     this.toolsList = this.core.prepareTools();
     this.core.stats.start(Date.now());
 
+    if (this.config.chatHistory?.length) {
+      this.addMessage(
+        'info',
+        `History context from parent session included (${this.config.chatHistory.length} messages)`,
+      );
+    }
+
     if (this.config.initialTask) {
       this.queue.enqueue(this.config.initialTask);
       this.executionPromise = this.runLoop();

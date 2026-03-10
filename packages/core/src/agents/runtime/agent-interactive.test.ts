@@ -554,6 +554,37 @@ describe('AgentInteractive', () => {
     await agent.shutdown();
   });
 
+  it('should add info message when chatHistory is present', async () => {
+    const { core } = createMockCore();
+    const chatHistory = [
+      { role: 'user' as const, parts: [{ text: 'earlier question' }] },
+      { role: 'model' as const, parts: [{ text: 'earlier answer' }] },
+    ];
+    const agent = new AgentInteractive(createConfig({ chatHistory }), core);
+
+    await agent.start(context);
+
+    const messages = agent.getMessages();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'info',
+      content: 'History context from parent session included (2 messages)',
+    });
+
+    await agent.shutdown();
+  });
+
+  it('should not add info message when chatHistory is absent', async () => {
+    const { core } = createMockCore();
+    const agent = new AgentInteractive(createConfig(), core);
+
+    await agent.start(context);
+
+    expect(agent.getMessages()).toHaveLength(0);
+
+    await agent.shutdown();
+  });
+
   it('should pass undefined extraHistory when chatHistory is not set', async () => {
     const { core } = createMockCore();
     const config = createConfig();
