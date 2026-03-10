@@ -1012,6 +1012,38 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Skills',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for skill filtering and availability.',
+    showInDialog: false,
+    properties: {
+      allowed: {
+        type: 'array',
+        label: 'Allowed Skills',
+        category: 'Skills',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'A list of skill names that are allowed to be invoked. If empty or undefined, all skills are allowed.',
+        showInDialog: false,
+      },
+      excluded: {
+        type: 'array',
+        label: 'Excluded Skills',
+        category: 'Skills',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description: 'A list of skill names to exclude from availability.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   security: {
     type: 'object',
     label: 'Security',

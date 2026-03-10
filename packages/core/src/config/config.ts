@@ -337,6 +337,8 @@ export interface ConfigParameters {
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
+  allowedSkills?: string[];
+  excludedSkills?: string[];
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
   folderTrustFeature?: boolean;
@@ -461,6 +463,8 @@ export class Config {
   private lspClient?: LspClient;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
+  private readonly allowedSkills?: string[];
+  private readonly excludedSkills?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -571,6 +575,8 @@ export class Config {
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
     this.excludedMcpServers = params.excludedMcpServers;
+    this.allowedSkills = params.allowedSkills;
+    this.excludedSkills = params.excludedSkills;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -1270,6 +1276,13 @@ export class Config {
 
   isMcpServerDisabled(serverName: string): boolean {
     return this.excludedMcpServers?.includes(serverName) ?? false;
+  }
+
+  getSkillsFilter(): { allowed?: string[]; excluded?: string[] } {
+    return {
+      allowed: this.allowedSkills,
+      excluded: this.excludedSkills,
+    };
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {

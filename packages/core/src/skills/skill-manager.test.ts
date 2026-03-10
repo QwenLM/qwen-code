@@ -73,6 +73,15 @@ describe('SkillManager', () => {
       if (yamlString.includes('name: regular-skill')) {
         return { name: 'regular-skill', description: 'A regular skill' };
       }
+      if (yamlString.includes('name: pdf')) {
+        return { name: 'pdf', description: 'PDF skill' };
+      }
+      if (yamlString.includes('name: xlsx')) {
+        return { name: 'xlsx', description: 'XLSX skill' };
+      }
+      if (yamlString.includes('name: internal')) {
+        return { name: 'internal', description: 'Internal skill' };
+      }
       if (!yamlString.includes('name:')) {
         return { description: 'A test skill' }; // Missing name case
       }
@@ -687,6 +696,154 @@ Symlinked skill content`);
         'regular-skill',
         'symlink-skill',
       ]);
+    });
+  });
+
+  describe('skill filtering', () => {
+    it('should return all skills when no filter configured', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      vi.spyOn(mockConfig, 'getSkillsFilter').mockReturnValue({});
+      await manager.listSkills();
+      expect(mockConfig.getSkillsFilter).toHaveBeenCalled();
+    });
+
+    it('should filter skills by allowed list', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'pdf',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'xlsx',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([]);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          '---\nname: pdf\ndescription: PDF skill\n---\ncontent',
+        )
+        .mockResolvedValueOnce(
+          '---\nname: xlsx\ndescription: XLSX skill\n---\ncontent',
+        );
+      vi.spyOn(mockConfig, 'getSkillsFilter').mockReturnValue({
+        allowed: ['pdf'],
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0].name).toBe('pdf');
+    });
+
+    it('should filter skills by excluded list', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'pdf',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'xlsx',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([]);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          '---\nname: pdf\ndescription: PDF skill\n---\ncontent',
+        )
+        .mockResolvedValueOnce(
+          '---\nname: xlsx\ndescription: XLSX skill\n---\ncontent',
+        );
+      vi.spyOn(mockConfig, 'getSkillsFilter').mockReturnValue({
+        excluded: ['xlsx'],
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0].name).toBe('pdf');
+    });
+
+    it('should apply allowed list before excluded list', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'pdf',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'xlsx',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'internal',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([]);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile)
+        .mockResolvedValueOnce(
+          '---\nname: pdf\ndescription: PDF skill\n---\ncontent',
+        )
+        .mockResolvedValueOnce(
+          '---\nname: xlsx\ndescription: XLSX skill\n---\ncontent',
+        )
+        .mockResolvedValueOnce(
+          '---\nname: internal\ndescription: Internal skill\n---\ncontent',
+        );
+      vi.spyOn(mockConfig, 'getSkillsFilter').mockReturnValue({
+        allowed: ['pdf', 'xlsx', 'internal'],
+        excluded: ['internal'],
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(2);
+      expect(skills.map((s) => s.name).sort()).toEqual(['pdf', 'xlsx']);
+    });
+
+    it('should return empty array when no skills match allowed list', async () => {
+      vi.mocked(fs.readdir)
+        .mockResolvedValueOnce([
+          {
+            name: 'pdf',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
+        .mockResolvedValueOnce([]);
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: pdf\ndescription: PDF skill\n---\ncontent',
+      );
+      vi.spyOn(mockConfig, 'getSkillsFilter').mockReturnValue({
+        allowed: ['nonexistent'],
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(0);
     });
   });
 });
