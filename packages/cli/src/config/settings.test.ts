@@ -348,7 +348,7 @@ describe('Settings Loading and Merging', () => {
           fileName: 'WORKSPACE_CONTEXT.md',
         },
         mcp: {
-          allowed: ['server1', 'server2'],
+          allowed: ['server1', 'server2', 'server3', 'server1', 'server2'],
         },
       });
     });
@@ -1474,8 +1474,8 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged.mcp).toEqual({
-        allowed: ['system-allowed'],
-        excluded: ['workspace-excluded'],
+        allowed: ['user-allowed', 'workspace-allowed', 'system-allowed'],
+        excluded: ['user-excluded', 'workspace-excluded'],
       });
     });
 

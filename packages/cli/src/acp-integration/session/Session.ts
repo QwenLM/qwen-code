@@ -513,13 +513,27 @@ export class Session implements SessionContext {
       }
 
       const confirmationDetails =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO
-          ? await invocation.shouldConfirmExecute(abortSignal)
-          : false;
+        await invocation.shouldConfirmExecute(abortSignal);
+
+      // In YOLO mode, auto-approve everything except ask_user_question
+      // (the user must always have a chance to respond to questions)
+      const isAskUserQuestionTool =
+        confirmationDetails && confirmationDetails.type === 'ask_user_question';
+      const effectiveConfirmationDetails =
+        this.config.getApprovalMode() === ApprovalMode.YOLO &&
+        !isAskUserQuestionTool
+          ? false
+          : confirmationDetails;
 
       // Check for plan mode enforcement - block non-read-only tools
+      // but allow ask_user_question so users can answer clarification questions
       const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
-      if (isPlanMode && !isExitPlanModeTool && confirmationDetails) {
+      if (
+        isPlanMode &&
+        !isExitPlanModeTool &&
+        !isAskUserQuestionTool &&
+        effectiveConfirmationDetails
+      ) {
         // In plan mode, block any tool that requires confirmation (write operations)
         return errorResponse(
           new Error(
@@ -529,25 +543,25 @@ export class Session implements SessionContext {
         );
       }
 
-      if (confirmationDetails) {
+      if (effectiveConfirmationDetails) {
         const content: ToolCallContent[] = [];
 
-        if (confirmationDetails.type === 'edit') {
+        if (effectiveConfirmationDetails.type === 'edit') {
           content.push({
             type: 'diff',
-            path: confirmationDetails.fileName,
-            oldText: confirmationDetails.originalContent,
-            newText: confirmationDetails.newContent,
+            path: effectiveConfirmationDetails.fileName,
+            oldText: effectiveConfirmationDetails.originalContent,
+            newText: effectiveConfirmationDetails.newContent,
           });
         }
 
         // Add plan content for exit_plan_mode
-        if (confirmationDetails.type === 'plan') {
+        if (effectiveConfirmationDetails.type === 'plan') {
           content.push({
             type: 'content',
             content: {
               type: 'text',
-              text: confirmationDetails.plan,
+              text: effectiveConfirmationDetails.plan,
             },
           });
         }
@@ -557,7 +571,7 @@ export class Session implements SessionContext {
 
         const params: RequestPermissionRequest = {
           sessionId: this.sessionId,
-          options: toPermissionOptions(confirmationDetails),
+          options: toPermissionOptions(effectiveConfirmationDetails),
           toolCall: {
             toolCallId: callId,
             status: 'pending',
@@ -565,10 +579,15 @@ export class Session implements SessionContext {
             content,
             locations: invocation.toolLocations(),
             kind: mappedKind,
+            rawInput: args,
           },
         };
 
-        const output = await this.client.requestPermission(params);
+        const output = (await this.client.requestPermission(
+          params,
+        )) as RequestPermissionResponse & {
+          answers?: Record<string, string>;
+        };
         const outcome =
           output.outcome.outcome === 'cancelled'
             ? ToolConfirmationOutcome.Cancel
@@ -576,7 +595,9 @@ export class Session implements SessionContext {
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
 
-        await confirmationDetails.onConfirm(outcome);
+        await effectiveConfirmationDetails.onConfirm(outcome, {
+          answers: output.answers,
+        });
 
         // After exit_plan_mode confirmation, send current_mode_update notification
         if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
@@ -1023,6 +1044,19 @@ function toPermissionOptions(
         {
           optionId: ToolConfirmationOutcome.Cancel,
           name: `No, keep planning (esc)`,
+          kind: 'reject_once',
+        },
+      ];
+    case 'ask_user_question':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
           kind: 'reject_once',
         },
       ];

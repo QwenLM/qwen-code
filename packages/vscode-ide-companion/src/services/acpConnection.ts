@@ -27,7 +27,10 @@ import type {
   SetSessionModeResponse,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
-import type { AuthenticateUpdateNotification } from '../types/acpTypes.js';
+import type {
+  AuthenticateUpdateNotification,
+  AskUserQuestionRequest,
+} from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
@@ -58,6 +61,10 @@ export class AcpConnection {
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
+  onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
+    optionId: string;
+    answers?: Record<string, string>;
+  }> = () => Promise.resolve({ optionId: 'cancel' });
   onInitialized: (init: unknown) => void = () => {};
 
   async connect(
@@ -175,6 +182,52 @@ export class AcpConnection {
         ): Promise<RequestPermissionResponse> {
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
+            // Check if this is an ask_user_question request by inspecting rawInput
+            const rawInput = permissionData.toolCall?.rawInput as
+              | Record<string, unknown>
+              | undefined;
+            const isAskUserQuestion = Array.isArray(rawInput?.questions);
+
+            if (isAskUserQuestion) {
+              // Handle ask_user_question separately via dedicated callback
+              const questions = (rawInput?.questions ??
+                []) as AskUserQuestionRequest['questions'];
+              const metadata =
+                rawInput?.metadata as AskUserQuestionRequest['metadata'];
+
+              const response = await self.onAskUserQuestion({
+                sessionId: permissionData.sessionId,
+                questions,
+                metadata,
+              });
+
+              const optionId = response?.optionId;
+              const answers = response?.answers;
+              console.log('[ACP] AskUserQuestion response:', optionId);
+
+              let outcome: 'selected' | 'cancelled';
+              if (
+                optionId &&
+                (optionId.includes('reject') || optionId === 'cancel')
+              ) {
+                outcome = 'cancelled';
+              } else {
+                outcome = 'selected';
+              }
+
+              if (outcome === 'cancelled') {
+                return { outcome: { outcome: 'cancelled' } };
+              }
+              return {
+                outcome: {
+                  outcome: 'selected',
+                  optionId: optionId || 'proceed_once',
+                },
+                answers,
+              } as RequestPermissionResponse;
+            }
+
+            // Handle regular permission request
             const response = await self.onPermissionRequest(permissionData);
             const optionId = response?.optionId;
             console.log('[ACP] Permission request:', optionId);

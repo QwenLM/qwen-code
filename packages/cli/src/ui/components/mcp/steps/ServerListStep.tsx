@@ -27,7 +27,6 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
     [servers],
   );
 
-  // 动态计算服务器名称列的最大宽度（基于实际内容）
   const serverNameWidth = useMemo(() => {
     if (servers.length === 0) return 20;
     const maxLength = Math.max(...servers.map((s) => s.name.length));
@@ -35,7 +34,6 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
     return Math.min(Math.max(maxLength + 2, 20), 35);
   }, [servers]);
 
-  // 计算扁平化的服务器列表用于导航
   const flatServers = useMemo(() => {
     const result: MCPServerDisplayInfo[] = [];
     for (const group of groupedServers) {
@@ -44,7 +42,6 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
     return result;
   }, [groupedServers]);
 
-  // 键盘导航
   useKeypress(
     (key) => {
       if (key.name === 'up') {
@@ -71,7 +68,6 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
     );
   }
 
-  // 计算当前选中项在分组中的位置
   const getSelectionPosition = (globalIndex: number) => {
     let currentIndex = 0;
     for (const group of groupedServers) {
@@ -90,18 +86,15 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
 
   return (
     <Box flexDirection="column">
-      {/* 服务器统计 */}
-      <Box marginBottom={1}>
-        <Text color={theme.text.secondary}>
-          {servers.length} {servers.length === 1 ? t('server') : t('servers')}
-        </Text>
-      </Box>
-
       {/* 分组服务器列表 */}
       {groupedServers.map((group, groupIndex) => (
-        <Box key={group.source} flexDirection="column" marginBottom={1}>
+        <Box
+          key={group.source}
+          flexDirection="column"
+          marginBottom={groupIndex === groupedServers.length - 1 ? 0 : 1}
+        >
           <Text bold color={theme.text.primary}>
-            {group.displayName}
+            {`  ${group.displayName}`}
             {group.servers[0]?.configPath && (
               <Text color={theme.text.secondary}>
                 {' '}
@@ -109,12 +102,14 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
               </Text>
             )}
           </Text>
-          <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column">
             {group.servers.map((server, itemIndex) => {
               const isSelected =
                 groupIndex === currentPosition.groupIndex &&
                 itemIndex === currentPosition.itemIndex;
-              const statusColor = getStatusColor(server.status);
+              const statusColor = server.isDisabled
+                ? 'yellow'
+                : getStatusColor(server.status);
 
               return (
                 <Box key={server.name}>
@@ -149,13 +144,9 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
                           : theme.status.error
                     }
                   >
-                    {getStatusIcon(server.status)} {t(server.status)}
+                    {getStatusIcon(server.status)}{' '}
+                    {server.isDisabled ? t('disabled') : t(server.status)}
                   </Text>
-                  {/* 显示 Scope 和禁用状态 */}
-                  <Text color={theme.text.secondary}> [{server.scope}]</Text>
-                  {server.isDisabled && (
-                    <Text color={theme.status.warning}> {t('(disabled)')}</Text>
-                  )}
                   {/* 显示无效工具警告 */}
                   {!!server.invalidToolCount && server.invalidToolCount > 0 && (
                     <Text color={theme.status.warning}>
@@ -173,8 +164,8 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
       ))}
 
       {/* 提示信息 */}
-      {servers.some((s) => s.status === 'disconnected') && (
-        <Box>
+      {servers.some((s) => s.status === 'disconnected' && !s.isDisabled) && (
+        <Box marginTop={1}>
           <Text color={theme.status.warning}>
             ※ {t('Run qwen --debug to see error logs')}
           </Text>

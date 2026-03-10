@@ -899,6 +899,9 @@ export default {
   // MCP Management - Core translations
   Disable: 'Отключить',
   Enable: 'Включить',
+  Authenticate: 'Аутентификация',
+  disabled: 'отключен',
+  'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
   'View tools': 'Просмотреть инструменты',
   '(disabled)': '(отключен)',
@@ -1478,6 +1481,17 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
+  Custom: 'Пользовательский',
+  'More instructions about configuring `modelProviders` manually.':
+    'Дополнительные инструкции по ручной настройке `modelProviders`.',
+  'Select API-KEY configuration mode:': 'Выберите режим конфигурации API-KEY:',
+  '(Press Escape to go back)': '(Нажмите Escape для возврата)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Нажмите Enter для отправки, Escape для отмены)',
+  'More instructions please check:': 'Дополнительные инструкции см.:',
   'Select Region for Coding Plan': 'Выберите регион Coding Plan',
   'Choose based on where your account is registered':
     'Выберите в зависимости от места регистрации вашего аккаунта',
@@ -1536,6 +1550,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Запустите qwen --debug для просмотра журналов ошибок',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-аутентификация',
+  'Press Enter to start authentication, Esc to go back':
+    'Нажмите Enter для начала аутентификации, Esc для возврата',
+  'Authenticating... Please complete the login in your browser.':
+    'Аутентификация... Пожалуйста, завершите вход в браузере.',
+  'Press Enter or Esc to go back': 'Нажмите Enter или Esc для возврата',
+
   // MCP Tool List
   'No tools available for this server.':
     'Для этого сервера нет доступных инструментов.',
@@ -1544,6 +1566,7 @@ export default {
   'open-world': 'открытый мир',
   idempotent: 'идемпотентный',
   'Tools for {{name}}': 'Инструменты для {{name}}',
+  'Tools for {{serverName}}': 'Инструменты для {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
@@ -1565,4 +1588,33 @@ export default {
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Совет: Используйте /model для переключения между доступными моделями Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Пожалуйста, ответьте на следующий(ие) вопрос(ы):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Невозможно задавать вопросы пользователю в неинтерактивном режиме. Пожалуйста, запустите в интерактивном режиме для использования этого инструмента.',
+  'User declined to answer the questions.':
+    'Пользователь отказался отвечать на вопросы.',
+  'User has provided the following answers:':
+    'Пользователь предоставил следующие ответы:',
+  'Failed to process user answers:':
+    'Не удалось обработать ответы пользователя:',
+  'Type something...': 'Введите что-то...',
+  Submit: 'Отправить',
+  'Submit answers': 'Отправить ответы',
+  Cancel: 'Отмена',
+  'Your answers:': 'Ваши ответы:',
+  '(not answered)': '(не отвечено)',
+  'Ready to submit your answers?': 'Готовы отправить свои ответы?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Enter: Выбор',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
 };

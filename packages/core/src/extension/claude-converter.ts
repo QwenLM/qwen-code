@@ -92,7 +92,7 @@ export interface ClaudeMarketplaceConfig {
 }
 
 const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
-  AskUserQuestion: 'None',
+  AskUserQuestion: 'AskUserQuestion',
   Bash: 'Shell',
   BashOutput: 'None',
   Edit: 'Edit',

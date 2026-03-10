@@ -14,14 +14,12 @@ interface ScopeSelectStepProps {
   selectedExtension: Extension | null;
   mode: 'disable' | 'enable';
   onScopeSelect: (scope: 'user' | 'workspace') => void;
-  onNavigateBack: () => void;
 }
 
 export function ScopeSelectStep({
   selectedExtension,
   mode,
   onScopeSelect,
-  onNavigateBack,
 }: ScopeSelectStepProps) {
   const scopeItems = [
     {
@@ -38,20 +36,9 @@ export function ScopeSelectStep({
       },
       value: 'workspace' as const,
     },
-    {
-      key: 'back',
-      get label() {
-        return t('Back');
-      },
-      value: 'back' as const,
-    },
   ];
 
-  const handleSelect = (value: 'user' | 'workspace' | 'back') => {
-    if (value === 'back') {
-      onNavigateBack();
-      return;
-    }
+  const handleSelect = (value: 'user' | 'workspace') => {
     onScopeSelect(value);
   };
 
@@ -71,7 +58,7 @@ export function ScopeSelectStep({
   return (
     <Box flexDirection="column" gap={1}>
       <Text color={theme.text.primary}>{title}</Text>
-      <Box marginTop={1}>
+      <Box>
         <RadioButtonSelect
           items={scopeItems}
           onSelect={handleSelect}

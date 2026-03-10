@@ -10,7 +10,10 @@ import type {
   RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
-import type { AuthenticateUpdateNotification } from '../types/acpTypes.js';
+import type {
+  AuthenticateUpdateNotification,
+  AskUserQuestionRequest,
+} from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
@@ -196,6 +199,16 @@ export class QwenAgentManager {
         };
       }
       return { optionId: this.resolvePermissionOptionId(data) || '' };
+    };
+
+    this.connection.onAskUserQuestion = async (
+      data: AskUserQuestionRequest,
+    ) => {
+      if (this.callbacks.onAskUserQuestion) {
+        const result = await this.callbacks.onAskUserQuestion(data);
+        return result;
+      }
+      return { optionId: 'cancel' };
     };
 
     this.connection.onEndTurn = (reason?: string) => {
@@ -1284,6 +1297,20 @@ export class QwenAgentManager {
     callback: (request: RequestPermissionRequest) => Promise<string>,
   ): void {
     this.callbacks.onPermissionRequest = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register ask user question callback
+   *
+   * @param callback - Ask user question callback function
+   */
+  onAskUserQuestion(
+    callback: (
+      request: AskUserQuestionRequest,
+    ) => Promise<{ optionId: string; answers?: Record<string, string> }>,
+  ): void {
+    this.callbacks.onAskUserQuestion = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

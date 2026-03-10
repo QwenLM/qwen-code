@@ -18,6 +18,7 @@ export const MCP_MANAGEMENT_STEPS = {
   DISABLE_SCOPE_SELECT: 'disable-scope-select',
   TOOL_LIST: 'tool-list',
   TOOL_DETAIL: 'tool-detail',
+  AUTHENTICATE: 'authenticate', // OAuth 认证步骤
 } as const;
 
 export type MCPManagementStep =
@@ -33,8 +34,6 @@ export interface MCPServerDisplayInfo {
   status: MCPServerStatus;
   /** 来源类型 */
   source: 'user' | 'project' | 'extension';
-  /** 配置所在的 scope */
-  scope: 'user' | 'workspace' | 'extension';
   /** 配置文件路径 */
   configPath?: string;
   /** 服务器配置 */
@@ -120,7 +119,7 @@ export interface ServerListStepProps {
 }
 
 /**
- * ServerDetailStep组件属性
+ * ServerDetailStep 组件属性
  */
 export interface ServerDetailStepProps {
   /** 选中的服务器 */
@@ -131,6 +130,8 @@ export interface ServerDetailStepProps {
   onReconnect?: () => void;
   /** 禁用服务器回调 */
   onDisable?: () => void;
+  /** OAuth 认证回调 */
+  onAuthenticate?: () => void;
   /** 返回回调 */
   onBack: () => void;
 }
@@ -162,11 +163,23 @@ export interface ToolListStepProps {
 }
 
 /**
- * ToolDetailStep组件属性
+ * ToolDetailStep 组件属性
  */
 export interface ToolDetailStepProps {
   /** 工具信息 */
   tool: MCPToolDisplayInfo | null;
+  /** 返回回调 */
+  onBack: () => void;
+}
+
+/**
+ * AuthenticateStep 组件属性
+ */
+export interface AuthenticateStepProps {
+  /** 服务器信息 */
+  server: MCPServerDisplayInfo | null;
+  /** 认证成功回调 */
+  onSuccess?: () => void;
   /** 返回回调 */
   onBack: () => void;
 }

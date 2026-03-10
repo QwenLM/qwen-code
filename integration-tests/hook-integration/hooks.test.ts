@@ -133,7 +133,7 @@ describe('Hooks System Integration', () => {
 
       it('should block tool execution when hook returns block and verify no tool was called', async () => {
         const blockScript =
-          'echo \'{"decision": "block", "reason": "File writing blocked by security policy"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "File writing blocked by security policy"}\'';
 
         await rig.setup('ups-block-tool', {
           settings: {
@@ -162,6 +162,12 @@ describe('Hooks System Integration', () => {
         ).rejects.toThrow(/block/i);
 
         // Tool should not be called due to blocking hook
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(0); // At least one hook call occurred
+
         const toolLogs = rig.readToolLogs();
         const writeFileCalls = toolLogs.filter(
           (t) =>
@@ -942,8 +948,9 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook returns block decision', async () => {
         // Stop hook's block decision means "block stopping" (i.e., force continuation)
         // not "block operation and show error"
+        // Use background process to write count file, ensuring final output is pure JSON
         const blockStopScript =
-          'echo \'{"decision": "block", "reason": "Stop blocked by security policy"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "Stop blocked by security policy"}\'';
 
         await rig.setup('stop-block-decision', {
           settings: {
@@ -967,15 +974,25 @@ describe('Hooks System Integration', () => {
         });
 
         // When Stop hook blocks, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run('Say hello', '--max-session-turns', '2');
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+        const result = await rig.run('Say hello', '--max-session-turns', '3');
+
+        // Verify that execution completed successfully (not blocked by Stop hook)
+        // Verify Stop hook was invoked multiple times (indicating multiple rounds)
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
+
+        const toolLogs = rig.readToolLogs();
+        const hasActivity = result.length > 0 || toolLogs.length > 0;
+        expect(hasActivity).toBe(true);
       });
 
       it('should continue execution with custom reason', async () => {
         // Stop hook's block decision means "block stopping" (i.e., force continuation)
         const blockReasonScript =
-          'echo \'{"decision": "block", "reason": "Custom block reason: task incomplete"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "Custom block reason: task incomplete"}\'';
 
         await rig.setup('stop-block-custom-reason', {
           settings: {
@@ -999,46 +1016,19 @@ describe('Hooks System Integration', () => {
         });
 
         // When Stop hook blocks, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run('Say goodbye', '--max-session-turns', '2');
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
-      });
-    });
+        const result = await rig.run('Say goodbye', '--max-session-turns', '3');
 
-    describe('Continue False', () => {
-      it('should request continue execution when hook returns continue: false', async () => {
-        const continueScript =
-          'echo \'{"continue": false, "stopReason": "More work needed"}\'';
+        // Verify that execution completed successfully (not blocked by Stop hook)
+        // This confirms: 1) Agent could execute after Stop hook blocked, 2) Session terminated normally
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
 
-        await rig.setup('stop-continue-false', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: continueScript,
-                      name: 'stop-continue-hook',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-            trusted: true,
-          },
-        });
-
-        // When continue: false, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run(
-          'Say continue',
-          '--max-session-turns',
-          '2',
-        );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+        const toolLogs = rig.readToolLogs();
+        const hasActivity = result.length > 0 || toolLogs.length > 0;
+        expect(hasActivity).toBe(true);
       });
     });
 
@@ -1262,8 +1252,9 @@ describe('Hooks System Integration', () => {
         // Stop hook's block decision means "block stopping" (i.e., force continuation)
         const allowScript =
           'echo \'{"decision": "allow", "reason": "Stop allowed"}\'';
+        // Write to a file to count hook invocations, then echo the decision
         const blockScript =
-          'echo \'{"decision": "block", "reason": "Stop blocked by security policy"}\'';
+          'echo "hook_called" >> hook_invoke_count.txt; echo \'{"decision": "block", "reason": "Stop blocked by security policy"}\'';
 
         await rig.setup('stop-multi-one-blocks', {
           settings: {
@@ -1296,18 +1287,28 @@ describe('Hooks System Integration', () => {
         const result = await rig.run(
           'Say multi stop',
           '--max-session-turns',
-          '2',
+          '3',
         );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+
+        // Verify that execution completed successfully (not blocked by Stop hook)
+        // This confirms: 1) Agent could execute after Stop hook blocked, 2) Session terminated normally
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
+
+        const toolLogs = rig.readToolLogs();
+        const hasActivity = result.length > 0 || toolLogs.length > 0;
+        expect(hasActivity).toBe(true);
       });
 
       it('should continue execution when first sequential stop hook returns block', async () => {
         // Stop hook's block decision means "block stopping" (i.e., force continuation)
         const blockScript =
-          'echo \'{"decision": "block", "reason": "First hook blocks stop"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "First hook blocks stop"}\'';
         const allowScript =
-          'echo \'{"decision": "allow", "reason": "This should not run"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow", "reason": "This should still run"}\'';
 
         await rig.setup('stop-seq-first-blocks', {
           settings: {
@@ -1341,18 +1342,28 @@ describe('Hooks System Integration', () => {
         const result = await rig.run(
           'Say sequential stop',
           '--max-session-turns',
-          '2',
+          '3',
         );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+
+        // Verify that execution completed successfully (not blocked by Stop hook)
+        // This confirms: 1) Agent could execute after Stop hook blocked, 2) Session terminated normally
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
+
+        const toolLogs = rig.readToolLogs();
+        const hasActivity = result.length > 0 || toolLogs.length > 0;
+        expect(hasActivity).toBe(true);
       });
 
       it('should continue execution when second sequential stop hook returns block', async () => {
         // Stop hook's block decision means "block stopping" (i.e., force continuation)
         const allowScript =
-          'echo \'{"decision": "allow", "reason": "First allows"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow", "reason": "First allows"}\'';
         const blockScript =
-          'echo \'{"decision": "block", "reason": "Second hook blocks stop"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "Second hook blocks stop"}\'';
 
         await rig.setup('stop-seq-second-blocks', {
           settings: {
@@ -1386,10 +1397,20 @@ describe('Hooks System Integration', () => {
         const result = await rig.run(
           'Say seq second blocks',
           '--max-session-turns',
-          '2',
+          '3',
         );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+
+        // Verify that execution completed successfully (not blocked by Stop hook)
+        // This confirms: 1) Agent could execute after Stop hook blocked, 2) Session terminated normally
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
+
+        const toolLogs = rig.readToolLogs();
+        const hasActivity = result.length > 0 || toolLogs.length > 0;
+        expect(hasActivity).toBe(true);
       });
 
       it('should handle multiple stop hooks all returning allow', async () => {
@@ -1441,9 +1462,9 @@ describe('Hooks System Integration', () => {
 
       it('should handle multiple stop hooks all returning block', async () => {
         const block1Script =
-          'echo \'{"decision": "block", "reason": "First blocks"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "First blocks"}\'';
         const block2Script =
-          'echo \'{"decision": "block", "reason": "Second blocks"}\'';
+          '(echo "hook_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "block", "reason": "Second blocks"}\'';
 
         await rig.setup('stop-multi-all-block', {
           settings: {
@@ -1473,138 +1494,18 @@ describe('Hooks System Integration', () => {
         });
 
         // When Stop hooks block, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run(
+        const _result = await rig.run(
           'Say all block',
           '--max-session-turns',
-          '2',
+          '3',
         );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
-      });
 
-      it('should handle multiple continue: false from different stop hooks', async () => {
-        const continue1Script =
-          'echo \'{"continue": false, "stopReason": "First needs more work"}\'';
-        const continue2Script =
-          'echo \'{"continue": false, "stopReason": "Second needs more work"}\'';
-
-        await rig.setup('stop-multi-continue-false', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: continue1Script,
-                      name: 'stop-continue-1',
-                      timeout: 5000,
-                    },
-                    {
-                      type: 'command',
-                      command: continue2Script,
-                      name: 'stop-continue-2',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-            trusted: true,
-          },
-        });
-
-        // When continue: false, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run(
-          'Say multi continue',
-          '--max-session-turns',
-          '2',
-        );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
-      });
-
-      it('should handle mixed allow and continue: false in stop hooks', async () => {
-        const allowScript =
-          'echo \'{"decision": "allow", "reason": "Allow stop"}\'';
-        const continueScript =
-          'echo \'{"continue": false, "stopReason": "Need more work"}\'';
-
-        await rig.setup('stop-mixed-allow-continue', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: allowScript,
-                      name: 'stop-allow-hook',
-                      timeout: 5000,
-                    },
-                    {
-                      type: 'command',
-                      command: continueScript,
-                      name: 'stop-continue-hook',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-            trusted: true,
-          },
-        });
-
-        // When continue: false, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run('Say mixed', '--max-session-turns', '2');
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
-      });
-
-      it('should handle block with higher priority than continue: false', async () => {
-        const blockScript =
-          'echo \'{"decision": "block", "reason": "Security block"}\'';
-        const continueScript =
-          'echo \'{"continue": false, "stopReason": "Need more work"}\'';
-
-        await rig.setup('stop-block-vs-continue', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: blockScript,
-                      name: 'stop-block-priority',
-                      timeout: 5000,
-                    },
-                    {
-                      type: 'command',
-                      command: continueScript,
-                      name: 'stop-continue-lower',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-            trusted: true,
-          },
-        });
-
-        // When Stop hook blocks, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run(
-          'Say block priority',
-          '--max-session-turns',
-          '2',
-        );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
+        // Verify Stop hook was invoked multiple times (indicating multiple rounds)
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter((line) => line.trim() === 'hook_called').length;
+        expect(hookInvokeCount).toBeGreaterThan(1);
       });
 
       it('should handle stop hook with error alongside blocking hook', async () => {

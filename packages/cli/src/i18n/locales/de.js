@@ -915,6 +915,9 @@ export default {
     'Enter zum Bestätigen, Esc zum Abbrechen',
   Disable: 'Deaktivieren',
   Enable: 'Aktivieren',
+  Authenticate: 'Authentifizieren',
+  disabled: 'deaktiviert',
+  'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
   'Status:': 'Status:',
@@ -943,6 +946,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Führen Sie qwen --debug aus, um Fehlerprotokolle anzuzeigen',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-Authentifizierung',
+  'Press Enter to start authentication, Esc to go back':
+    'Drücken Sie Enter, um die Authentifizierung zu starten, Esc zum Zurückgehen',
+  'Authenticating... Please complete the login in your browser.':
+    'Authentifizierung läuft... Bitte schließen Sie die Anmeldung in Ihrem Browser ab.',
+  'Press Enter or Esc to go back': 'Drücken Sie Enter oder Esc zum Zurückgehen',
+
   // MCP Tool List
   'No tools available for this server.':
     'Keine Werkzeuge für diesen Server verfügbar.',
@@ -951,6 +962,7 @@ export default {
   'open-world': 'offene Welt',
   idempotent: 'idempotent',
   'Tools for {{name}}': 'Werkzeuge für {{name}}',
+  'Tools for {{serverName}}': 'Werkzeuge für {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
@@ -1539,6 +1551,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  Custom: 'Benutzerdefiniert',
+  'More instructions about configuring `modelProviders` manually.':
+    'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
+  'Select API-KEY configuration mode:':
+    'API-KEY-Konfigurationsmodus auswählen:',
+  '(Press Escape to go back)': '(Escape drücken zum Zurückgehen)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enter zum Absenden, Escape zum Abbrechen)',
+  'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
   'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
   'Choose based on where your account is registered':
     'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
@@ -1557,4 +1581,33 @@ export default {
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Tipp: Verwenden Sie /model, um zwischen verfügbaren Coding Plan-Modellen zu wechseln.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Bitte beantworten Sie die folgende(n) Frage(n):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Benutzerfragen können im nicht-interaktiven Modus nicht gestellt werden. Bitte führen Sie das Tool im interaktiven Modus aus.',
+  'User declined to answer the questions.':
+    'Benutzer hat die Beantwortung der Fragen abgelehnt.',
+  'User has provided the following answers:':
+    'Benutzer hat die folgenden Antworten bereitgestellt:',
+  'Failed to process user answers:':
+    'Fehler beim Verarbeiten der Benutzerantworten:',
+  'Type something...': 'Etwas eingeben...',
+  Submit: 'Senden',
+  'Submit answers': 'Antworten senden',
+  Cancel: 'Abbrechen',
+  'Your answers:': 'Ihre Antworten:',
+  '(not answered)': '(nicht beantwortet)',
+  'Ready to submit your answers?': 'Bereit, Ihre Antworten zu senden?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Enter: Auswählen',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
 };
