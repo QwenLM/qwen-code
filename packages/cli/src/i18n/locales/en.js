@@ -842,6 +842,8 @@ export default {
   Reconnect: 'Reconnect',
   Enable: 'Enable',
   Disable: 'Disable',
+  Authenticate: 'Authenticate',
+  'Server:': 'Server:',
   'Command:': 'Command:',
   'Working Directory:': 'Working Directory:',
   'Capabilities:': 'Capabilities:',
@@ -866,6 +868,14 @@ export default {
     'Add MCP servers to your settings to get started.',
   'Run qwen --debug to see error logs': 'Run qwen --debug to see error logs',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth Authentication',
+  'Press Enter to start authentication, Esc to go back':
+    'Press Enter to start authentication, Esc to go back',
+  'Authenticating... Please complete the login in your browser.':
+    'Authenticating... Please complete the login in your browser.',
+  'Press Enter or Esc to go back': 'Press Enter or Esc to go back',
+
   // MCP Tool List
   'No tools available for this server.': 'No tools available for this server.',
   destructive: 'destructive',
@@ -873,6 +883,7 @@ export default {
   'open-world': 'open-world',
   idempotent: 'idempotent',
   'Tools for {{name}}': 'Tools for {{name}}',
+  'Tools for {{serverName}}': 'Tools for {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail

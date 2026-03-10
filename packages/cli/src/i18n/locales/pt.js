@@ -921,6 +921,9 @@ export default {
     'Enter para confirmar, Esc para cancelar',
   Disable: 'Desativar',
   Enable: 'Ativar',
+  Authenticate: 'Autenticar',
+  disabled: 'desativado',
+  'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
   'Status:': 'Status:',
@@ -950,6 +953,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Execute qwen --debug para ver os logs de erro',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'Autenticação OAuth',
+  'Press Enter to start authentication, Esc to go back':
+    'Pressione Enter para iniciar a autenticação, Esc para voltar',
+  'Authenticating... Please complete the login in your browser.':
+    'Autenticando... Por favor, conclua o login no seu navegador.',
+  'Press Enter or Esc to go back': 'Pressione Enter ou Esc para voltar',
+
   // MCP Tool List
   'No tools available for this server.':
     'Nenhuma ferramenta disponível para este servidor.',
@@ -958,6 +969,7 @@ export default {
   'open-world': 'mundo aberto',
   idempotent: 'idempotente',
   'Tools for {{name}}': 'Ferramentas para {{name}}',
+  'Tools for {{serverName}}': 'Ferramentas para {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail

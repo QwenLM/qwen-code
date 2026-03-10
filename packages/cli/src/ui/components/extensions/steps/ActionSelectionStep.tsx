@@ -15,14 +15,12 @@ interface ActionSelectionStepProps {
   selectedExtension: Extension | null;
   hasUpdateAvailable: boolean;
   onNavigateToStep: (step: string) => void;
-  onNavigateBack: () => void;
   onActionSelect: (action: ExtensionAction) => void;
 }
 
 export const ActionSelectionStep = ({
   selectedExtension,
   hasUpdateAvailable,
-  onNavigateBack,
   onActionSelect,
 }: ActionSelectionStepProps) => {
   const [selectedAction, setSelectedAction] = useState<ExtensionAction | null>(
@@ -78,23 +76,11 @@ export const ActionSelectionStep = ({
         },
         value: 'uninstall' as const,
       },
-      {
-        key: 'back',
-        get label() {
-          return t('Back');
-        },
-        value: 'back' as const,
-      },
     ];
     return allActions;
   }, [hasUpdateAvailable, isActive]);
 
   const handleActionSelect = (value: ExtensionAction) => {
-    if (value === 'back') {
-      onNavigateBack();
-      return;
-    }
-
     setSelectedAction(value);
     onActionSelect(value);
   };

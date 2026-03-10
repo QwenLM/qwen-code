@@ -899,6 +899,9 @@ export default {
   // MCP Management - Core translations
   Disable: 'Отключить',
   Enable: 'Включить',
+  Authenticate: 'Аутентификация',
+  disabled: 'отключен',
+  'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
   'View tools': 'Просмотреть инструменты',
   '(disabled)': '(отключен)',
@@ -1547,6 +1550,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Запустите qwen --debug для просмотра журналов ошибок',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-аутентификация',
+  'Press Enter to start authentication, Esc to go back':
+    'Нажмите Enter для начала аутентификации, Esc для возврата',
+  'Authenticating... Please complete the login in your browser.':
+    'Аутентификация... Пожалуйста, завершите вход в браузере.',
+  'Press Enter or Esc to go back': 'Нажмите Enter или Esc для возврата',
+
   // MCP Tool List
   'No tools available for this server.':
     'Для этого сервера нет доступных инструментов.',
@@ -1555,6 +1566,7 @@ export default {
   'open-world': 'открытый мир',
   idempotent: 'идемпотентный',
   'Tools for {{name}}': 'Инструменты для {{name}}',
+  'Tools for {{serverName}}': 'Инструменты для {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
