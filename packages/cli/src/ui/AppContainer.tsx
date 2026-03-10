@@ -676,15 +676,16 @@ export const AppContainer = (props: AppContainerProps) => {
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
-  // Auto-accept indicator
+  const agentViewState = useAgentViewState();
+
+  // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
     shouldBlockTab: () => hasSuggestionsVisible,
+    disabled: agentViewState.activeView !== 'main',
   });
-
-  const agentViewState = useAgentViewState();
 
   const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
     useMessageQueue({

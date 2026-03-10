@@ -276,6 +276,11 @@ export class AgentInteractive {
     return this.core.getExecutionSummary();
   }
 
+  /** The prompt token count from the most recent model call. */
+  getLastPromptTokenCount(): number {
+    return this.core.lastPromptTokenCount;
+  }
+
   getCore(): AgentCore {
     return this.core;
   }

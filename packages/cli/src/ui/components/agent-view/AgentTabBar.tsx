@@ -8,7 +8,12 @@
  * @fileoverview AgentTabBar — horizontal tab strip for in-process agent views.
  *
  * Rendered at the top of the terminal whenever in-process agents are registered.
- * Left/Right arrow keys cycle through tabs when the input buffer is empty.
+ *
+ * On the main tab, Left/Right switch tabs when the input buffer is empty.
+ * On agent tabs, the tab bar uses an exclusive-focus model:
+ *   - Down arrow at the input's bottom edge focuses the tab bar
+ *   - Left/Right switch tabs only when the tab bar is focused
+ *   - Up arrow or typing returns focus to the input
  *
  * Tab indicators:  running,  idle/completed,  failed,  cancelled
  */
@@ -36,6 +41,8 @@ function statusIndicator(agent: RegisteredAgent): {
     case AgentStatus.RUNNING:
     case AgentStatus.INITIALIZING:
       return { symbol: '\u25CF', color: theme.status.warning }; // ● running
+    case AgentStatus.IDLE:
+      return { symbol: '\u25CF', color: theme.status.success }; // ● idle (ready)
     case AgentStatus.COMPLETED:
       return { symbol: '\u2713', color: theme.status.success }; // ✓ completed
     case AgentStatus.FAILED:
@@ -50,20 +57,32 @@ function statusIndicator(agent: RegisteredAgent): {
 // ─── Component ──────────────────────────────────────────────
 
 export const AgentTabBar: React.FC = () => {
-  const { activeView, agents, agentShellFocused } = useAgentViewState();
-  const { switchToNext, switchToPrevious } = useAgentViewActions();
-  const { buffer, embeddedShellFocused } = useUIState();
+  const { activeView, agents, agentShellFocused, agentTabBarFocused } =
+    useAgentViewState();
+  const { switchToNext, switchToPrevious, setAgentTabBarFocused } =
+    useAgentViewActions();
+  const { embeddedShellFocused } = useUIState();
 
-  // Left/Right arrow keys switch tabs when the input buffer is empty
-  // and no embedded shell (main or agent tab) has input focus.
   useKeypress(
     (key) => {
-      if (buffer.text !== '' || embeddedShellFocused || agentShellFocused)
-        return;
+      if (embeddedShellFocused || agentShellFocused) return;
+      if (!agentTabBarFocused) return;
+
       if (key.name === 'left') {
         switchToPrevious();
       } else if (key.name === 'right') {
         switchToNext();
+      } else if (key.name === 'up') {
+        setAgentTabBarFocused(false);
+      } else if (
+        key.sequence &&
+        key.sequence.length === 1 &&
+        !key.ctrl &&
+        !key.meta
+      ) {
+        // Printable character → return focus to input (key falls through
+        // to BaseTextInput's useKeypress and gets typed normally)
+        setAgentTabBarFocused(false);
       }
     },
     { isActive: true },
@@ -89,12 +108,18 @@ export const AgentTabBar: React.FC = () => {
     return () => cleanups.forEach((fn) => fn());
   }, [agents, forceRender]);
 
+  const isFocused = agentTabBarFocused;
+
+  // Navigation hint varies by context
+  const hint = isFocused ? '\u2190/\u2192 switch  \u2191 input' : '\u2193 tabs';
+
   return (
     <Box flexDirection="row" paddingX={1}>
       {/* Main tab */}
       <Box marginRight={1}>
         <Text
           bold={activeView === 'main'}
+          dimColor={!isFocused}
           backgroundColor={
             activeView === 'main' ? theme.border.default : undefined
           }
@@ -107,7 +132,9 @@ export const AgentTabBar: React.FC = () => {
       </Box>
 
       {/* Separator */}
-      <Text color={theme.border.default}>{'\u2502'}</Text>
+      <Text dimColor={!isFocused} color={theme.border.default}>
+        {'\u2502'}
+      </Text>
 
       {/* Agent tabs */}
       {[...agents.entries()].map(([agentId, agent]) => {
@@ -118,19 +145,22 @@ export const AgentTabBar: React.FC = () => {
           <Box key={agentId} marginLeft={1}>
             <Text
               bold={isActive}
+              dimColor={!isFocused}
               backgroundColor={isActive ? theme.border.default : undefined}
               color={isActive ? undefined : agent.color || theme.text.secondary}
             >
               {` ${agent.displayName} `}
             </Text>
-            <Text color={indicatorColor}>{` ${symbol}`}</Text>
+            <Text dimColor={!isFocused} color={indicatorColor}>
+              {` ${symbol}`}
+            </Text>
           </Box>
         );
       })}
 
       {/* Navigation hint */}
       <Box marginLeft={2}>
-        <Text color={theme.text.secondary}>←/→</Text>
+        <Text color={theme.text.secondary}>{hint}</Text>
       </Box>
     </Box>
   );

@@ -206,6 +206,7 @@ export class GeminiClient {
         },
         history,
         this.config.getChatRecordingService(),
+        uiTelemetryService,
       );
     } catch (error) {
       await reportError(

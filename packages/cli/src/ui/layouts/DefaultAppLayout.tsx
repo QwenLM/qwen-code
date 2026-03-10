@@ -13,6 +13,7 @@ import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
+import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -24,6 +25,7 @@ export const DefaultAppLayout: React.FC = () => {
   const { activeView, agents } = useAgentViewState();
   const { columns: terminalWidth } = useTerminalSize();
   const hasAgents = agents.size > 0;
+  const isAgentTab = activeView !== 'main' && agents.has(activeView);
 
   // Clear terminal on view switch so previous view's <Static> output
   // is removed. refreshStatic clears the terminal and bumps the
@@ -39,33 +41,38 @@ export const DefaultAppLayout: React.FC = () => {
 
   return (
     <Box flexDirection="column" width={terminalWidth}>
-      {/* Content area: only the active view is rendered.
-          Conditional rendering avoids Ink's <Static> display="none" bug
-          where Static items remain visible even when the parent is hidden.
-          Each mount gets a fresh <Static> instance that re-renders items
-          on the cleared terminal. */}
-      {activeView !== 'main' && agents.has(activeView) ? (
-        <AgentChatView agentId={activeView} />
-      ) : (
-        <MainContent />
-      )}
-
-      {/* Shared footer — single instance keeps mainControlsRef attached
-          regardless of which tab is active so height measurement stays
-          current. */}
-      <Box flexDirection="column" ref={uiState.mainControlsRef}>
-        {uiState.dialogsVisible ? (
-          <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
-            <DialogManager
-              terminalWidth={uiState.terminalWidth}
-              addItem={uiState.historyManager.addItem}
-            />
+      {isAgentTab ? (
+        <>
+          {/* Agent view: chat history + agent-specific composer */}
+          <AgentChatView agentId={activeView} />
+          <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            <AgentComposer key={activeView} agentId={activeView} />
+            <ExitWarning />
           </Box>
-        ) : (
-          <Composer />
-        )}
-        <ExitWarning />
-      </Box>
+        </>
+      ) : (
+        <>
+          {/* Main view: conversation history + main composer / dialogs */}
+          <MainContent />
+          <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {uiState.dialogsVisible ? (
+              <Box
+                marginX={2}
+                flexDirection="column"
+                width={uiState.mainAreaWidth}
+              >
+                <DialogManager
+                  terminalWidth={uiState.terminalWidth}
+                  addItem={uiState.historyManager.addItem}
+                />
+              </Box>
+            ) : (
+              <Composer />
+            )}
+            <ExitWarning />
+          </Box>
+        </>
+      )}
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}

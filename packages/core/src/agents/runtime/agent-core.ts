@@ -150,6 +150,12 @@ export class AgentCore {
     outputTokens: 0,
     totalTokens: 0,
   };
+  /**
+   * The prompt token count from the most recent model response.
+   * Exposed so UI hooks can seed initial state without waiting for events.
+   */
+  lastPromptTokenCount = 0;
+
   private toolUsage = new Map<
     string,
     {
@@ -996,6 +1002,13 @@ Important Rules:
     const thoughtTok = Number(usage.thoughtsTokenCount || 0);
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
     const totalTok = Number(usage.totalTokenCount || 0);
+    // Prefer totalTokenCount (prompt + output) for context usage — the
+    // output from this round becomes history for the next, matching
+    // the approach in geminiChat.ts.
+    const contextTok = isFinite(totalTok) && totalTok > 0 ? totalTok : inTok;
+    if (isFinite(contextTok) && contextTok > 0) {
+      this.lastPromptTokenCount = contextTok;
+    }
     if (
       isFinite(inTok) ||
       isFinite(outTok) ||
