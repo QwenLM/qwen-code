@@ -13,6 +13,7 @@ import {
   getCodingPlanConfig,
   CodingPlanRegion,
 } from '../../constants/codingPlan.js';
+import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { t } from '../../i18n/index.js';
 
 export interface CodingPlanUpdateRequest {
@@ -47,6 +48,9 @@ export function useCodingPlanUpdates(
     async (region: CodingPlanRegion = CodingPlanRegion.CHINA) => {
       try {
         const persistScope = getPersistScopeForModelSelection(settings);
+
+        const settingsFile = settings.forScope(persistScope);
+        backupSettingsFile(settingsFile.path);
 
         // Replace the managed Coding Plan provider by providerId
         const { providerId, providerConfig, version } =
