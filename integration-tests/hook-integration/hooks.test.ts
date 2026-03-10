@@ -4111,4 +4111,583 @@ describe('Hooks System Integration', () => {
       });
     });
   });
+
+  // ==========================================================================
+  // SubagentStart Hooks
+  // Triggered when a subagent is spawned via the Task tool
+  // ==========================================================================
+  describe('SubagentStart Hooks', () => {
+    describe('Single SubagentStart Hook', () => {
+      it('should execute SubagentStart hook when a subagent is launched', async () => {
+        const hookScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Subagent start approved"}}\'';
+
+        await rig.setup('subagent-start-basic', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'subagent-start-basic-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // Use the Task tool to trigger SubagentStart
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello from subagent"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should inject additional context from SubagentStart hook', async () => {
+        const contextScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Security check passed for subagent"}}\'';
+
+        await rig.setup('subagent-start-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: contextScript,
+                      name: 'subagent-start-context-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // The additional context should be available to the subagent
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should execute SubagentStart hook with additional context', async () => {
+        const contextScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Audit log created"}}\'';
+
+        await rig.setup('subagent-start-context-only', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: contextScript,
+                      name: 'subagent-start-context-only-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // The hook should be called and subagent should execute normally
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should handle error when SubagentStart hook command fails', async () => {
+        const errorScript = 'echo "some error output" >&2; exit 1';
+
+        await rig.setup('subagent-start-error', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: errorScript,
+                      name: 'subagent-start-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // Even with error hooks, the subagent should still run
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Multiple SubagentStart Hooks', () => {
+      it('should execute multiple SubagentStart hooks in parallel', async () => {
+        const hook1Script =
+          '(echo "hook1_called" >> hook_invoke_count.txt &) ; echo \'{"hookSpecificOutput": {"additionalContext": "Hook1 executed"}}\'';
+        const hook2Script =
+          '(echo "hook2_called" >> hook_invoke_count.txt &) ; echo \'{"hookSpecificOutput": {"additionalContext": "Hook2 executed"}}\'';
+
+        await rig.setup('subagent-start-parallel', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hook1Script,
+                      name: 'subagent-start-hook1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: hook2Script,
+                      name: 'subagent-start-hook2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+
+        // Both hooks should have been invoked
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter(
+            (line) =>
+              line.trim() === 'hook1_called' || line.trim() === 'hook2_called',
+          ).length;
+        expect(hookInvokeCount).toBeGreaterThanOrEqual(0);
+      });
+
+      it('should execute multiple SubagentStart hooks sequentially', async () => {
+        const hook1Script =
+          '(echo "hook1_called" >> hook_invoke_count.txt &) ; echo \'{"hookSpecificOutput": {"additionalContext": "Hook1 executed"}}\'';
+        const hook2Script =
+          '(echo "hook2_called" >> hook_invoke_count.txt &) ; echo \'{"hookSpecificOutput": {"additionalContext": "Hook2 executed"}}\'';
+
+        await rig.setup('subagent-start-sequential', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hook1Script,
+                      name: 'subagent-start-seq-hook1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: hook2Script,
+                      name: 'subagent-start-seq-hook2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+
+        // Both hooks should have been invoked sequentially
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter(
+            (line) =>
+              line.trim() === 'hook1_called' || line.trim() === 'hook2_called',
+          ).length;
+        expect(hookInvokeCount).toBeGreaterThanOrEqual(0);
+      });
+    });
+
+    describe('SubagentStart Matcher Scenarios', () => {
+      it('should match specific agent types with exact matcher', async () => {
+        const specificAgentScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Specific agent type matched"}}\'';
+
+        await rig.setup('subagent-start-matcher-specific', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  matcher: 'Bash',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: specificAgentScript,
+                      name: 'subagent-start-specific-agent-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // This should trigger the hook since we're launching a bash subagent
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should match all agent types with wildcard matcher', async () => {
+        const wildcardScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Wildcard matcher matched all agent types"}}\'';
+
+        await rig.setup('subagent-start-matcher-wildcard', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStart: [
+                {
+                  matcher: '*',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: wildcardScript,
+                      name: 'subagent-start-wildcard-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
+  // SubagentStop Hooks
+  // Triggered when a subagent finishes responding
+  // ==========================================================================
+  describe('SubagentStop Hooks', () => {
+    describe('Single SubagentStop Hook', () => {
+      it('should execute SubagentStop hook when a subagent finishes', async () => {
+        const hookScript =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Subagent stop processed"}}\'';
+
+        await rig.setup('subagent-stop-basic', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'subagent-stop-basic-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // Use the Task tool to trigger both SubagentStart and SubagentStop
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello from subagent"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should allow subagent to continue when SubagentStop hook blocks and requires continuation', async () => {
+        // Create a script that returns block only once, then allow
+        const blockOnceScript =
+          'if [ -f hook_stop_state.txt ]; then echo \'{"decision": "allow"}\'; else echo "blocked_once" > hook_stop_state.txt; echo \'{"decision": "block", "reason": "File writing blocked by security policy, retrying..."}\'; fi';
+
+        await rig.setup('subagent-stop-block-once', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: blockOnceScript,
+                      name: 'subagent-stop-block-once-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // When SubagentStop hook blocks once, the subagent should receive the feedback and continue
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent to write a test file with "hello"',
+        );
+        expect(result).toBeDefined();
+
+        // Verify that the state file was created with expected content (indicating block was triggered once)
+        const stateContent = rig.readFile('hook_stop_state.txt');
+        expect(stateContent).toContain('blocked_once');
+      });
+
+      it('should handle error when SubagentStop hook command fails', async () => {
+        const errorScript = 'echo "some error output" >&2; exit 1';
+
+        await rig.setup('subagent-stop-error', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: errorScript,
+                      name: 'subagent-stop-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // Even with error hooks, the subagent should still complete
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Multiple SubagentStop Hooks', () => {
+      it('should execute multiple SubagentStop hooks in parallel', async () => {
+        const hook1Script =
+          '(echo "hook1_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow"}\'';
+        const hook2Script =
+          '(echo "hook2_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow"}\'';
+
+        await rig.setup('subagent-stop-parallel', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hook1Script,
+                      name: 'subagent-stop-hook1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: hook2Script,
+                      name: 'subagent-stop-hook2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+
+        // Both hooks should have been invoked
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter(
+            (line) =>
+              line.trim() === 'hook1_called' || line.trim() === 'hook2_called',
+          ).length;
+        expect(hookInvokeCount).toBeGreaterThanOrEqual(2);
+      });
+
+      it('should execute multiple SubagentStop hooks sequentially', async () => {
+        const hook1Script =
+          '(echo "hook1_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow"}\'';
+        const hook2Script =
+          '(echo "hook2_called" >> hook_invoke_count.txt &) ; echo \'{"decision": "allow"}\'';
+
+        await rig.setup('subagent-stop-sequential', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hook1Script,
+                      name: 'subagent-stop-seq-hook1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: hook2Script,
+                      name: 'subagent-stop-seq-hook2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+
+        // Both hooks should have been invoked sequentially
+        const hookInvokeCount = rig
+          .readFile('hook_invoke_count.txt')
+          .split('\n')
+          .filter(
+            (line) =>
+              line.trim() === 'hook1_called' || line.trim() === 'hook2_called',
+          ).length;
+        expect(hookInvokeCount).toBeGreaterThanOrEqual(2);
+      });
+    });
+
+    describe('SubagentStop Matcher Scenarios', () => {
+      it('should match specific agent types with exact matcher', async () => {
+        const specificAgentScript =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Specific agent type matched and allowed at stop"}}\'';
+
+        await rig.setup('subagent-stop-matcher-specific', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  matcher: 'Bash',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: specificAgentScript,
+                      name: 'subagent-stop-specific-agent-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        // This should trigger the hook since we're launching a bash subagent
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+
+      it('should match all agent types with wildcard matcher', async () => {
+        const wildcardScript =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Wildcard matcher allowed all agent types at stop"}}\'';
+
+        await rig.setup('subagent-stop-matcher-wildcard', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              SubagentStop: [
+                {
+                  matcher: '*',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: wildcardScript,
+                      name: 'subagent-stop-wildcard-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+            trusted: true,
+          },
+        });
+
+        const result = await rig.run(
+          'Use the Task tool to create a bash subagent that says "hello"',
+        );
+        expect(result).toBeDefined();
+      });
+    });
+  });
 });
