@@ -28,6 +28,11 @@ describe('useCodingPlanUpdates', () => {
     isTrusted: true,
     workspace: { settings: {} },
     user: { settings: {} },
+    forScope: vi.fn().mockImplementation((scope: string) => ({
+      path: `/${scope}/settings.json`,
+      settings: {},
+      originalSettings: {},
+    })),
   };
 
   const mockConfig = {

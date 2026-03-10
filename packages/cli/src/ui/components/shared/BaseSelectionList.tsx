@@ -127,21 +127,28 @@ export function BaseSelectionList<
         const isFirst = index === 0;
         const isLast = index === visibleItems.length - 1;
 
-        // Determine prefix character based on scroll state (aligned with SessionPicker)
+        // Keep a fixed-width prefix column for all items to preserve historical indentation.
         let prefixChar = PREFIX_CHARS.normal;
-        let prefixColor: string | undefined = undefined;
-
-        if (showScrollArrows && hasMoreThanOnePage) {
-          if (isSelected) {
-            prefixChar = PREFIX_CHARS.selected;
-            prefixColor = theme.text.accent;
-          } else if (isFirst && showScrollUp) {
-            prefixChar = PREFIX_CHARS.scrollUp;
-            prefixColor = theme.text.secondary;
-          } else if (isLast && showScrollDown) {
-            prefixChar = PREFIX_CHARS.scrollDown;
-            prefixColor = theme.text.secondary;
-          }
+        let prefixColor = theme.text.primary;
+        if (isSelected) {
+          prefixChar = PREFIX_CHARS.selected;
+          prefixColor = theme.text.accent;
+        } else if (
+          showScrollArrows &&
+          hasMoreThanOnePage &&
+          isFirst &&
+          showScrollUp
+        ) {
+          prefixChar = PREFIX_CHARS.scrollUp;
+          prefixColor = theme.text.secondary;
+        } else if (
+          showScrollArrows &&
+          hasMoreThanOnePage &&
+          isLast &&
+          showScrollDown
+        ) {
+          prefixChar = PREFIX_CHARS.scrollDown;
+          prefixColor = theme.text.secondary;
         }
 
         // Determine colors based on selection and disabled state
@@ -170,21 +177,11 @@ export function BaseSelectionList<
 
         return (
           <Box key={item.key} alignItems="flex-start">
-            {/* Selection indicator prefix - always show for selected item when there's more than one item */}
-            {isSelected && items.length > 1 && (
-              <Box flexShrink={0} minWidth={2}>
-                <Text color={theme.text.accent}>{PREFIX_CHARS.selected}</Text>
-              </Box>
-            )}
+            {/* Fixed prefix column keeps option indentation stable across states */}
+            <Box flexShrink={0} minWidth={2}>
+              <Text color={prefixColor}>{prefixChar}</Text>
+            </Box>
 
-            {/* Scroll indicator prefix (aligned with SessionPicker) - only show when showScrollArrows is enabled */}
-            {showScrollArrows && hasMoreThanOnePage && !isSelected && (
-              <Box flexShrink={0} minWidth={2}>
-                <Text color={prefixColor}>{prefixChar}</Text>
-              </Box>
-            )}
-
-            {/* Item number - placed after prefix */}
             {showNumbers && (
               <Box
                 marginRight={1}
@@ -203,7 +200,7 @@ export function BaseSelectionList<
                 titleColor,
                 numberColor,
                 prefixChar,
-                prefixColor: prefixColor ?? theme.text.primary,
+                prefixColor,
               })}
             </Box>
           </Box>
