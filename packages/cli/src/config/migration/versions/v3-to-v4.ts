@@ -121,6 +121,42 @@ function groupLegacyModels(
   );
 }
 
+function generateProviderIdFromBaseUrl(
+  baseUrl: string | undefined,
+): string | null {
+  if (!baseUrl) return null;
+
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    const labels = hostname.split('.').filter(Boolean);
+    if (labels.length === 0) return null;
+
+    // Prefer the domain label right before TLD, e.g. api.openai.com -> openai.
+    let providerName =
+      labels.length >= 2 ? labels[labels.length - 2]! : labels[0]!;
+
+    // If the label is too generic, fallback one step left when possible.
+    const genericLabels = new Set([
+      'api',
+      'www',
+      'gateway',
+      'proxy',
+      'service',
+      'services',
+    ]);
+    if (genericLabels.has(providerName) && labels.length >= 3) {
+      providerName = labels[labels.length - 3]!;
+    }
+
+    providerName = providerName.replace(/\./g, '-');
+    providerName = providerName.replace(/[^a-z0-9-]/g, '-');
+    providerName = providerName.replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return providerName || null;
+  } catch {
+    return null;
+  }
+}
+
 function assignProviderIds(
   allGroups: ProviderGroup[],
   warnings: string[],
@@ -158,7 +194,8 @@ function assignProviderIds(
     };
   }
 
-  // Phase 2: Regular groups get deterministic providerIds per authType
+  // Phase 2: Regular groups get deterministic providerIds
+  // Try to generate readable ID from baseUrl first, fallback to authType-based ID
   const byAuthType = new Map<string, ProviderGroup[]>();
   for (const group of regularGroups) {
     const list = byAuthType.get(group.authType) || [];
@@ -167,12 +204,32 @@ function assignProviderIds(
   }
 
   for (const [authType, groups] of byAuthType) {
+    const sanitizedAuthType = authType
+      .toLowerCase()
+      .replace(/\./g, '-')
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
     for (let i = 0; i < groups.length; i++) {
       const group = groups[i]!;
-      let candidateId = i === 0 ? authType : `${authType}-${i + 1}`;
 
-      while (usedIds.has(candidateId)) {
-        candidateId = `${candidateId}_`;
+      // Try to generate readable ID from baseUrl
+      let candidateId = generateProviderIdFromBaseUrl(group.baseUrl);
+
+      // Fallback to {authType}-{index} if generation failed
+      if (!candidateId) {
+        candidateId = `${sanitizedAuthType || 'provider'}-${i + 1}`;
+      }
+
+      // Ensure uniqueness
+      if (usedIds.has(candidateId)) {
+        let dedupeIndex = 2;
+        const baseId = candidateId;
+        while (usedIds.has(candidateId)) {
+          candidateId = `${baseId}-${dedupeIndex}`;
+          dedupeIndex++;
+        }
       }
 
       usedIds.add(candidateId);
@@ -310,6 +367,7 @@ export const TEST_ONLY = {
   assignProviderIds,
   migrateModelProviders,
   migrateModelSelection,
+  generateProviderIdFromBaseUrl,
   CP_CHINA_PROVIDER_ID,
   CP_GLOBAL_PROVIDER_ID,
 };
