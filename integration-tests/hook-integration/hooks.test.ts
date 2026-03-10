@@ -56,7 +56,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -86,7 +85,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -122,7 +120,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -152,7 +149,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -200,7 +196,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -231,7 +226,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -259,7 +253,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -288,7 +281,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -315,7 +307,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -341,7 +332,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -374,7 +364,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -405,7 +394,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -444,7 +432,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -478,7 +465,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -519,7 +505,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -564,7 +549,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -603,7 +587,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -640,7 +623,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -675,7 +657,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -710,7 +691,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -752,7 +732,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -793,7 +772,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -831,7 +809,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -868,7 +845,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -905,7 +881,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -934,7 +909,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -969,7 +943,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1011,7 +984,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1054,7 +1026,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1091,7 +1062,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1122,7 +1092,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1150,7 +1119,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1179,7 +1147,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1206,7 +1173,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1238,7 +1204,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1279,7 +1244,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1334,7 +1298,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1389,7 +1352,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1450,7 +1412,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1489,7 +1450,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1535,7 +1495,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1587,7 +1546,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1624,7 +1582,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1664,7 +1621,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1701,7 +1657,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1737,7 +1692,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1775,7 +1729,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1812,7 +1765,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1842,7 +1794,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1871,7 +1822,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1900,7 +1850,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1945,7 +1894,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -1975,7 +1923,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2005,7 +1952,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2035,7 +1981,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2065,7 +2010,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2095,7 +2039,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2125,7 +2068,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2168,7 +2110,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2198,7 +2139,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2267,7 +2207,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2314,7 +2253,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2352,7 +2290,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2389,7 +2326,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2426,7 +2362,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2454,7 +2389,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2480,7 +2414,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2506,7 +2439,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2542,7 +2474,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2571,7 +2502,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2616,7 +2546,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2646,7 +2575,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2676,7 +2604,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2706,7 +2633,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2788,7 +2714,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2827,7 +2752,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2865,7 +2789,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2902,7 +2825,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2933,7 +2855,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -2964,7 +2885,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3002,7 +2922,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3040,7 +2959,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3078,7 +2996,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3108,7 +3025,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3137,7 +3053,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3163,7 +3078,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3201,7 +3115,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3240,7 +3153,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3279,7 +3191,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3317,7 +3228,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3352,7 +3262,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3389,7 +3298,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3428,7 +3336,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3741,7 +3648,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3784,7 +3690,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3816,7 +3721,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3863,7 +3767,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3907,7 +3810,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3950,7 +3852,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -3988,7 +3889,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4032,7 +3932,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4072,7 +3971,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4102,7 +4000,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4139,7 +4036,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4171,7 +4067,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4203,7 +4098,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4234,7 +4128,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4276,7 +4169,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4326,7 +4218,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4370,7 +4261,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4403,7 +4293,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4442,7 +4331,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4475,7 +4363,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4510,7 +4397,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4552,7 +4438,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4602,7 +4487,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4646,7 +4530,6 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
@@ -4679,13 +4562,335 @@ describe('Hooks System Integration', () => {
                 },
               ],
             },
-            trusted: true,
           },
         });
 
         const result = await rig.run(
           'Use the Task tool to create a bash subagent that says "hello"',
         );
+        expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
+  // Notification Hooks
+  // Triggered when various notification events occur
+  // ==========================================================================
+  describe('Notification Hooks', () => {
+    describe('Idle Prompt Notifications', () => {
+      it('should handle idle prompt notifications correctly', async () => {
+        const idlePromptScript =
+          'echo \'{"additionalContext": "Idle prompt notification processed"}\'';
+        await rig.setup('notification-idle-prompt', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: idlePromptScript,
+                      name: 'notification-idle-prompt-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Simulate an idle prompt scenario - this might involve simulating a timeout
+        const result = await rig.run('Say idle prompt notification test');
+
+        expect(result).toBeDefined();
+      });
+
+      it('should process multiple idle prompt notifications', async () => {
+        const idlePromptScript1 =
+          'echo \'{"additionalContext": "First idle prompt notification"}\'';
+        const idlePromptScript2 =
+          'echo \'{"additionalContext": "Second idle prompt notification"}\'';
+        await rig.setup('notification-idle-prompt-multiple', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: idlePromptScript1,
+                      name: 'notification-idle-prompt-hook-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: idlePromptScript2,
+                      name: 'notification-idle-prompt-hook-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run(
+          'Say multiple idle prompt notification test',
+        );
+
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Elicitation Dialog Notifications', () => {
+      it('should handle elication dialog notifications correctly', async () => {
+        const elicationDialogScript =
+          'echo \'{"additionalContext": "Elicitation dialog notification processed"}\'';
+
+        await rig.setup('notification-elication-dialog', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: elicationDialogScript,
+                      name: 'notification-elication-dialog-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Simulate an elication dialog scenario
+        const result = await rig.run('Say elication dialog notification test');
+
+        expect(result).toBeDefined();
+      });
+
+      it('should handle multiple elication dialog notifications', async () => {
+        const elicationDialogScript1 =
+          'echo \'{"additionalContext": "First elication dialog notification"}\'';
+        const elicationDialogScript2 =
+          'echo \'{"additionalContext": "Second elication dialog notification"}\'';
+        await rig.setup('notification-elication-dialog-multiple', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: elicationDialogScript1,
+                      name: 'notification-elication-dialog-hook-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: elicationDialogScript2,
+                      name: 'notification-elication-dialog-hook-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run(
+          'Say multiple elication dialog notification test',
+        );
+
+        expect(result).toBeDefined();
+      });
+
+      it('should handle elication dialog notification with error', async () => {
+        await rig.setup('notification-elication-dialog-error', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'nonexistent_command_xyz',
+                      name: 'notification-elication-dialog-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Error should be handled gracefully and not block execution
+        const result = await rig.run('Say elication dialog error test');
+
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Multiple Notification Hooks', () => {
+      it('should handle multiple different notification types correctly', async () => {
+        const notificationScript1 =
+          'echo \'{"additionalContext": "Generic notification 1"}\'';
+        const notificationScript2 =
+          'echo \'{"additionalContext": "Generic notification 2"}\'';
+
+        await rig.setup('notification-multiple-different', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: notificationScript1,
+                      name: 'notification-multiple-hook-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: notificationScript2,
+                      name: 'notification-multiple-hook-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run(
+          'Say multiple different notification test',
+        );
+
+        expect(result).toBeDefined();
+      });
+    });
+
+    describe('Notification Hook Error Handling', () => {
+      it('should handle missing command gracefully', async () => {
+        await rig.setup('notification-missing-command', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '', // Empty command
+                      name: 'notification-empty-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Empty command should be skipped gracefully
+        const result = await rig.run('Say missing command test');
+
+        expect(result).toBeDefined();
+      });
+
+      it('should handle non-executable command gracefully', async () => {
+        await rig.setup('notification-non-executable', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/path/to/command',
+                      name: 'notification-non-exec-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Non-existent command should be handled gracefully
+        const result = await rig.run('Say non-executable command test');
+
+        expect(result).toBeDefined();
+      });
+
+      it('should handle command with non-zero exit code gracefully', async () => {
+        await rig.setup('notification-nonzero-exit', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'echo "warning" >&2 && exit 1',
+                      name: 'notification-nonzero-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Non-zero exit should be handled gracefully for notification hooks
+        const result = await rig.run('Say nonzero exit code test');
+
+        expect(result).toBeDefined();
+      });
+
+      it('should handle command timeout gracefully', async () => {
+        await rig.setup('notification-timeout', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              Notification: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 10',
+                      name: 'notification-timeout-hook',
+                      timeout: 1000, // Very short timeout to trigger timeout condition
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Timeout should be handled gracefully
+        const result = await rig.run('Say timeout test');
+
         expect(result).toBeDefined();
       });
     });
