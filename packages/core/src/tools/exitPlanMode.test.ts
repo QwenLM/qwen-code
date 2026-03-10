@@ -119,7 +119,9 @@ describe('ExitPlanModeTool', () => {
       expect(invocation).toBeDefined();
       expect(invocation.params).toEqual(params);
 
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+
+      const confirmation = await invocation.getConfirmationDetails(signal);
       expect(confirmation).toMatchObject({
         type: 'plan',
         title: 'Would you like to proceed?',
@@ -154,7 +156,7 @@ describe('ExitPlanModeTool', () => {
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      const confirmation = await invocation.getConfirmationDetails(signal);
 
       if (confirmation) {
         expect(confirmation.type).toBe('plan');
@@ -178,7 +180,7 @@ describe('ExitPlanModeTool', () => {
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      const confirmation = await invocation.getConfirmationDetails(signal);
 
       if (confirmation) {
         await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);

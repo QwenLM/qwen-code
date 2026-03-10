@@ -9,6 +9,7 @@ import {
   parseRule,
   matchesRule,
   resolveToolName,
+  splitCompoundCommand,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
 import type {
@@ -108,7 +109,26 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   evaluate(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, filePath, domain } = ctx;
+    const { command } = ctx;
+
+    // For shell commands, split compound commands and evaluate each
+    // sub-command independently, then return the most restrictive result.
+    // Priority order (most to least restrictive): deny > ask > default > allow
+    if (command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return this.evaluateCompoundCommand(ctx, subCommands);
+      }
+    }
+
+    return this.evaluateSingle(ctx);
+  }
+
+  /**
+   * Evaluate a single (non-compound) context against all rules.
+   */
+  private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
+    const { toolName, command, filePath, domain, specifier } = ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
@@ -119,7 +139,14 @@ export class PermissionManager {
           }
         : undefined;
 
-    const matchArgs = [toolName, command, filePath, domain, pathCtx] as const;
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
 
     // Priority 1: deny rules (session first, then persistent)
     for (const rule of [
@@ -152,6 +179,50 @@ export class PermissionManager {
     }
 
     return 'default';
+  }
+
+  /**
+   * Evaluate a compound command by splitting it into sub-commands,
+   * evaluating each independently, and returning the most restrictive result.
+   *
+   * Restriction order: deny > ask > default > allow
+   *
+   * Example: with rules `allow: [safe-cmd *, one-cmd *]`
+   *   - "safe-cmd && one-cmd"  → both allow  → allow
+   *   - "safe-cmd && two-cmd"  → allow + default → default
+   *   - "safe-cmd && evil-cmd" (deny: [evil-cmd]) → allow + deny → deny
+   */
+  private evaluateCompoundCommand(
+    ctx: PermissionCheckContext,
+    subCommands: string[],
+  ): PermissionDecision {
+    const PRIORITY: Record<PermissionDecision, number> = {
+      deny: 3,
+      ask: 2,
+      default: 1,
+      allow: 0,
+    };
+
+    let mostRestrictive: PermissionDecision = 'allow';
+
+    for (const subCmd of subCommands) {
+      const subCtx: PermissionCheckContext = {
+        ...ctx,
+        command: subCmd,
+      };
+      const decision = this.evaluateSingle(subCtx);
+
+      if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
+        mostRestrictive = decision;
+      }
+
+      // Short-circuit: deny is the most restrictive possible
+      if (mostRestrictive === 'deny') {
+        return 'deny';
+      }
+    }
+
+    return mostRestrictive;
   }
 
   // ---------------------------------------------------------------------------
@@ -189,6 +260,63 @@ export class PermissionManager {
       toolName: 'run_shell_command',
       command,
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Relevance check
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Check whether any rule (allow, ask, or deny) in the current rule set
+   * matches the given invocation context.
+   *
+   * This allows the scheduler to skip the full `evaluate()` call when no
+   * rules are relevant, preserving the tool's `getDefaultPermission()` result
+   * as-is.
+   *
+   * "Relevant" means at least one rule's toolName matches AND, if the rule
+   * has a specifier, it also matches the context's command/filePath/domain.
+   *
+   * Examples for Shell executing `git clone xxx`:
+   *   - "Bash"               → matches (tool-level rule, no specifier)
+   *   - "Bash(git *)"        → matches (git sub-command wildcard)
+   *   - "Bash(git clone *)"  → matches (exact sub-command wildcard)
+   *   - "Bash(git add *)"    → no match (different sub-command)
+   *   - "Edit"               → no match (different tool)
+   *
+   * @param ctx - Permission check context.
+   * @returns true if at least one rule matches.
+   */
+  hasRelevantRules(ctx: PermissionCheckContext): boolean {
+    const { toolName, command, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    const allRules = [
+      ...this.sessionRules.allow,
+      ...this.persistentRules.allow,
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ];
+
+    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
   }
 
   // ---------------------------------------------------------------------------
@@ -240,7 +368,11 @@ export class PermissionManager {
    */
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
-    this.persistentRules[type].push(rule);
+    // Deduplicate: skip if a rule with the same raw string already exists
+    const exists = this.persistentRules[type].some((r) => r.raw === rule.raw);
+    if (!exists) {
+      this.persistentRules[type].push(rule);
+    }
     return rule;
   }
 

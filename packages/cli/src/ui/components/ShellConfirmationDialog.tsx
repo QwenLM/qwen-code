@@ -57,9 +57,14 @@ export const ShellConfirmationDialog: React.FC<
       key: 'Yes, allow once',
     },
     {
-      label: t('Yes, allow always for this session'),
-      value: ToolConfirmationOutcome.ProceedAlways,
-      key: 'Yes, allow always for this session',
+      label: t('Always allow in this project'),
+      value: ToolConfirmationOutcome.ProceedAlwaysProject,
+      key: 'Always allow in this project',
+    },
+    {
+      label: t('Always allow for this user'),
+      value: ToolConfirmationOutcome.ProceedAlwaysUser,
+      key: 'Always allow for this user',
     },
     {
       label: t('No (esc)'),

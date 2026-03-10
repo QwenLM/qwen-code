@@ -16,6 +16,7 @@ import {
   resolvePathPattern,
   getSpecifierKind,
   toolMatchesRuleToolName,
+  splitCompoundCommand,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
@@ -45,7 +46,7 @@ describe('resolveToolName', () => {
   });
 
   it('resolves Agent category', () => {
-    expect(resolveToolName('Agent')).toBe('Agent');
+    expect(resolveToolName('Agent')).toBe('task');
   });
 
   it('returns unknown names unchanged', () => {
@@ -154,7 +155,7 @@ describe('parseRule', () => {
 
   it('parses Agent with literal specifier', () => {
     const r = parseRule('Agent(Explore)');
-    expect(r.toolName).toBe('Agent');
+    expect(r.toolName).toBe('task');
     expect(r.specifier).toBe('Explore');
     expect(r.specifierKind).toBe('literal');
   });
@@ -213,6 +214,16 @@ describe('matchesCommandPattern', () => {
       expect(matchesCommandPattern('git *', 'git status')).toBe(true);
       expect(matchesCommandPattern('git *', 'git commit -m "test"')).toBe(true);
       expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
+    });
+
+    it('space-star requires word boundary (ls * does not match lsof)', () => {
+      expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
+      expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);
+    });
+
+    it('no-space-star allows prefix matching (ls* matches lsof)', () => {
+      expect(matchesCommandPattern('ls*', 'ls -la')).toBe(true);
+      expect(matchesCommandPattern('ls*', 'lsof')).toBe(true);
     });
 
     it('does not match different command', () => {
@@ -279,47 +290,19 @@ describe('matchesCommandPattern', () => {
   //
   // The safety benefit: a pattern like `rm *` would NOT match
   // `git status && rm -rf /` because the first command is `git status`.
-  describe('shell operator boundaries', () => {
-    it('first-command extraction: git * matches first cmd in compound', () => {
-      // First command is "git status", which matches "git *"
-      expect(matchesCommandPattern('git *', 'git status && rm -rf /')).toBe(
-        true,
-      );
-    });
-
-    it('second command is not reachable: rm * does not match compound starting with git', () => {
-      // First command is "git status", NOT "rm -rf /"
-      expect(matchesCommandPattern('rm *', 'git status && rm -rf /')).toBe(
-        false,
-      );
-    });
-
-    it('pipe boundary: grep * does not match first command', () => {
-      // First command is "git status", not "grep foo"
-      expect(matchesCommandPattern('grep *', 'git status | grep foo')).toBe(
-        false,
-      );
-    });
-
-    it('semicolon boundary: rm * does not match first command', () => {
-      // First command is "git status", not "rm -rf /"
-      expect(matchesCommandPattern('rm *', 'git status; rm -rf /')).toBe(false);
-    });
-
-    it('|| boundary: echo * does not match first command', () => {
-      expect(matchesCommandPattern('echo *', 'git status || echo fail')).toBe(
-        false,
-      );
-    });
-
+  // matchesCommandPattern operates on simple commands only.
+  // Compound command splitting is handled by PermissionManager.evaluate().
+  // These tests verify that matchesCommandPattern works correctly on
+  // individual simple commands (the sub-commands after splitting).
+  describe('simple command matching (no operators)', () => {
     it('matches when no operators are present', () => {
       expect(
         matchesCommandPattern('git *', 'git commit -m "hello world"'),
       ).toBe(true);
     });
 
-    it('operators inside quotes are not boundaries', () => {
-      // "echo 'a && b'" → first command is the whole thing because && is inside quotes
+    it('operators inside quotes are not boundaries for splitCompoundCommand', () => {
+      // "echo 'a && b'" → the && is inside quotes, not an operator
       expect(matchesCommandPattern('echo *', "echo 'a && b'")).toBe(true);
     });
   });
@@ -348,6 +331,69 @@ describe('matchesCommandPattern', () => {
         false,
       );
     });
+  });
+});
+
+// ─── splitCompoundCommand ────────────────────────────────────────────────────
+
+describe('splitCompoundCommand', () => {
+  it('simple command returns single-element array', () => {
+    expect(splitCompoundCommand('git status')).toEqual(['git status']);
+  });
+
+  it('splits on &&', () => {
+    expect(splitCompoundCommand('git status && rm -rf /')).toEqual([
+      'git status',
+      'rm -rf /',
+    ]);
+  });
+
+  it('splits on ||', () => {
+    expect(splitCompoundCommand('git push || echo failed')).toEqual([
+      'git push',
+      'echo failed',
+    ]);
+  });
+
+  it('splits on ;', () => {
+    expect(splitCompoundCommand('echo hello; echo world')).toEqual([
+      'echo hello',
+      'echo world',
+    ]);
+  });
+
+  it('splits on |', () => {
+    expect(splitCompoundCommand('git log | grep fix')).toEqual([
+      'git log',
+      'grep fix',
+    ]);
+  });
+
+  it('handles three-part compound', () => {
+    expect(splitCompoundCommand('a && b && c')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('handles mixed operators', () => {
+    expect(splitCompoundCommand('a && b | c; d')).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('does not split on operators inside single quotes', () => {
+    expect(splitCompoundCommand("echo 'a && b'")).toEqual(["echo 'a && b'"]);
+  });
+
+  it('does not split on operators inside double quotes', () => {
+    expect(splitCompoundCommand('echo "a && b"')).toEqual(['echo "a && b"']);
+  });
+
+  it('handles escaped characters', () => {
+    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&& b']);
+  });
+
+  it('trims whitespace around sub-commands', () => {
+    expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
+      'git status',
+      'rm -rf /',
+    ]);
   });
 });
 
@@ -541,17 +587,11 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'run_shell_command', 'echo hello')).toBe(false);
   });
 
-  it('operator boundary: pattern matches first command only', () => {
+  it('matchesRule checks individual simple commands (compound splitting is at PM level)', () => {
     const rule = parseRule('Bash(git *)');
-    // First command is "git status" which matches "git *" → true
-    expect(
-      matchesRule(rule, 'run_shell_command', 'git status && rm -rf /'),
-    ).toBe(true);
-    // rm * would not match because first command is "git status"
-    const rmRule = parseRule('Bash(rm *)');
-    expect(
-      matchesRule(rmRule, 'run_shell_command', 'git status && rm -rf /'),
-    ).toBe(false);
+    // matchesRule receives a simple command (already split by PM)
+    expect(matchesRule(rule, 'run_shell_command', 'git status')).toBe(true);
+    expect(matchesRule(rule, 'run_shell_command', 'rm -rf /')).toBe(false);
   });
 
   // Meta-category matching: Read
@@ -645,10 +685,30 @@ describe('matchesRule', () => {
   // Agent literal matching
   it('Agent literal specifier', () => {
     const rule = parseRule('Agent(Explore)');
-    // Agent rules use `command` field for the agent name
-    expect(matchesRule(rule, 'Agent', 'Explore')).toBe(true);
-    expect(matchesRule(rule, 'Agent', 'Plan')).toBe(false);
-    expect(matchesRule(rule, 'Agent')).toBe(false); // no agent name
+    // Agent is an alias for 'task'; specifier matches via the specifier field
+    expect(
+      matchesRule(
+        rule,
+        'task',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'Explore',
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'task',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'Plan',
+      ),
+    ).toBe(false);
+    expect(matchesRule(rule, 'task')).toBe(false); // no specifier
   });
 
   // MCP tool matching
@@ -782,6 +842,189 @@ describe('PermissionManager', () => {
       expect(pm.isCommandAllowed('git commit')).toBe('allow');
       expect(pm.isCommandAllowed('rm -rf /')).toBe('deny');
       expect(pm.isCommandAllowed('ls')).toBe('default');
+    });
+  });
+
+  describe('compound command evaluation', () => {
+    it('all sub-commands allowed → allow', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'safe-cmd arg1 && one-cmd arg2',
+        }),
+      ).toBe('allow');
+    });
+
+    it('one sub-command unmatched → default (most restrictive)', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(safe-cmd *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'safe-cmd && two-cmd',
+        }),
+      ).toBe('default');
+    });
+
+    it('one sub-command denied → deny', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(safe-cmd *)'],
+          permissionsDeny: ['Bash(evil-cmd *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'safe-cmd && evil-cmd rm-all',
+        }),
+      ).toBe('deny');
+    });
+
+    it('one sub-command ask + one allow → ask', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)'],
+          permissionsAsk: ['Bash(npm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git status && npm publish',
+        }),
+      ).toBe('ask');
+    });
+
+    it('pipe compound: all matched → allow', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)', 'Bash(grep *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git log | grep fix',
+        }),
+      ).toBe('allow');
+    });
+
+    it('pipe compound: second unmatched → default', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git log | grep fix',
+        }),
+      ).toBe('default');
+    });
+
+    it('semicolon compound: deny in second → deny', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo hello; rm -rf /',
+        }),
+      ).toBe('deny');
+    });
+
+    it('|| compound: all allowed → allow', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)', 'Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git push || echo failed',
+        }),
+      ).toBe('allow');
+    });
+
+    it('operators inside quotes: treated as single command', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "echo 'a && b'",
+        }),
+      ).toBe('allow');
+    });
+
+    it('three-part compound: all must pass', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)', 'Bash(npm *)', 'Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git add . && npm test && echo done',
+        }),
+      ).toBe('allow');
+    });
+
+    it('three-part compound: one unmatched → default', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(git *)', 'Bash(echo *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git add . && npm test && echo done',
+        }),
+      ).toBe('default');
+    });
+
+    it('isCommandAllowed also handles compound commands', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
+          permissionsDeny: ['Bash(evil-cmd *)'],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isCommandAllowed('safe-cmd a && one-cmd b')).toBe('allow');
+      expect(pm.isCommandAllowed('safe-cmd a && unknown-cmd')).toBe('default');
+      expect(pm.isCommandAllowed('safe-cmd a && evil-cmd b')).toBe('deny');
     });
   });
 

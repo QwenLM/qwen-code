@@ -895,6 +895,8 @@ export default {
   "Allow execution of: '{{command}}'?":
     "Ausführung erlauben von: '{{command}}'?",
   'Yes, allow always ...': 'Ja, immer erlauben ...',
+  'Always allow in this project': 'In diesem Projekt immer erlauben',
+  'Always allow for this user': 'Für diesen Benutzer immer erlauben',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
@@ -1063,6 +1065,53 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': 'Ordnervertrauenseinstellungen verwalten',
+  'Manage permission rules': 'Berechtigungsregeln verwalten',
+  Allow: 'Erlauben',
+  Ask: 'Fragen',
+  Deny: 'Verweigern',
+  Workspace: 'Arbeitsbereich',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code fragt nicht, bevor erlaubte Tools verwendet werden.',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code fragt, bevor diese Tools verwendet werden.',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code darf verweigerte Tools nicht verwenden.',
+  'Manage trusted directories for this workspace.':
+    'Vertrauenswürdige Verzeichnisse für diesen Arbeitsbereich verwalten.',
+  'Any use of the {{tool}} tool': 'Jede Verwendung des {{tool}}-Tools',
+  "{{tool}} commands matching '{{pattern}}'":
+    "{{tool}}-Befehle, die '{{pattern}}' entsprechen",
+  'From user settings': 'Aus Benutzereinstellungen',
+  'From project settings': 'Aus Projekteinstellungen',
+  'From session': 'Aus Sitzung',
+  'Project settings (local)': 'Projekteinstellungen (lokal)',
+  'Saved in .qwen/settings.local.json':
+    'Gespeichert in .qwen/settings.local.json',
+  'Project settings': 'Projekteinstellungen',
+  'Checked in at .qwen/settings.json': 'Eingecheckt in .qwen/settings.json',
+  'User settings': 'Benutzereinstellungen',
+  'Saved in at ~/.qwen/settings.json': 'Gespeichert in ~/.qwen/settings.json',
+  'Add a new rule…': 'Neue Regel hinzufügen…',
+  'Add {{type}} permission rule': '{{type}}-Berechtigungsregel hinzufügen',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    'Berechtigungsregeln sind ein Toolname, optional gefolgt von einem Bezeichner in Klammern.',
+  'e.g.,': 'z.B.',
+  or: 'oder',
+  'Enter permission rule…': 'Berechtigungsregel eingeben…',
+  'Enter to submit · Esc to cancel': 'Enter zum Absenden · Esc zum Abbrechen',
+  'Where should this rule be saved?': 'Wo soll diese Regel gespeichert werden?',
+  'Enter to confirm · Esc to cancel':
+    'Enter zum Bestätigen · Esc zum Abbrechen',
+  'Delete {{type}} rule?': '{{type}}-Regel löschen?',
+  'Are you sure you want to delete this permission rule?':
+    'Sind Sie sicher, dass Sie diese Berechtigungsregel löschen möchten?',
+  'Permissions:': 'Berechtigungen:',
+  '(←/→ or tab to cycle)': '(←/→ oder Tab zum Wechseln)',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '↑↓ navigieren · Enter auswählen · Tippen suchen · Esc abbrechen',
+  'Search…': 'Suche…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    'Verwenden Sie /trust, um die Ordnervertrauenseinstellungen für diesen Arbeitsbereich zu verwalten.',
 
   // ============================================================================
   // Status Bar

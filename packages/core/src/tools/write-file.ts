@@ -17,6 +17,7 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -132,13 +133,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
-    }
+  /**
+   * Write operations always need user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
 
+  /**
+   * Constructs the write-file diff confirmation details.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     const correctedContentResult = await getCorrectedFileContent(
       this.config,
       this.params.file_path,
@@ -146,8 +153,9 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     );
 
     if (correctedContentResult.error) {
-      // If file exists but couldn't be read, we can't show a diff for confirmation.
-      return false;
+      throw new Error(
+        `Error checking existing file '${this.params.file_path}': ${correctedContentResult.error.message}`,
+      );
     }
 
     const { originalContent, correctedContent } = correctedContentResult;
@@ -159,8 +167,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
     const fileDiff = Diff.createPatch(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      correctedContent, // Content after potential correction
+      originalContent,
+      correctedContent,
       'Current',
       'Proposed',
       DEFAULT_DIFF_OPTIONS,

@@ -15,6 +15,7 @@ import type {
   ToolResultDisplay,
   ToolRegistry,
 } from '../index.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -35,7 +36,8 @@ import type { Part, PartListUnion } from '@google/genai';
 import {
   MockModifiableTool,
   MockTool,
-  MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+  MOCK_TOOL_GET_DEFAULT_PERMISSION,
+  MOCK_TOOL_GET_CONFIRMATION_DETAILS,
 } from '../test-utils/mock-tool.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -83,14 +85,14 @@ class TestApprovalInvocation extends BaseToolInvocation<
     return `Test tool ${this.params.id}`;
   }
 
-  override async shouldConfirmExecute(): Promise<
-    ToolCallConfirmationDetails | false
-  > {
-    // Need confirmation unless approval mode is AUTO_EDIT
+  override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
+      return 'allow';
     }
+    return 'ask';
+  }
 
+  override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
     return {
       type: 'edit',
       title: `Confirm Test Tool ${this.params.id}`,
@@ -127,9 +129,13 @@ class AbortDuringConfirmationInvocation extends BaseToolInvocation<
     super(params);
   }
 
-  override async shouldConfirmExecute(
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  override async getConfirmationDetails(
     _signal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
+  ): Promise<ToolCallConfirmationDetails> {
     this.abortController.abort();
     throw this.abortError;
   }
@@ -213,7 +219,8 @@ describe('CoreToolScheduler', () => {
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {
     const mockTool = new MockTool({
       name: 'mockTool',
-      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
     });
     const declarativeTool = mockTool;
     const mockToolRegistry = {
@@ -998,9 +1005,13 @@ class MockEditToolInvocation extends BaseToolInvocation<
     return 'A mock edit tool invocation';
   }
 
-  override async shouldConfirmExecute(
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
+  ): Promise<ToolCallConfirmationDetails> {
     return {
       type: 'edit',
       title: 'Confirm Edit',
@@ -1140,7 +1151,8 @@ describe('CoreToolScheduler YOLO mode', () => {
     const mockTool = new MockTool({
       name: 'mockTool',
       execute: executeFn,
-      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
     });
     const declarativeTool = mockTool;
 
@@ -1501,118 +1513,6 @@ describe('CoreToolScheduler request queueing', () => {
     // Verify the completion callbacks were called correctly.
     expect(onAllToolCallsComplete.mock.calls[0][0][0].status).toBe('success');
     expect(onAllToolCallsComplete.mock.calls[1][0][0].status).toBe('success');
-  });
-
-  it('should auto-approve a tool call if it is on the allowedTools list', async () => {
-    // Arrange
-    const executeFn = vi.fn().mockResolvedValue({
-      llmContent: 'Tool executed',
-      returnDisplay: 'Tool executed',
-    });
-    const mockTool = new MockTool({
-      name: 'mockTool',
-      execute: executeFn,
-      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
-    });
-    const declarativeTool = mockTool;
-
-    const toolRegistry = {
-      getTool: () => declarativeTool,
-      getToolByName: () => declarativeTool,
-      getFunctionDeclarations: () => [],
-      tools: new Map(),
-      discovery: {},
-      registerTool: () => {},
-      getToolByDisplayName: () => declarativeTool,
-      getTools: () => [],
-      discoverTools: async () => {},
-      getAllTools: () => [],
-      getToolsByServer: () => [],
-    } as unknown as ToolRegistry;
-
-    const onAllToolCallsComplete = vi.fn();
-    const onToolCallsUpdate = vi.fn();
-
-    // Configure the scheduler to auto-approve the specific tool call.
-    const mockConfig = {
-      getSessionId: () => 'test-session-id',
-      getUsageStatisticsEnabled: () => true,
-      getDebugMode: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT, // Not YOLO mode
-      getAllowedTools: () => ['mockTool'], // Auto-approve this tool
-      getToolRegistry: () => toolRegistry,
-      getContentGeneratorConfig: () => ({
-        model: 'test-model',
-        authType: 'gemini',
-      }),
-      getShellExecutionConfig: () => ({
-        terminalWidth: 80,
-        terminalHeight: 24,
-      }),
-      getTerminalWidth: vi.fn(() => 80),
-      getTerminalHeight: vi.fn(() => 24),
-      storage: {
-        getProjectTempDir: () => '/tmp',
-      },
-      getTruncateToolOutputThreshold: () =>
-        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
-      getChatRecordingService: () => undefined,
-    } as unknown as Config;
-
-    const scheduler = new CoreToolScheduler({
-      config: mockConfig,
-      onAllToolCallsComplete,
-      onToolCallsUpdate,
-      getPreferredEditor: () => 'vscode',
-      onEditorClose: vi.fn(),
-    });
-
-    const abortController = new AbortController();
-    const request = {
-      callId: '1',
-      name: 'mockTool',
-      args: { param: 'value' },
-      isClientInitiated: false,
-      prompt_id: 'prompt-auto-approved',
-    };
-
-    // Act
-    await scheduler.schedule([request], abortController.signal);
-
-    // Wait for the tool execution to complete
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
-
-    // Assert
-    // 1. The tool's execute method was called directly.
-    expect(executeFn).toHaveBeenCalledWith({ param: 'value' });
-
-    // 2. The tool call status never entered 'awaiting_approval'.
-    const statusUpdates = onToolCallsUpdate.mock.calls
-      .map((call) => (call[0][0] as ToolCall)?.status)
-      .filter(Boolean);
-    expect(statusUpdates).not.toContain('awaiting_approval');
-    expect(statusUpdates).toEqual([
-      'validating',
-      'scheduled',
-      'executing',
-      'success',
-    ]);
-
-    // 3. The final callback indicates the tool call was successful.
-    expect(onAllToolCallsComplete).toHaveBeenCalled();
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as ToolCall[];
-    expect(completedCalls).toHaveLength(1);
-    const completedCall = completedCalls[0];
-    expect(completedCall.status).toBe('success');
-    if (completedCall.status === 'success') {
-      expect(completedCall.response.resultDisplay).toBe('Tool executed');
-    }
   });
 
   it('should handle two synchronous calls to schedule', async () => {

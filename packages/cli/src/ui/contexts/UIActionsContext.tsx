@@ -56,6 +56,7 @@ export interface UIActions {
   closeModelDialog: () => void;
   dismissCodingPlanUpdate: () => void;
   closeTrustDialog: () => void;
+  closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;
   handleIdePromptComplete: (result: IdeIntegrationNudgeResult) => void;

@@ -14,6 +14,7 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
@@ -35,15 +36,12 @@ import type {
 } from './modifiable-tool.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   countOccurrences,
   extractEditSnippet,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
-
-const debugLogger = createDebugLogger('EDIT');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -242,16 +240,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
-   * Handles the confirmation prompt for the Edit tool in the CLI.
-   * It needs to calculate the diff to show the user.
+   * Edit operations always need user confirmation (unless overridden by PM or ApprovalMode).
    */
-  async shouldConfirmExecute(
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
-    }
+  async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
 
+  /**
+   * Constructs the edit diff confirmation details.
+   */
+  async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);
@@ -260,13 +260,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         throw error;
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
-      debugLogger.warn(`Error preparing edit: ${errorMsg}`);
-      return false;
+      throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
     if (editData.error) {
-      debugLogger.warn(`Error: ${editData.error.display}`);
-      return false;
+      throw new Error(`Edit error: ${editData.error.display}`);
     }
 
     const fileName = path.basename(this.params.file_path);
@@ -300,8 +298,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         if (ideConfirmation) {
           const result = await ideConfirmation;
           if (result.status === 'accepted' && result.content) {
-            // TODO(chrstn): See https://github.com/google-gemini/gemini-cli/pull/5618#discussion_r2255413084
-            // for info on a possible race condition where the file is modified on disk while being edited.
             this.params.old_string = editData.currentContent ?? '';
             this.params.new_string = result.content;
           }

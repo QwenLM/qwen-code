@@ -32,7 +32,8 @@ import {
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
-import type { Settings } from './settings.js';
+import type { Settings , LoadedSettings } from './settings.js';
+import { SettingScope } from './settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -672,6 +673,7 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  loadedSettings?: LoadedSettings,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -982,6 +984,21 @@ export async function loadCliConfig(
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
     },
+    // Permission rule persistence callback (writes to settings files).
+    onPersistPermissionRule: loadedSettings
+      ? async (scope, ruleType, rule) => {
+          const settingScope =
+            scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+          const key = `permissions.${ruleType}`;
+          const currentRules: string[] =
+            loadedSettings.forScope(settingScope).settings.permissions?.[
+              ruleType
+            ] ?? [];
+          if (!currentRules.includes(rule)) {
+            loadedSettings.setValue(settingScope, key, [...currentRules, rule]);
+          }
+        }
+      : undefined,
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,
     mcpServerCommand: settings.mcp?.serverCommand,

@@ -53,6 +53,7 @@ export interface UIState {
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isTrustDialogOpen: boolean;
+  isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];

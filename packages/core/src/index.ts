@@ -168,7 +168,6 @@ export * from './tools/task.js';
 export * from './tools/todoWrite.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
-export * from './tools/tools.js';
 export * from './tools/web-fetch.js';
 export * from './tools/web-search/index.js';
 export * from './tools/write-file.js';

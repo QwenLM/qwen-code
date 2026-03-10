@@ -103,9 +103,9 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   // Legacy edit tool name
   replace: 'edit',
 
-  // Agent (subagent) rules — "Agent" is a category prefix.
-  // "Agent(Explore)" is parsed with toolName = "Agent" and specifier = "Explore"
-  Agent: 'Agent',
+  // Agent (subagent) rules — "Agent" is a user-friendly alias for the Task tool.
+  // "Agent(Explore)" is parsed with toolName = "task" and specifier = "Explore"
+  Agent: 'task',
 };
 
 /**
@@ -209,7 +209,7 @@ export function toolMatchesRuleToolName(
  *   "Read(./secrets/**)"        → gitignore-style path match
  *   "Edit(/src/**\/*.ts)"        → gitignore-style path match
  *   "WebFetch(domain:x.com)"    → domain match
- *   "Agent(Explore)"            → subagent name literal match
+ *   "Agent(Explore)"            → subagent type literal match (alias for Task)
  *   "mcp__server__tool"         → MCP tool (no specifier needed)
  */
 export function parseRule(raw: string): PermissionRule {
@@ -265,19 +265,24 @@ export function parseRules(raws: string[]): PermissionRule[] {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
 
 /**
- * Extract the first simple command from a compound shell command string.
- * Stops at the first shell operator boundary (&&, ||, ;, |) that is not
- * inside quotes.
+ * Split a compound shell command into its individual simple commands
+ * by splitting on unquoted shell operators (&&, ||, ;, |, etc.).
+ *
+ * Returns an array of trimmed simple command strings.
+ * For simple commands (no operators), returns a single-element array.
  *
  * Examples:
- *   "git status && rm -rf /"  → "git status"
- *   "ls -la | grep foo"      → "ls -la"
- *   "echo 'a && b'"          → "echo 'a && b'"  (inside quotes)
+ *   "git status && rm -rf /"  → ["git status", "rm -rf /"]
+ *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
+ *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
+ *   "a && b || c"            → ["a", "b", "c"]
  */
-function extractFirstCommand(command: string): string {
+export function splitCompoundCommand(command: string): string[] {
+  const commands: string[] = [];
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  let lastSplit = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -305,12 +310,24 @@ function extractFirstCommand(command: string): string {
     // Check for shell operators (longest match first)
     for (const op of SHELL_OPERATORS) {
       if (command.substring(i, i + op.length) === op) {
-        return command.substring(0, i).trimEnd();
+        const segment = command.substring(lastSplit, i).trim();
+        if (segment) {
+          commands.push(segment);
+        }
+        lastSplit = i + op.length;
+        i = lastSplit - 1; // -1 because the loop will i++
+        break;
       }
     }
   }
 
-  return command;
+  // Add the last segment
+  const lastSegment = command.substring(lastSplit).trim();
+  if (lastSegment) {
+    commands.push(lastSegment);
+  }
+
+  return commands.length > 0 ? commands : [command];
 }
 
 /**
@@ -336,8 +353,8 @@ export function matchesCommandPattern(
   pattern: string,
   command: string,
 ): boolean {
-  // Extract only the first simple command (operator awareness)
-  const firstCmd = extractFirstCommand(command);
+  // This function matches a single pattern against a single simple command.
+  // Compound command splitting is handled by the caller (PermissionManager).
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
@@ -348,7 +365,7 @@ export function matchesCommandPattern(
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
-    return firstCmd === pattern || firstCmd.startsWith(pattern + ' ');
+    return command === pattern || command.startsWith(pattern + ' ');
   }
 
   // Build regex from glob pattern with word-boundary semantics.
@@ -397,9 +414,9 @@ export function matchesCommandPattern(
   regex += '$';
 
   try {
-    return new RegExp(regex).test(firstCmd);
+    return new RegExp(regex).test(command);
   } catch {
-    return firstCmd === pattern;
+    return command === pattern;
   }
 }
 
@@ -622,6 +639,7 @@ export function matchesRule(
   filePath?: string,
   domain?: string,
   pathContext?: PathMatchContext,
+  specifier?: string,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -679,9 +697,10 @@ export function matchesRule(
 
     case 'literal':
     default: {
-      // Literal/exact matching (for Agent subagent names, etc.)
-      if (command !== undefined) {
-        return command === rule.specifier;
+      // Literal/exact matching (for Skill names, Agent subagent types, etc.)
+      const value = command ?? specifier;
+      if (value !== undefined) {
+        return value === rule.specifier;
       }
       return false;
     }

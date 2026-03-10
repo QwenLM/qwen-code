@@ -257,10 +257,18 @@ describe('WriteFileTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getConfirmationDetails', () => {
     const abortSignal = new AbortController().signal;
 
-    it('should return false if _getCorrectedFileContent returns an error', async () => {
+    it('should always return ask from getDefaultPermission', async () => {
+      const filePath = path.join(rootDir, 'confirm_permission_file.txt');
+      const params = { file_path: filePath, content: 'test content' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should throw if _getCorrectedFileContent returns an error', async () => {
       const filePath = path.join(rootDir, 'confirm_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
@@ -271,8 +279,9 @@ describe('WriteFileTool', () => {
       );
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow('Error checking existing file');
 
       fs.chmodSync(filePath, 0o600);
     });
@@ -283,7 +292,7 @@ describe('WriteFileTool', () => {
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -310,7 +319,7 @@ describe('WriteFileTool', () => {
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -342,7 +351,7 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -361,7 +370,7 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        await invocation.shouldConfirmExecute(abortSignal);
+        await invocation.getConfirmationDetails(abortSignal);
 
         expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
       });
@@ -372,7 +381,7 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        await invocation.shouldConfirmExecute(abortSignal);
+        await invocation.getConfirmationDetails(abortSignal);
 
         expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
       });
@@ -383,7 +392,7 @@ describe('WriteFileTool', () => {
         const invocation = tool.build(params);
 
         // This is the key part: get the confirmation details
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -411,7 +420,7 @@ describe('WriteFileTool', () => {
         });
         mockIdeClient.openDiff.mockReturnValue(diffPromise);
 
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -469,7 +478,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -504,7 +514,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -536,7 +547,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content };
       const invocation = tool.build(params);
       // Simulate confirmation if your logic requires it before execute, or remove if not needed for this path
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&

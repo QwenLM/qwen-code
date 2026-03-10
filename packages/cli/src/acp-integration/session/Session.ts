@@ -511,14 +511,17 @@ export class Session implements SessionContext {
         );
       }
 
-      const confirmationDetails =
+      // Use the new permission flow: getDefaultPermission + getConfirmationDetails
+      const defaultPermission =
         this.config.getApprovalMode() !== ApprovalMode.YOLO
-          ? await invocation.shouldConfirmExecute(abortSignal)
-          : false;
+          ? await invocation.getDefaultPermission()
+          : 'allow';
+
+      const needsConfirmation = defaultPermission === 'ask';
 
       // Check for plan mode enforcement - block non-read-only tools
       const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
-      if (isPlanMode && !isExitPlanModeTool && confirmationDetails) {
+      if (isPlanMode && !isExitPlanModeTool && needsConfirmation) {
         // In plan mode, block any tool that requires confirmation (write operations)
         return errorResponse(
           new Error(
@@ -528,7 +531,17 @@ export class Session implements SessionContext {
         );
       }
 
-      if (confirmationDetails) {
+      if (defaultPermission === 'deny') {
+        return errorResponse(
+          new Error(
+            `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`,
+          ),
+        );
+      }
+
+      if (needsConfirmation) {
+        const confirmationDetails =
+          await invocation.getConfirmationDetails(abortSignal);
         const content: acp.ToolCallContent[] = [];
 
         if (confirmationDetails.type === 'edit') {
@@ -589,6 +602,8 @@ export class Session implements SessionContext {
             );
           case ToolConfirmationOutcome.ProceedOnce:
           case ToolConfirmationOutcome.ProceedAlways:
+          case ToolConfirmationOutcome.ProceedAlwaysProject:
+          case ToolConfirmationOutcome.ProceedAlwaysUser:
           case ToolConfirmationOutcome.ProceedAlwaysServer:
           case ToolConfirmationOutcome.ProceedAlwaysTool:
           case ToolConfirmationOutcome.ModifyWithEditor:
@@ -980,8 +995,13 @@ function toPermissionOptions(
     case 'exec':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow ${confirmation.rootCommand}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project: ${confirmation.rootCommand}`,
+          kind: 'allow_always',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user: ${confirmation.rootCommand}`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,
@@ -989,13 +1009,13 @@ function toPermissionOptions(
     case 'mcp':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-          name: `Always Allow ${confirmation.serverName}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project: ${confirmation.toolName}`,
           kind: 'allow_always',
         },
         {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-          name: `Always Allow ${confirmation.toolName}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user: ${confirmation.toolName}`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,
@@ -1003,8 +1023,13 @@ function toPermissionOptions(
     case 'info':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project`,
+          kind: 'allow_always',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,

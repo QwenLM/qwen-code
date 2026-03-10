@@ -93,6 +93,12 @@ export interface PermissionCheckContext {
    * The domain being fetched (only for WebFetch).
    */
   domain?: string;
+  /**
+   * A generic specifier for literal matching (e.g. skill name for Skill,
+   * subagent type for Task/Agent). Used when the rule has a literal
+   * specifier that doesn't fall into command/path/domain categories.
+   */
+  specifier?: string;
 }
 
 /** A rule with its type and source scope, used for listing rules. */
