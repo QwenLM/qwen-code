@@ -11,6 +11,7 @@
  * These types are used across different agent orchestration modes.
  */
 
+import type { Content } from '@google/genai';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
   PromptConfig,
@@ -93,6 +94,12 @@ export interface InProcessSpawnConfig {
     apiKey?: string;
     baseUrl?: string;
   };
+  /**
+   * Optional chat history from the parent session. When provided, this
+   * history is prepended to the agent's chat so it has conversational
+   * context from the session that spawned it.
+   */
+  chatHistory?: Content[];
 }
 
 /**

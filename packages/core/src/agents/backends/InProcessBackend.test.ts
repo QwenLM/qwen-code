@@ -407,6 +407,34 @@ describe('InProcessBackend', () => {
     expect(result).toBe(true);
   });
 
+  describe('chat history', () => {
+    it('should pass chatHistory to AgentInteractive config', async () => {
+      await backend.init();
+
+      const chatHistory = [
+        { role: 'user' as const, parts: [{ text: 'prior question' }] },
+        { role: 'model' as const, parts: [{ text: 'prior answer' }] },
+      ];
+      const config = createSpawnConfig('agent-1');
+      config.inProcess!.chatHistory = chatHistory;
+
+      await backend.spawnAgent(config);
+
+      const agent = backend.getAgent('agent-1');
+      expect(agent).toBeDefined();
+      expect(agent!.config.chatHistory).toEqual(chatHistory);
+    });
+
+    it('should leave chatHistory undefined when not provided', async () => {
+      await backend.init();
+      await backend.spawnAgent(createSpawnConfig('agent-1'));
+
+      const agent = backend.getAgent('agent-1');
+      expect(agent).toBeDefined();
+      expect(agent!.config.chatHistory).toBeUndefined();
+    });
+  });
+
   describe('auth isolation', () => {
     it('should create per-agent ContentGenerator when authOverrides is provided', async () => {
       await backend.init();

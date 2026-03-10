@@ -155,6 +155,7 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
+      agentId,
       messages.length,
       pendingApprovals?.size,
       liveOutputs?.size,

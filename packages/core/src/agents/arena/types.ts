@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Content } from '@google/genai';
 import type { WorktreeInfo } from '../../services/gitWorktreeService.js';
 import type { DisplayMode } from '../backends/types.js';
 import type { AgentStatus } from '../runtime/agent-types.js';
@@ -65,6 +66,8 @@ export interface ArenaConfig {
   approvalMode?: string;
   /** Source repository path */
   sourceRepoPath: string;
+  /** Chat history from the parent session for agent context seeding. */
+  chatHistory?: Content[];
 }
 
 /**
@@ -161,6 +164,12 @@ export interface ArenaStartOptions {
   rows?: number;
   /** Display mode preference */
   displayMode?: DisplayMode;
+  /**
+   * Optional chat history from the main session to seed each arena agent
+   * with conversational context. When provided, this history is prepended
+   * to each agent's chat so they understand the prior conversation.
+   */
+  chatHistory?: Content[];
 }
 
 /**

@@ -98,7 +98,10 @@ export class AgentInteractive {
   async start(context: ContextState): Promise<void> {
     this.setStatus(AgentStatus.INITIALIZING);
 
-    this.chat = await this.core.createChat(context, { interactive: true });
+    this.chat = await this.core.createChat(context, {
+      interactive: true,
+      extraHistory: this.config.chatHistory,
+    });
     if (!this.chat) {
       this.error = 'Failed to create chat session';
       this.setStatus(AgentStatus.FAILED);

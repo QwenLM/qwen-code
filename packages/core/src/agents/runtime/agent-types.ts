@@ -143,6 +143,11 @@ export interface AgentInteractiveConfig {
   maxTurnsPerMessage?: number;
   /** Max wall-clock minutes per enqueued message (default: unlimited). */
   maxTimeMinutesPerMessage?: number;
+  /**
+   * Optional conversation history from a parent session to seed the
+   * agent's chat with prior context.
+   */
+  chatHistory?: Content[];
 }
 
 /**

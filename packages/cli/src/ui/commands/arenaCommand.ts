@@ -21,6 +21,7 @@ import {
   ArenaSessionStatus,
   AuthType,
   createDebugLogger,
+  stripStartupContext,
   type Config,
   type ArenaModelConfig,
   type ArenaAgentErrorEvent,
@@ -171,6 +172,18 @@ function executeArenaCommand(
   ui: CommandContext['ui'],
   input: ArenaExecutionInput,
 ): void {
+  // Capture the main session's chat history so arena agents start with
+  // conversational context. Strip the leading startup context (env info
+  // user message + model ack) because each agent generates its own for
+  // its worktree directory — keeping the parent's would duplicate it.
+  let chatHistory;
+  try {
+    const fullHistory = config.getGeminiClient().getHistory();
+    chatHistory = stripStartupContext(fullHistory);
+  } catch {
+    debugLogger.debug('Could not retrieve chat history for arena agents');
+  }
+
   const manager = new ArenaManager(config);
   const emitter = manager.getEventEmitter();
   const detachListeners: Array<() => void> = [];
@@ -331,6 +344,7 @@ function executeArenaCommand(
       cols,
       rows,
       approvalMode: input.approvalMode,
+      chatHistory,
     })
     .then(
       () => {

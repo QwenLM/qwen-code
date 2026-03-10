@@ -334,6 +334,45 @@ describe('ArenaManager', () => {
     });
   });
 
+  describe('chat history forwarding', () => {
+    it('should pass chatHistory to backend spawnAgent calls', async () => {
+      const manager = new ArenaManager(mockConfig as never);
+      const chatHistory = [
+        { role: 'user' as const, parts: [{ text: 'prior question' }] },
+        { role: 'model' as const, parts: [{ text: 'prior answer' }] },
+      ];
+
+      await manager.start({
+        ...createValidStartOptions(),
+        chatHistory,
+      });
+
+      // Both agents should have been spawned with chatHistory in
+      // the inProcess config.
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: { chatHistory?: unknown };
+        };
+        expect(spawnConfig.inProcess?.chatHistory).toEqual(chatHistory);
+      }
+    });
+
+    it('should pass undefined chatHistory when not provided', async () => {
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: { chatHistory?: unknown };
+        };
+        expect(spawnConfig.inProcess?.chatHistory).toBeUndefined();
+      }
+    });
+  });
+
   describe('active session lifecycle', () => {
     it('cancel should stop backend and move session to CANCELLED', async () => {
       const manager = new ArenaManager(mockConfig as never);

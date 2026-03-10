@@ -294,6 +294,7 @@ export class ArenaManager {
       timeoutSeconds: options.timeoutSeconds ?? arenaSettings?.timeoutSeconds,
       approvalMode: options.approvalMode,
       sourceRepoPath,
+      chatHistory: options.chatHistory,
     };
 
     debugLogger.info(`Starting Arena session: ${this.sessionId}`);
@@ -1065,6 +1066,7 @@ export class ArenaManager {
           apiKey: model.apiKey,
           baseUrl: model.baseUrl,
         },
+        chatHistory: this.arenaConfig?.chatHistory,
       },
     };
 

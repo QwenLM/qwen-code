@@ -533,6 +533,42 @@ describe('AgentInteractive', () => {
     await agent.shutdown();
   });
 
+  // ─── Chat History ────────────────────────────────────────────
+
+  it('should pass chatHistory as extraHistory to createChat', async () => {
+    const { core } = createMockCore();
+    const chatHistory = [
+      { role: 'user' as const, parts: [{ text: 'earlier question' }] },
+      { role: 'model' as const, parts: [{ text: 'earlier answer' }] },
+    ];
+    const config = createConfig({ chatHistory });
+    const agent = new AgentInteractive(config, core);
+
+    await agent.start(context);
+
+    expect(core.createChat).toHaveBeenCalledWith(context, {
+      interactive: true,
+      extraHistory: chatHistory,
+    });
+
+    await agent.shutdown();
+  });
+
+  it('should pass undefined extraHistory when chatHistory is not set', async () => {
+    const { core } = createMockCore();
+    const config = createConfig();
+    const agent = new AgentInteractive(config, core);
+
+    await agent.start(context);
+
+    expect(core.createChat).toHaveBeenCalledWith(context, {
+      interactive: true,
+      extraHistory: undefined,
+    });
+
+    await agent.shutdown();
+  });
+
   // ─── Events ────────────────────────────────────────────────
 
   it('should emit status_change events', async () => {

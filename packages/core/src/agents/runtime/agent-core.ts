@@ -94,6 +94,12 @@ export interface CreateChatOptions {
    * Used by AgentInteractive for persistent interactive agents.
    */
   interactive?: boolean;
+  /**
+   * Optional conversation history from a parent session. When provided,
+   * this history is prepended to the chat so the agent has prior
+   * conversational context (e.g., from the main session that spawned it).
+   */
+  extraHistory?: Content[];
 }
 
 /**
@@ -219,6 +225,7 @@ export class AgentCore {
 
     const startHistory = [
       ...envHistory,
+      ...(options?.extraHistory ?? []),
       ...(this.promptConfig.initialMessages ?? []),
     ];
 
