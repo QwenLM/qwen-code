@@ -230,16 +230,14 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return error for path outside root', () => {
+    it('should allow path outside root (external path support)', () => {
       const params: EditToolParams = {
         file_path: path.join(tempDir, 'outside-root.txt'),
         old_string: 'old',
         new_string: 'new',
       };
       const error = tool.validateToolParams(params);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
+      expect(error).toBeNull();
     });
   });
 
@@ -869,17 +867,14 @@ describe('EditTool', () => {
       expect(tool.validateToolParams(validPath)).toBeNull();
     });
 
-    it('should reject paths outside workspace root', () => {
-      const invalidPath = {
+    it('should allow paths outside workspace root (external path support)', () => {
+      const externalPath = {
         file_path: '/etc/passwd',
         old_string: 'root',
         new_string: 'hacked',
       };
-      const error = tool.validateToolParams(invalidPath);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
-      expect(error).toContain(rootDir);
+      const error = tool.validateToolParams(externalPath);
+      expect(error).toBeNull();
     });
   });
 

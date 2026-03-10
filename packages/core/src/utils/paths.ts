@@ -253,6 +253,13 @@ export interface PathValidationOptions {
    * If true, allows both files and directories. If false (default), only allows directories.
    */
   allowFiles?: boolean;
+
+  /**
+   * If true, allows paths outside the workspace boundaries.
+   * The caller is responsible for adjusting permissions (e.g. 'ask') for
+   * external paths.
+   */
+  allowExternalPaths?: boolean;
 }
 
 /**
@@ -268,10 +275,13 @@ export function validatePath(
   resolvedPath: string,
   options: PathValidationOptions = {},
 ): void {
-  const { allowFiles = false } = options;
+  const { allowFiles = false, allowExternalPaths = false } = options;
   const workspaceContext = config.getWorkspaceContext();
 
-  if (!workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+  if (
+    !allowExternalPaths &&
+    !workspaceContext.isPathWithinWorkspace(resolvedPath)
+  ) {
     throw new Error('Path is not within workspace');
   }
 

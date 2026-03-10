@@ -422,14 +422,6 @@ export class WriteFileTool
       return `File path must be absolute: ${filePath}`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(filePath)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
-    }
-
     try {
       if (fs.existsSync(filePath)) {
         const stats = fs.lstatSync(filePath);

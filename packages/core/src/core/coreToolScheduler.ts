@@ -42,6 +42,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import { buildPermissionRules } from '../permissions/rule-parser.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -884,40 +885,53 @@ export class CoreToolScheduler {
           let finalPermission = defaultPermission;
           let pmForcedAsk = false;
 
-          if (pm && defaultPermission !== 'deny') {
-            // Build invocation context from tool params.
-            const params = invocation.params as Record<string, unknown>;
-            const shellCommand =
-              'command' in params ? String(params['command']) : undefined;
-            const filePath =
-              typeof params['absolute_path'] === 'string'
-                ? params['absolute_path']
-                : typeof params['file_path'] === 'string'
-                  ? params['file_path']
-                  : undefined;
-            let domain: string | undefined;
-            if (typeof params['url'] === 'string') {
-              try {
-                domain = new URL(params['url']).hostname;
-              } catch {
-                // malformed URL — leave domain undefined
-              }
+          // Build invocation context from tool params.
+          // This is used both by the PM evaluation below and later by
+          // centralized permission-rule generation (Always Allow).
+          const toolParams = invocation.params as Record<string, unknown>;
+          const shellCommand =
+            'command' in toolParams ? String(toolParams['command']) : undefined;
+          // Extract file path — tools use 'absolute_path', 'file_path',
+          // or 'path' (LS / grep / glob).
+          let invocationFilePath =
+            typeof toolParams['absolute_path'] === 'string'
+              ? toolParams['absolute_path']
+              : typeof toolParams['file_path'] === 'string'
+                ? toolParams['file_path']
+                : undefined;
+          if (
+            invocationFilePath === undefined &&
+            typeof toolParams['path'] === 'string'
+          ) {
+            // LS uses absolute paths; grep/glob may be relative to targetDir.
+            invocationFilePath = path.isAbsolute(toolParams['path'])
+              ? toolParams['path']
+              : path.resolve(this.config.getTargetDir(), toolParams['path']);
+          }
+          let invocationDomain: string | undefined;
+          if (typeof toolParams['url'] === 'string') {
+            try {
+              invocationDomain = new URL(toolParams['url']).hostname;
+            } catch {
+              // malformed URL — leave domain undefined
             }
-            // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
-            const literalSpecifier =
-              typeof params['skill'] === 'string'
-                ? params['skill']
-                : typeof params['subagent_type'] === 'string'
-                  ? params['subagent_type']
-                  : undefined;
-            const pmCtx = {
-              toolName: reqInfo.name,
-              command: shellCommand,
-              filePath,
-              domain,
-              specifier: literalSpecifier,
-            };
+          }
+          // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+          const literalSpecifier =
+            typeof toolParams['skill'] === 'string'
+              ? toolParams['skill']
+              : typeof toolParams['subagent_type'] === 'string'
+                ? toolParams['subagent_type']
+                : undefined;
+          const pmCtx = {
+            toolName: reqInfo.name,
+            command: shellCommand,
+            filePath: invocationFilePath,
+            domain: invocationDomain,
+            specifier: literalSpecifier,
+          };
 
+          if (pm && defaultPermission !== 'deny') {
             if (pm.hasRelevantRules(pmCtx)) {
               const pmDecision = pm.evaluate(pmCtx);
               if (pmDecision !== 'default') {
@@ -988,6 +1002,21 @@ export class CoreToolScheduler {
             // Get confirmation details from the tool
             const confirmationDetails =
               await invocation.getConfirmationDetails(signal);
+
+            // ── Centralised rule injection ──────────────────────────────────
+            // If the tool did not provide its own permissionRules (e.g. Shell
+            // and WebFetch already do), generate minimum-scope rules from
+            // the invocation context so that "Always Allow" persists a
+            // properly scoped rule rather than nothing.
+            // Only exec/mcp/info types support the permissionRules field.
+            if (
+              (confirmationDetails.type === 'exec' ||
+                confirmationDetails.type === 'mcp' ||
+                confirmationDetails.type === 'info') &&
+              !confirmationDetails.permissionRules
+            ) {
+              confirmationDetails.permissionRules = buildPermissionRules(pmCtx);
+            }
 
             // AUTO_EDIT mode: auto-approve edit-like and info tools
             if (

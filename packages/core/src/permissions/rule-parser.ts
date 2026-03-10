@@ -7,7 +7,11 @@
 import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
-import type { PermissionRule, SpecifierKind } from './types.js';
+import type {
+  PermissionCheckContext,
+  PermissionRule,
+  SpecifierKind,
+} from './types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool name aliases & categories
@@ -252,6 +256,137 @@ export function parseRule(raw: string): PermissionRule {
  */
 export function parseRules(raws: string[]): PermissionRule[] {
   return raws.filter((r) => r && r.trim()).map(parseRule);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimum-scope rule generation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Map from canonical tool names to the preferred display names used in
+ * permission rule strings.
+ *
+ * Read tools all map to "Read" (meta-category) so a single rule covers the
+ * entire family (read_file, grep_search, glob, list_directory).
+ * Edit tools map to "Edit" (meta-category) covering edit + write_file.
+ * Other tools use their individual display alias.
+ */
+const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
+  // Read meta-category
+  read_file: 'Read',
+  grep_search: 'Read',
+  glob: 'Read',
+  list_directory: 'Read',
+  // Edit meta-category
+  edit: 'Edit',
+  write_file: 'Edit',
+  // Shell
+  run_shell_command: 'Bash',
+  // Web
+  web_fetch: 'WebFetch',
+  web_search: 'WebSearch',
+  // Agent / Skill
+  task: 'Task',
+  skill: 'Skill',
+  // Others
+  save_memory: 'SaveMemory',
+  todo_write: 'TodoWrite',
+  lsp: 'Lsp',
+  exit_plan_mode: 'ExitPlanMode',
+};
+
+/**
+ * Get the human-friendly display name to use in a permission rule string
+ * for a given canonical tool name.
+ *
+ * Falls back to the canonical name itself for unknown tools (e.g. MCP tools).
+ */
+export function getRuleDisplayName(canonicalToolName: string): string {
+  return CANONICAL_TO_RULE_DISPLAY[canonicalToolName] ?? canonicalToolName;
+}
+
+/**
+ * Tools whose parameter path points to a **file** (as opposed to a directory).
+ *
+ * For these tools the minimum-scope rule uses `path.dirname()` so the rule
+ * covers the containing directory rather than a single file — e.g.
+ *   read_file("/Users/alice/.secrets") → `Read(//Users/alice)`
+ *
+ * Directory-targeted tools (list_directory, grep_search, glob) already receive
+ * a directory path, so they use it as-is.
+ */
+const FILE_TARGETED_TOOLS = new Set(['read_file', 'edit', 'write_file']);
+
+/**
+ * Build minimum-scope permission rule strings from a permission check context.
+ *
+ * This is the **single, centralised** function for generating rules to be
+ * persisted when a user selects "Always Allow".  Rules follow the format
+ * `DisplayName(specifier)` where the specifier narrows the rule to the
+ * minimum scope required by the current invocation.
+ *
+ * Specifier selection by tool category:
+ *   - **path** tools (Read/Edit):
+ *       File-targeted tools (read_file, edit, write_file) use the **parent
+ *       directory** so the rule covers the whole directory, not a single file.
+ *       Directory-targeted tools (grep, glob, ls) use the directory as-is.
+ *       The `//` prefix denotes an absolute filesystem path in the rule grammar.
+ *   - **domain** tools (WebFetch): `WebFetch(example.com)`
+ *   - **command** tools (Bash): `Bash(command)` — note: Shell already generates
+ *     its own fine-grained rules via `extractCommandRules`; this is a fallback.
+ *   - **literal** tools (Skill/Task): `Skill(name)` / `Task(type)`
+ *
+ * If no specifier is available the rule falls back to the bare display name
+ * (e.g. `Read`), which matches **all** invocations of that tool category.
+ *
+ * @param ctx - The permission check context (built in coreToolScheduler L4).
+ * @returns Array of rule strings (usually a single element).
+ */
+export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
+  const canonicalName = resolveToolName(ctx.toolName);
+  const displayName = getRuleDisplayName(canonicalName);
+  const kind = getSpecifierKind(canonicalName);
+
+  switch (kind) {
+    case 'command':
+      // Shell commands — fallback only; shell.ts provides its own rules via
+      // extractCommandRules which are more granular (per-simple-command).
+      if (ctx.command) {
+        return [`${displayName}(${ctx.command})`];
+      }
+      return [displayName];
+
+    case 'path':
+      if (ctx.filePath) {
+        // For file-targeted tools, scope to the containing directory;
+        // for directory-targeted tools the path is already a directory.
+        const dirPath = FILE_TARGETED_TOOLS.has(canonicalName)
+          ? path.dirname(ctx.filePath)
+          : ctx.filePath;
+        // Use the `//` prefix for absolute filesystem paths in rule grammar.
+        // Append `/**` so the gitignore-style glob matches all files in the
+        // directory recursively (picomatch uses `**` for recursive descent).
+        // resolvePathPattern("//foo/**") → "/foo/**" — round-trips correctly.
+        const specifier = dirPath.startsWith('/')
+          ? `/${dirPath}/**`
+          : `${dirPath}/**`;
+        return [`${displayName}(${specifier})`];
+      }
+      return [displayName];
+
+    case 'domain':
+      if (ctx.domain) {
+        return [`${displayName}(${ctx.domain})`];
+      }
+      return [displayName];
+
+    case 'literal':
+    default:
+      if (ctx.specifier) {
+        return [`${displayName}(${ctx.specifier})`];
+      }
+      return [displayName];
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -17,6 +17,8 @@ import {
   getSpecifierKind,
   toolMatchesRuleToolName,
   splitCompoundCommand,
+  buildPermissionRules,
+  getRuleDisplayName,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
@@ -1205,6 +1207,247 @@ describe('PermissionManager', () => {
         (r) => r.scope === 'session' && r.type === 'allow',
       );
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
+    });
+  });
+});
+
+// ─── getRuleDisplayName ──────────────────────────────────────────────────────
+
+describe('getRuleDisplayName', () => {
+  it('maps read tools to "Read" meta-category', () => {
+    expect(getRuleDisplayName('read_file')).toBe('Read');
+    expect(getRuleDisplayName('grep_search')).toBe('Read');
+    expect(getRuleDisplayName('glob')).toBe('Read');
+    expect(getRuleDisplayName('list_directory')).toBe('Read');
+  });
+
+  it('maps edit tools to "Edit" meta-category', () => {
+    expect(getRuleDisplayName('edit')).toBe('Edit');
+    expect(getRuleDisplayName('write_file')).toBe('Edit');
+  });
+
+  it('maps shell to "Bash"', () => {
+    expect(getRuleDisplayName('run_shell_command')).toBe('Bash');
+  });
+
+  it('maps web_fetch to "WebFetch"', () => {
+    expect(getRuleDisplayName('web_fetch')).toBe('WebFetch');
+  });
+
+  it('maps task to "Task" and skill to "Skill"', () => {
+    expect(getRuleDisplayName('task')).toBe('Task');
+    expect(getRuleDisplayName('skill')).toBe('Skill');
+  });
+
+  it('returns the canonical name for unknown tools (e.g. MCP)', () => {
+    expect(getRuleDisplayName('mcp__server__tool')).toBe('mcp__server__tool');
+  });
+});
+
+// ─── buildPermissionRules ────────────────────────────────────────────────────
+
+describe('buildPermissionRules', () => {
+  describe('path-based tools (Read/Edit)', () => {
+    it('generates Read rule scoped to parent directory for read_file', () => {
+      const rules = buildPermissionRules({
+        toolName: 'read_file',
+        filePath: '/Users/alice/.secrets',
+      });
+      // read_file is file-targeted → dirname gives /Users/alice, plus /** glob
+      expect(rules).toEqual(['Read(//Users/alice/**)']);
+    });
+
+    it('generates Read rule with directory as-is for grep_search', () => {
+      const rules = buildPermissionRules({
+        toolName: 'grep_search',
+        filePath: '/external/dir',
+      });
+      // grep_search is directory-targeted → path used as-is, plus /** glob
+      expect(rules).toEqual(['Read(//external/dir/**)']);
+    });
+
+    it('generates Read rule with directory as-is for glob', () => {
+      const rules = buildPermissionRules({
+        toolName: 'glob',
+        filePath: '/tmp/data',
+      });
+      expect(rules).toEqual(['Read(//tmp/data/**)']);
+    });
+
+    it('generates Read rule with directory as-is for list_directory', () => {
+      const rules = buildPermissionRules({
+        toolName: 'list_directory',
+        filePath: '/home/user/docs',
+      });
+      expect(rules).toEqual(['Read(//home/user/docs/**)']);
+    });
+
+    it('generates Edit rule scoped to parent directory for edit', () => {
+      const rules = buildPermissionRules({
+        toolName: 'edit',
+        filePath: '/external/file.ts',
+      });
+      // edit is file-targeted → dirname gives /external, plus /** glob
+      expect(rules).toEqual(['Edit(//external/**)']);
+    });
+
+    it('generates Edit rule scoped to parent directory for write_file', () => {
+      const rules = buildPermissionRules({
+        toolName: 'write_file',
+        filePath: '/tmp/output.txt',
+      });
+      expect(rules).toEqual(['Edit(//tmp/**)']);
+    });
+
+    it('falls back to bare display name when no filePath', () => {
+      const rules = buildPermissionRules({ toolName: 'read_file' });
+      expect(rules).toEqual(['Read']);
+    });
+  });
+
+  describe('generated rules round-trip through parseRule and matchesRule', () => {
+    it('Read rule for external file covers the containing directory', () => {
+      const rules = buildPermissionRules({
+        toolName: 'read_file',
+        filePath: '/Users/alice/.secrets',
+      });
+      expect(rules).toHaveLength(1);
+      expect(rules[0]).toBe('Read(//Users/alice/**)');
+
+      const parsed = parseRule(rules[0]!);
+      expect(parsed.toolName).toBe('read_file');
+      expect(parsed.specifier).toBe('//Users/alice/**');
+      expect(parsed.specifierKind).toBe('path');
+
+      // Should match the original file (inside the directory)
+      expect(
+        matchesRule(
+          parsed,
+          'read_file',
+          undefined,
+          '/Users/alice/.secrets',
+          undefined,
+          { projectRoot: '/some/project', cwd: '/some/project' },
+        ),
+      ).toBe(true);
+
+      // Should also match other files in the same directory
+      expect(
+        matchesRule(
+          parsed,
+          'read_file',
+          undefined,
+          '/Users/alice/.other',
+          undefined,
+          { projectRoot: '/some/project', cwd: '/some/project' },
+        ),
+      ).toBe(true);
+
+      // Should NOT match files in a different directory
+      expect(
+        matchesRule(
+          parsed,
+          'read_file',
+          undefined,
+          '/Users/bob/.secrets',
+          undefined,
+          { projectRoot: '/some/project', cwd: '/some/project' },
+        ),
+      ).toBe(false);
+    });
+
+    it('Read rule also matches other read-family tools on the same path', () => {
+      const rules = buildPermissionRules({
+        toolName: 'grep_search',
+        filePath: '/external/dir',
+      });
+      const parsed = parseRule(rules[0]!);
+
+      // Should match grep_search on a file inside the dir
+      expect(
+        matchesRule(
+          parsed,
+          'grep_search',
+          undefined,
+          '/external/dir/file.txt',
+          undefined,
+          { projectRoot: '/p', cwd: '/p' },
+        ),
+      ).toBe(true);
+
+      // Should also match read_file (Read meta-category)
+      expect(
+        matchesRule(
+          parsed,
+          'read_file',
+          undefined,
+          '/external/dir/other.ts',
+          undefined,
+          { projectRoot: '/p', cwd: '/p' },
+        ),
+      ).toBe(true);
+    });
+  });
+
+  describe('domain-based tools', () => {
+    it('generates WebFetch rule with domain specifier', () => {
+      const rules = buildPermissionRules({
+        toolName: 'web_fetch',
+        domain: 'example.com',
+      });
+      expect(rules).toEqual(['WebFetch(example.com)']);
+    });
+
+    it('falls back to bare display name when no domain', () => {
+      const rules = buildPermissionRules({ toolName: 'web_fetch' });
+      expect(rules).toEqual(['WebFetch']);
+    });
+  });
+
+  describe('command-based tools', () => {
+    it('generates Bash rule with command specifier', () => {
+      const rules = buildPermissionRules({
+        toolName: 'run_shell_command',
+        command: 'git status',
+      });
+      expect(rules).toEqual(['Bash(git status)']);
+    });
+
+    it('falls back to bare display name when no command', () => {
+      const rules = buildPermissionRules({ toolName: 'run_shell_command' });
+      expect(rules).toEqual(['Bash']);
+    });
+  });
+
+  describe('literal-specifier tools', () => {
+    it('generates Skill rule with specifier', () => {
+      const rules = buildPermissionRules({
+        toolName: 'skill',
+        specifier: 'Explore',
+      });
+      expect(rules).toEqual(['Skill(Explore)']);
+    });
+
+    it('generates Task rule with specifier', () => {
+      const rules = buildPermissionRules({
+        toolName: 'task',
+        specifier: 'research',
+      });
+      expect(rules).toEqual(['Task(research)']);
+    });
+
+    it('falls back to bare display name when no specifier', () => {
+      const rules = buildPermissionRules({ toolName: 'skill' });
+      expect(rules).toEqual(['Skill']);
+    });
+  });
+
+  describe('unknown / MCP tools', () => {
+    it('uses the canonical name as display for MCP tools', () => {
+      const rules = buildPermissionRules({
+        toolName: 'mcp__puppeteer__navigate',
+      });
+      expect(rules).toEqual(['mcp__puppeteer__navigate']);
     });
   });
 });

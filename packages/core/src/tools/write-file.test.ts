@@ -151,15 +151,14 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).toThrow(/File path must be absolute/);
     });
 
-    it('should throw an error for a path outside root', () => {
+    it('should allow a path outside root (external path support)', () => {
       const outsidePath = path.resolve(tempDir, 'outside-root.txt');
       const params = {
         file_path: outsidePath,
         content: 'hello',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should throw an error if path is a directory', () => {
@@ -619,14 +618,13 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).not.toThrow();
     });
 
-    it('should reject paths outside workspace root', () => {
+    it('should allow paths outside workspace root (external path support)', () => {
       const params = {
         file_path: '/etc/passwd',
-        content: 'malicious',
+        content: 'test',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
   });
 
