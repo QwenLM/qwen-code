@@ -16,8 +16,8 @@ import { CommandKind } from './types.js';
 import {
   ArenaManager,
   ArenaEventType,
-  AgentStatus,
   isTerminalStatus,
+  isSuccessStatus,
   ArenaSessionStatus,
   AuthType,
   createDebugLogger,
@@ -238,7 +238,9 @@ function executeArenaCommand(
       return;
     }
 
-    if (event.type === 'info') {
+    if (event.type === 'success') {
+      addAndRecordArenaMessage(MessageType.SUCCESS, event.message);
+    } else if (event.type === 'info') {
       addAndRecordArenaMessage(MessageType.INFO, event.message);
     } else {
       addAndRecordArenaMessage(
@@ -597,9 +599,7 @@ export const arenaCommand: SlashCommand = {
         }
 
         const agents = manager.getAgentStates();
-        const hasSuccessful = agents.some(
-          (a) => a.status === AgentStatus.COMPLETED,
-        );
+        const hasSuccessful = agents.some((a) => isSuccessStatus(a.status));
 
         if (!hasSuccessful) {
           return {
@@ -616,7 +616,7 @@ export const arenaCommand: SlashCommand = {
           const matchingAgent = agents.find((a) => {
             const label = a.model.displayName || a.model.modelId;
             return (
-              a.status === AgentStatus.COMPLETED &&
+              isSuccessStatus(a.status) &&
               (label.toLowerCase() === trimmedArgs.toLowerCase() ||
                 a.model.modelId.toLowerCase() === trimmedArgs.toLowerCase())
             );

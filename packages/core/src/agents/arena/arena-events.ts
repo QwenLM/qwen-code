@@ -117,7 +117,7 @@ export interface ArenaAgentStatusChangeEvent {
 /**
  * Event payload for session update (informational or warning).
  */
-export type ArenaSessionUpdateType = 'info' | 'warning';
+export type ArenaSessionUpdateType = 'info' | 'warning' | 'success';
 
 export interface ArenaSessionUpdateEvent {
   sessionId: string;

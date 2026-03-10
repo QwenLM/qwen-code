@@ -123,6 +123,10 @@ export const isTerminalStatus = (s: AgentStatus): boolean =>
   s === AgentStatus.FAILED ||
   s === AgentStatus.CANCELLED;
 
+/** True for IDLE or COMPLETED — agent finished its work successfully. */
+export const isSuccessStatus = (s: AgentStatus): boolean =>
+  s === AgentStatus.IDLE || s === AgentStatus.COMPLETED;
+
 /** True for terminal statuses OR IDLE — agent has settled (not actively working). */
 export const isSettledStatus = (s: AgentStatus): boolean =>
   s === AgentStatus.IDLE || isTerminalStatus(s);

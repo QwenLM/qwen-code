@@ -546,6 +546,9 @@ export class Config {
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
+  private arenaManagerChangeCallback:
+    | ((manager: ArenaManager | null) => void)
+    | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
@@ -1369,6 +1372,17 @@ export class Config {
 
   setArenaManager(manager: ArenaManager | null): void {
     this.arenaManager = manager;
+    this.arenaManagerChangeCallback?.(manager);
+  }
+
+  /**
+   * Register a callback invoked whenever the arena manager changes.
+   * Pass `null` to unsubscribe. Only one subscriber is supported.
+   */
+  onArenaManagerChange(
+    cb: ((manager: ArenaManager | null) => void) | null,
+  ): void {
+    this.arenaManagerChangeCallback = cb;
   }
 
   getArenaAgentClient(): ArenaAgentClient | null {
@@ -1393,7 +1407,7 @@ export class Config {
     } else {
       await manager.cleanup();
     }
-    this.arenaManager = null;
+    this.setArenaManager(null);
   }
 
   getApprovalMode(): ApprovalMode {

@@ -163,7 +163,7 @@ export async function startInteractiveUI(
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
-              <AgentViewProvider>
+              <AgentViewProvider config={config}>
                 <AppContainer
                   config={config}
                   settings={settings}

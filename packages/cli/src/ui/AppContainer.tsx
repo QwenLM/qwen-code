@@ -98,7 +98,6 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
-import { useArenaInProcess } from './hooks/useArenaInProcess.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -817,9 +816,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const isFocused = useFocus();
   useBracketedPaste();
-
-  // Bridge arena in-process events to AgentViewContext
-  useArenaInProcess(config);
 
   // Context file names computation
   const contextFileNames = useMemo(() => {

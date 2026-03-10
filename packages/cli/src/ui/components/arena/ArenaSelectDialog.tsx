@@ -9,7 +9,7 @@ import { useCallback, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ArenaManager,
-  AgentStatus,
+  isSuccessStatus,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
@@ -138,7 +138,7 @@ export function ArenaSelectDialog({
         // Build diff summary from cached result if available
         let diffAdditions = 0;
         let diffDeletions = 0;
-        if (agent.status === AgentStatus.COMPLETED && result) {
+        if (isSuccessStatus(agent.status) && result) {
           const agentResult = result.agents.find(
             (a) => a.agentId === agent.agentId,
           );
@@ -182,7 +182,7 @@ export function ArenaSelectDialog({
           value: agent.agentId,
           title,
           description,
-          disabled: agent.status !== AgentStatus.COMPLETED,
+          disabled: !isSuccessStatus(agent.status),
         };
       }),
     [agents, result],

@@ -40,6 +40,7 @@ import {
   AgentStatus,
   isTerminalStatus,
   isSettledStatus,
+  isSuccessStatus,
 } from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
@@ -567,7 +568,7 @@ export class ArenaManager {
       return { success: false, error: `Agent ${agentId} not found` };
     }
 
-    if (agent.status !== AgentStatus.COMPLETED) {
+    if (!isSuccessStatus(agent.status)) {
       return {
         success: false,
         error: `Agent ${agentId} has not completed (current status: ${agent.status})`,
@@ -643,11 +644,14 @@ export class ArenaManager {
    * Emit a progress message via SESSION_UPDATE so the UI can display
    * setup status.
    */
-  private emitProgress(message: string): void {
+  private emitProgress(
+    message: string,
+    type: 'info' | 'warning' | 'success' = 'info',
+  ): void {
     if (!this.sessionId) return;
     this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
       sessionId: this.sessionId,
-      type: 'info',
+      type,
       message,
       timestamp: Date.now(),
     });
@@ -1121,10 +1125,23 @@ export class ArenaManager {
       timestamp: Date.now(),
     });
 
+    const displayName = agent.model.displayName || agent.model.modelId;
+
+    // Emit a success message when an agent finishes its initial task.
+    if (
+      this.sessionStatus === ArenaSessionStatus.RUNNING &&
+      previousStatus === AgentStatus.RUNNING &&
+      newStatus === AgentStatus.IDLE
+    ) {
+      this.emitProgress(
+        `Agent ${displayName} finished initial task.`,
+        'success',
+      );
+    }
+
     // Emit progress messages for follow-up transitions (only after
     // the initial task — the session is IDLE once all agents first settle).
     if (this.sessionStatus === ArenaSessionStatus.IDLE) {
-      const displayName = agent.model.displayName || agent.model.modelId;
       if (
         previousStatus === AgentStatus.IDLE &&
         newStatus === AgentStatus.RUNNING
@@ -1136,7 +1153,10 @@ export class ArenaManager {
         previousStatus === AgentStatus.RUNNING &&
         newStatus === AgentStatus.IDLE
       ) {
-        this.emitProgress(`Agent ${displayName} finished follow-up task.`);
+        this.emitProgress(
+          `Agent ${displayName} finished follow-up task.`,
+          'success',
+        );
       }
     }
 
@@ -1529,8 +1549,8 @@ export class ArenaManager {
     for (const agent of this.agents.values()) {
       const result = this.buildAgentResult(agent);
 
-      // Get diff for completed agents (they finished their task)
-      if (agent.status === AgentStatus.COMPLETED) {
+      // Get diff for agents that finished their task (IDLE or COMPLETED)
+      if (isSuccessStatus(agent.status)) {
         try {
           result.diff = await this.worktreeService.getWorktreeDiff(
             agent.worktree.path,

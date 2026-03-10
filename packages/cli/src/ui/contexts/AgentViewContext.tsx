@@ -25,7 +25,9 @@ import {
 import {
   type AgentInteractive,
   type ApprovalMode,
+  type Config,
 } from '@qwen-code/qwen-code-core';
+import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -116,10 +118,14 @@ export function useAgentViewActions(): AgentViewActions {
 // ─── Provider ───────────────────────────────────────────────
 
 interface AgentViewProviderProps {
+  config?: Config;
   children: React.ReactNode;
 }
 
-export function AgentViewProvider({ children }: AgentViewProviderProps) {
+export function AgentViewProvider({
+  config,
+  children,
+}: AgentViewProviderProps) {
   const [activeView, setActiveView] = useState<string>('main');
   const [agents, setAgents] = useState<Map<string, RegisteredAgent>>(
     () => new Map(),
@@ -275,6 +281,12 @@ export function AgentViewProvider({ children }: AgentViewProviderProps) {
       setAgentApprovalMode,
     ],
   );
+
+  // ── Arena in-process bridge ──
+  // Bridge arena manager events to agent registration. The hook is kept
+  // in its own file for separation of concerns; it's called here so the
+  // provider is the single owner of agent tab lifecycle.
+  useArenaInProcess(config ?? null, actions);
 
   return (
     <AgentViewStateContext.Provider value={state}>

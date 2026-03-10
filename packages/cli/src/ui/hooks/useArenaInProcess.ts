@@ -6,13 +6,13 @@
 
 /**
  * @fileoverview useArenaInProcess — bridges ArenaManager in-process events
- * to the AgentViewContext for React-based agent tab navigation.
+ * to AgentViewContext agent registration.
  *
- * When an arena session starts with an InProcessBackend, this hook:
- * 1. Listens to AGENT_START events from ArenaManager
- * 2. Retrieves the AgentInteractive from InProcessBackend
- * 3. Registers it with AgentViewContext
- * 4. Cleans up on SESSION_COMPLETE / SESSION_ERROR / unmount
+ * Subscribes to `config.onArenaManagerChange()` to react immediately when
+ * the arena manager is set or cleared. Event listeners are attached to the
+ * manager's emitter as soon as it appears — the backend is resolved lazily
+ * inside the AGENT_START handler, which only fires after the backend is
+ * initialized.
  */
 
 import { useEffect, useRef } from 'react';
@@ -20,17 +20,16 @@ import {
   ArenaEventType,
   ArenaSessionStatus,
   DISPLAY_MODE,
-  type ArenaManager,
   type ArenaAgentStartEvent,
+  type ArenaManager,
   type ArenaSessionCompleteEvent,
   type Config,
   type InProcessBackend,
 } from '@qwen-code/qwen-code-core';
-import { useAgentViewActions } from '../contexts/AgentViewContext.js';
+import type { AgentViewActions } from '../contexts/AgentViewContext.js';
 import { theme } from '../semantic-colors.js';
 
-// Palette of colors for agent tabs (cycles for >N agents)
-const getAgentColors = () => [
+const AGENT_COLORS = [
   theme.text.accent,
   theme.text.link,
   theme.status.success,
@@ -39,78 +38,85 @@ const getAgentColors = () => [
   theme.status.error,
 ];
 
-export function useArenaInProcess(config: Config): void {
-  const actions = useAgentViewActions();
+/**
+ * Bridge arena in-process events to agent tab registration/unregistration.
+ *
+ * Called by AgentViewProvider — accepts config and actions directly so the
+ * hook has no dependency on AgentViewContext (avoiding a circular import).
+ */
+export function useArenaInProcess(
+  config: Config | null,
+  actions: AgentViewActions,
+): void {
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
 
   useEffect(() => {
-    // Poll for arena manager (it's set asynchronously by the /arena start command)
-    let checkInterval: ReturnType<typeof setInterval> | null = null;
-    // Track the manager instance (not just a boolean) so we never
-    // reattach to the same completed manager after SESSION_COMPLETE.
-    let attachedManager: ArenaManager | null = null;
-    let detachListeners: (() => void) | null = null;
-    // Pending agent-registration retry timeouts (cancelled on session end & unmount).
+    if (!config) return;
+
+    let detachArenaListeners: (() => void) | null = null;
     const retryTimeouts = new Set<ReturnType<typeof setTimeout>>();
 
-    const tryAttach = () => {
-      const manager: ArenaManager | null = config.getArenaManager();
-      // Skip if no manager or if it's the same instance we already handled
-      if (!manager || manager === attachedManager) return;
+    /** Remove agent tabs, cancel pending retries, and detach arena events. */
+    const detachSession = () => {
+      actionsRef.current.unregisterAll();
+      for (const t of retryTimeouts) clearTimeout(t);
+      retryTimeouts.clear();
+      detachArenaListeners?.();
+      detachArenaListeners = null;
+    };
 
-      const backend = manager.getBackend();
-      if (!backend || backend.type !== DISPLAY_MODE.IN_PROCESS) return;
-
-      attachedManager = manager;
-      if (checkInterval) {
-        clearInterval(checkInterval);
-        checkInterval = null;
-      }
-
-      const inProcessBackend = backend as InProcessBackend;
+    /** Attach to an arena manager's event emitter. The backend is resolved
+     *  lazily — we only need it when registering agents, not at subscribe
+     *  time. This avoids the race where setArenaManager fires before
+     *  manager.start() initializes the backend. */
+    const attachSession = (manager: ArenaManager) => {
       const emitter = manager.getEventEmitter();
-      const agentColors = getAgentColors();
       let colorIndex = 0;
 
-      // Register agents that already started (race condition if events
-      // fired before we attached)
-      const existingAgents = manager.getAgentStates();
-      for (const agentState of existingAgents) {
-        const interactive = inProcessBackend.getAgent(agentState.agentId);
-        if (interactive) {
-          const displayName =
-            agentState.model.displayName || agentState.model.modelId;
-          const color = agentColors[colorIndex % agentColors.length]!;
-          colorIndex++;
-          actionsRef.current.registerAgent(
-            agentState.agentId,
-            interactive,
-            displayName,
-            color,
-          );
+      const nextColor = () => AGENT_COLORS[colorIndex++ % AGENT_COLORS.length]!;
+
+      /** Resolve the InProcessBackend, or null if not applicable. */
+      const getInProcessBackend = (): InProcessBackend | null => {
+        const backend = manager.getBackend();
+        if (!backend || backend.type !== DISPLAY_MODE.IN_PROCESS) return null;
+        return backend as InProcessBackend;
+      };
+
+      // Register agents that already started (events may have fired before
+      // the callback was attached).
+      const inProcessBackend = getInProcessBackend();
+      if (inProcessBackend) {
+        for (const agentState of manager.getAgentStates()) {
+          const interactive = inProcessBackend.getAgent(agentState.agentId);
+          if (interactive) {
+            actionsRef.current.registerAgent(
+              agentState.agentId,
+              interactive,
+              agentState.model.displayName || agentState.model.modelId,
+              nextColor(),
+            );
+          }
         }
       }
 
-      // Listen for new agent starts.
-      // AGENT_START is emitted by ArenaManager *before* backend.spawnAgent()
-      // creates the AgentInteractive, so getAgent() may still return
-      // undefined.  We retry with a short poll to bridge the gap.
-      const MAX_AGENT_RETRIES = 20;
-      const AGENT_RETRY_INTERVAL_MS = 50;
+      // AGENT_START fires *before* backend.spawnAgent() creates the
+      // AgentInteractive, so getAgent() may return undefined. Retry briefly.
+      const MAX_RETRIES = 20;
+      const RETRY_MS = 50;
 
       const onAgentStart = (event: ArenaAgentStartEvent) => {
         const tryRegister = (retriesLeft: number) => {
-          const interactive = inProcessBackend.getAgent(event.agentId);
+          const backend = getInProcessBackend();
+          if (!backend) return; // not an in-process session
+
+          const interactive = backend.getAgent(event.agentId);
           if (interactive) {
-            const displayName = event.model.displayName || event.model.modelId;
-            const color = agentColors[colorIndex % agentColors.length]!;
-            colorIndex++;
             actionsRef.current.registerAgent(
               event.agentId,
               interactive,
-              displayName,
-              color,
+              event.model.displayName || event.model.modelId,
+              nextColor(),
             );
             return;
           }
@@ -118,70 +124,52 @@ export function useArenaInProcess(config: Config): void {
             const timeout = setTimeout(() => {
               retryTimeouts.delete(timeout);
               tryRegister(retriesLeft - 1);
-            }, AGENT_RETRY_INTERVAL_MS);
+            }, RETRY_MS);
             retryTimeouts.add(timeout);
           }
         };
-        tryRegister(MAX_AGENT_RETRIES);
+        tryRegister(MAX_RETRIES);
       };
 
-      // Tear down agent tabs, remove listeners, and resume polling for
-      // a genuinely new manager instance.
-      const teardown = () => {
-        actionsRef.current.unregisterAll();
-        for (const timeout of retryTimeouts) {
-          clearTimeout(timeout);
-        }
-        retryTimeouts.clear();
-        // Remove listeners eagerly so they don't fire again
-        emitter.off(ArenaEventType.AGENT_START, onAgentStart);
-        emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
-        emitter.off(ArenaEventType.SESSION_ERROR, teardown);
-        detachListeners = null;
-        // Keep attachedManager reference — prevents reattach to this
-        // same (completed) manager on the next poll tick.
-        // Polling will pick up a new manager once /arena start creates one.
-        if (!checkInterval) {
-          checkInterval = setInterval(tryAttach, 500);
-        }
-      };
-
-      // When agents settle to IDLE the session is still alive — keep
-      // the tab bar so users can continue interacting with agents.
-      // Only tear down on truly terminal session statuses.
       const onSessionComplete = (event: ArenaSessionCompleteEvent) => {
-        if (event.result.status === ArenaSessionStatus.IDLE) {
-          return;
-        }
-        teardown();
+        // IDLE means agents finished but the session is still alive for
+        // follow-up interaction — keep the tab bar.
+        if (event.result.status === ArenaSessionStatus.IDLE) return;
+        detachSession();
       };
+
+      const onSessionError = () => detachSession();
 
       emitter.on(ArenaEventType.AGENT_START, onAgentStart);
       emitter.on(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
-      emitter.on(ArenaEventType.SESSION_ERROR, teardown);
+      emitter.on(ArenaEventType.SESSION_ERROR, onSessionError);
 
-      detachListeners = () => {
+      detachArenaListeners = () => {
         emitter.off(ArenaEventType.AGENT_START, onAgentStart);
         emitter.off(ArenaEventType.SESSION_COMPLETE, onSessionComplete);
-        emitter.off(ArenaEventType.SESSION_ERROR, teardown);
+        emitter.off(ArenaEventType.SESSION_ERROR, onSessionError);
       };
     };
 
-    // Check immediately, then poll every 500ms
-    tryAttach();
-    if (!attachedManager) {
-      checkInterval = setInterval(tryAttach, 500);
+    const handleManagerChange = (manager: ArenaManager | null) => {
+      detachSession();
+      if (manager) {
+        attachSession(manager);
+      }
+    };
+
+    // Subscribe to future changes.
+    config.onArenaManagerChange(handleManagerChange);
+
+    // Handle the case where a manager already exists when we mount.
+    const current = config.getArenaManager();
+    if (current) {
+      attachSession(current);
     }
 
     return () => {
-      if (checkInterval) {
-        clearInterval(checkInterval);
-      }
-      for (const timeout of retryTimeouts) {
-        clearTimeout(timeout);
-      }
-      retryTimeouts.clear();
-      detachListeners?.();
+      config.onArenaManagerChange(null);
+      detachSession();
     };
   }, [config]);
 }

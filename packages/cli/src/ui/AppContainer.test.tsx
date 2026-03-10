@@ -93,9 +93,6 @@ vi.mock('./contexts/AgentViewContext.js', () => ({
     unregisterAll: vi.fn(),
   })),
 }));
-vi.mock('./hooks/useArenaInProcess.js', () => ({
-  useArenaInProcess: vi.fn(),
-}));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
 
