@@ -66,22 +66,12 @@ function normalizeBasicCharacters(text: string): string {
 
 /* -------------------------------------------------------------------------- */
 /* Line-based search helpers                                                 */
+
 /* -------------------------------------------------------------------------- */
 
 interface MatchedSliceResult {
   slice: string;
-  removedTrailingFinalEmptyLine: boolean;
 }
-
-/**
- * Comparison passes become progressively more forgiving, making it possible to
- * match when only trailing whitespace differs. Leading whitespace (indentation)
- * is always preserved to avoid matching at incorrect scope levels.
- */
-const LINE_COMPARISON_PASSES: Array<(value: string) => string> = [
-  (value) => value,
-  (value) => value.trimEnd(),
-];
 
 function normalizeLineForComparison(value: string): string {
   return normalizeBasicCharacters(value).trimEnd();
@@ -104,35 +94,49 @@ function seekSequenceWithTransform(
     return null;
   }
 
-  outer: for (let i = 0; i <= lines.length - pattern.length; i++) {
-    for (let p = 0; p < pattern.length; p++) {
-      if (transform(lines[i + p]) !== transform(pattern[p])) {
-        continue outer;
+  for (let i = 0; i <= lines.length - pattern.length; i++) {
+    let allEqual = true;
+    for (let p = 0; p <= pattern.length - 1; p++) {
+      const a = transform(lines[i + p]).replaceAll(' ', '');
+      const b = transform(pattern[p]).replaceAll(' ', '');
+      if (a !== b) {
+        allEqual = false;
+        break;
       }
     }
-    return i;
+    if (allEqual) {
+      return i;
+    }
   }
 
   return null;
 }
 
+// We assume that a line of text should include the trailing newline character.
+// For example:
+// `\naaa\nbbb\nccc` should be split into "\n", "aaa\n", "bbb\n", "ccc"
+// `aaa\nbbb\nccc\n` should be split into "aaa\n", "bbb\n", "ccc\n"
+// `aaa\nbbb\nccc`   should be split into "aaa\n", "bbb\n", "ccc"
 function buildLineIndex(text: string): {
   lines: string[];
   offsets: number[];
 } {
   const lines = text.split('\n');
-  const offsets = new Array<number>(lines.length + 1);
+  let endWithNewLine = false;
+  if (lines[lines.length - 1] === '') {
+    lines.pop();
+    endWithNewLine = true;
+  }
+  const offsets = new Array<number>(lines.length);
   let cursor = 0;
 
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i <= lines.length - 1; i++) {
+    if (i !== lines.length - 1 || endWithNewLine) {
+      lines[i] = lines[i] + '\n'; // Add back the removed newline
+    }
     offsets[i] = cursor;
     cursor += lines[i].length;
-    if (i < lines.length - 1) {
-      cursor += 1; // Account for the newline that split() removed.
-    }
   }
-  offsets[lines.length] = text.length;
-
   return { lines, offsets };
 }
 
@@ -146,26 +150,11 @@ function sliceFromLines(
   lines: string[],
   startLine: number,
   lineCount: number,
-  includeTrailingNewline: boolean,
 ): string {
-  if (lineCount === 0) {
-    return includeTrailingNewline ? '\n' : '';
-  }
-
   const startIndex = offsets[startLine] ?? 0;
   const lastLineIndex = startLine + lineCount - 1;
   const lastLineStart = offsets[lastLineIndex] ?? 0;
-  let endIndex = lastLineStart + (lines[lastLineIndex]?.length ?? 0);
-
-  if (includeTrailingNewline) {
-    const nextLineStart = offsets[startLine + lineCount];
-    if (nextLineStart !== undefined) {
-      endIndex = nextLineStart;
-    } else if (text.endsWith('\n')) {
-      endIndex = text.length;
-    }
-  }
-
+  const endIndex = lastLineStart + (lines[lastLineIndex]?.length ?? 0);
   return text.slice(startIndex, endIndex);
 }
 
@@ -174,68 +163,41 @@ function findLineBasedMatch(
   needle: string,
 ): MatchedSliceResult | null {
   const { lines, offsets } = buildLineIndex(haystack);
-  const patternLines = needle.split('\n');
-  const endsWithNewline = needle.endsWith('\n');
-
+  const patternLines = buildLineIndex(needle).lines;
+  const endWithNewLine = isTrailingNewLine(
+    patternLines[patternLines.length - 1],
+  );
   if (patternLines.length === 0) {
     return null;
   }
-
-  const attemptMatch = (candidate: string[]): number | null => {
-    for (const pass of LINE_COMPARISON_PASSES) {
-      const idx = seekSequenceWithTransform(lines, candidate, pass);
-      if (idx !== null) {
-        return idx;
-      }
-    }
-    return seekSequenceWithTransform(
-      lines,
-      candidate,
-      normalizeLineForComparison,
-    );
-  };
-
-  let matchIndex = attemptMatch(patternLines);
+  const matchIndex = seekSequenceWithTransform(
+    lines,
+    patternLines,
+    normalizeLineForComparison,
+  );
   if (matchIndex !== null) {
-    return {
-      slice: sliceFromLines(
-        haystack,
-        offsets,
-        lines,
-        matchIndex,
-        patternLines.length,
-        endsWithNewline,
-      ),
-      removedTrailingFinalEmptyLine: false,
-    };
-  }
-
-  if (patternLines.at(-1) === '') {
-    const trimmedPattern = patternLines.slice(0, -1);
-    if (trimmedPattern.length === 0) {
-      return null;
-    }
-    matchIndex = attemptMatch(trimmedPattern);
-    if (matchIndex !== null) {
+    const slice = sliceFromLines(
+      haystack,
+      offsets,
+      lines,
+      matchIndex,
+      patternLines.length,
+    );
+    if (!endWithNewLine) {
       return {
-        slice: sliceFromLines(
-          haystack,
-          offsets,
-          lines,
-          matchIndex,
-          trimmedPattern.length,
-          false,
-        ),
-        removedTrailingFinalEmptyLine: true,
+        slice: removeTrailingNewline(slice),
       };
     }
+    return {
+      slice,
+    };
   }
-
   return null;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Slice discovery                                                           */
+
 /* -------------------------------------------------------------------------- */
 
 function findMatchedSlice(
@@ -250,7 +212,6 @@ function findMatchedSlice(
   if (literalIndex !== -1) {
     return {
       slice: haystack.slice(literalIndex, literalIndex + needle.length),
-      removedTrailingFinalEmptyLine: false,
     };
   }
 
@@ -260,7 +221,6 @@ function findMatchedSlice(
   if (normalizedIndex !== -1) {
     return {
       slice: haystack.slice(normalizedIndex, normalizedIndex + needle.length),
-      removedTrailingFinalEmptyLine: false,
     };
   }
 
@@ -273,7 +233,32 @@ function findMatchedSlice(
  */
 /* -------------------------------------------------------------------------- */
 /* Replacement helpers                                                       */
+
 /* -------------------------------------------------------------------------- */
+
+function isLeadingNewLine(text: string): boolean {
+  if (text.startsWith('\r\n')) {
+    return true;
+  }
+  return text.startsWith('\n') || text.startsWith('\r');
+}
+
+function isTrailingNewLine(text: string): boolean {
+  if (text.endsWith('\r\n')) {
+    return true;
+  }
+  return text.endsWith('\n') || text.endsWith('\r');
+}
+
+function removeLeadingNewLine(text: string): string {
+  if (text.startsWith('\r\n')) {
+    return text.slice(2, text.length);
+  }
+  if (text.startsWith('\n') || text.startsWith('\r')) {
+    return text.slice(1, text.length);
+  }
+  return text;
+}
 
 function removeTrailingNewline(text: string): string {
   if (text.endsWith('\r\n')) {
@@ -283,13 +268,6 @@ function removeTrailingNewline(text: string): string {
     return text.slice(0, -1);
   }
   return text;
-}
-
-function adjustNewStringForTrailingLine(
-  newString: string,
-  removedTrailingLine: boolean,
-): string {
-  return removedTrailingLine ? removeTrailingNewline(newString) : newString;
 }
 
 export interface NormalizedEditStrings {
@@ -321,15 +299,25 @@ export function normalizeEditStrings(
       newString,
     };
   }
+  while (true) {
+    if (isLeadingNewLine(oldString) && isLeadingNewLine(newString)) {
+      oldString = removeLeadingNewLine(oldString);
+      newString = removeLeadingNewLine(newString);
+      continue;
+    }
+    if (isTrailingNewLine(oldString) && isTrailingNewLine(newString)) {
+      oldString = removeTrailingNewline(oldString);
+      newString = removeTrailingNewline(newString);
+      continue;
+    }
+    break;
+  }
 
   const canonicalOriginal = findMatchedSlice(fileContent, oldString);
   if (canonicalOriginal !== null) {
     return {
       oldString: canonicalOriginal.slice,
-      newString: adjustNewStringForTrailingLine(
-        newString,
-        canonicalOriginal.removedTrailingFinalEmptyLine,
-      ),
+      newString,
     };
   }
 
