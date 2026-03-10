@@ -168,7 +168,7 @@ describe('V3ToV4Migration', () => {
       const providerIds = Object.keys(result).sort();
       expect(providerIds).toHaveLength(2);
       expect(providerIds).toContain('openai');
-      expect(providerIds).toContain('openai-2');
+      expect(providerIds).toContain('my-proxy');
     });
 
     it('uses fixed providerIds for Coding Plan models', () => {
@@ -213,7 +213,7 @@ describe('V3ToV4Migration', () => {
       );
 
       const ids = Object.keys(result).sort();
-      expect(ids).toEqual(['openai', 'openai-2', 'openai-3']);
+      expect(ids).toEqual(['api-1', 'api-2', 'api-3']);
     });
 
     it('produces stable output across repeated runs', () => {

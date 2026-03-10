@@ -439,6 +439,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
   const hasModels = MODEL_OPTIONS.length > 0;
 
+  // Fixed max items for testing scroll indicators
+  const maxItemsToShow = 6;
+
   return (
     <Box
       borderStyle="round"
@@ -475,6 +478,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            showScrollArrows={true}
+            centerSelection={true}
+            maxItemsToShow={maxItemsToShow}
           />
         </Box>
       )}
