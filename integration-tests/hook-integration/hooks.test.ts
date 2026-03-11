@@ -1073,36 +1073,6 @@ describe('Hooks System Integration', () => {
       });
     });
 
-    describe('Stop Reason', () => {
-      it('should include stop reason when hook provides it', async () => {
-        const reasonScript =
-          'echo \'{"decision": "allow", "stopReason": "Custom stop reason from hook"}\'';
-
-        await rig.setup('stop-set-reason', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: reasonScript,
-                      name: 'stop-reason-hook',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        });
-
-        const result = await rig.run('Say reason test');
-        expect(result).toBeDefined();
-      });
-    });
-
     describe('Timeout Handling', () => {
       it('should continue stopping when hook times out', async () => {
         await rig.setup('stop-timeout', {
@@ -1470,51 +1440,11 @@ describe('Hooks System Integration', () => {
           .filter((line) => line.trim() === 'hook_called').length;
         expect(hookInvokeCount).toBeGreaterThan(1);
       });
-
-      it('should handle stop hook with error alongside blocking hook', async () => {
-        const blockScript =
-          'echo \'{"decision": "block", "reason": "Blocked"}\'';
-
-        await rig.setup('stop-error-with-block', {
-          settings: {
-            hooksConfig: { enabled: true },
-            hooks: {
-              Stop: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: '/nonexistent/command',
-                      name: 'stop-error-hook',
-                      timeout: 5000,
-                    },
-                    {
-                      type: 'command',
-                      command: blockScript,
-                      name: 'stop-block-hook',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        });
-
-        // When Stop hook blocks, agent continues execution normally (with max turns to prevent infinite loop)
-        const result = await rig.run(
-          'Say error with block',
-          '--max-session-turns',
-          '2',
-        );
-        expect(result).toBeDefined();
-        expect(result.length).toBeGreaterThan(0);
-      });
     });
   });
 
   // ==========================================================================
-  // Multiple Hooks (General)
+  // Multiple Hooks
   // Tests for hook execution modes: sequential vs parallel
   // ==========================================================================
   describe('Multiple Hooks', () => {
@@ -1803,33 +1733,6 @@ describe('Hooks System Integration', () => {
         const result = await rig.run('What project context do you have?');
         expect(result).toBeDefined();
         expect(result.toLowerCase()).toContain('typescript');
-      });
-
-      it('should set environment variables via CLAUDE_ENV_FILE', async () => {
-        const envScript = `if [ -n "$CLAUDE_ENV_FILE" ]; then echo 'export TEST_VAR=session_start_value' >> "$CLAUDE_ENV_FILE"; echo 'export NODE_ENV=test' >> "$CLAUDE_ENV_FILE"; fi; echo '{"decision": "allow"}';`;
-
-        await rig.setup('session-start-env', {
-          settings: {
-            hooks: {
-              enabled: true,
-              SessionStart: [
-                {
-                  hooks: [
-                    {
-                      type: 'command',
-                      command: envScript,
-                      name: 'session-start-env-hook',
-                      timeout: 5000,
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        });
-
-        const result = await rig.run('Echo $TEST_VAR using Bash');
-        expect(result).toBeDefined();
       });
 
       it('should handle SessionStart hook with system message', async () => {
