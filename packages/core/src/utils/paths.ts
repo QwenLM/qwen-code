@@ -296,12 +296,18 @@ export function validatePath(
 ): void {
   const { allowFiles = false, allowExternalPaths = false } = options;
   const workspaceContext = config.getWorkspaceContext();
+  const isWithinWorkspace =
+    workspaceContext.isPathWithinWorkspace(resolvedPath);
 
-  if (
-    !allowExternalPaths &&
-    !workspaceContext.isPathWithinWorkspace(resolvedPath)
-  ) {
+  if (!allowExternalPaths && !isWithinWorkspace) {
     throw new Error('Path is not within workspace');
+  }
+
+  // For external paths where allowExternalPaths is true, skip filesystem checks.
+  // The path may not exist locally on the current machine, and permissions for
+  // external paths are handled at runtime rather than at validation time.
+  if (allowExternalPaths && !isWithinWorkspace) {
+    return;
   }
 
   try {

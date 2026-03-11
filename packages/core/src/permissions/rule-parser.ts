@@ -7,6 +7,21 @@
 import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
+
+/**
+ * Normalize a filesystem path to use POSIX-style forward slashes.
+ *
+ * On Windows, `path.join()` produces backslash-separated paths, but the
+ * permission rule system and picomatch both work with forward slashes.
+ * This helper ensures consistent path separators across all platforms.
+ *
+ * Examples:
+ *   toPosixPath('C:\\Users\\foo\\bar') → 'C:/Users/foo/bar'
+ *   toPosixPath('/home/user/project') → '/home/user/project' (no-op on POSIX)
+ */
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
 import type {
   PermissionCheckContext,
   PermissionRule,
@@ -595,21 +610,22 @@ export function resolvePathPattern(
 
   if (specifier.startsWith('~/')) {
     // Relative to home directory
-    return path.join(os.homedir(), specifier.substring(2));
+    // Normalize homedir to forward slashes for cross-platform picomatch compatibility
+    return toPosixPath(path.join(os.homedir(), specifier.substring(2)));
   }
 
   if (specifier.startsWith('/')) {
     // Relative to project root (NOT absolute!)
-    return path.join(projectRoot, specifier.substring(1));
+    return toPosixPath(path.join(projectRoot, specifier.substring(1)));
   }
 
   if (specifier.startsWith('./')) {
     // Relative to current working directory
-    return path.join(cwd, specifier.substring(2));
+    return toPosixPath(path.join(cwd, specifier.substring(2)));
   }
 
   // No prefix: relative to current working directory
-  return path.join(cwd, specifier);
+  return toPosixPath(path.join(cwd, specifier));
 }
 
 /**
@@ -633,6 +649,10 @@ export function matchesPathPattern(
 ): boolean {
   const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
 
+  // Normalize filePath to forward slashes for cross-platform picomatch compatibility.
+  // On Windows, incoming paths may use backslashes; picomatch expects forward slashes.
+  const normalizedFilePath = toPosixPath(filePath);
+
   // Use picomatch for gitignore-style matching
   const isMatch = picomatch(resolvedPattern, {
     dot: true, // Match dotfiles (e.g. .env)
@@ -641,7 +661,7 @@ export function matchesPathPattern(
     // Default picomatch behavior is gitignore-style: `*` = single dir, `**` = recursive.
   });
 
-  return isMatch(filePath);
+  return isMatch(normalizedFilePath);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import os from 'node:os';
 import {
   parseRule,
   parseRules,
@@ -414,8 +415,11 @@ describe('resolvePathPattern', () => {
   it('~/ prefix → relative to home directory', () => {
     const result = resolvePathPattern('~/Documents/*.pdf', projectRoot, cwd);
     expect(result).toContain('Documents/*.pdf');
-    // Should start with actual home directory
-    expect(result.startsWith('/')).toBe(true);
+    // On POSIX systems the home dir starts with '/'; on Windows it may look like
+    // 'C:/Users/foo'. Either way, verify the result begins with the (normalized)
+    // home directory.
+    const normalizedHome = os.homedir().replace(/\\/g, '/');
+    expect(result.startsWith(normalizedHome)).toBe(true);
   });
 
   it('/ prefix → relative to project root (NOT absolute)', () => {

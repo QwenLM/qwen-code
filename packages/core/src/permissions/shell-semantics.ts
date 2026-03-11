@@ -117,17 +117,30 @@ function tokenize(command: string): string[] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve a path argument to an absolute path.
+ * Resolve a path argument to an absolute POSIX-style path.
  * Handles `~` home-directory expansion and relative paths.
+ *
+ * Always returns paths with forward-slash separators so that the resolved
+ * paths are consistent across platforms and compatible with picomatch / the
+ * permission rule matching system.
  */
 function resolvePath(p: string, cwd: string): string {
-  if (p === '~' || p.startsWith('~/')) {
-    return nodePath.join(os.homedir(), p.slice(1));
+  // Normalize inputs to forward slashes for consistent cross-platform handling
+  const normP = p.replace(/\\/g, '/');
+  const normCwd = cwd.replace(/\\/g, '/');
+
+  if (normP === '~' || normP.startsWith('~/')) {
+    const homeDir = os.homedir().replace(/\\/g, '/');
+    const rest = normP.slice(1); // '' or '/some/path'
+    // nodePath.posix.join handles the rest correctly:
+    // join('C:/Users/foo', '/.ssh/id_rsa') → 'C:/Users/foo/.ssh/id_rsa'
+    return rest ? nodePath.posix.join(homeDir, rest) : homeDir;
   }
-  if (nodePath.isAbsolute(p)) {
-    return p;
+  // isAbsolute check: handle both POSIX (/foo) and Windows (C:\foo) absolute paths
+  if (nodePath.isAbsolute(normP) || normP.startsWith('/')) {
+    return normP;
   }
-  return nodePath.resolve(cwd, p);
+  return nodePath.posix.join(normCwd, normP);
 }
 
 /**
