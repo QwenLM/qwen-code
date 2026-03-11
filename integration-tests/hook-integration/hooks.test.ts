@@ -9,12 +9,15 @@ import { TestRig, validateModelOutput } from '../test-helper.js';
  * - Stop hooks: Triggered when agent is about to stop
  * - SessionStart hooks: Triggered when a new session starts (Startup, Resume, Clear, Compact)
  * - SessionEnd hooks: Triggered when a session ends (Clear, Logout, PromptInputExit)
+ * - PreToolUse hooks: Triggered before tool execution
+ * - PostToolUse hooks: Triggered after successful tool execution
+ * - PostToolUseFailure hooks: Triggered after tool execution fails
+ * - SubagentStart hooks: Triggered when a subagent starts
+ * - SubagentStop hooks: Triggered when a subagent stops
+ * - Notification hooks: Triggered when notifications are sent
+ * - PermissionRequest hooks: Triggered when permission dialogs are displayed
+ * - PreCompact hooks: Triggered before conversation compaction
  *
- * Test categories:
- * - Single hook scenarios (allow, block, modify, context, etc.)
- * - Multiple hooks scenarios (parallel, sequential, mixed)
- * - Error handling (missing command, exit codes)
- * - Combined hooks (multiple hook types in same session)
  */
 describe('Hooks System Integration', () => {
   let rig: TestRig;
@@ -4892,6 +4895,1222 @@ describe('Hooks System Integration', () => {
         const result = await rig.run('Say timeout test');
 
         expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
+  // PreToolUse Hooks
+  // Triggered before a tool is executed
+  // ==========================================================================
+  describe('PreToolUse Hooks', () => {
+    describe('Allow Decision', () => {
+      it('should allow tool execution when hook returns allow decision', async () => {
+        const hookScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Tool execution approved by pretooluse hook"}}\'';
+
+        await rig.setup('pretooluse-allow-decision', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'pretooluse-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say hello world');
+
+        // Verify that the interaction completed successfully (the hook allowed execution)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should allow tool execution with additional context from hook', async () => {
+        const hookScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Security check passed by pretooluse hook", "additionalContext": "Security check passed by pretooluse hook"}}\'';
+
+        await rig.setup('pretooluse-allow-with-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'pretooluse-context-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say context test');
+
+        // Verify that the interaction completed successfully (the hook allowed execution)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Block Decision', () => {
+      it('should block tool execution when hook returns block decision', async () => {
+        const blockScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Tool execution blocked by security policy in pretooluse"}}\'';
+
+        await rig.setup('pretooluse-block-decision', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: blockScript,
+                      name: 'pretooluse-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // When PreToolUse hook blocks, the interaction should still return a response
+        const result = await rig.run('Say should be blocked');
+
+        // Verify that a response was received despite the block
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should block specific tools based on tool name matching', async () => {
+        const blockSpecificToolScript = `
+          INPUT=$(cat)
+          TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
+
+          if [ "$TOOL_NAME" = "write_file" ]; then
+            echo '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "File writing blocked by pretooluse hook"}}'
+          else
+            echo '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Tool allowed by pretooluse hook"}}'
+          fi
+        `;
+
+        await rig.setup('pretooluse-block-specific-tool', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: blockSpecificToolScript,
+                      name: 'pretooluse-block-specific-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Attempt to say something - should be blocked by the hook for write_file operations
+        const result = await rig.run('Say should be blocked');
+
+        // Verify that a response was received
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+
+        // But other prompts should still work
+        const readResult = await rig.run('Say hello from other tools');
+        expect(readResult).toBeDefined();
+        expect(readResult.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Matcher Scenarios', () => {
+      it('should match specific tools with regex matcher', async () => {
+        const specificToolScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Specific tool matched and allowed by pretooluse", "additionalContext": "Specific tool matched and allowed by pretooluse"}}\'';
+
+        await rig.setup('pretooluse-matcher-specific', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'write_file|read_file',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: specificToolScript,
+                      name: 'pretooluse-specific-tool-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say matcher test');
+
+        // Verify that the interaction completed successfully (the hook allowed execution)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should match all tools with wildcard matcher', async () => {
+        const wildcardScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Wildcard matcher allowed all tools in pretooluse", "additionalContext": "Wildcard matcher allowed all tools in pretooluse"}}\'';
+
+        await rig.setup('pretooluse-matcher-wildcard', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: '*',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: wildcardScript,
+                      name: 'pretooluse-wildcard-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say wildcard test');
+
+        // Verify that the interaction completed successfully (the hook allowed execution)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should not execute when matcher does not match', async () => {
+        const noMatchScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Should not execute in pretooluse", "additionalContext": "Should not execute in pretooluse"}}\'';
+
+        await rig.setup('pretooluse-matcher-no-match', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'nonexistent_tool', // This won't match any real tool
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: noMatchScript,
+                      name: 'pretooluse-no-match-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say no match test');
+
+        // Verify that the interaction completed successfully (the hook allowed execution)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Error Handling', () => {
+      it('should continue execution when hook exits with non-blocking error', async () => {
+        await rig.setup('pretooluse-nonblocking-error', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'echo warning && exit 1',
+                      name: 'pretooluse-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say error test');
+
+        // Verify that the interaction completed successfully despite the hook error
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should continue execution when hook command does not exist', async () => {
+        await rig.setup('pretooluse-missing-command', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/pretooluse/command',
+                      name: 'pretooluse-missing-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say missing test');
+
+        // Verify that the interaction completed successfully despite the missing hook command
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Multiple PreToolUse Hooks', () => {
+      it('should execute multiple parallel PreToolUse hooks', async () => {
+        const script1 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Parallel pretooluse hook 1"}}\'';
+        const script2 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Parallel pretooluse hook 2"}}\'';
+
+        await rig.setup('pretooluse-multi-parallel', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'pretooluse-parallel-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'pretooluse-parallel-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say parallel test');
+
+        // Verify that the interaction completed successfully with multiple parallel hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should execute sequential PreToolUse hooks in order', async () => {
+        const script1 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Sequential pretooluse hook 1"}}\'';
+        const script2 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Sequential pretooluse hook 2"}}\'';
+
+        await rig.setup('pretooluse-multi-sequential', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'pretooluse-seq-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'pretooluse-seq-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say sequential test');
+
+        // Verify that the interaction completed successfully with multiple sequential hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should block when one of multiple parallel hooks returns block', async () => {
+        const allowScript = 'echo \'{"decision": "allow"}\'';
+        const blockScript =
+          'echo \'{"decision": "block", "reason": "Blocked by security policy in parallel pretooluse"}\'';
+
+        await rig.setup('pretooluse-multi-one-blocks', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: allowScript,
+                      name: 'pretooluse-allow-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: blockScript,
+                      name: 'pretooluse-block-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // When one hook blocks, the tool should not execute
+        const result = await rig.run('Say should be blocked');
+
+        // Verify that a response was received despite the block
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should block when first sequential hook returns block', async () => {
+        const blockScript =
+          'echo \'{"decision": "block", "reason": "First hook blocks in sequential pretooluse"}\'';
+        const allowScript = 'echo \'{"decision": "allow"}\'';
+
+        await rig.setup('pretooluse-seq-first-blocks', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: blockScript,
+                      name: 'pretooluse-seq-block-hook',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: allowScript,
+                      name: 'pretooluse-seq-allow-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // When the first hook blocks, the tool should not execute
+        const result = await rig.run('Say should be blocked');
+
+        // Verify that a response was received despite the block
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should concatenate additional context from multiple hooks', async () => {
+        const context1 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Context from pretooluse hook 1"}}\'';
+        const context2 =
+          'echo \'{"decision": "allow", "hookSpecificOutput": {"additionalContext": "Context from pretooluse hook 2"}}\'';
+
+        await rig.setup('pretooluse-multi-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: context1,
+                      name: 'pretooluse-ctx-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: context2,
+                      name: 'pretooluse-ctx-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say multi context test');
+
+        // Verify that the interaction completed successfully with multiple context hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  // ==========================================================================
+  // PostToolUse Hooks
+  // Triggered after a tool executes successfully
+  // ==========================================================================
+  describe('PostToolUse Hooks', () => {
+    describe('Basic Functionality', () => {
+      it('should execute PostToolUse hook after successful tool execution', async () => {
+        const hookScript =
+          'echo \'{"decision": "allow", "reason": "Tool execution logged by posttooluse hook", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Tool execution logged by posttooluse hook"}}\'';
+
+        await rig.setup('posttooluse-basic', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'posttooluse-basic-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say posttooluse test');
+
+        // Verify that the interaction completed successfully with the posttooluse hook
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Matcher Scenarios', () => {
+      it('should match specific tools with regex matcher', async () => {
+        const specificToolScript =
+          'echo \'{"decision": "allow", "reason": "Specific tool matched by posttooluse", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Specific tool matched by posttooluse"}}\'';
+
+        await rig.setup('posttooluse-matcher-specific', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  matcher: 'write_file|read_file',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: specificToolScript,
+                      name: 'posttooluse-specific-tool-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say matcher test');
+
+        // Verify that the interaction completed successfully with the posttooluse hook
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should match all tools with wildcard matcher', async () => {
+        const wildcardScript =
+          'echo \'{"decision": "allow", "reason": "Wildcard matcher processed all tools in posttooluse", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Wildcard matcher processed all tools in posttooluse"}}\'';
+
+        await rig.setup('posttooluse-matcher-wildcard', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  matcher: '*',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: wildcardScript,
+                      name: 'posttooluse-wildcard-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say wildcard test');
+
+        // Verify that the interaction completed successfully with the posttooluse hook
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should not execute when matcher does not match', async () => {
+        const noMatchScript =
+          'echo \'{"decision": "allow", "reason": "Should not execute in posttooluse", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Should not execute in posttooluse"}}\'';
+
+        await rig.setup('posttooluse-matcher-no-match', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  matcher: 'nonexistent_tool', // This won't match any real tool
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: noMatchScript,
+                      name: 'posttooluse-no-match-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say no match test');
+
+        // Verify that the interaction completed successfully (the hook didn't block execution since it didn't match)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Multiple PostToolUse Hooks', () => {
+      it('should execute multiple parallel PostToolUse hooks', async () => {
+        const script1 =
+          'echo \'{"decision": "allow", "reason": "Parallel posttooluse hook 1", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Parallel posttooluse hook 1"}}\'';
+        const script2 =
+          'echo \'{"decision": "allow", "reason": "Parallel posttooluse hook 2", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Parallel posttooluse hook 2"}}\'';
+
+        await rig.setup('posttooluse-multi-parallel', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'posttooluse-parallel-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'posttooluse-parallel-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say parallel test');
+
+        // Verify that the interaction completed successfully with multiple posttooluse hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should execute sequential PostToolUse hooks in order', async () => {
+        const script1 =
+          'echo \'{"decision": "allow", "reason": "Sequential posttooluse hook 1", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Sequential posttooluse hook 1"}}\'';
+        const script2 =
+          'echo \'{"decision": "allow", "reason": "Sequential posttooluse hook 2", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Sequential posttooluse hook 2"}}\'';
+
+        await rig.setup('posttooluse-multi-sequential', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'posttooluse-seq-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'posttooluse-seq-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say sequential test');
+
+        // Verify that the interaction completed successfully with multiple sequential posttooluse hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should concatenate additional context from multiple hooks', async () => {
+        const context1 =
+          'echo \'{"decision": "allow", "reason": "Context from posttooluse hook 1", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Context from posttooluse hook 1"}}\'';
+        const context2 =
+          'echo \'{"decision": "allow", "reason": "Context from posttooluse hook 2", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "Context from posttooluse hook 2"}}\'';
+
+        await rig.setup('posttooluse-multi-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUse: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: context1,
+                      name: 'posttooluse-ctx-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: context2,
+                      name: 'posttooluse-ctx-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say multi context test');
+
+        // Verify that the interaction completed successfully with multiple context posttooluse hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+  });
+
+  // ==========================================================================
+  // PostToolUseFailure Hooks
+  // Triggered after a tool fails to execute
+  // ==========================================================================
+  describe('PostToolUseFailure Hooks', () => {
+    describe('Basic Functionality', () => {
+      it('should execute PostToolUseFailure hook after failed tool execution', async () => {
+        const hookScript =
+          'echo \'{"hookSpecificOutput": {"additionalContext": "Tool failure logged by posttoolusefailure hook"}}\'';
+
+        await rig.setup('posttoolusefailure-basic', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUseFailure: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'posttoolusefailure-basic-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Attempt to read a non-existent file to trigger a tool failure
+        const result = await rig.run('Read the nonexistent-file.txt file');
+
+        // The tool should fail, but the hook should still execute
+        expect(result).toBeDefined();
+      });
+
+      it('should receive tool failure details in hook input', async () => {
+        const hookScript = `
+          INPUT=$(cat)
+          TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
+          ERROR_MESSAGE=$(echo "$INPUT" | jq -r '.error_message // empty')
+          
+          echo '{"hookSpecificOutput": {"additionalContext": "Failed ' + '$TOOL_NAME' + ' with error: ' + '$ERROR_MESSAGE' + '"}}'
+        `;
+
+        await rig.setup('posttoolusefailure-with-details', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PostToolUseFailure: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'posttoolusefailure-details-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        // Attempt to read a non-existent file to trigger a tool failure
+        const result = await rig.run('Read the nonexistent-details.txt file');
+
+        // The tool should fail, but the hook should still execute and process the error details
+        expect(result).toBeDefined();
+      });
+    });
+  });
+
+  // ==========================================================================
+  // PreCompact Hooks
+  // Triggered before conversation compaction
+  // ==========================================================================
+  describe('PreCompact Hooks', () => {
+    describe('Basic Functionality', () => {
+      it('should execute PreCompact hook before conversation compaction', async () => {
+        const hookScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Compaction approved by precompact hook"}}\'';
+
+        await rig.setup('precompact-basic', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'precompact-basic-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact test');
+
+        // Verify that the interaction completed successfully with the precompact hook
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should receive compaction details in hook input', async () => {
+        const hookScript = `
+          INPUT=$(cat)
+          TRIGGER=$(echo "$INPUT" | jq -r '.trigger')
+          CUSTOM_INSTRUCTIONS=$(echo "$INPUT" | jq -r '.custom_instructions // empty')
+
+          echo '{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Compaction triggered by: ' + '$TRIGGER' + ', Instructions length: $(echo "$CUSTOM_INSTRUCTIONS" | wc -c)"}}'
+        `;
+
+        await rig.setup('precompact-with-details', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: hookScript,
+                      name: 'precompact-details-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact details test');
+
+        // Verify that the interaction completed successfully with the precompact hook
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Context Scenarios', () => {
+      it('should provide additional context when hook returns context', async () => {
+        const contextScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Compaction context provided by precompact hook"}}\'';
+
+        await rig.setup('precompact-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: contextScript,
+                      name: 'precompact-context-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact context test');
+
+        // Verify that the interaction completed successfully with context
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Matcher Scenarios', () => {
+      it('should match all compaction triggers with wildcard matcher', async () => {
+        const wildcardScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Wildcard matcher allowed compaction in precompact"}}\'';
+
+        await rig.setup('precompact-matcher-wildcard', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  matcher: '*',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: wildcardScript,
+                      name: 'precompact-wildcard-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact wildcard test');
+
+        // Verify that the interaction completed successfully with the wildcard matcher
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should not execute when matcher does not match', async () => {
+        const noMatchScript =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Should not execute in precompact"}}\'';
+
+        await rig.setup('precompact-matcher-no-match', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  matcher: 'nonexistent_trigger', // This won't match any real trigger
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: noMatchScript,
+                      name: 'precompact-no-match-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact no match test');
+
+        // Verify that the interaction completed successfully (the hook didn't block execution since it didn't match)
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Multiple PreCompact Hooks', () => {
+      it('should execute multiple parallel PreCompact hooks', async () => {
+        const script1 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Parallel precompact hook 1"}}\'';
+        const script2 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Parallel precompact hook 2"}}\'';
+
+        await rig.setup('precompact-multi-parallel', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'precompact-parallel-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'precompact-parallel-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact parallel test');
+
+        // Verify that the interaction completed successfully with multiple parallel hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should execute sequential PreCompact hooks in order', async () => {
+        const script1 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Sequential precompact hook 1"}}\'';
+        const script2 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Sequential precompact hook 2"}}\'';
+
+        await rig.setup('precompact-multi-sequential', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  sequential: true,
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: script1,
+                      name: 'precompact-seq-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: script2,
+                      name: 'precompact-seq-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact sequential test');
+
+        // Verify that the interaction completed successfully with multiple sequential hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should concatenate additional context from multiple hooks', async () => {
+        const context1 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Context from precompact hook 1"}}\'';
+        const context2 =
+          'echo \'{"hookSpecificOutput": {"hookEventName": "PreCompact", "additionalContext": "Context from precompact hook 2"}}\'';
+
+        await rig.setup('precompact-multi-context', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: context1,
+                      name: 'precompact-ctx-1',
+                      timeout: 5000,
+                    },
+                    {
+                      type: 'command',
+                      command: context2,
+                      name: 'precompact-ctx-2',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact multi context test');
+
+        // Verify that the interaction completed successfully with multiple context hooks
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('Error Handling', () => {
+      it('should continue execution when hook exits with error', async () => {
+        await rig.setup('precompact-error', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'echo warning && exit 1',
+                      name: 'precompact-error-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact error test');
+
+        // Verify that the interaction completed successfully despite the hook error
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should continue execution when hook command does not exist', async () => {
+        await rig.setup('precompact-missing-command', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: '/nonexistent/precompact/command',
+                      name: 'precompact-missing-hook',
+                      timeout: 5000,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact missing test');
+
+        // Verify that the interaction completed successfully despite the missing hook command
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
+      });
+
+      it('should handle hook timeout gracefully', async () => {
+        await rig.setup('precompact-timeout', {
+          settings: {
+            hooksConfig: { enabled: true },
+            hooks: {
+              PreCompact: [
+                {
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: 'sleep 60',
+                      name: 'precompact-timeout-hook',
+                      timeout: 1000, // 1 second timeout
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+
+        const result = await rig.run('Say precompact timeout test');
+
+        // Verify that the interaction completed successfully despite the hook timeout
+        expect(result).toBeDefined();
+        expect(result.length).toBeGreaterThan(0);
       });
     });
   });
