@@ -741,6 +741,7 @@ function makeConfig(
     permissionsAllow: string[];
     permissionsAsk: string[];
     permissionsDeny: string[];
+    coreTools: string[];
     projectRoot: string;
     cwd: string;
   }> = {},
@@ -749,6 +750,7 @@ function makeConfig(
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
+    getCoreTools: () => opts.coreTools,
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
   };
@@ -1144,13 +1146,59 @@ describe('PermissionManager', () => {
       expect(pm.isToolEnabled('run_shell_command')).toBe(false);
     });
 
-    it('coreTools allowlist passed via permissionsAllow enables only listed tools', () => {
+    it('coreTools allowlist: listed tool is enabled', () => {
+      pm = new PermissionManager(
+        makeConfig({ coreTools: ['read_file', 'Bash'] }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('read_file')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true); // Bash resolves to run_shell_command
+    });
+
+    it('coreTools allowlist: unlisted tool is disabled', () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(pm.isToolEnabled('read_file')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(false);
+      expect(pm.isToolEnabled('edit')).toBe(false);
+    });
+
+    it('coreTools with specifier: tool-level check strips specifier', () => {
+      // "Bash(ls -l)" should register run_shell_command (specifier only affects runtime)
+      pm = new PermissionManager(makeConfig({ coreTools: ['Bash(ls -l)'] }));
+      pm.initialize();
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(pm.isToolEnabled('read_file')).toBe(false);
+    });
+
+    it('empty coreTools: all tools enabled (no whitelist restriction)', () => {
+      pm = new PermissionManager(makeConfig({ coreTools: [] }));
+      pm.initialize();
+      expect(pm.isToolEnabled('read_file')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true);
+    });
+
+    it('coreTools allowlist + deny rule: deny takes precedence for listed tools', () => {
+      pm = new PermissionManager(
+        makeConfig({
+          coreTools: ['read_file', 'Bash'],
+          permissionsDeny: ['Bash'],
+        }),
+      );
+      pm.initialize();
+      expect(pm.isToolEnabled('read_file')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(false); // in list but denied
+    });
+
+    it('permissionsAllow alone does NOT restrict unlisted tools (not a whitelist)', () => {
+      // This verifies the previous incorrect behavior is gone: permissionsAllow
+      // only means "auto-approve", it does NOT block unlisted tools.
       pm = new PermissionManager(
         makeConfig({ permissionsAllow: ['read_file'] }),
       );
       pm.initialize();
       expect(pm.isToolEnabled('read_file')).toBe(true);
-      expect(pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(pm.isToolEnabled('run_shell_command')).toBe(true); // not denied, just unreviewed
     });
   });
 

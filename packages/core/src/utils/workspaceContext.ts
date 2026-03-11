@@ -31,10 +31,13 @@ export class WorkspaceContext {
    */
   constructor(directory: string, additionalDirectories: string[] = []) {
     this.addDirectory(directory);
+    // Snapshot only the primary working directory as "initial" (non-removable).
+    // Additional directories (from settings / CLI flags) are added after
+    // the snapshot so they remain removable by the user.
+    this.initialDirectories = new Set(this.directories);
     for (const additionalDirectory of additionalDirectories) {
       this.addDirectory(additionalDirectory);
     }
-    this.initialDirectories = new Set(this.directories);
   }
 
   /**

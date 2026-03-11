@@ -213,9 +213,9 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | ------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tools.sandbox`                      | boolean or string | Sandbox execution environment (can be a boolean or a path string).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `undefined` |                                                                                                                                                                                                                                                      |
 | `tools.shell.enableInteractiveShell` | boolean           | Use `node-pty` for an interactive shell experience. Fallback to `child_process` still applies.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `false`     |                                                                                                                                                                                                                                                      |
-| `tools.core`                         | array of strings  | This can be used to restrict the set of built-in tools with an allowlist. You can also specify command-specific restrictions for tools that support it, like the `run_shell_command` tool. For example, `"tools.core": ["run_shell_command(ls -l)"]` will only allow the `ls -l` command to be executed.                                                                                                                                                                                                                                                                                                                                                                                                                                             | `undefined` |                                                                                                                                                                                                                                                      |
-| `tools.exclude`                      | array of strings  | Tool names to exclude from discovery. You can also specify command-specific restrictions for tools that support it, like the `run_shell_command` tool. For example, `"tools.exclude": ["run_shell_command(rm -rf)"]` will block the `rm -rf` command. **Security Note:** Command-specific restrictions in `tools.exclude` for `run_shell_command` are based on simple string matching and can be easily bypassed. This feature is **not a security mechanism** and should not be relied upon to safely execute untrusted code. It is recommended to use `tools.core` to explicitly select commands that can be executed.                                                                                                                             | `undefined` |                                                                                                                                                                                                                                                      |
-| `tools.allowed`                      | array of strings  | A list of tool names that will bypass the confirmation dialog. This is useful for tools that you trust and use frequently. For example, `["run_shell_command(git)", "run_shell_command(npm test)"]` will skip the confirmation dialog to run any `git` and `npm test` commands.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `undefined` |                                                                                                                                                                                                                                                      |
+| `tools.core`                         | array of strings  | **Deprecated.** Will be removed in next version. Use `permissions.allow` + `permissions.deny` instead. Restricts built-in tools to an allowlist. All tools not in the list are disabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `undefined` |                                                                                                                                                                                                                                                      |
+| `tools.exclude`                      | array of strings  | **Deprecated.** Use `permissions.deny` instead. Tool names to exclude from discovery. Automatically migrated to the `permissions` format on first load.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | `undefined` |                                                                                                                                                                                                                                                      |
+| `tools.allowed`                      | array of strings  | **Deprecated.** Use `permissions.allow` instead. Tool names that bypass the confirmation dialog. Automatically migrated to the `permissions` format on first load.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `undefined` |                                                                                                                                                                                                                                                      |
 | `tools.approvalMode`                 | string            | Sets the default approval mode for tool usage.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `default`   | Possible values: `plan` (analyze only, do not modify files or execute commands), `default` (require approval before file edits or shell commands run), `auto-edit` (automatically approve file edits), `yolo` (automatically approve all tool calls) |
 | `tools.discoveryCommand`             | string            | Command to run for tool discovery.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `undefined` |                                                                                                                                                                                                                                                      |
 | `tools.callCommand`                  | string            | Defines a custom shell command for calling a specific tool that was discovered using `tools.discoveryCommand`. The shell command must meet the following criteria: It must take function `name` (exactly as in [function declaration](https://ai.google.dev/gemini-api/docs/function-calling#function-declarations)) as first command line argument. It must read function arguments as JSON on `stdin`, analogous to [`functionCall.args`](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#functioncall). It must return function output as JSON on `stdout`, analogous to [`functionResponse.response.content`](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#functionresponse). | `undefined` |                                                                                                                                                                                                                                                      |
@@ -227,51 +227,100 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 
 > [!note]
 >
-> **Migrating from `tools.core` / `tools.exclude` / `tools.allowed`:** These legacy settings are automatically migrated to the new `permissions` format. See below.
+> **Migrating from `tools.core` / `tools.exclude` / `tools.allowed`:** These legacy settings are **deprecated** and automatically migrated to the new `permissions` format on first load. Prefer configuring `permissions.allow` / `permissions.deny` directly. Use `/permissions` to manage rules interactively.
 
 #### permissions
 
-The permissions system provides fine-grained control over which tools can run, which require confirmation, and which are blocked. Rules use the format `"ToolName"` or `"ToolName(specifier)"`.
+The permissions system provides fine-grained control over which tools can run, which require confirmation, and which are blocked.
+
+**Decision priority (highest first): `deny` > `ask` > `allow` > _(default/interactive mode)_**
+
+The first matching rule wins. Rules use the format `"ToolName"` or `"ToolName(specifier)"`.
 
 | Setting             | Type             | Description                                                                                                      | Default     |
 | ------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------- | ----------- |
 | `permissions.allow` | array of strings | Rules for auto-approved tool calls (no confirmation needed). Merged across all scopes (user + project + system). | `undefined` |
-| `permissions.ask`   | array of strings | Rules for tool calls that require user confirmation.                                                             | `undefined` |
-| `permissions.deny`  | array of strings | Rules for blocked tool calls. Deny rules take highest priority.                                                  | `undefined` |
+| `permissions.ask`   | array of strings | Rules for tool calls that always require user confirmation. Takes priority over `allow`.                         | `undefined` |
+| `permissions.deny`  | array of strings | Rules for blocked tool calls. Highest priority — overrides both `allow` and `ask`.                               | `undefined` |
+
+**Tool name aliases (any of these work in rules):**
+
+| Alias                 | Canonical tool      | Notes                     |
+| --------------------- | ------------------- | ------------------------- |
+| `Bash`, `Shell`       | `run_shell_command` |                           |
+| `Read`, `ReadFile`    | `read_file`         | Meta-category — see below |
+| `Edit`, `EditFile`    | `edit`              | Meta-category — see below |
+| `Write`, `WriteFile`  | `write_file`        |                           |
+| `Grep`, `SearchFiles` | `grep_search`       |                           |
+| `Glob`, `FindFiles`   | `glob`              |                           |
+| `ListFiles`           | `list_directory`    |                           |
+| `WebFetch`            | `web_fetch`         |                           |
+| `Agent`               | `task`              |                           |
+| `Skill`               | `skill`             |                           |
+
+**Meta-categories:**
+
+Some rule names automatically cover multiple tools:
+
+| Rule name | Tools covered                                        |
+| --------- | ---------------------------------------------------- |
+| `Read`    | `read_file`, `grep_search`, `glob`, `list_directory` |
+| `Edit`    | `edit`, `write_file`                                 |
+
+> [!important]
+> `Read(/path/**)` matches **all four** read tools (file read, grep, glob, and directory listing).
+> To restrict only file reading, use `ReadFile(/path/**)` or `read_file(/path/**)`.
 
 **Rule syntax examples:**
 
-| Rule                             | Meaning                                                        |
-| -------------------------------- | -------------------------------------------------------------- |
-| `"Bash"`                         | All shell commands                                             |
-| `"Bash(git *)"`                  | Shell commands starting with `git` (word boundary: NOT `gitk`) |
-| `"Bash(npm run build)"`          | Exact command (also matches with trailing args)                |
-| `"Read"`                         | All file read tools (read_file, grep, glob, list_directory)    |
-| `"Read(./secrets/**)"`           | Read files under `./secrets/` recursively                      |
-| `"Edit(/src/**/*.ts)"`           | Edit TypeScript files under project root `/src/`               |
-| `"WebFetch(domain:example.com)"` | Fetch from example.com and subdomains                          |
-| `"mcp__puppeteer"`               | All tools from the puppeteer MCP server                        |
+| Rule                          | Meaning                                                        |
+| ----------------------------- | -------------------------------------------------------------- |
+| `"Bash"`                      | All shell commands                                             |
+| `"Bash(git *)"`               | Shell commands starting with `git` (word boundary: NOT `gitk`) |
+| `"Bash(git push *)"`          | Shell commands like `git push origin main`                     |
+| `"Bash(npm run *)"`           | Any `npm run` script                                           |
+| `"Read"`                      | All file read operations (read, grep, glob, list)              |
+| `"Read(./secrets/**)"`        | Read any file under `./secrets/` recursively                   |
+| `"Edit(/src/**/*.ts)"`        | Edit TypeScript files under project root `/src/`               |
+| `"WebFetch(api.example.com)"` | Fetch from `api.example.com` and all its subdomains            |
+| `"mcp__puppeteer"`            | All tools from the puppeteer MCP server                        |
 
 **Path pattern prefixes:**
 
-| Prefix | Meaning                               | Example                    |
-| ------ | ------------------------------------- | -------------------------- |
-| `//`   | Absolute path from filesystem root    | `//Users/alice/secrets/**` |
-| `~/`   | Relative to home directory            | `~/Documents/*.pdf`        |
-| `/`    | Relative to project root              | `/src/**/*.ts`             |
-| `./`   | Relative to current working directory | `./secrets/**`             |
+| Prefix | Meaning                               | Example             |
+| ------ | ------------------------------------- | ------------------- |
+| `//`   | Absolute path from filesystem root    | `//etc/passwd`      |
+| `~/`   | Relative to home directory            | `~/Documents/*.pdf` |
+| `/`    | Relative to project root              | `/src/**/*.ts`      |
+| `./`   | Relative to current working directory | `./secrets/**`      |
+| (none) | Same as `./`                          | `secrets/**`        |
+
+**Shell command bypass prevention:**
+
+Permission rules for `Read`, `Edit`, and `WebFetch` are also enforced when the agent runs equivalent shell commands. For example, if `Read(./.env)` is in `deny`, the agent cannot bypass it via `cat .env` in a shell command. Supported shell commands include `cat`, `grep`, `curl`, `wget`, `cp`, `mv`, `rm`, `chmod`, and many more. Unknown/safe commands (e.g. `git`) are unaffected by file/network rules.
+
+**Migrating from legacy settings:**
+
+| Legacy setting  | Equivalent `permissions` rule   | Notes                                                        |
+| --------------- | ------------------------------- | ------------------------------------------------------------ |
+| `tools.allowed` | `permissions.allow`             | Auto-migrated on first load                                  |
+| `tools.exclude` | `permissions.deny`              | Auto-migrated on first load                                  |
+| `tools.core`    | `permissions.allow` (allowlist) | Auto-migrated; unlisted tools are disabled at registry level |
 
 **Example configuration:**
 
 ```json
 {
   "permissions": {
-    "allow": ["Bash(git *)", "Bash(npm *)"],
-    "ask": ["Edit"],
-    "deny": ["Bash(rm -rf *)", "Read(.env)"]
+    "allow": ["Bash(git *)", "Bash(npm run *)", "Read(//Users/alice/code/**)"],
+    "ask": ["Bash(git push *)", "Edit"],
+    "deny": ["Bash(rm -rf *)", "Read(.env)", "WebFetch(malicious.com)"]
   }
 }
 ```
+
+> [!tip]
+> Use `/permissions` in the interactive CLI to view, add, and remove rules without editing `settings.json` directly.
 
 #### mcp
 

@@ -61,6 +61,19 @@ export interface PermissionManagerConfig {
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
    */
   getApprovalMode?(): string;
+  /**
+   * Returns the legacy coreTools allowlist.
+   *
+   * When non-empty, only the tools in this list will be considered enabled at
+   * the registry level — all other tools will be excluded from registration.
+   * This preserves the original `tools.core` whitelist semantic inside
+   * PermissionManager, so `createToolRegistry` can use a single
+   * `pm.isToolEnabled()` check without any legacy fallback.
+   *
+   * @deprecated Configure tool availability via `permissions.deny` rules
+   *             (e.g. `"Bash"` to block all shell commands) instead.
+   */
+  getCoreTools?(): string[] | undefined;
 }
 
 /**
@@ -95,6 +108,13 @@ export class PermissionManager {
     deny: [],
   };
 
+  /**
+   * Canonical tool names from the legacy `coreTools` allowlist.
+   * When non-null, `isToolEnabled()` rejects any tool not in this set.
+   * Populated during `initialize()` from `config.getCoreTools()`.
+   */
+  private coreToolsAllowList: Set<string> | null = null;
+
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
@@ -110,6 +130,17 @@ export class PermissionManager {
       ask: parseRules(this.config.getPermissionsAsk() ?? []),
       deny: parseRules(this.config.getPermissionsDeny() ?? []),
     };
+
+    // Build the coreTools allowlist (legacy whitelist semantic).
+    // Each entry may be a bare name ("Bash", "read_file") or include a specifier
+    // ("Bash(ls -l)") – we normalise to canonical tool names and ignore specifiers
+    // because the registry check is at the tool level, not the invocation level.
+    const rawCoreTools = this.config.getCoreTools?.();
+    if (rawCoreTools && rawCoreTools.length > 0) {
+      this.coreToolsAllowList = new Set(
+        rawCoreTools.map((t) => parseRule(t).toolName),
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -201,7 +232,12 @@ export class PermissionManager {
 
     // For shell commands: evaluate virtual file/network operations extracted
     // from the command string against Read/Edit/Write/WebFetch/ListFiles rules.
-    // The most restrictive result across base + virtual ops wins.
+    //
+    // Virtual ops can only ESCALATE a decision (to 'ask' or 'deny').
+    // A 'default' virtual result means "shell semantics have no opinion" — it
+    // must never downgrade an explicit 'allow' decision from a Bash rule.
+    // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
+    // should return 'allow', not be downgraded to 'default'.
     if (toolName === 'run_shell_command' && command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       const virtualDecision = this.evaluateShellVirtualOps(
@@ -209,6 +245,7 @@ export class PermissionManager {
         pathCtx,
       );
       if (
+        virtualDecision !== 'default' &&
         DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[baseDecision]
       ) {
         return virtualDecision;
@@ -312,6 +349,16 @@ export class PermissionManager {
    */
   isToolEnabled(toolName: string): boolean {
     const canonicalName = resolveToolName(toolName);
+
+    // If a coreTools allowlist is active, only explicitly listed tools are
+    // registered. This mirrors the legacy `tools.core` whitelist semantic:
+    // any tool NOT in the allowlist is excluded from the registry entirely.
+    if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
+      if (!this.coreToolsAllowList.has(canonicalName)) {
+        return false;
+      }
+    }
+
     // evaluate({ toolName }) without a command will only match rules that have
     // no specifier, which is the correct registry-level check.
     const decision = this.evaluate({ toolName: canonicalName });

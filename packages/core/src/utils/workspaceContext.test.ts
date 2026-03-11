@@ -446,16 +446,20 @@ describe('WorkspaceContext removeDirectory', () => {
     expect(ctx.getDirectories()).not.toContain(addedDir);
   });
 
-  it('should not remove an initial directory', () => {
+  it('should not remove the initial cwd directory', () => {
     const ctx = new WorkspaceContext(cwd, [addedDir]);
-    // Both cwd and addedDir are initial
+    // Only cwd is truly initial (non-removable)
     const result = ctx.removeDirectory(cwd);
     expect(result).toBe(false);
     expect(ctx.getDirectories()).toContain(cwd);
+  });
 
-    const result2 = ctx.removeDirectory(addedDir);
-    expect(result2).toBe(false);
-    expect(ctx.getDirectories()).toContain(addedDir);
+  it('should allow removing an additional directory passed at construction', () => {
+    const ctx = new WorkspaceContext(cwd, [addedDir]);
+    // additionalDirectories are NOT initial — they can be removed
+    const result = ctx.removeDirectory(addedDir);
+    expect(result).toBe(true);
+    expect(ctx.getDirectories()).not.toContain(addedDir);
   });
 
   it('should return false for non-existent directory', () => {
@@ -514,9 +518,10 @@ describe('WorkspaceContext isInitialDirectory', () => {
     expect(ctx.isInitialDirectory(cwd)).toBe(true);
   });
 
-  it('should return true for an additional initial directory', () => {
+  it('should return false for an additional directory passed at construction', () => {
     const ctx = new WorkspaceContext(cwd, [additionalDir]);
-    expect(ctx.isInitialDirectory(additionalDir)).toBe(true);
+    // additionalDirectories are no longer considered 'initial'
+    expect(ctx.isInitialDirectory(additionalDir)).toBe(false);
   });
 
   it('should return false for a runtime-added directory', () => {

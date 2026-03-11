@@ -90,7 +90,7 @@ import {
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
@@ -1765,9 +1765,6 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    const coreToolsConfig = this.getCoreTools();
-    const excludeToolsConfig = this.getExcludeTools();
-
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
@@ -1783,20 +1780,13 @@ export class Config {
         return;
       }
 
-      // Two-layer check: legacy coreTools/excludeTools whitelist + PM deny rules.
-      // Legacy isToolEnabled() preserves the whitelist semantic where coreTools
-      // acts as a strict allowlist (only listed tools are registered).
-      // PM.isToolEnabled() handles deny rules from the new permissions system.
-      const legacyEnabled = isToolEnabled(
-        toolName,
-        coreToolsConfig,
-        excludeToolsConfig,
-      );
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
       const pmEnabled = this.permissionManager
         ? this.permissionManager.isToolEnabled(toolName)
         : true; // Should never reach here after initialize(), but safe default.
 
-      if (legacyEnabled && pmEnabled) {
+      if (pmEnabled) {
         try {
           registry.registerTool(new ToolClass(...args));
         } catch (error) {
