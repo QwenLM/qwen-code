@@ -33,7 +33,10 @@ import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
 
 export interface RegisteredAgent {
   interactiveAgent: AgentInteractive;
-  displayName: string;
+  /** Model identifier shown in tabs and paths (e.g. "glm-5"). */
+  modelId: string;
+  /** Human-friendly model name (e.g. "GLM 5"). */
+  modelName?: string;
   color: string;
 }
 
@@ -60,8 +63,9 @@ export interface AgentViewActions {
   registerAgent(
     agentId: string,
     interactiveAgent: AgentInteractive,
-    displayName: string,
+    modelId: string,
     color: string,
+    modelName?: string,
   ): void;
   unregisterAgent(agentId: string): void;
   unregisterAll(): void;
@@ -173,12 +177,18 @@ export function AgentViewProvider({
     (
       agentId: string,
       interactiveAgent: AgentInteractive,
-      displayName: string,
+      modelId: string,
       color: string,
+      modelName?: string,
     ) => {
       setAgents((prev) => {
         const next = new Map(prev);
-        next.set(agentId, { interactiveAgent, displayName, color });
+        next.set(agentId, {
+          interactiveAgent,
+          modelId,
+          color,
+          modelName,
+        });
         return next;
       });
       // Seed approval mode from the agent's own config

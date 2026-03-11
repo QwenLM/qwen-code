@@ -149,7 +149,7 @@ export const AgentTabBar: React.FC = () => {
               backgroundColor={isActive ? theme.border.default : undefined}
               color={isActive ? undefined : agent.color || theme.text.secondary}
             >
-              {` ${agent.displayName} `}
+              {` ${agent.modelId} `}
             </Text>
             <Text dimColor={!isFocused} color={indicatorColor}>
               {` ${symbol}`}

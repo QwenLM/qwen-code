@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
@@ -51,8 +52,6 @@ export interface WorktreeSetupConfig {
   worktreeNames: string[];
   /** Base branch to create worktrees from (defaults to current branch) */
   baseBranch?: string;
-  /** Branch prefix for worktree branches (default: 'worktrees') */
-  branchPrefix?: string;
   /** Extra metadata to persist alongside the session config */
   metadata?: Record<string, unknown>;
 }
@@ -226,7 +225,6 @@ export class GitWorktreeService {
     sessionId: string,
     name: string,
     baseBranch?: string,
-    branchPrefix: string = WORKTREES_DIR,
   ): Promise<CreateWorktreeResult> {
     try {
       const worktreesDir = GitWorktreeService.getWorktreesDir(
@@ -238,7 +236,6 @@ export class GitWorktreeService {
       // Sanitize name for use as branch and directory name
       const sanitizedName = this.sanitizeName(name);
       const worktreePath = path.join(worktreesDir, sanitizedName);
-      const branchName = `${branchPrefix}/${sessionId}/${sanitizedName}`;
 
       // Check if worktree already exists
       const exists = await this.pathExists(worktreePath);
@@ -251,6 +248,8 @@ export class GitWorktreeService {
 
       // Determine base branch
       const base = baseBranch || (await this.getCurrentBranch());
+      const shortSession = sessionId.slice(0, 6);
+      const branchName = `${base}-${shortSession}-${sanitizedName}`;
 
       // Create the worktree with a new branch
       await this.git.raw([
@@ -381,15 +380,12 @@ export class GitWorktreeService {
       // Non-fatal: proceed without untracked files
     }
 
-    const branchPrefix = config.branchPrefix ?? WORKTREES_DIR;
-
     // Create worktrees for each entry
     for (const name of config.worktreeNames) {
       const createResult = await this.createWorktree(
         config.sessionId,
         name,
         config.baseBranch,
-        branchPrefix,
       );
 
       if (createResult.success && createResult.worktree) {
@@ -406,7 +402,7 @@ export class GitWorktreeService {
     // If any worktree failed, clean up all created resources and fail
     if (result.errors.length > 0) {
       try {
-        await this.cleanupSession(config.sessionId, branchPrefix);
+        await this.cleanupSession(config.sessionId);
       } catch (error) {
         result.errors.push({
           name: 'cleanup',
@@ -468,10 +464,7 @@ export class GitWorktreeService {
   /**
    * Lists all worktrees for a session.
    */
-  async listWorktrees(
-    sessionId: string,
-    branchPrefix: string = WORKTREES_DIR,
-  ): Promise<WorktreeInfo[]> {
+  async listWorktrees(sessionId: string): Promise<WorktreeInfo[]> {
     const worktreesDir = GitWorktreeService.getWorktreesDir(
       sessionId,
       this.customBaseDir,
@@ -484,7 +477,18 @@ export class GitWorktreeService {
       for (const entry of entries) {
         if (entry.isDirectory()) {
           const worktreePath = path.join(worktreesDir, entry.name);
-          const branchName = `${branchPrefix}/${sessionId}/${entry.name}`;
+
+          // Read the actual branch from the worktree
+          let branchName = '';
+          try {
+            branchName = execSync('git rev-parse --abbrev-ref HEAD', {
+              cwd: worktreePath,
+              encoding: 'utf8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+            }).trim();
+          } catch {
+            // Fallback if git command fails
+          }
 
           // Try to get stats for creation time
           let createdAt = Date.now();
@@ -544,10 +548,7 @@ export class GitWorktreeService {
   /**
    * Cleans up all worktrees and branches for a session.
    */
-  async cleanupSession(
-    sessionId: string,
-    branchPrefix: string = WORKTREES_DIR,
-  ): Promise<{
+  async cleanupSession(sessionId: string): Promise<{
     success: boolean;
     removedWorktrees: string[];
     removedBranches: string[];
@@ -560,7 +561,11 @@ export class GitWorktreeService {
       errors: [] as string[],
     };
 
-    const worktrees = await this.listWorktrees(sessionId, branchPrefix);
+    // Collect actual branch names from worktrees before removing them
+    const worktrees = await this.listWorktrees(sessionId);
+    const worktreeBranches = new Set(
+      worktrees.map((w) => w.branch).filter(Boolean),
+    );
 
     // Remove all worktrees
     for (const worktree of worktrees) {
@@ -588,18 +593,14 @@ export class GitWorktreeService {
       );
     }
 
-    // Clean up branches
-    const prefix = `${branchPrefix}/${sessionId}/`;
+    // Clean up branches that belonged to the worktrees
     try {
-      const branches = await this.git.branch(['-a']);
-      for (const branchName of Object.keys(branches.branches)) {
-        if (branchName.startsWith(prefix)) {
-          try {
-            await this.git.branch(['-D', branchName]);
-            result.removedBranches.push(branchName);
-          } catch {
-            // Branch might already be deleted, ignore
-          }
+      for (const branchName of worktreeBranches) {
+        try {
+          await this.git.branch(['-D', branchName]);
+          result.removedBranches.push(branchName);
+        } catch {
+          // Branch might already be deleted, ignore
         }
       }
     } catch {

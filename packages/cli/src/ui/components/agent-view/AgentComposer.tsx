@@ -242,7 +242,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         <LoadingIndicator
           currentLoadingPhrase={
             streamingState === StreamingState.Responding
-              ? t('Agent is working…')
+              ? t('Thinking…')
               : undefined
           }
           elapsedTime={elapsedTime}
@@ -268,16 +268,14 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         />
 
         {/* Footer: approval mode + context usage */}
-        {isInputActive && (
-          <AgentFooter
-            approvalMode={agentApprovalMode}
-            promptTokenCount={lastPromptTokenCount}
-            contextWindowSize={
-              config.getContentGeneratorConfig()?.contextWindowSize
-            }
-            terminalWidth={terminalWidth}
-          />
-        )}
+        <AgentFooter
+          approvalMode={agentApprovalMode}
+          promptTokenCount={lastPromptTokenCount}
+          contextWindowSize={
+            config.getContentGeneratorConfig()?.contextWindowSize
+          }
+          terminalWidth={terminalWidth}
+        />
       </Box>
     </StreamingContext.Provider>
   );

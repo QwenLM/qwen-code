@@ -213,7 +213,7 @@ export function ArenaStatusDialog({
 
       {/* Agent rows */}
       {agents.map((agent) => {
-        const label = agent.model.displayName || agent.model.modelId;
+        const label = agent.model.modelId;
         const { text: statusText, color } = getArenaStatusLabel(agent.status);
         const elapsed = getElapsedMs(agent);
 
@@ -270,18 +270,6 @@ export function ArenaStatusDialog({
                 )}
               </Box>
             </Box>
-            {/* In-process mode: show extra detail row with thought/cached tokens */}
-            {live && (live.thoughtTokens > 0 || live.cachedTokens > 0) && (
-              <Box marginLeft={2}>
-                <Text color={theme.text.secondary}>
-                  {live.thoughtTokens > 0 &&
-                    `Thinking: ${live.thoughtTokens.toLocaleString()} tok`}
-                  {live.thoughtTokens > 0 && live.cachedTokens > 0 && '  ·  '}
-                  {live.cachedTokens > 0 &&
-                    `Cached: ${live.cachedTokens.toLocaleString()} tok`}
-                </Text>
-              </Box>
-            )}
           </Box>
         );
       })}

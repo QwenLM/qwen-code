@@ -411,10 +411,7 @@ describe('ArenaManager', () => {
       expect(mockBackend.cleanup).toHaveBeenCalledTimes(1);
       // cleanupSession is called with worktreeDirName (short ID), not the full sessionId.
       // For 'test-session', the short ID is 'testsess' (first 8 chars with dashes removed).
-      expect(hoistedMockCleanupSession).toHaveBeenCalledWith(
-        'testsess',
-        'arena',
-      );
+      expect(hoistedMockCleanupSession).toHaveBeenCalledWith('testsess');
       expect(manager.getBackend()).toBeNull();
       expect(manager.getSessionId()).toBeUndefined();
     });

@@ -93,8 +93,9 @@ export function useArenaInProcess(
             actionsRef.current.registerAgent(
               agentState.agentId,
               interactive,
-              agentState.model.displayName || agentState.model.modelId,
+              agentState.model.modelId,
               nextColor(),
+              agentState.model.displayName,
             );
           }
         }
@@ -115,8 +116,9 @@ export function useArenaInProcess(
             actionsRef.current.registerAgent(
               event.agentId,
               interactive,
-              event.model.displayName || event.model.modelId,
+              event.model.modelId,
               nextColor(),
+              event.model.displayName,
             );
             return;
           }

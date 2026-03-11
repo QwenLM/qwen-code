@@ -26,6 +26,7 @@ import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   AgentStatus,
   AgentEventType,
+  getGitBranch,
   type AgentStatusChangeEvent,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -40,6 +41,7 @@ import { theme } from '../../semantic-colors.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
+import { AgentHeader } from './AgentHeader.js';
 
 // ─── Main Component ─────────────────────────────────────────
 
@@ -188,7 +190,17 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
   const committedItems = allItems.slice(0, splitIndex);
   const pendingItems = allItems.slice(splitIndex);
 
-  if (!agent || !interactiveAgent) {
+  const core = interactiveAgent?.getCore();
+  const agentWorkingDir = core?.runtimeContext.getTargetDir() ?? '';
+  // Cache the branch — it won't change during the agent's lifetime and
+  // getGitBranch uses synchronous execSync which blocks the render loop.
+  const agentGitBranch = useMemo(
+    () => (agentWorkingDir ? getGitBranch(agentWorkingDir) : ''),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [agentId],
+  );
+
+  if (!agent || !interactiveAgent || !core) {
     return (
       <Box marginX={2}>
         <Text color={theme.status.error}>
@@ -198,6 +210,8 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
     );
   }
 
+  const agentModelId = core.modelConfig.model ?? '';
+
   return (
     <Box flexDirection="column">
       {/* Committed message history.
@@ -206,15 +220,24 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
           all items on the cleared screen. */}
       <Static
         key={`agent-${agentId}-${historyRemountKey}`}
-        items={committedItems.map((item) => (
-          <HistoryItemDisplay
-            key={item.id}
-            item={item}
-            isPending={false}
-            terminalWidth={terminalWidth}
-            mainAreaWidth={contentWidth}
-          />
-        ))}
+        items={[
+          <AgentHeader
+            key="agent-header"
+            modelId={agentModelId}
+            modelName={agent.modelName}
+            workingDirectory={agentWorkingDir}
+            gitBranch={agentGitBranch}
+          />,
+          ...committedItems.map((item) => (
+            <HistoryItemDisplay
+              key={item.id}
+              item={item}
+              isPending={false}
+              terminalWidth={terminalWidth}
+              mainAreaWidth={contentWidth}
+            />
+          )),
+        ]}
       >
         {(item) => item}
       </Static>

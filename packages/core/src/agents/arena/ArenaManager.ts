@@ -508,7 +508,7 @@ export class ArenaManager {
     }
 
     // Clean up worktrees
-    await this.worktreeService.cleanupSession(this.worktreeDirName!, 'arena');
+    await this.worktreeService.cleanupSession(this.worktreeDirName!);
 
     this.agents.clear();
     this.cachedResult = null;
@@ -758,15 +758,12 @@ export class ArenaManager {
 
     debugLogger.info('Setting up worktrees for Arena agents');
 
-    const worktreeNames = this.arenaConfig.models.map(
-      (m) => m.displayName || m.modelId,
-    );
+    const worktreeNames = this.arenaConfig.models.map((m) => m.modelId);
 
     const result = await this.worktreeService.setupWorktrees({
       sessionId: this.worktreeDirName!,
       sourceRepoPath: this.arenaConfig.sourceRepoPath,
       worktreeNames,
-      branchPrefix: 'arena',
       metadata: { arenaSessionId: this.arenaConfig.sessionId },
     });
 

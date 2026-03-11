@@ -148,13 +148,13 @@ describe('GitWorktreeService', () => {
       'model-a',
     );
     expect(result.success).toBe(true);
-    expect(result.worktree?.branch).toBe('worktrees/s1/model-a');
+    expect(result.worktree?.branch).toBe('main-s1-model-a');
     expect(result.worktree?.path).toBe(expectedPath);
     expect(hoistedMockRaw).toHaveBeenCalledWith([
       'worktree',
       'add',
       '-b',
-      'worktrees/s1/model-a',
+      'main-s1-model-a',
       expectedPath,
       'main',
     ]);
@@ -228,7 +228,7 @@ describe('GitWorktreeService', () => {
 
     expect(result.success).toBe(false);
     expect(result.errors).toContainEqual({ name: 'b', error: 'boom' });
-    expect(cleanupSpy).toHaveBeenCalledWith('s1', 'worktrees');
+    expect(cleanupSpy).toHaveBeenCalledWith('s1');
   });
 
   it('listWorktrees should return empty array when session dir does not exist', async () => {
@@ -256,31 +256,34 @@ describe('GitWorktreeService', () => {
     expect(hoistedMockRaw).toHaveBeenNthCalledWith(2, ['worktree', 'prune']);
   });
 
-  it('cleanupSession should remove prefixed branches only', async () => {
+  it('cleanupSession should remove branches from listed worktrees', async () => {
     const service = new GitWorktreeService('/repo');
-    vi.spyOn(service, 'listWorktrees').mockResolvedValue([]);
-    hoistedMockBranch.mockImplementation((args?: string[]) => {
-      if (args?.[0] === '-a') {
-        return Promise.resolve({
-          branches: {
-            main: {},
-            'worktrees/s1/a': {},
-            'worktrees/s1/b': {},
-          },
-        });
-      }
-      return Promise.resolve({ branches: {} });
-    });
+    vi.spyOn(service, 'listWorktrees').mockResolvedValue([
+      {
+        id: 's1/a',
+        name: 'a',
+        path: '/w/a',
+        branch: 'main-s1-a',
+        isActive: true,
+        createdAt: Date.now(),
+      },
+      {
+        id: 's1/b',
+        name: 'b',
+        path: '/w/b',
+        branch: 'main-s1-b',
+        isActive: true,
+        createdAt: Date.now(),
+      },
+    ]);
+    vi.spyOn(service, 'removeWorktree').mockResolvedValue({ success: true });
 
     const result = await service.cleanupSession('s1');
 
     expect(result.success).toBe(true);
-    expect(result.removedBranches).toEqual([
-      'worktrees/s1/a',
-      'worktrees/s1/b',
-    ]);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'worktrees/s1/a']);
-    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'worktrees/s1/b']);
+    expect(result.removedBranches).toEqual(['main-s1-a', 'main-s1-b']);
+    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'main-s1-a']);
+    expect(hoistedMockBranch).toHaveBeenCalledWith(['-D', 'main-s1-b']);
     expect(hoistedMockRaw).toHaveBeenCalledWith(['worktree', 'prune']);
   });
 
