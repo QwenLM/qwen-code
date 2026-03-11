@@ -35,7 +35,7 @@ function getUnicodePathHandlingInstructions(model?: string): string {
 
   return `
 # Unicode Path Handling
-- This model can accidentally insert spaces into paths that mix Chinese characters with punctuation, Latin letters, or digits.
+- You can accidentally insert spaces into paths that mix Chinese characters with punctuation, Latin letters, or digits.
 - To avoid corrupting paths, whenever you output or reuse a filename or path that contains any non-ASCII character, write every non-ASCII character with JSON-style Unicode escapes. Example: \`中文中文-1.md\` must be written as \`\\u4e2d\\u6587\\u4e2d\\u6587-1.md\`.
 - Never add, remove, or normalize spaces inside a path. Copy paths exactly from tool results.
 - When a tool result contains a \`Unicode paths\` or \`Unicode names\` section, always copy the escaped form verbatim in later tool calls and shell commands.
