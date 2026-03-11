@@ -674,7 +674,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
-    shouldBlockTab: () => hasSuggestionsVisible,
+    // Block Tab key when suggestions are visible (autocomplete) or when AI is actively responding
+    // This prevents accidental mode switches from interrupting ongoing AI responses and edits
+    shouldBlockTab: () =>
+      hasSuggestionsVisible || streamingState === StreamingState.Responding,
   });
 
   const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
