@@ -1036,6 +1036,28 @@ export default {
   'Search…': '搜索…',
   'Use /trust to manage folder trust settings for this workspace.':
     '使用 /trust 管理此工作区的文件夹信任设置。',
+  // Workspace directory management
+  'Add directory…': '添加目录…',
+  'Add directory to workspace': '添加工作区目录',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code 可以读取工作区中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code 将能够读取此目录中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Enter the path to the directory:': '输入目录路径：',
+  'Enter directory path…': '输入目录路径…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab 补全 · 回车添加 · Esc 取消',
+  'Remove directory?': '删除目录？',
+  'Are you sure you want to remove this directory from the workspace?':
+    '确定要将此目录从工作区中移除吗？',
+  '  (Original working directory)': '  （原始工作目录）',
+  '  (from settings)': '  （来自设置）',
+  'Directory does not exist.': '目录不存在。',
+  'Path is not a directory.': '路径不是目录。',
+  'This directory is already in the workspace.': '此目录已在工作区中。',
+  'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    '将目录添加到工作区（/directory add 的别名）',
 
   // ============================================================================
   // Status Bar

@@ -1115,6 +1115,30 @@ export default {
   'Search…': 'Pesquisar…',
   'Use /trust to manage folder trust settings for this workspace.':
     'Use /trust para gerenciar as configurações de confiança de pasta desta área de trabalho.',
+  // Workspace directory management
+  'Add directory…': 'Adicionar diretório…',
+  'Add directory to workspace': 'Adicionar diretório à área de trabalho',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'O Qwen Code pode ler arquivos na área de trabalho e fazer edições quando a aceitação automática está ativada.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'O Qwen Code poderá ler arquivos neste diretório e fazer edições quando a aceitação automática está ativada.',
+  'Enter the path to the directory:': 'Insira o caminho do diretório:',
+  'Enter directory path…': 'Insira o caminho do diretório…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab para completar · Enter para adicionar · Esc para cancelar',
+  'Remove directory?': 'Remover diretório?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Tem certeza de que deseja remover este diretório da área de trabalho?',
+  '  (Original working directory)': '  (Diretório de trabalho original)',
+  '  (from settings)': '  (das configurações)',
+  'Directory does not exist.': 'O diretório não existe.',
+  'Path is not a directory.': 'O caminho não é um diretório.',
+  'This directory is already in the workspace.':
+    'Este diretório já está na área de trabalho.',
+  'Already covered by existing directory: {{dir}}':
+    'Já coberto pelo diretório existente: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'Adicionar diretórios à área de trabalho (apelido para /directory add)',
 
   // ============================================================================
   // Status Bar

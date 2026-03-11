@@ -1113,6 +1113,30 @@ export default {
   'Search…': 'Поиск…',
   'Use /trust to manage folder trust settings for this workspace.':
     'Используйте /trust для управления настройками доверия к папкам этой рабочей области.',
+  // Workspace directory management
+  'Add directory…': 'Добавить каталог…',
+  'Add directory to workspace': 'Добавить каталог в рабочую область',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code может читать файлы в рабочей области и вносить правки, когда автоприём правок включён.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code сможет читать файлы в этом каталоге и вносить правки, когда автоприём правок включён.',
+  'Enter the path to the directory:': 'Введите путь к каталогу:',
+  'Enter directory path…': 'Введите путь к каталогу…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab для завершения · Enter для добавления · Esc для отмены',
+  'Remove directory?': 'Удалить каталог?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Вы уверены, что хотите удалить этот каталог из рабочей области?',
+  '  (Original working directory)': '  (Исходный рабочий каталог)',
+  '  (from settings)': '  (из настроек)',
+  'Directory does not exist.': 'Каталог не существует.',
+  'Path is not a directory.': 'Путь не является каталогом.',
+  'This directory is already in the workspace.':
+    'Этот каталог уже есть в рабочей области.',
+  'Already covered by existing directory: {{dir}}':
+    'Уже охвачен существующим каталогом: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'Добавить каталоги в рабочую область (псевдоним для /directory add)',
 
   // ============================================================================
   // Строка состояния

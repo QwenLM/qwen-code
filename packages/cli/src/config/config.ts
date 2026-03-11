@@ -32,7 +32,7 @@ import {
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
-import type { Settings , LoadedSettings } from './settings.js';
+import type { Settings, LoadedSettings } from './settings.js';
 import { SettingScope } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -378,6 +378,7 @@ export async function parseArguments(): Promise<CliArgs> {
           description: 'List all available extensions and exit.',
         })
         .option('include-directories', {
+          alias: 'add-dir',
           type: 'array',
           string: true,
           description:
@@ -715,7 +716,14 @@ export async function loadCliConfig(
 
   const includeDirectories = (settings.context?.includeDirectories || [])
     .map(resolvePath)
-    .concat((argv.includeDirectories || []).map(resolvePath));
+    .concat((argv.includeDirectories || []).map(resolvePath))
+    .concat(
+      (
+        ((settings.permissions as Record<string, unknown> | undefined)?.[
+          'additionalDirectories'
+        ] as string[] | undefined) ?? []
+      ).map(resolvePath),
+    );
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled = argv.experimentalLsp === true;

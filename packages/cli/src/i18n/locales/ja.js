@@ -801,6 +801,30 @@ export default {
   'Search…': '検索…',
   'Use /trust to manage folder trust settings for this workspace.':
     '/trust を使用してこのワークスペースのフォルダ信頼設定を管理します。',
+  // Workspace directory management
+  'Add directory…': 'ディレクトリを追加…',
+  'Add directory to workspace': 'ワークスペースにディレクトリを追加',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code はワークスペース内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code はこのディレクトリ内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Enter the path to the directory:': 'ディレクトリのパスを入力してください:',
+  'Enter directory path…': 'ディレクトリパスを入力…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab で補完 · Enter で追加 · Esc でキャンセル',
+  'Remove directory?': 'ディレクトリを削除しますか？',
+  'Are you sure you want to remove this directory from the workspace?':
+    'このディレクトリをワークスペースから削除してもよろしいですか？',
+  '  (Original working directory)': '  （元の作業ディレクトリ）',
+  '  (from settings)': '  （設定より）',
+  'Directory does not exist.': 'ディレクトリが存在しません。',
+  'Path is not a directory.': 'パスはディレクトリではありません。',
+  'This directory is already in the workspace.':
+    'このディレクトリはすでにワークスペースに含まれています。',
+  'Already covered by existing directory: {{dir}}':
+    '既存のディレクトリによって既にカバーされています: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'ワークスペースにディレクトリを追加（/directory add のエイリアス）',
   // Status Bar
   'Using:': '使用中:',
   '{{count}} open file': '{{count}} 個のファイルを開いています',

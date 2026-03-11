@@ -835,6 +835,18 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      additionalDirectories: {
+        type: 'array',
+        label: 'Additional Directories',
+        category: 'Tools',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Additional directories to include in the workspace context. ' +
+          'Alias for context.includeDirectories. Files in these directories are treated as workspace files.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+      },
     },
   },
 

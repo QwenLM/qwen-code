@@ -112,6 +112,53 @@ export class WorkspaceContext {
     return Array.from(this.initialDirectories);
   }
 
+  /**
+   * Removes a directory from the workspace.
+   * Cannot remove initial directories (those set at construction time).
+   * @param directory The directory path to remove
+   * @returns True if the directory was removed, false if not found or is an initial directory
+   */
+  removeDirectory(directory: string): boolean {
+    // Resolve to match the stored form
+    let resolved: string;
+    try {
+      resolved = this.resolveAndValidateDir(directory);
+    } catch {
+      // If we can't resolve it, try matching by raw string (e.g. directory was deleted)
+      resolved = path.isAbsolute(directory)
+        ? directory
+        : path.resolve(process.cwd(), directory);
+    }
+
+    if (this.initialDirectories.has(resolved)) {
+      debugLogger.warn(`Cannot remove initial directory: ${resolved}`);
+      return false;
+    }
+
+    if (!this.directories.has(resolved)) {
+      return false;
+    }
+
+    this.directories.delete(resolved);
+    this.notifyDirectoriesChanged();
+    return true;
+  }
+
+  /**
+   * Checks whether a directory is an initial (non-removable) directory.
+   */
+  isInitialDirectory(directory: string): boolean {
+    try {
+      const resolved = this.resolveAndValidateDir(directory);
+      return this.initialDirectories.has(resolved);
+    } catch {
+      const absolutePath = path.isAbsolute(directory)
+        ? directory
+        : path.resolve(process.cwd(), directory);
+      return this.initialDirectories.has(absolutePath);
+    }
+  }
+
   setDirectories(directories: readonly string[]): void {
     const newDirectories = new Set<string>();
     for (const dir of directories) {

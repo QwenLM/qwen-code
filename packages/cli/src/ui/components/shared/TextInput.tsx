@@ -21,6 +21,12 @@ export interface TextInputProps {
   value: string;
   onChange: (text: string) => void;
   onSubmit?: () => void;
+  /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
+  onTab?: () => void;
+  /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
+  onUp?: () => void;
+  /** Called when ↓ is pressed; if provided, prevents cursor-down in the buffer. */
+  onDown?: () => void;
   placeholder?: string;
   height?: number; // lines in viewport; >1 enables multiline
   isActive?: boolean; // when false, ignore keypresses
@@ -32,6 +38,9 @@ export function TextInput({
   value,
   onChange,
   onSubmit,
+  onTab,
+  onUp,
+  onDown,
   placeholder,
   height = 1,
   isActive = true,
@@ -64,6 +73,22 @@ export function TextInput({
   useKeypress(
     (key: Key) => {
       if (!buffer || !isActive) return;
+
+      // Tab completion: delegate to caller instead of inserting a tab character
+      if (key.name === 'tab') {
+        onTab?.();
+        return;
+      }
+
+      // Arrow-key completion navigation: delegate to caller
+      if (key.name === 'up' && onUp) {
+        onUp();
+        return;
+      }
+      if (key.name === 'down' && onDown) {
+        onDown();
+        return;
+      }
 
       // Submit on Enter
       if (keyMatchers[Command.SUBMIT](key) || key.name === 'return') {

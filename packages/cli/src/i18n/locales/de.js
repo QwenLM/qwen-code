@@ -1112,6 +1112,30 @@ export default {
   'Search…': 'Suche…',
   'Use /trust to manage folder trust settings for this workspace.':
     'Verwenden Sie /trust, um die Ordnervertrauenseinstellungen für diesen Arbeitsbereich zu verwalten.',
+  // Workspace directory management
+  'Add directory…': 'Verzeichnis hinzufügen…',
+  'Add directory to workspace': 'Verzeichnis zum Arbeitsbereich hinzufügen',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code kann Dateien im Arbeitsbereich lesen und Bearbeitungen vornehmen, wenn die automatische Akzeptierung aktiviert ist.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code kann Dateien in diesem Verzeichnis lesen und Bearbeitungen vornehmen, wenn die automatische Akzeptierung aktiviert ist.',
+  'Enter the path to the directory:': 'Pfad zum Verzeichnis eingeben:',
+  'Enter directory path…': 'Verzeichnispfad eingeben…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab zum Vervollständigen · Enter zum Hinzufügen · Esc zum Abbrechen',
+  'Remove directory?': 'Verzeichnis entfernen?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Möchten Sie dieses Verzeichnis wirklich aus dem Arbeitsbereich entfernen?',
+  '  (Original working directory)': '  (Ursprüngliches Arbeitsverzeichnis)',
+  '  (from settings)': '  (aus Einstellungen)',
+  'Directory does not exist.': 'Verzeichnis existiert nicht.',
+  'Path is not a directory.': 'Pfad ist kein Verzeichnis.',
+  'This directory is already in the workspace.':
+    'Dieses Verzeichnis ist bereits im Arbeitsbereich.',
+  'Already covered by existing directory: {{dir}}':
+    'Bereits durch vorhandenes Verzeichnis abgedeckt: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'Verzeichnisse zum Arbeitsbereich hinzufügen (Alias für /directory add)',
 
   // ============================================================================
   // Status Bar

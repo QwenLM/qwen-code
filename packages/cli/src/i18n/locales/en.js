@@ -1097,6 +1097,30 @@ export default {
   'Search…': 'Search…',
   'Use /trust to manage folder trust settings for this workspace.':
     'Use /trust to manage folder trust settings for this workspace.',
+  // Workspace directory management
+  'Add directory…': 'Add directory…',
+  'Add directory to workspace': 'Add directory to workspace',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+  'Enter the path to the directory:': 'Enter the path to the directory:',
+  'Enter directory path…': 'Enter directory path…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab to complete · Enter to add · Esc to cancel',
+  'Remove directory?': 'Remove directory?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Are you sure you want to remove this directory from the workspace?',
+  '  (Original working directory)': '  (Original working directory)',
+  '  (from settings)': '  (from settings)',
+  'Directory does not exist.': 'Directory does not exist.',
+  'Path is not a directory.': 'Path is not a directory.',
+  'This directory is already in the workspace.':
+    'This directory is already in the workspace.',
+  'Already covered by existing directory: {{dir}}':
+    'Already covered by existing directory: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'Add directories to the workspace (alias for /directory add)',
 
   // ============================================================================
   // Status Bar
