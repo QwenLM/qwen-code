@@ -33,10 +33,18 @@ async function startDaemon(): Promise<void> {
     process.exit(0);
   };
 
+  // Handle stop requests from the API
+  server.onStop(() => {
+    shutdown();
+  });
+
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-startDaemon().catch(() => {
+startDaemon().catch((err) => {
+  process.stderr.write(
+    `Daemon startup failed: ${err instanceof Error ? err.message : String(err)}\n`,
+  );
   process.exit(1);
 });

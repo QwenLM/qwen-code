@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
 import { loadSettings } from '../config/settings.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
@@ -20,10 +19,36 @@ export interface DaemonSessionOptions {
 }
 
 /**
+ * Mutex to ensure only one session runs at a time.
+ * The non-interactive pipeline writes to process.stdout/stderr directly,
+ * so we serialize execution to prevent cross-session output contamination.
+ */
+let executionLock: Promise<void> = Promise.resolve();
+
+/**
  * Runs a single prompt through the Qwen Code engine in daemon mode.
  * Leverages the existing non-interactive pipeline with stdout/stderr intercepted.
+ * Execution is serialized via a mutex to prevent concurrent stdout conflicts.
  */
 export async function runDaemonSession(
+  options: DaemonSessionOptions,
+): Promise<void> {
+  // Queue this session behind any currently running session
+  const previousLock = executionLock;
+  let releaseLock: () => void;
+  executionLock = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+
+  try {
+    await previousLock;
+    await runDaemonSessionInternal(options);
+  } finally {
+    releaseLock!();
+  }
+}
+
+async function runDaemonSessionInternal(
   options: DaemonSessionOptions,
 ): Promise<void> {
   const { cwd, prompt, sessionId, abortSignal, onOutput, onError } = options;
@@ -54,7 +79,8 @@ export async function runDaemonSession(
   const abortHandler = () => abortController.abort();
   abortSignal.addEventListener('abort', abortHandler, { once: true });
 
-  // Intercept stdout to capture output
+  // Intercept stdout/stderr to capture output for the WebSocket session.
+  // Safe because the execution mutex ensures only one session runs at a time.
   const originalStdoutWrite = process.stdout.write.bind(process.stdout);
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
@@ -78,12 +104,11 @@ export async function runDaemonSession(
       return true;
     };
 
-  // Temporarily redirect stdout/stderr
   process.stdout.write = captureWrite(onOutput) as typeof process.stdout.write;
   process.stderr.write = captureWrite(onError) as typeof process.stderr.write;
 
   try {
-    await runNonInteractive(config, settings, prompt, randomUUID(), {
+    await runNonInteractive(config, settings, prompt, sessionId, {
       abortController,
     });
   } catch (err) {

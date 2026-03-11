@@ -165,7 +165,7 @@ export class DaemonServer {
     }
 
     if (url.pathname === '/api/stop') {
-      this.handleApiStop(res);
+      this.handleApiStop(req, res);
       return;
     }
 
@@ -192,12 +192,14 @@ export class DaemonServer {
       return;
     }
 
-    // Session page
+    // Session page (only serve existing sessions)
     const sessionMatch = url.pathname.match(/^\/session\/([a-f0-9-]+)$/);
     if (sessionMatch) {
       const sessionId = sessionMatch[1];
       if (!this.sessions.has(sessionId)) {
-        this.createSession(sessionId);
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Session not found. Use /session/new to create one.');
+        return;
       }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(getWebUIHtml(sessionId, this.authToken));
@@ -214,11 +216,30 @@ export class DaemonServer {
     res.end(JSON.stringify(this.getSessionsInfo()));
   }
 
-  private handleApiStop(res: http.ServerResponse): void {
+  private onStopRequested: (() => void) | null = null;
+
+  /** Register a callback to be invoked when a stop is requested via API. */
+  onStop(callback: () => void): void {
+    this.onStopRequested = callback;
+  }
+
+  private handleApiStop(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'text/plain' });
+      res.end('Method Not Allowed');
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'stopping' }));
-    // Graceful shutdown after response is sent
-    setTimeout(() => this.stop().then(() => process.exit(0)), 100);
+    // Notify the caller (daemon-entry) to handle shutdown
+    setTimeout(() => {
+      if (this.onStopRequested) {
+        this.onStopRequested();
+      }
+    }, 100);
   }
 
   private createSession(sessionId: string): ActiveSession {

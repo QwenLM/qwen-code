@@ -39,11 +39,19 @@ export const stopCommand: CommandModule = {
       try {
         await fetch(
           `http://127.0.0.1:${lock.port}/api/stop?token=${lock.authToken}`,
-          { signal: controller.signal },
+          { method: 'POST', signal: controller.signal },
         );
         clearTimeout(timeout);
-        writeStdoutLine(`Daemon stopped (PID: ${lock.pid}).`);
-        return;
+
+        // Wait for the process to actually exit
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 300));
+          if (!isDaemonRunning(lock)) {
+            writeStdoutLine(`Daemon stopped (PID: ${lock.pid}).`);
+            return;
+          }
+        }
+        // Process didn't exit via API, fall through to SIGTERM
       } catch {
         clearTimeout(timeout);
       }
