@@ -68,6 +68,30 @@ describe('lock-file', () => {
       const result = readLockFile();
       expect(result).toBeNull();
     });
+
+    it('should return null for JSON with missing fields', () => {
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({ pid: 123, port: 'not-a-number' }),
+      );
+
+      const result = readLockFile();
+      expect(result).toBeNull();
+    });
+
+    it('should return null for JSON with wrong types', () => {
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({
+          pid: '123',
+          port: 8080,
+          authToken: 'tok',
+          cwd: '/dir',
+          startedAt: '2025-01-01',
+        }),
+      );
+
+      const result = readLockFile();
+      expect(result).toBeNull();
+    });
   });
 
   describe('removeLockFile', () => {

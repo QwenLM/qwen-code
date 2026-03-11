@@ -18,11 +18,28 @@ export function writeLockFile(info: DaemonLockInfo): void {
   fs.writeFileSync(LOCK_FILE, JSON.stringify(info, null, 2), 'utf-8');
 }
 
-/** Read the daemon lock file. Returns null if not found or invalid. */
+/** Validate that a parsed object has the required DaemonLockInfo fields. */
+function isValidLockInfo(obj: unknown): obj is DaemonLockInfo {
+  if (typeof obj !== 'object' || obj === null) return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    typeof o['pid'] === 'number' &&
+    typeof o['port'] === 'number' &&
+    typeof o['authToken'] === 'string' &&
+    typeof o['cwd'] === 'string' &&
+    typeof o['startedAt'] === 'string'
+  );
+}
+
+/** Read the daemon lock file. Returns null if not found, invalid JSON, or missing fields. */
 export function readLockFile(): DaemonLockInfo | null {
   try {
     const content = fs.readFileSync(LOCK_FILE, 'utf-8');
-    return JSON.parse(content) as DaemonLockInfo;
+    const parsed: unknown = JSON.parse(content);
+    if (!isValidLockInfo(parsed)) {
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -43,6 +60,29 @@ export function isDaemonRunning(lock: DaemonLockInfo): boolean {
     process.kill(lock.pid, 0);
     return true;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify that a running process is actually the daemon by checking /health.
+ * Falls back to true if the API is not reachable (process might be starting up).
+ */
+export async function verifyDaemonProcess(
+  lock: DaemonLockInfo,
+): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const response = await fetch(`http://127.0.0.1:${lock.port}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return false;
+    const body = (await response.json()) as { status?: string; pid?: number };
+    return body.status === 'ok' && body.pid === lock.pid;
+  } catch {
+    // API not reachable - process might exist but not be the daemon
     return false;
   }
 }

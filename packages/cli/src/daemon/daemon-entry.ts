@@ -35,7 +35,7 @@ async function startDaemon(): Promise<void> {
 
   // Handle stop requests from the API
   server.onStop(() => {
-    shutdown();
+    void shutdown();
   });
 
   process.on('SIGINT', shutdown);

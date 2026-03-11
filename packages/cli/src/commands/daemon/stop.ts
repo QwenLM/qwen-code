@@ -9,6 +9,7 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   readLockFile,
   isDaemonRunning,
+  verifyDaemonProcess,
   removeLockFile,
 } from '../../daemon/lock-file.js';
 
@@ -26,6 +27,16 @@ export const stopCommand: CommandModule = {
     if (!isDaemonRunning(lock)) {
       writeStdoutLine(
         'Daemon is not running (stale lock file). Cleaning up...',
+      );
+      removeLockFile();
+      return;
+    }
+
+    // Verify the process is actually our daemon (not a PID reuse)
+    const isDaemon = await verifyDaemonProcess(lock);
+    if (!isDaemon) {
+      writeStdoutLine(
+        'Process exists but does not appear to be the daemon. Cleaning up lock file...',
       );
       removeLockFile();
       return;

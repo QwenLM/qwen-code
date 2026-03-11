@@ -91,10 +91,12 @@ async function runDaemonSessionInternal(
       encodingOrCb?: BufferEncoding | ((error?: Error | null) => void),
       cb?: (error?: Error | null) => void,
     ): boolean => {
+      const encoding =
+        typeof encodingOrCb === 'string' ? encodingOrCb : 'utf-8';
       const text =
         typeof chunk === 'string'
           ? chunk
-          : Buffer.from(chunk).toString('utf-8');
+          : Buffer.from(chunk).toString(encoding);
       if (text.trim()) {
         callback(text);
       }

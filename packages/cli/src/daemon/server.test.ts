@@ -48,6 +48,11 @@ describe('DaemonServer', () => {
     expect(res.status).toBe(401);
   });
 
+  it('should return 401 for wrong token', async () => {
+    const res = await fetchUrl('/api/sessions?token=wrong-token');
+    expect(res.status).toBe(401);
+  });
+
   it('should return sessions list with auth', async () => {
     const res = await fetchUrl(`/api/sessions?token=${authToken}`);
     expect(res.status).toBe(200);
@@ -90,7 +95,6 @@ describe('DaemonServer', () => {
   });
 
   it('should accept /api/stop with POST method', async () => {
-    // Register onStop handler so process.exit is not called
     let stopCalled = false;
     server.onStop(() => {
       stopCalled = true;
@@ -116,11 +120,25 @@ describe('DaemonServer', () => {
   });
 
   it('should report correct session count after creating sessions', async () => {
-    // Create a session via /session/new
     await fetchUrl(`/session/new?token=${authToken}`, { redirect: 'manual' });
 
     const res = await fetchUrl(`/api/sessions?token=${authToken}`);
     const body = await res.json();
     expect(body.length).toBe(1);
+  });
+
+  it('should serve session page for existing session', async () => {
+    // Create session first
+    const createRes = await fetchUrl(`/session/new?token=${authToken}`, {
+      redirect: 'manual',
+    });
+    const location = createRes.headers.get('location')!;
+    const sessionPath = location.split('?')[0];
+
+    // Access the session page
+    const res = await fetchUrl(`${sessionPath}?token=${authToken}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('Qwen Code');
   });
 });

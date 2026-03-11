@@ -5,7 +5,7 @@
  */
 
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { writeLockFile, removeLockFile } from './lock-file.js';
@@ -13,12 +13,20 @@ import { getWebUIHtml, getSessionsListHtml } from './web-ui.js';
 import type { DaemonSessionInfo, DaemonWsMessage } from './types.js';
 import { runDaemonSession } from './session-runner.js';
 
+/** Maximum number of concurrent sessions allowed. */
+const MAX_SESSIONS = 50;
+
+/** Session idle timeout in milliseconds (30 minutes). */
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
 interface ActiveSession {
   sessionId: string;
   clients: Set<WebSocket>;
   createdAt: string;
   prompt: string;
   abortController: AbortController | null;
+  lastActivityAt: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -29,14 +37,17 @@ export class DaemonServer {
   private server: http.Server | null = null;
   private wss: WebSocketServer | null = null;
   private readonly authToken: string;
+  private readonly authTokenBuffer: Buffer;
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly cwd: string;
   private readonly port: number;
+  private onStopRequested: (() => void) | null = null;
 
   constructor(cwd: string, port: number, authToken?: string) {
     this.cwd = cwd;
     this.port = port;
     this.authToken = authToken ?? randomUUID();
+    this.authTokenBuffer = Buffer.from(this.authToken);
   }
 
   /** Start the daemon server. */
@@ -56,8 +67,8 @@ export class DaemonServer {
         return;
       }
 
-      const token = url.searchParams.get('token');
-      if (token !== this.authToken) {
+      const token = url.searchParams.get('token') ?? '';
+      if (!this.verifyToken(token)) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
@@ -101,9 +112,12 @@ export class DaemonServer {
 
   /** Stop the daemon server and clean up. */
   async stop(): Promise<void> {
-    // Abort all active sessions
+    // Abort all active sessions and clear idle timers
     for (const session of this.sessions.values()) {
       session.abortController?.abort();
+      if (session.idleTimer) {
+        clearTimeout(session.idleTimer);
+      }
       for (const client of session.clients) {
         client.close();
       }
@@ -116,6 +130,8 @@ export class DaemonServer {
     }
 
     if (this.server) {
+      // Close all active connections so server.close() resolves promptly
+      this.server.closeAllConnections();
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve());
       });
@@ -123,6 +139,11 @@ export class DaemonServer {
     }
 
     removeLockFile();
+  }
+
+  /** Register a callback to be invoked when a stop is requested via API. */
+  onStop(callback: () => void): void {
+    this.onStopRequested = callback;
   }
 
   /** Get info about all active sessions. */
@@ -135,6 +156,15 @@ export class DaemonServer {
     }));
   }
 
+  /** Constant-time token comparison to prevent timing attacks. */
+  private verifyToken(token: string): boolean {
+    const tokenBuffer = Buffer.from(token);
+    if (tokenBuffer.length !== this.authTokenBuffer.length) {
+      return false;
+    }
+    return timingSafeEqual(tokenBuffer, this.authTokenBuffer);
+  }
+
   private handleRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -142,7 +172,8 @@ export class DaemonServer {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     const token =
       url.searchParams.get('token') ??
-      req.headers.authorization?.replace('Bearer ', '');
+      req.headers.authorization?.replace('Bearer ', '') ??
+      '';
 
     // Health check endpoint (no auth required)
     if (url.pathname === '/health') {
@@ -152,7 +183,7 @@ export class DaemonServer {
     }
 
     // All other routes require authentication
-    if (token !== this.authToken) {
+    if (!this.verifyToken(token)) {
       res.writeHead(401, { 'Content-Type': 'text/plain' });
       res.end('Unauthorized');
       return;
@@ -183,6 +214,13 @@ export class DaemonServer {
 
     // New session
     if (url.pathname === '/session/new') {
+      if (this.sessions.size >= MAX_SESSIONS) {
+        res.writeHead(429, { 'Content-Type': 'text/plain' });
+        res.end(
+          `Too many sessions (max: ${MAX_SESSIONS}). Close some sessions first.`,
+        );
+        return;
+      }
       const sessionId = randomUUID();
       this.createSession(sessionId);
       res.writeHead(302, {
@@ -216,13 +254,6 @@ export class DaemonServer {
     res.end(JSON.stringify(this.getSessionsInfo()));
   }
 
-  private onStopRequested: (() => void) | null = null;
-
-  /** Register a callback to be invoked when a stop is requested via API. */
-  onStop(callback: () => void): void {
-    this.onStopRequested = callback;
-  }
-
   private handleApiStop(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -249,9 +280,29 @@ export class DaemonServer {
       createdAt: new Date().toISOString(),
       prompt: '',
       abortController: null,
+      lastActivityAt: Date.now(),
+      idleTimer: null,
     };
     this.sessions.set(sessionId, session);
+    this.resetIdleTimer(session);
     return session;
+  }
+
+  /** Reset the idle timer for a session. Removes the session if idle too long. */
+  private resetIdleTimer(session: ActiveSession): void {
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+    }
+    session.lastActivityAt = Date.now();
+    session.idleTimer = setTimeout(() => {
+      // Only remove if no clients connected and no active task
+      if (session.clients.size === 0 && !session.abortController) {
+        this.sessions.delete(session.sessionId);
+      } else {
+        // Still active, reset timer
+        this.resetIdleTimer(session);
+      }
+    }, SESSION_IDLE_TIMEOUT_MS);
   }
 
   private handleWsConnection(ws: WebSocket, sessionId: string): void {
@@ -262,6 +313,7 @@ export class DaemonServer {
     }
 
     session.clients.add(ws);
+    this.resetIdleTimer(session);
 
     // Send connected confirmation
     this.sendToClient(ws, { type: 'connected', sessionId });
@@ -280,6 +332,7 @@ export class DaemonServer {
 
     ws.on('close', () => {
       session.clients.delete(ws);
+      this.resetIdleTimer(session);
     });
   }
 
@@ -306,12 +359,22 @@ export class DaemonServer {
   ): Promise<void> {
     if (!prompt.trim()) return;
 
+    // Reject if a prompt is already being processed for this session
+    if (session.abortController) {
+      this.broadcastToSession(session, {
+        type: 'error',
+        data: 'A prompt is already being processed. Stop it first or wait for it to finish.',
+      });
+      return;
+    }
+
     if (!session.prompt) {
       session.prompt = prompt.slice(0, 200);
     }
 
     const abortController = new AbortController();
     session.abortController = abortController;
+    this.resetIdleTimer(session);
 
     this.broadcastToSession(session, {
       type: 'status',
@@ -352,6 +415,7 @@ export class DaemonServer {
       });
     } finally {
       session.abortController = null;
+      this.resetIdleTimer(session);
     }
   }
 

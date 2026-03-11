@@ -61,6 +61,9 @@ export const startCommand: CommandModule = {
         await server.stop();
         process.exit(0);
       };
+      server.onStop(() => {
+        void shutdown();
+      });
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
 
@@ -78,7 +81,6 @@ export const startCommand: CommandModule = {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         cwd: process.cwd(),
-        env: { ...process.env },
       });
 
       // Wait for the child to report it's ready
