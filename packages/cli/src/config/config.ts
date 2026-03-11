@@ -34,6 +34,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { daemonCommand } from '../commands/daemon.js';
 import type { Settings } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -571,7 +572,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Extension subcommands
     .command(extensionsCommand)
     // Register Hooks subcommands
-    .command(hooksCommand);
+    .command(hooksCommand)
+    // Register Daemon subcommands
+    .command(daemonCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json

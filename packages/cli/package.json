@@ -70,6 +70,7 @@
     "undici": "^6.22.0",
     "update-notifier": "^7.3.1",
     "wrap-ansi": "9.0.2",
+    "ws": "^8.18.0",
     "yargs": "^17.7.2",
     "zod": "^3.23.8"
   },
@@ -88,6 +89,7 @@
     "@types/react-dom": "^19.1.6",
     "@types/semver": "^7.7.0",
     "@types/shell-quote": "^1.7.5",
+    "@types/ws": "^8.5.10",
     "@types/yargs": "^17.0.32",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
