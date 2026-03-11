@@ -2418,7 +2418,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
 
     return new MockTool({
       name: 'ask_user_question',
-      shouldConfirmExecute: async () => ({
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
         type: 'ask_user_question' as const,
         title: 'Please answer the following question(s):',
         questions: [
@@ -2625,7 +2626,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
   it('should block non-ask_user_question tools that need confirmation in plan mode', async () => {
     const editTool = new MockTool({
       name: 'write_file',
-      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
     });
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
