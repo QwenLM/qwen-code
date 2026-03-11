@@ -94,9 +94,10 @@ import {
 } from '../confirmation-bus/types.js';
 import {
   PermissionMode,
-  type NotificationType,
+  NotificationType,
   type PermissionSuggestion,
 } from '../hooks/types.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -982,6 +983,21 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    // Fire auth_success notification hook (supports both interactive & non-interactive)
+    const messageBus = this.getMessageBus();
+    const hooksEnabled = this.getEnableHooks();
+    if (hooksEnabled && messageBus) {
+      fireNotificationHook(
+        messageBus,
+        `Successfully authenticated with ${authMethod}`,
+        NotificationType.AuthSuccess,
+        'Authentication successful',
+      ).catch(() => {
+        // Silently ignore errors - fireNotificationHook has internal error handling
+        // and notification hooks should not block the auth flow
+      });
+    }
   }
 
   /**

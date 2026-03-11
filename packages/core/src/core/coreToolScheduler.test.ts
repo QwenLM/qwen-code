@@ -42,6 +42,7 @@ import * as path from 'node:path';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -2858,7 +2859,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
 
 // Integration tests for the fire* functions
 describe('Fire hook functions integration', () => {
-  let mockMessageBus: { request: Mock };
+  let mockMessageBus: { request: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     mockMessageBus = {
@@ -2882,7 +2883,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePreToolUseHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'toolu_test',
@@ -2921,7 +2922,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePreToolUseHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'toolu_test',
@@ -2952,7 +2953,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockRejectedValue(new Error('Network error'));
 
       const result = await firePreToolUseHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'toolu_test',
@@ -2968,6 +2969,8 @@ describe('Fire hook functions integration', () => {
       const { firePostToolUseHook } = await import('./toolHookTriggers.js');
 
       const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
         success: true,
         output: {
           permission_decision: 'proceed',
@@ -2977,7 +2980,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePostToolUseHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         { response: 'result' },
@@ -3005,7 +3008,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePostToolUseHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         { response: 'result' },
@@ -3053,7 +3056,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePostToolUseFailureHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'toolu_test',
         'testTool',
         { param: 'value' },
@@ -3102,7 +3105,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await fireNotificationHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'Test message',
         'info' as NotificationType,
         'Test Title',
@@ -3155,7 +3158,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePermissionRequestHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'full',
@@ -3186,7 +3189,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePermissionRequestHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'full',
@@ -3220,7 +3223,7 @@ describe('Fire hook functions integration', () => {
       mockMessageBus.request.mockResolvedValue(mockResponse);
 
       const result = await firePermissionRequestHook(
-        mockMessageBus,
+        mockMessageBus as unknown as MessageBus,
         'testTool',
         { param: 'value' },
         'full',

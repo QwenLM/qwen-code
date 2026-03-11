@@ -36,6 +36,8 @@ import { RipGrepTool } from '../tools/ripGrep.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -195,6 +197,10 @@ vi.mock('../ide/ide-client.js', () => ({
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
 vi.mock('../core/baseLlmClient.js');
+// Mock fireNotificationHook from toolHookTriggers
+vi.mock('../core/toolHookTriggers.js', () => ({
+  fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
 
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
@@ -315,6 +321,64 @@ describe('Server Config (config.ts)', () => {
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(GeminiClient).toHaveBeenCalledWith(config);
+    });
+
+    it('should fire auth_success notification hook when hooks are enabled', async () => {
+      const mockMessageBus = { request: vi.fn() };
+      const config = new Config({
+        ...baseParams,
+        enableHooks: true,
+      });
+      // Set messageBus using the setter
+      config.setMessageBus(mockMessageBus as unknown as MessageBus);
+
+      const authType = AuthType.USE_GEMINI;
+      const mockContentConfig = {
+        apiKey: 'test-key',
+        model: 'qwen3-coder-plus',
+        authType,
+      };
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: mockContentConfig as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      // Verify that fireNotificationHook was called with correct parameters
+      expect(fireNotificationHook).toHaveBeenCalledWith(
+        mockMessageBus,
+        `Successfully authenticated with ${authType}`,
+        'auth_success',
+        'Authentication successful',
+      );
+    });
+
+    it('should not fire notification hook when hooks are disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        enableHooks: false,
+      });
+      const authType = AuthType.USE_GEMINI;
+      const mockContentConfig = {
+        apiKey: 'test-key',
+        model: 'qwen3-coder-plus',
+        authType,
+      };
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: mockContentConfig as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      // Clear any previous calls
+      vi.mocked(fireNotificationHook).mockClear();
+
+      await config.refreshAuth(authType);
+
+      // Verify that fireNotificationHook was not called
+      expect(fireNotificationHook).not.toHaveBeenCalled();
     });
 
     it('should not strip thoughts when switching from Vertex to GenAI', async () => {
