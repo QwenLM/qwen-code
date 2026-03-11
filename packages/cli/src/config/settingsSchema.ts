@@ -76,6 +76,29 @@ export interface SettingDefinition {
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Schema for array items when type is 'array' */
+  items?: SettingItemDefinition;
+}
+
+/**
+ * Schema definition for array item types.
+ * Supports simple types (string, number, boolean) and complex object types.
+ */
+export interface SettingItemDefinition {
+  type: 'string' | 'number' | 'boolean' | 'object';
+  properties?: Record<
+    string,
+    SettingItemDefinition & {
+      required?: boolean;
+      enum?: string[];
+      additionalProperties?: SettingItemDefinition;
+    }
+  >;
+  items?: SettingItemDefinition;
+  required?: boolean;
+  enum?: string[];
+  description?: string;
+  additionalProperties?: boolean | SettingItemDefinition;
 }
 
 export interface SettingsSchema {
@@ -1233,6 +1256,67 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute before agent processing. Can modify prompts or inject context.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: {
+          type: 'object',
+          description:
+            'A hook definition with an optional matcher and a list of hook configurations.',
+          properties: {
+            matcher: {
+              type: 'string',
+              description:
+                'An optional matcher pattern to filter when this hook definition applies.',
+            },
+            sequential: {
+              type: 'boolean',
+              description:
+                'Whether the hooks should be executed sequentially instead of in parallel.',
+            },
+            hooks: {
+              type: 'object',
+              description: 'The list of hook configurations to execute.',
+              required: true,
+              items: {
+                type: 'object',
+                description:
+                  'A hook configuration entry that defines a command to execute.',
+                properties: {
+                  type: {
+                    type: 'string',
+                    description: 'The type of hook.',
+                    enum: ['command'],
+                    required: true,
+                  },
+                  command: {
+                    type: 'string',
+                    description:
+                      'The command to execute when the hook is triggered.',
+                    required: true,
+                  },
+                  name: {
+                    type: 'string',
+                    description: 'An optional name for the hook.',
+                  },
+                  description: {
+                    type: 'string',
+                    description:
+                      'An optional description of what the hook does.',
+                  },
+                  timeout: {
+                    type: 'number',
+                    description:
+                      'Timeout in milliseconds for the hook execution.',
+                  },
+                  env: {
+                    type: 'object',
+                    description:
+                      'Environment variables to set when executing the hook command.',
+                    additionalProperties: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       Stop: {
         type: 'array',
@@ -1244,6 +1328,67 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: {
+          type: 'object',
+          description:
+            'A hook definition with an optional matcher and a list of hook configurations.',
+          properties: {
+            matcher: {
+              type: 'string',
+              description:
+                'An optional matcher pattern to filter when this hook definition applies.',
+            },
+            sequential: {
+              type: 'boolean',
+              description:
+                'Whether the hooks should be executed sequentially instead of in parallel.',
+            },
+            hooks: {
+              type: 'object',
+              description: 'The list of hook configurations to execute.',
+              required: true,
+              items: {
+                type: 'object',
+                description:
+                  'A hook configuration entry that defines a command to execute.',
+                properties: {
+                  type: {
+                    type: 'string',
+                    description: 'The type of hook.',
+                    enum: ['command'],
+                    required: true,
+                  },
+                  command: {
+                    type: 'string',
+                    description:
+                      'The command to execute when the hook is triggered.',
+                    required: true,
+                  },
+                  name: {
+                    type: 'string',
+                    description: 'An optional name for the hook.',
+                  },
+                  description: {
+                    type: 'string',
+                    description:
+                      'An optional description of what the hook does.',
+                  },
+                  timeout: {
+                    type: 'number',
+                    description:
+                      'Timeout in milliseconds for the hook execution.',
+                  },
+                  env: {
+                    type: 'object',
+                    description:
+                      'Environment variables to set when executing the hook command.',
+                    additionalProperties: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
   },
