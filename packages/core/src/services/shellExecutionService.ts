@@ -21,6 +21,34 @@ import {
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
+const WINDOWS_PATH_DELIMITER = ';';
+
+function mergeWindowsPathValues(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string | undefined {
+  const mergedEntries: string[] = [];
+  const seenEntries = new Set<string>();
+
+  for (const key of pathKeys) {
+    const value = env[key];
+    if (value === undefined) {
+      continue;
+    }
+
+    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
+      if (seenEntries.has(entry)) {
+        continue;
+      }
+      seenEntries.add(entry);
+      mergedEntries.push(entry);
+    }
+  }
+
+  return mergedEntries.length > 0
+    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
+    : undefined;
+}
 
 function normalizePathEnvForWindows(
   env: NodeJS.ProcessEnv,
@@ -38,19 +66,26 @@ function normalizePathEnvForWindows(
     return normalized;
   }
 
-  // Prefer canonical "Path" value when present, otherwise use the first
-  // available PATH-like key and collapse duplicates to avoid ambiguity.
-  const canonicalValue =
-    normalized['Path'] ?? normalized[pathKeys[0] as keyof NodeJS.ProcessEnv];
+  const orderedPathKeys = [...pathKeys].sort((left, right) => {
+    if (left === 'PATH') {
+      return -1;
+    }
+    if (right === 'PATH') {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  const canonicalValue = mergeWindowsPathValues(normalized, orderedPathKeys);
 
   for (const key of pathKeys) {
-    if (key !== 'Path') {
+    if (key !== 'PATH') {
       delete normalized[key];
     }
   }
 
   if (canonicalValue !== undefined) {
-    normalized['Path'] = canonicalValue;
+    normalized['PATH'] = canonicalValue;
   }
 
   return normalized;
