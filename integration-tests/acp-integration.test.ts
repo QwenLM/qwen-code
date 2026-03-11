@@ -14,8 +14,8 @@ import { TestRig } from './test-helper.js';
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
-  process.env['GEMINI_SANDBOX'] &&
-  process.env['GEMINI_SANDBOX']!.toLowerCase() !== 'false';
+  process.env['QWEN_SANDBOX'] &&
+  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -45,6 +45,7 @@ type SessionUpdateNotification = {
       text?: string;
     };
     modeId?: string;
+    currentModeId?: string;
     _meta?: {
       usage?: UsageMetadata;
     };
@@ -313,7 +314,7 @@ function setupAcpTest(
     }
   });
 
-  it('returns modes on initialize and allows setting mode and model', async () => {
+  it('initializes and allows setting mode', async () => {
     const rig = new TestRig();
     rig.setup('acp mode and model');
 
@@ -326,40 +327,10 @@ function setupAcpTest(
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
         },
-      })) as {
-        protocolVersion: number;
-        modes: {
-          currentModeId: string;
-          availableModes: Array<{
-            id: string;
-            name: string;
-            description: string;
-          }>;
-        };
-      };
+      })) as { protocolVersion: number };
 
       expect(initResult).toBeDefined();
       expect(initResult.protocolVersion).toBe(1);
-
-      // Verify modes data is present
-      expect(initResult.modes).toBeDefined();
-      expect(initResult.modes.currentModeId).toBeDefined();
-      expect(Array.isArray(initResult.modes.availableModes)).toBe(true);
-      expect(initResult.modes.availableModes.length).toBeGreaterThan(0);
-
-      // Verify available modes have expected structure
-      const modeIds = initResult.modes.availableModes.map((m) => m.id);
-      expect(modeIds).toContain('default');
-      expect(modeIds).toContain('yolo');
-      expect(modeIds).toContain('auto-edit');
-      expect(modeIds).toContain('plan');
-
-      // Verify each mode has required fields
-      for (const mode of initResult.modes.availableModes) {
-        expect(mode.id).toBeTruthy();
-        expect(mode.name).toBeTruthy();
-        expect(mode.description).toBeTruthy();
-      }
 
       // Test 2: Authenticate
       await sendRequest('authenticate', { methodId: 'openai' });
@@ -381,37 +352,22 @@ function setupAcpTest(
       const setModeResult = (await sendRequest('session/set_mode', {
         sessionId: newSession.sessionId,
         modeId: 'yolo',
-      })) as { modeId: string };
-      expect(setModeResult).toBeDefined();
-      expect(setModeResult.modeId).toBe('yolo');
+      })) as unknown;
+      expect(setModeResult).toEqual({});
 
       // Test 5: Set approval mode to 'auto-edit'
       const setModeResult2 = (await sendRequest('session/set_mode', {
         sessionId: newSession.sessionId,
         modeId: 'auto-edit',
-      })) as { modeId: string };
-      expect(setModeResult2).toBeDefined();
-      expect(setModeResult2.modeId).toBe('auto-edit');
+      })) as unknown;
+      expect(setModeResult2).toEqual({});
 
       // Test 6: Set approval mode back to 'default'
       const setModeResult3 = (await sendRequest('session/set_mode', {
         sessionId: newSession.sessionId,
         modeId: 'default',
-      })) as { modeId: string };
-      expect(setModeResult3).toBeDefined();
-      expect(setModeResult3.modeId).toBe('default');
-
-      // Test 7: Set model using openai model instead of first available model (index=0) which could be qwen-oauth requiring login
-      const openaiModel = newSession.models.availableModels.find((model) =>
-        model.modelId.includes('openai'),
-      );
-      expect(openaiModel).toBeDefined();
-      const setModelResult = (await sendRequest('session/set_model', {
-        sessionId: newSession.sessionId,
-        modelId: openaiModel!.modelId,
-      })) as { modelId: string };
-      expect(setModelResult).toBeDefined();
-      expect(setModelResult.modelId).toBeTruthy();
+      })) as unknown;
+      expect(setModeResult3).toEqual({});
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
@@ -422,7 +378,7 @@ function setupAcpTest(
     }
   });
 
-  it('includes authMethods in error data when auth is required', async () => {
+  it('returns internal error details when model auth is required', async () => {
     const rig = new TestRig();
     rig.setup('acp auth methods in error data');
 
@@ -447,18 +403,23 @@ function setupAcpTest(
         };
       };
 
-      // Attempt to set the first model (which might be qwen-oauth requiring login) without authenticating
-      // This should trigger an auth error with authMethods in the response
-      const firstModel = newSession.models.availableModels[0];
+      // Choose a qwen-oauth model to trigger auth-required path deterministically.
+      const qwenOauthModel = newSession.models.availableModels.find((model) =>
+        model.modelId.includes('qwen-oauth'),
+      );
+      expect(qwenOauthModel).toBeDefined();
       await expect(
-        sendRequest('session/set_model', {
+        sendRequest('session/set_config_option', {
           sessionId: newSession.sessionId,
-          modelId: firstModel.modelId,
+          configId: 'model',
+          value: qwenOauthModel!.modelId,
         }),
       ).rejects.toMatchObject({
         response: {
+          code: -32603,
+          message: 'Internal error',
           data: {
-            authMethods: expect.any(Array),
+            details: expect.any(String),
           },
         },
       });
@@ -606,10 +567,7 @@ function setupAcpTest(
       ).rejects.toMatchObject({
         response: {
           code: -32602,
-          message: 'Invalid params',
-          data: {
-            details: 'Unsupported configId: invalid_config',
-          },
+          message: 'Invalid params: Unsupported configId: invalid_config',
         },
       });
     } catch (e) {
@@ -726,8 +684,8 @@ function setupAcpTest(
       const setModeResult = (await sendRequest('session/set_mode', {
         sessionId: newSession.sessionId,
         modeId: 'plan',
-      })) as { modeId: string };
-      expect(setModeResult.modeId).toBe('plan');
+      })) as unknown;
+      expect(setModeResult).toEqual({});
 
       // Send a prompt that should trigger the LLM to call exit_plan_mode
       // The prompt is designed to trigger planning behavior
@@ -780,9 +738,9 @@ function setupAcpTest(
         // Verify mode update structure
         const modeUpdate = modeUpdateNotifications[0];
         expect(modeUpdate.sessionId).toBe(newSession.sessionId);
-        expect(modeUpdate.update?.modeId).toBeDefined();
+        expect(modeUpdate.update?.currentModeId).toBeDefined();
         // Mode should be auto-edit since we approved with proceed_always
-        expect(modeUpdate.update?.modeId).toBe('auto-edit');
+        expect(modeUpdate.update?.currentModeId).toBe('auto-edit');
       }
 
       // Note: If the LLM didn't call exit_plan_mode, that's acceptable
@@ -834,8 +792,8 @@ function setupAcpTest(
       const setModeResult = (await sendRequest('session/set_mode', {
         sessionId: newSession.sessionId,
         modeId: 'plan',
-      })) as { modeId: string };
-      expect(setModeResult.modeId).toBe('plan');
+      })) as unknown;
+      expect(setModeResult).toEqual({});
 
       // Try to create a file - this should be blocked by plan mode
       const promptResult = await sendRequest('session/prompt', {

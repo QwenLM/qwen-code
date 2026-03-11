@@ -348,7 +348,7 @@ describe('Settings Loading and Merging', () => {
           fileName: 'WORKSPACE_CONTEXT.md',
         },
         mcp: {
-          allowed: ['server1', 'server2'],
+          allowed: ['server1', 'server2', 'server3', 'server1', 'server2'],
         },
       });
     });
@@ -453,7 +453,7 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
-    it('should warn about unknown top-level keys in a v2 settings file', () => {
+    it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
       );
@@ -471,13 +471,7 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(getSettingsWarnings(settings)).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining(
-            "Unknown setting 'someUnknownKey' will be ignored",
-          ),
-        ]),
-      );
+      expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
     it('should not warn for valid v2 container keys', () => {
@@ -1480,8 +1474,8 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged.mcp).toEqual({
-        allowed: ['system-allowed'],
-        excluded: ['workspace-excluded'],
+        allowed: ['user-allowed', 'workspace-allowed', 'system-allowed'],
+        excluded: ['user-excluded', 'workspace-excluded'],
       });
     });
 

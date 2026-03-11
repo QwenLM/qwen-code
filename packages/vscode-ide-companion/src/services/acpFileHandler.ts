@@ -48,10 +48,11 @@ export class AcpFileHandler {
         `[ACP] Successfully read file: ${params.path} (${content.length} bytes)`,
       );
 
-      // Handle line offset and limit
+      // Handle line offset and limit.
+      // ACP spec: `line` is 1-based (first line = 1).
       if (params.line !== null || params.limit !== null) {
         const lines = content.split('\n');
-        const startLine = params.line || 0;
+        const startLine = Math.max(0, (params.line ?? 1) - 1);
         const endLine = params.limit ? startLine + params.limit : lines.length;
         const selectedLines = lines.slice(startLine, endLine);
         const result = { content: selectedLines.join('\n') };

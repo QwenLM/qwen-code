@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type {
-  AcpPermissionRequest,
   ModelInfo,
   AvailableCommand,
-} from './acpTypes.js';
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
 }
@@ -35,10 +36,17 @@ export interface ToolCallUpdateData {
 
 export interface UsageStatsPayload {
   usage?: {
+    // SDK field names (primary)
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    thoughtTokens?: number | null;
+    totalTokens?: number | null;
+    cachedReadTokens?: number | null;
+    cachedWriteTokens?: number | null;
+    // Legacy field names (compat with older CLI builds)
     promptTokens?: number | null;
     completionTokens?: number | null;
     thoughtsTokens?: number | null;
-    totalTokens?: number | null;
     cachedTokens?: number | null;
   } | null;
   durationMs?: number | null;
@@ -51,7 +59,10 @@ export interface QwenAgentCallbacks {
   onThoughtChunk?: (chunk: string) => void;
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
-  onPermissionRequest?: (request: AcpPermissionRequest) => Promise<string>;
+  onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
+  onAskUserQuestion?: (
+    request: AskUserQuestionRequest,
+  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;

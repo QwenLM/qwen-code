@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -31,6 +31,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.qwen/settings.json",
+        "url": "./schemas/settings.schema.json"
+      }
+    ],
     "languages": [
       {
         "id": "qwen-diff-editable"
@@ -152,6 +158,7 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/webui": "*",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cors": "^2.8.5",

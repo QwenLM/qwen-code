@@ -2526,6 +2526,77 @@ describe('useGeminiStream', () => {
         expect.any(String),
       );
     });
+
+    it('should clear static error when starting a new query', async () => {
+      // First, mock a stream that yields an error (static error without countdown)
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'First error' } },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      // Submit first query that will fail
+      await act(async () => {
+        await result.current.submitQuery('First query');
+      });
+
+      // Verify error appears in pending history items
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+      });
+
+      // Now mock a successful stream for the second query
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Text,
+            value: 'Success response',
+          };
+        })(),
+      );
+
+      // Submit second query
+      await act(async () => {
+        await result.current.submitQuery('Second query');
+      });
+
+      // Verify the error is cleared (no longer in pending history items)
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeUndefined();
+      });
+    });
   });
 
   describe('Concurrent Execution Prevention', () => {

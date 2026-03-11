@@ -12,7 +12,10 @@ import { Session } from './Session.js';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
+import type {
+  AgentSideConnection,
+  PromptRequest,
+} from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 
@@ -24,7 +27,7 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
 describe('Session', () => {
   let mockChat: GeminiChat;
   let mockConfig: Config;
-  let mockClient: acp.Client;
+  let mockClient: AgentSideConnection;
   let mockSettings: LoadedSettings;
   let session: Session;
   let currentModel: string;
@@ -77,8 +80,8 @@ describe('Session', () => {
       requestPermission: vi.fn().mockResolvedValue({
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       }),
-      sendCustomNotification: vi.fn().mockResolvedValue(undefined),
-    } as unknown as acp.Client;
+      extNotification: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AgentSideConnection;
 
     mockSettings = {
       merged: {},
@@ -104,20 +107,19 @@ describe('Session', () => {
       ['auto-edit', ApprovalMode.AUTO_EDIT],
       ['yolo', ApprovalMode.YOLO],
     ] as const)('maps %s mode', async (modeId, expected) => {
-      const result = await session.setMode({
+      await session.setMode({
         sessionId: 'test-session-id',
         modeId,
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
-      expect(result).toEqual({ modeId });
     });
   });
 
   describe('setModel', () => {
     it('sets model via config and returns current model', async () => {
       const requested = `qwen3-coder-plus(${AuthType.USE_OPENAI})`;
-      const result = await session.setModel({
+      await session.setModel({
         sessionId: 'test-session-id',
         modelId: `  ${requested}  `,
       });
@@ -127,10 +129,6 @@ describe('Session', () => {
         'qwen3-coder-plus',
         undefined,
       );
-      expect(mockConfig.getModel).toHaveBeenCalled();
-      expect(result).toEqual({
-        modelId: `qwen3-coder-plus(${AuthType.USE_OPENAI})`,
-      });
     });
 
     it('rejects empty/whitespace model IDs', async () => {
@@ -222,7 +220,7 @@ describe('Session', () => {
           .fn()
           .mockResolvedValue((async function* () {})());
 
-        const promptRequest: acp.PromptRequest = {
+        const promptRequest: PromptRequest = {
           sessionId: 'test-session-id',
           prompt: [
             { type: 'text', text: 'Check this file' },

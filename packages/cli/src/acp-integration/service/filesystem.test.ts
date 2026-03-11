@@ -7,7 +7,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
-import { ACP_ERROR_CODES } from '../errorCodes.js';
+import type { AgentSideConnection } from '@agentclientprotocol/sdk';
+
+const RESOURCE_NOT_FOUND_CODE = -32002;
+const INTERNAL_ERROR_CODE = -32603;
 
 const createFallback = (): FileSystemService => ({
   readTextFile: vi.fn(),
@@ -26,7 +29,7 @@ describe('AcpFileSystemService', () => {
         readTextFile: vi
           .fn()
           .mockResolvedValue({ content: '\ufeff// BOM file' }),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -40,7 +43,6 @@ describe('AcpFileSystemService', () => {
       expect(client.readTextFile).toHaveBeenCalledWith({
         path: '/test/file.txt',
         sessionId: 'session-1',
-        line: null,
         limit: 1,
       });
     });
@@ -48,7 +50,7 @@ describe('AcpFileSystemService', () => {
     it('detects no BOM through ACP client when content does not start with U+FEFF', async () => {
       const client = {
         readTextFile: vi.fn().mockResolvedValue({ content: '// No BOM file' }),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -64,7 +66,7 @@ describe('AcpFileSystemService', () => {
     it('falls back to local filesystem when ACP client fails', async () => {
       const client = {
         readTextFile: vi.fn().mockRejectedValue(new Error('Network error')),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
       (fallback.detectFileBOM as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -86,7 +88,7 @@ describe('AcpFileSystemService', () => {
     it('falls back to local filesystem when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
       (fallback.detectFileBOM as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -110,12 +112,12 @@ describe('AcpFileSystemService', () => {
   describe('readTextFile ENOENT handling', () => {
     it('converts RESOURCE_NOT_FOUND error to ENOENT', async () => {
       const resourceNotFoundError = {
-        code: ACP_ERROR_CODES.RESOURCE_NOT_FOUND,
+        code: RESOURCE_NOT_FOUND_CODE,
         message: 'File not found',
       };
       const client = {
         readTextFile: vi.fn().mockRejectedValue(resourceNotFoundError),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -133,12 +135,12 @@ describe('AcpFileSystemService', () => {
 
     it('re-throws other errors unchanged', async () => {
       const otherError = {
-        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+        code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       };
       const client = {
         readTextFile: vi.fn().mockRejectedValue(otherError),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -148,7 +150,7 @@ describe('AcpFileSystemService', () => {
       );
 
       await expect(svc.readTextFile('/some/file.txt')).rejects.toMatchObject({
-        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+        code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       });
     });
@@ -156,7 +158,7 @@ describe('AcpFileSystemService', () => {
     it('uses fallback when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
       (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(

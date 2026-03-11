@@ -59,6 +59,7 @@ import {
   type TrackedToolCall,
   type TrackedCompletedToolCall,
   type TrackedCancelledToolCall,
+  type TrackedExecutingToolCall,
   type TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
 import { promises as fs } from 'node:fs';
@@ -356,6 +357,23 @@ export const useGeminiStream = (
 
   const streamingState = useMemo(() => {
     if (toolCalls.some((tc) => tc.status === 'awaiting_approval')) {
+      return StreamingState.WaitingForConfirmation;
+    }
+    // Check if any executing subagent task has a pending confirmation
+    if (
+      toolCalls.some((tc) => {
+        if (tc.status !== 'executing') return false;
+        const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
+        return (
+          typeof liveOutput === 'object' &&
+          liveOutput !== null &&
+          'type' in liveOutput &&
+          liveOutput.type === 'task_execution' &&
+          'pendingConfirmation' in liveOutput &&
+          liveOutput.pendingConfirmation != null
+        );
+      })
+    ) {
       return StreamingState.WaitingForConfirmation;
     }
     if (
@@ -1020,6 +1038,15 @@ export const useGeminiStream = (
               clearRetryCountdown();
             }
             break;
+          case ServerGeminiEventType.HookSystemMessage:
+            // Display system message from hooks (e.g., Ralph Loop iteration info)
+            // This is handled as a content event to show in the UI
+            geminiMessageBuffer = handleContentEvent(
+              event.value + '\n',
+              geminiMessageBuffer,
+              userMessageTimestamp,
+            );
+            break;
           default: {
             // enforces exhaustive switch-case
             const unreachable: never = event;
@@ -1080,8 +1107,13 @@ export const useGeminiStream = (
       if (!options?.isContinuation) {
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
-        // user is starting a new conversation turn
-        if (pendingRetryCountdownItemRef.current) {
+        // user is starting a new conversation turn.
+        // Clear both countdown-based errors AND static errors (those without
+        // an active countdown timer, e.g. "Press Ctrl+Y to retry").
+        if (
+          pendingRetryCountdownItemRef.current ||
+          pendingRetryErrorItemRef.current
+        ) {
           clearRetryCountdown();
         }
       }
@@ -1176,7 +1208,8 @@ export const useGeminiStream = (
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
-          // remain visible until the user presses Ctrl+Y to retry.
+          // remain visible until the user presses Ctrl+Y to retry or starts
+          // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
           }
@@ -1223,6 +1256,7 @@ export const useGeminiStream = (
       handleLoopDetectedEvent,
       clearRetryCountdown,
       pendingRetryCountdownItemRef,
+      pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
     ],
   );
