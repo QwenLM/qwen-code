@@ -15,6 +15,7 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { buildUnicodeMappingSection } from '../utils/unicodeEscaping.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -222,6 +223,14 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         .join('\n');
 
       let resultMessage = `Directory listing for ${this.params.path}:\n${directoryContent}`;
+      resultMessage += buildUnicodeMappingSection(
+        [this.params.path],
+        'Unicode paths',
+      );
+      resultMessage += buildUnicodeMappingSection(
+        entries.map((entry) => entry.name),
+        'Unicode names',
+      );
       const ignoredMessages = [];
       if (gitIgnoredCount > 0) {
         ignoredMessages.push(`${gitIgnoredCount} git-ignored`);

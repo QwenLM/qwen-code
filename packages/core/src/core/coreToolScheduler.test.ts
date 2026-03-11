@@ -2812,3 +2812,174 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     expect(completedCalls[0].status).toBe('cancelled');
   });
 });
+
+describe('CoreToolScheduler unicode-escaped tool args', () => {
+  class CapturingToolInvocation extends BaseToolInvocation<
+    Record<string, unknown>,
+    ToolResult
+  > {
+    constructor(params: Record<string, unknown>) {
+      super(params);
+    }
+
+    getDescription(): string {
+      return 'Capturing tool invocation';
+    }
+
+    async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
+      return {
+        llmContent: 'Captured successfully',
+        returnDisplay: 'Captured successfully',
+      };
+    }
+  }
+
+  class CapturingTool extends BaseDeclarativeTool<
+    Record<string, unknown>,
+    ToolResult
+  > {
+    capturedBuildParams: Record<string, unknown> | undefined;
+
+    constructor(name: string) {
+      super(
+        name,
+        name,
+        'A tool used to capture normalized params in scheduler tests',
+        Kind.Read,
+        {
+          type: 'object',
+          properties: {
+            absolute_path: { type: 'string' },
+            command: { type: 'string' },
+            is_background: { type: 'boolean' },
+          },
+        },
+      );
+    }
+
+    protected createInvocation(
+      params: Record<string, unknown>,
+    ): ToolInvocation<Record<string, unknown>, ToolResult> {
+      this.capturedBuildParams = params;
+      return new CapturingToolInvocation(params);
+    }
+  }
+
+  function createUnicodeDecodingScheduler(
+    tool: CapturingTool,
+    model = 'qwen3.5-plus',
+  ) {
+    const mockToolRegistry = {
+      getTool: (name: string) => (name === tool.name ? tool : undefined),
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [tool],
+      discoverTools: async () => {},
+      getAllTools: () => [tool],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getModel: () => model,
+      getContentGeneratorConfig: () => ({
+        model,
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    return { scheduler, onAllToolCallsComplete, onToolCallsUpdate };
+  }
+
+  it('should decode unicode-escaped absolute_path for read_file calls on qwen3.5-plus', async () => {
+    const tool = new CapturingTool('read_file');
+    const { scheduler, onAllToolCallsComplete } =
+      createUnicodeDecodingScheduler(tool);
+
+    const abortController = new AbortController();
+    const request = {
+      callId: 'unicode-read-1',
+      name: 'read_file',
+      args: {
+        absolute_path: '/tmp/\\u4e2d\\u6587\\u4e2d\\u6587-1.md',
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-unicode-read',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(tool.capturedBuildParams).toEqual({
+      absolute_path: '/tmp/中文中文-1.md',
+    });
+  });
+
+  it('should decode unicode-escaped command for run_shell_command calls on qwen3.5-plus', async () => {
+    const tool = new CapturingTool('run_shell_command');
+    const { scheduler, onAllToolCallsComplete } =
+      createUnicodeDecodingScheduler(tool);
+
+    const abortController = new AbortController();
+    const request = {
+      callId: 'unicode-shell-1',
+      name: 'run_shell_command',
+      args: {
+        command: "cat '/tmp/\\u4e2d\\u6587\\u4e2d\\u6587-1.md'",
+        is_background: false,
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-unicode-shell',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(tool.capturedBuildParams).toEqual({
+      command: "cat '/tmp/中文中文-1.md'",
+      is_background: false,
+    });
+  });
+});

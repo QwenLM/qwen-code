@@ -16,6 +16,34 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
+function shouldUseUnicodeEscapedPaths(model?: string): boolean {
+  if (!model) {
+    return false;
+  }
+
+  const normalized = model.trim().toLowerCase();
+  return (
+    normalized.includes('qwen3.5-plus') ||
+    normalized.includes('qwen3.5-397b-a17b')
+  );
+}
+
+function getUnicodePathHandlingInstructions(model?: string): string {
+  if (!shouldUseUnicodeEscapedPaths(model)) {
+    return '';
+  }
+
+  return `
+# Unicode Path Handling
+- This model can accidentally insert spaces into paths that mix Chinese characters with punctuation, Latin letters, or digits.
+- To avoid corrupting paths, whenever you output or reuse a filename or path that contains any non-ASCII character, write every non-ASCII character with JSON-style Unicode escapes. Example: \`中文中文-1.md\` must be written as \`\\u4e2d\\u6587\\u4e2d\\u6587-1.md\`.
+- Never add, remove, or normalize spaces inside a path. Copy paths exactly from tool results.
+- When a tool result contains a \`Unicode paths\` or \`Unicode names\` section, always copy the escaped form verbatim in later tool calls and shell commands.
+- Prefer '${ToolNames.READ_FILE}', '${ToolNames.WRITE_FILE}', '${ToolNames.EDIT}', '${ToolNames.GLOB}', '${ToolNames.GREP}', and '${ToolNames.LS}' over '${ToolNames.SHELL}' for non-ASCII paths.
+- If '${ToolNames.SHELL}' is unavoidable, keep the command string path in the same JSON-style Unicode-escaped form.
+`.trim();
+}
+
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
   value: string | null;
@@ -264,8 +292,10 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.TASK}' tool in order to reduce context usage. You should proactively use the '${ToolNames.TASK}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${ToolNames.MEMORY}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
-
-## Interaction Details
+${(() => {
+  const instructions = getUnicodePathHandlingInstructions(model);
+  return instructions ? `\n\n${instructions}\n\n` : '\n';
+})()}## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
 
