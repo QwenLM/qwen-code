@@ -706,6 +706,76 @@ describe('EditTool', () => {
       // Ensure the file was not actually changed
       expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
+
+    it('should preserve CRLF line endings when editing a CRLF file', async () => {
+      const crlfContent = 'line 1\r\nline 2\r\nline 3\r\n';
+      fs.writeFileSync(filePath, crlfContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'line 2',
+        new_string: 'modified line 2',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      const writtenContent = fs.readFileSync(filePath, 'utf8');
+      // CRLF should be preserved in the output
+      expect(writtenContent).toBe(
+        'line 1\r\nmodified line 2\r\nline 3\r\n',
+      );
+      expect(writtenContent).toContain('\r\n');
+    });
+
+    it('should not inject CRLF when editing a LF file', async () => {
+      const lfContent = 'line 1\nline 2\nline 3\n';
+      fs.writeFileSync(filePath, lfContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'line 2',
+        new_string: 'modified line 2',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      const writtenContent = fs.readFileSync(filePath, 'utf8');
+      expect(writtenContent).toBe('line 1\nmodified line 2\nline 3\n');
+      expect(writtenContent).not.toContain('\r\n');
+    });
+
+    it('should preserve UTF-8 BOM when editing a BOM file', async () => {
+      const bomContent = '\uFEFFline 1\nline 2\n';
+      // Write raw bytes with BOM
+      const bomBuffer = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        Buffer.from('line 1\nline 2\n', 'utf8'),
+      ]);
+      fs.writeFileSync(filePath, bomBuffer);
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'line 1',
+        new_string: 'modified line 1',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      const rawBytes = fs.readFileSync(filePath);
+      // BOM should be preserved
+      expect(rawBytes[0]).toBe(0xef);
+      expect(rawBytes[1]).toBe(0xbb);
+      expect(rawBytes[2]).toBe(0xbf);
+      // Content after BOM should contain the edit
+      const content = rawBytes.subarray(3).toString('utf8');
+      expect(content).toContain('modified line 1');
+    });
   });
 
   describe('Error Scenarios', () => {
