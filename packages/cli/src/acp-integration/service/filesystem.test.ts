@@ -179,4 +179,69 @@ describe('AcpFileSystemService', () => {
       expect(client.readTextFile).not.toHaveBeenCalled();
     });
   });
+
+  describe('writeTextFile invalid path fallback', () => {
+    it('falls back to local filesystem when ACP write fails with invalid path', async () => {
+      const invalidPathError = {
+        code: INTERNAL_ERROR_CODE,
+        message: 'Internal error',
+        data: 'invalid path',
+      };
+      const client = {
+        writeTextFile: vi.fn().mockRejectedValue(invalidPathError),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      (fallback.writeTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-4',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+      );
+
+      await expect(
+        svc.writeTextFile('/some/file.txt', 'hello world'),
+      ).resolves.toBeUndefined();
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello world',
+        sessionId: 'session-4',
+      });
+      expect(fallback.writeTextFile).toHaveBeenCalledWith(
+        '/some/file.txt',
+        'hello world',
+        undefined,
+      );
+    });
+
+    it('rethrows ACP write errors that are not invalid path', async () => {
+      const writeError = {
+        code: INTERNAL_ERROR_CODE,
+        message: 'Internal error',
+        data: 'permission denied',
+      };
+      const client = {
+        writeTextFile: vi.fn().mockRejectedValue(writeError),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-5',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+      );
+
+      await expect(
+        svc.writeTextFile('/some/file.txt', 'hello world'),
+      ).rejects.toMatchObject(writeError);
+      expect(fallback.writeTextFile).not.toHaveBeenCalled();
+    });
+  });
 });

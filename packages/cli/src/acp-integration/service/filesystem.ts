@@ -16,6 +16,29 @@ import type {
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
 
+function isInvalidPathWriteError(error: unknown): boolean {
+  const data =
+    typeof error === 'object' && error !== null && 'data' in error
+      ? (error as { data?: unknown }).data
+      : undefined;
+
+  if (typeof data === 'string') {
+    return data.toLowerCase() === 'invalid path';
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'object' && error !== null && 'message' in error
+        ? (error as { message?: unknown }).message
+        : undefined;
+
+  return (
+    typeof message === 'string' &&
+    message.toLowerCase().includes('invalid path')
+  );
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
     private readonly connection: AgentSideConnection,
@@ -75,12 +98,19 @@ export class AcpFileSystemService implements FileSystemService {
     }
 
     const finalContent = options?.bom ? '\uFEFF' + content : content;
-
-    await this.connection.writeTextFile({
-      path: filePath,
-      content: finalContent,
-      sessionId: this.sessionId,
-    });
+    try {
+      await this.connection.writeTextFile({
+        path: filePath,
+        content: finalContent,
+        sessionId: this.sessionId,
+      });
+    } catch (error) {
+      if (isInvalidPathWriteError(error)) {
+        await this.fallback.writeTextFile(filePath, content, options);
+        return;
+      }
+      throw error;
+    }
   }
 
   async detectFileBOM(filePath: string): Promise<boolean> {
