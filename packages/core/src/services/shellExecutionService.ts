@@ -22,6 +22,8 @@ const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
 const WINDOWS_PATH_DELIMITER = ';';
+let cachedWindowsPathFingerprint: string | undefined;
+let cachedMergedWindowsPath: string | undefined;
 
 function mergeWindowsPathValues(
   env: NodeJS.ProcessEnv,
@@ -50,6 +52,15 @@ function mergeWindowsPathValues(
     : undefined;
 }
 
+function getWindowsPathFingerprint(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string {
+  return pathKeys
+    .map((key) => `${key}=${env[key] ?? ''}`)
+    .join('\0');
+}
+
 function normalizePathEnvForWindows(
   env: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
@@ -76,7 +87,16 @@ function normalizePathEnvForWindows(
     return left.localeCompare(right);
   });
 
-  const canonicalValue = mergeWindowsPathValues(normalized, orderedPathKeys);
+  const fingerprint = getWindowsPathFingerprint(normalized, orderedPathKeys);
+  const canonicalValue =
+    fingerprint === cachedWindowsPathFingerprint
+      ? cachedMergedWindowsPath
+      : mergeWindowsPathValues(normalized, orderedPathKeys);
+
+  if (fingerprint !== cachedWindowsPathFingerprint) {
+    cachedWindowsPathFingerprint = fingerprint;
+    cachedMergedWindowsPath = canonicalValue;
+  }
 
   for (const key of pathKeys) {
     if (key !== 'PATH') {
