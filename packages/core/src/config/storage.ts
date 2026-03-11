@@ -44,8 +44,19 @@ export class Storage {
     }
 
     let resolved = dir;
-    if (resolved.startsWith('~/') || resolved === '~') {
-      resolved = path.join(os.homedir(), resolved.slice(1));
+    if (
+      resolved === '~' ||
+      resolved.startsWith('~/') ||
+      resolved.startsWith('~\\')
+    ) {
+      const relativeSegments =
+        resolved === '~'
+          ? []
+          : resolved
+              .slice(2)
+              .split(/[/\\]+/)
+              .filter(Boolean);
+      resolved = path.join(os.homedir(), ...relativeSegments);
     }
     if (!path.isAbsolute(resolved)) {
       resolved = cwd ? path.resolve(cwd, resolved) : path.resolve(resolved);

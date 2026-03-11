@@ -84,6 +84,12 @@ describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
     expect(Storage.getRuntimeBaseDir()).toBe(expected);
   });
 
+  it('expands Windows-style tilde paths in setRuntimeBaseDir', () => {
+    Storage.setRuntimeBaseDir('~\\custom-runtime');
+    const expected = path.join(os.homedir(), 'custom-runtime');
+    expect(Storage.getRuntimeBaseDir()).toBe(expected);
+  });
+
   it('expands tilde (~) in QWEN_RUNTIME_DIR env var', () => {
     process.env['QWEN_RUNTIME_DIR'] = '~/env-runtime';
     const expected = path.join(os.homedir(), 'env-runtime');
