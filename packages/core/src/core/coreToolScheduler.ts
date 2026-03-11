@@ -1347,14 +1347,14 @@ export class CoreToolScheduler {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
           this.setStatusInternal(callId, 'cancelled', cancelMessage);
-          return;
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
         }
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
-        return;
+        return; // Both code paths should return here
       }
 
       if (toolResult.error === undefined) {
@@ -1506,6 +1506,7 @@ export class CoreToolScheduler {
             'User cancelled tool execution.',
           );
         }
+        return;
       } else {
         // PostToolUseFailure Hook
         let exceptionErrorMessage = errorMessage;
