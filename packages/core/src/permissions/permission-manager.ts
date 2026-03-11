@@ -12,6 +12,8 @@ import {
   splitCompoundCommand,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
+import { extractShellOperations } from './shell-semantics.js';
+import type { ShellOperation } from './shell-semantics.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -21,6 +23,18 @@ import type {
   RuleWithSource,
   RuleScope,
 } from './types.js';
+
+/**
+ * Numeric priority for each PermissionDecision.
+ * Higher number = more restrictive. Used to combine decisions by taking
+ * the most restrictive result across base rules + virtual shell operations.
+ */
+const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
+  deny: 3,
+  ask: 2,
+  default: 1,
+  allow: 0,
+};
 
 /**
  * Minimal interface for the parts of Config used by PermissionManager.
@@ -126,6 +140,13 @@ export class PermissionManager {
 
   /**
    * Evaluate a single (non-compound) context against all rules.
+   *
+   * For shell commands (run_shell_command), the result is the most restrictive
+   * of:
+   *   1. The base decision from Bash / command-pattern rules.
+   *   2. The decision derived from virtual file / network operations extracted
+   *      via `extractShellOperations` — allows Read/Edit/Write/WebFetch rules
+   *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
     const { toolName, command, filePath, domain, specifier } = ctx;
@@ -148,37 +169,89 @@ export class PermissionManager {
       specifier,
     ] as const;
 
-    // Priority 1: deny rules (session first, then persistent)
-    for (const rule of [
-      ...this.sessionRules.deny,
-      ...this.persistentRules.deny,
-    ]) {
-      if (matchesRule(rule, ...matchArgs)) {
-        return 'deny';
+    // Compute the base decision from explicit Bash/file/domain rules.
+    // Using an IIFE to keep the priority-cascade logic clean.
+    const baseDecision: PermissionDecision = (() => {
+      // Priority 1: deny rules (session first, then persistent)
+      for (const rule of [
+        ...this.sessionRules.deny,
+        ...this.persistentRules.deny,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'deny';
+      }
+      // Priority 2: ask rules
+      for (const rule of [
+        ...this.sessionRules.ask,
+        ...this.persistentRules.ask,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'ask';
+      }
+      // Priority 3: allow rules
+      for (const rule of [
+        ...this.sessionRules.allow,
+        ...this.persistentRules.allow,
+      ]) {
+        if (matchesRule(rule, ...matchArgs)) return 'allow';
+      }
+      return 'default';
+    })();
+
+    // `deny` is the most restrictive result — no further checks needed.
+    if (baseDecision === 'deny') return 'deny';
+
+    // For shell commands: evaluate virtual file/network operations extracted
+    // from the command string against Read/Edit/Write/WebFetch/ListFiles rules.
+    // The most restrictive result across base + virtual ops wins.
+    if (toolName === 'run_shell_command' && command !== undefined) {
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const virtualDecision = this.evaluateShellVirtualOps(
+        extractShellOperations(command, cwd),
+        pathCtx,
+      );
+      if (
+        DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[baseDecision]
+      ) {
+        return virtualDecision;
       }
     }
 
-    // Priority 2: ask rules
-    for (const rule of [
-      ...this.sessionRules.ask,
-      ...this.persistentRules.ask,
-    ]) {
-      if (matchesRule(rule, ...matchArgs)) {
-        return 'ask';
+    return baseDecision;
+  }
+
+  /**
+   * Evaluate a list of virtual operations (derived from shell command analysis)
+   * against all current rules.  Returns the most restrictive matching decision,
+   * or `'default'` if no rule matches any operation.
+   *
+   * Each operation is evaluated as if it were a direct invocation of its
+   * `virtualTool` (e.g. `read_file`, `web_fetch`, `edit`), so Read/Edit/etc.
+   * rules are applied naturally.
+   */
+  private evaluateShellVirtualOps(
+    ops: ShellOperation[],
+    _pathCtx: PathMatchContext | undefined,
+  ): PermissionDecision {
+    if (ops.length === 0) return 'default';
+
+    let worst: PermissionDecision = 'default';
+
+    for (const op of ops) {
+      // Evaluate the virtual operation using the standard rule-matching path.
+      // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
+      // into the shell-semantics branch.
+      const opDecision = this.evaluateSingle({
+        toolName: op.virtualTool,
+        filePath: op.filePath,
+        domain: op.domain,
+      });
+
+      if (DECISION_PRIORITY[opDecision] > DECISION_PRIORITY[worst]) {
+        worst = opDecision;
+        if (worst === 'deny') return 'deny'; // short-circuit
       }
     }
 
-    // Priority 3: allow rules
-    for (const rule of [
-      ...this.sessionRules.allow,
-      ...this.persistentRules.allow,
-    ]) {
-      if (matchesRule(rule, ...matchArgs)) {
-        return 'allow';
-      }
-    }
-
-    return 'default';
+    return worst;
   }
 
   /**
@@ -316,7 +389,33 @@ export class PermissionManager {
       ...this.persistentRules.deny,
     ];
 
-    return allRules.some((rule) => matchesRule(rule, ...matchArgs));
+    if (allRules.some((rule) => matchesRule(rule, ...matchArgs))) return true;
+
+    // For shell commands: also check whether any virtual file/network operation
+    // extracted from the command has a relevant rule. This ensures the PM is
+    // consulted (and the confirmation dialog shown) when Read/Edit/etc. rules
+    // would match equivalent shell commands.
+    if (ctx.toolName === 'run_shell_command' && ctx.command !== undefined) {
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperations(ctx.command, cwd);
+      if (
+        ops.some((op) => {
+          const opMatchArgs = [
+            op.virtualTool,
+            undefined,
+            op.filePath,
+            op.domain,
+            pathCtx,
+            undefined,
+          ] as const;
+          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+        })
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ---------------------------------------------------------------------------
