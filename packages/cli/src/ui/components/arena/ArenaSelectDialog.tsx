@@ -72,7 +72,7 @@ export function ArenaSelectDialog({
       const agent =
         mgr.getAgentState(agentId) ??
         mgr.getAgentStates().find((item) => item.agentId === agentId);
-      const label = agent?.model.displayName || agent?.model.modelId || agentId;
+      const label = agent?.model.modelId || agentId;
 
       const result = await mgr.applyAgentResult(agentId);
       if (!result.success) {
@@ -130,7 +130,7 @@ export function ArenaSelectDialog({
   const items: Array<DescriptiveRadioSelectItem<string>> = useMemo(
     () =>
       agents.map((agent) => {
-        const label = agent.model.displayName || agent.model.modelId;
+        const label = agent.model.modelId;
         const statusInfo = getArenaStatusLabel(agent.status);
         const duration = formatDuration(agent.stats.durationMs);
         const tokens = agent.stats.totalTokens.toLocaleString();

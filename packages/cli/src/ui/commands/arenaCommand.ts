@@ -215,10 +215,7 @@ function executeArenaCommand(
 
   const handleSessionStart = (event: ArenaSessionStartEvent) => {
     const modelList = event.models
-      .map(
-        (model, index) =>
-          `  ${index + 1}. ${model.displayName || model.modelId}`,
-      )
+      .map((model, index) => `  ${index + 1}. ${model.modelId}`)
       .join('\n');
     // SESSION_START fires synchronously before the first await in
     // ArenaManager.start(), so the slash command processor's finally
@@ -230,9 +227,10 @@ function executeArenaCommand(
   };
 
   const handleAgentStart = (event: ArenaAgentStartEvent) => {
-    const label = event.model.displayName || event.model.modelId;
-    agentLabels.set(event.agentId, label);
-    debugLogger.debug(`Arena agent started: ${label} (${event.agentId})`);
+    agentLabels.set(event.agentId, event.model.modelId);
+    debugLogger.debug(
+      `Arena agent started: ${event.model.modelId} (${event.agentId})`,
+    );
   };
 
   const handleSessionUpdate = (event: ArenaSessionUpdateEvent) => {
@@ -269,7 +267,7 @@ function executeArenaCommand(
   const buildAgentCardData = (
     result: ArenaAgentCompleteEvent['result'],
   ): ArenaAgentCardData => ({
-    label: result.model.displayName || result.model.modelId,
+    label: result.model.modelId,
     status: result.status,
     durationMs: result.stats.durationMs,
     totalTokens: result.stats.totalTokens,
@@ -621,14 +619,11 @@ export const arenaCommand: SlashCommand = {
 
         // Handle direct model selection via args
         if (trimmedArgs) {
-          const matchingAgent = agents.find((a) => {
-            const label = a.model.displayName || a.model.modelId;
-            return (
+          const matchingAgent = agents.find(
+            (a) =>
               isSuccessStatus(a.status) &&
-              (label.toLowerCase() === trimmedArgs.toLowerCase() ||
-                a.model.modelId.toLowerCase() === trimmedArgs.toLowerCase())
-            );
-          });
+              a.model.modelId.toLowerCase() === trimmedArgs.toLowerCase(),
+          );
 
           if (!matchingAgent) {
             return {
@@ -638,8 +633,7 @@ export const arenaCommand: SlashCommand = {
             };
           }
 
-          const label =
-            matchingAgent.model.displayName || matchingAgent.model.modelId;
+          const label = matchingAgent.model.modelId;
           const result = await manager.applyAgentResult(matchingAgent.agentId);
           if (!result.success) {
             return {

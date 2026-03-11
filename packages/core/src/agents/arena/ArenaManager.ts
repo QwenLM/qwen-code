@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
@@ -13,6 +12,7 @@ import type { Config } from '../../config/config.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
 import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
@@ -370,7 +370,7 @@ export class ArenaManager {
       const worktreeInfo = Array.from(this.agents.values())
         .map(
           (agent, i) =>
-            `  ${i + 1}. ${agent.model.displayName || agent.model.modelId} → ${agent.worktree.path}`,
+            `  ${i + 1}. ${agent.model.modelId} → ${agent.worktree.path}`,
         )
         .join('\n');
       this.emitProgress(`Environment ready. Agent worktrees:\n${worktreeInfo}`);
@@ -1045,7 +1045,7 @@ export class ArenaManager {
       cols: this.terminalCols,
       rows: this.terminalRows,
       inProcess: {
-        agentName: model.displayName || model.modelId,
+        agentName: model.modelId,
         initialTask: this.arenaConfig?.task,
         runtimeConfig: {
           promptConfig: {
@@ -1122,7 +1122,7 @@ export class ArenaManager {
       timestamp: Date.now(),
     });
 
-    const displayName = agent.model.displayName || agent.model.modelId;
+    const label = agent.model.modelId;
 
     // Emit a success message when an agent finishes its initial task.
     if (
@@ -1130,10 +1130,7 @@ export class ArenaManager {
       previousStatus === AgentStatus.RUNNING &&
       newStatus === AgentStatus.IDLE
     ) {
-      this.emitProgress(
-        `Agent ${displayName} finished initial task.`,
-        'success',
-      );
+      this.emitProgress(`Agent ${label} finished initial task.`, 'success');
     }
 
     // Emit progress messages for follow-up transitions (only after
@@ -1143,17 +1140,12 @@ export class ArenaManager {
         previousStatus === AgentStatus.IDLE &&
         newStatus === AgentStatus.RUNNING
       ) {
-        this.emitProgress(
-          `Agent ${displayName} is working on a follow-up task…`,
-        );
+        this.emitProgress(`Agent ${label} is working on a follow-up task…`);
       } else if (
         previousStatus === AgentStatus.RUNNING &&
         newStatus === AgentStatus.IDLE
       ) {
-        this.emitProgress(
-          `Agent ${displayName} finished follow-up task.`,
-          'success',
-        );
+        this.emitProgress(`Agent ${label} finished follow-up task.`, 'success');
       }
     }
 
@@ -1211,13 +1203,19 @@ export class ArenaManager {
     };
   }
 
-  // ─── Private: Arena Session Directory ─────────────────────────
+  // ─── Arena Session Directory ──────────────────────────────────
 
   /**
    * Get the arena session directory for the current session.
    * All status and control files are stored here.
+   *
+   * Returns the absolute path to the session directory, e.g.
+   * `~/.qwen/worktrees/<sessionId>/`.  The directory contains:
+   * - `config.json` — consolidated session config + per-agent status
+   * - `agents/<safeAgentId>.json` — individual agent status files
+   * - `control/` — control signals (shutdown, cancel)
    */
-  private getArenaSessionDir(): string {
+  getArenaSessionDir(): string {
     if (!this.arenaConfig) {
       throw new Error('Arena config not initialized');
     }
@@ -1337,9 +1335,19 @@ export class ArenaManager {
       const onStatusChange = (event: AgentStatusChangeEvent) => {
         syncStats();
         applyStatus(event.newStatus);
+        // Write status files so external consumers get a consistent
+        // file-based view regardless of backend mode.
+        this.flushInProcessStatusFiles().catch((err) =>
+          debugLogger.error('Failed to flush in-process status files:', err),
+        );
       };
 
-      const onUsageMetadata = () => syncStats();
+      const onUsageMetadata = () => {
+        syncStats();
+        this.flushInProcessStatusFiles().catch((err) =>
+          debugLogger.error('Failed to flush in-process status files:', err),
+        );
+      };
 
       emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
       emitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
@@ -1357,6 +1365,12 @@ export class ArenaManager {
       syncStats();
       applyStatus(interactive.getStatus());
     }
+
+    // Flush status files once after reconciliation so that agents which
+    // already settled before the bridge was attached still get written to disk.
+    this.flushInProcessStatusFiles().catch((err) =>
+      debugLogger.error('Failed to flush in-process status files:', err),
+    );
   }
 
   /**
@@ -1470,24 +1484,59 @@ export class ArenaManager {
       config.updatedAt = Date.now();
       config.agents = agents;
 
-      // Atomic write
-      const tmpPath = `${configPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-      try {
-        await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), 'utf-8');
-        await fs.rename(tmpPath, configPath);
-      } catch (writeError) {
-        try {
-          await fs.unlink(tmpPath);
-        } catch {
-          // Ignore cleanup errors
-        }
-        throw writeError;
-      }
+      await atomicWriteJSON(configPath, config);
     } catch (error) {
       debugLogger.error(
         'Failed to write consolidated status to config.json:',
         error,
       );
+    }
+  }
+
+  /**
+   * Build an ArenaStatusFile snapshot from in-memory agent state.
+   */
+  private buildStatusFile(agent: ArenaAgentState): ArenaStatusFile {
+    return {
+      agentId: agent.agentId,
+      status: agent.status,
+      updatedAt: Date.now(),
+      rounds: agent.stats.rounds,
+      stats: { ...agent.stats },
+      finalSummary: null,
+      error: agent.error ?? null,
+    };
+  }
+
+  /**
+   * Write status files for all in-process agents and update the
+   * consolidated config.json.
+   *
+   * In PTY mode these files are written by ArenaAgentClient inside each
+   * child process. In in-process mode there is no child process, so the
+   * ArenaManager writes them directly so that external consumers
+   * (e.g. an orchestrating agent) get a consistent file-based view
+   * regardless of backend.
+   */
+  private async flushInProcessStatusFiles(): Promise<void> {
+    const sessionDir = this.getArenaSessionDir();
+    const agentsDir = path.join(sessionDir, 'agents');
+    await fs.mkdir(agentsDir, { recursive: true });
+
+    const consolidatedAgents: Record<string, ArenaStatusFile> = {};
+
+    for (const agent of this.agents.values()) {
+      const statusFile = this.buildStatusFile(agent);
+      const filePath = path.join(
+        agentsDir,
+        `${safeAgentId(agent.agentId)}.json`,
+      );
+      await atomicWriteJSON(filePath, statusFile);
+      consolidatedAgents[agent.agentId] = statusFile;
+    }
+
+    if (Object.keys(consolidatedAgents).length > 0) {
+      await this.writeConsolidatedStatus(consolidatedAgents);
     }
   }
 

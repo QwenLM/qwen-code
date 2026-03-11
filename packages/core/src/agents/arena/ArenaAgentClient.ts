@@ -6,9 +6,9 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
 import type {
   ArenaAgentStats,
@@ -109,7 +109,7 @@ export class ArenaAgentClient {
       error: null,
     };
 
-    await this.atomicWrite(this.statusFilePath, statusFile);
+    await atomicWriteJSON(this.statusFilePath, statusFile);
   }
 
   /**
@@ -158,7 +158,7 @@ export class ArenaAgentClient {
       error: null,
     };
 
-    await this.atomicWrite(this.statusFilePath, statusFile);
+    await atomicWriteJSON(this.statusFilePath, statusFile);
   }
 
   /**
@@ -179,7 +179,7 @@ export class ArenaAgentClient {
       error: errorMessage,
     };
 
-    await this.atomicWrite(this.statusFilePath, statusFile);
+    await atomicWriteJSON(this.statusFilePath, statusFile);
   }
 
   /**
@@ -200,7 +200,7 @@ export class ArenaAgentClient {
       error: null,
     };
 
-    await this.atomicWrite(this.statusFilePath, statusFile);
+    await atomicWriteJSON(this.statusFilePath, statusFile);
   }
 
   /**
@@ -231,52 +231,6 @@ export class ArenaAgentClient {
       successfulToolCalls: metrics.tools.totalSuccess,
       failedToolCalls: metrics.tools.totalFail,
     };
-  }
-
-  /**
-   * Atomically write JSON data to a file (write temp → rename).
-   * Retries on EPERM which occurs on Windows under concurrent renames.
-   */
-  private async atomicWrite(
-    filePath: string,
-    data: ArenaStatusFile,
-  ): Promise<void> {
-    const tmpPath = `${filePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-    try {
-      await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
-      await this.renameWithRetry(tmpPath, filePath);
-    } catch (error) {
-      try {
-        await fs.unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw error;
-    }
-  }
-
-  private async renameWithRetry(
-    src: string,
-    dest: string,
-    retries = 3,
-    delayMs = 50,
-  ): Promise<void> {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        await fs.rename(src, dest);
-        return;
-      } catch (error: unknown) {
-        const isRetryable =
-          isNodeError(error) &&
-          (error.code === 'EPERM' || error.code === 'EACCES');
-        if (!isRetryable || attempt === retries) {
-          throw error;
-        }
-        await new Promise((resolve) =>
-          setTimeout(resolve, delayMs * 2 ** attempt),
-        );
-      }
-    }
   }
 
   private async ensureInitialized(): Promise<void> {

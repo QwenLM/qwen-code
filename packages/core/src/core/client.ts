@@ -23,6 +23,7 @@ const debugLogger = createDebugLogger('CLIENT');
 import type { ContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
+  getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
@@ -575,6 +576,18 @@ export class GeminiClient {
         systemReminders.push(
           getPlanModeSystemReminder(this.config.getSdkMode()),
         );
+      }
+
+      // add arena system reminder if an arena session is active
+      const arenaManager = this.config.getArenaManager();
+      if (arenaManager) {
+        try {
+          const sessionDir = arenaManager.getArenaSessionDir();
+          const configPath = `${sessionDir}/config.json`;
+          systemReminders.push(getArenaSystemReminder(configPath));
+        } catch {
+          // Arena config not yet initialized — skip
+        }
       }
 
       requestToSent = [...systemReminders, ...requestToSent];
