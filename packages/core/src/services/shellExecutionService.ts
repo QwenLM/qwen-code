@@ -7,10 +7,9 @@
 import stripAnsi from 'strip-ansi';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
-import { spawn as cpSpawn, spawnSync } from 'node:child_process';
+import { spawn as cpSpawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
-import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration } from '../utils/shell-utils.js';
@@ -19,127 +18,27 @@ import {
   serializeTerminalToObject,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
+import type {
+  ShellExecutionResult,
+  ShellExecutionHandle,
+  ShellExecutionConfig,
+  ShellOutputEvent,
+} from './shellTypes.js';
+import {
+  type ActivePty,
+  SIGKILL_TIMEOUT_MS,
+  getCleanupStrategy,
+  getFullBufferText,
+} from './processCleanup.js';
+
+export type {
+  ShellExecutionResult,
+  ShellExecutionHandle,
+  ShellExecutionConfig,
+  ShellOutputEvent,
+} from './shellTypes.js';
+
 const { Terminal } = pkg;
-
-const SIGKILL_TIMEOUT_MS = 200;
-
-/** A structured result from a shell command execution. */
-export interface ShellExecutionResult {
-  /** The raw, unprocessed output buffer. */
-  rawOutput: Buffer;
-  /** The combined, decoded output as a string. */
-  output: string;
-  /** The process exit code, or null if terminated by a signal. */
-  exitCode: number | null;
-  /** The signal that terminated the process, if any. */
-  signal: number | null;
-  /** An error object if the process failed to spawn. */
-  error: Error | null;
-  /** A boolean indicating if the command was aborted by the user. */
-  aborted: boolean;
-  /** The process ID of the spawned shell. */
-  pid: number | undefined;
-  /** The method used to execute the shell command. */
-  executionMethod: 'lydell-node-pty' | 'node-pty' | 'child_process' | 'none';
-}
-
-/** A handle for an ongoing shell execution. */
-export interface ShellExecutionHandle {
-  /** The process ID of the spawned shell. */
-  pid: number | undefined;
-  /** A promise that resolves with the complete execution result. */
-  result: Promise<ShellExecutionResult>;
-}
-
-export interface ShellExecutionConfig {
-  terminalWidth?: number;
-  terminalHeight?: number;
-  pager?: string;
-  showColor?: boolean;
-  defaultFg?: string;
-  defaultBg?: string;
-  // Used for testing
-  disableDynamicLineTrimming?: boolean;
-}
-
-/**
- * Describes a structured event emitted during shell command execution.
- */
-export type ShellOutputEvent =
-  | {
-      /** The event contains a chunk of output data. */
-      type: 'data';
-      /** The decoded string chunk. */
-      chunk: string | AnsiOutput;
-    }
-  | {
-      /** Signals that the output stream has been identified as binary. */
-      type: 'binary_detected';
-    }
-  | {
-      /** Provides progress updates for a binary stream. */
-      type: 'binary_progress';
-      /** The total number of bytes received so far. */
-      bytesReceived: number;
-    };
-
-interface ActivePty {
-  ptyProcess: IPty;
-  headlessTerminal: pkg.Terminal;
-}
-
-const getFullBufferText = (terminal: pkg.Terminal): string => {
-  const buffer = terminal.buffer.active;
-  const lines: string[] = [];
-  for (let i = 0; i < buffer.length; i++) {
-    const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString() : '';
-    lines.push(lineContent);
-  }
-  return lines.join('\n').trimEnd();
-};
-
-interface ProcessCleanupStrategy {
-  killPty(pid: number, pty: ActivePty): void;
-  killChildProcesses(pids: Set<number>): void;
-}
-
-const windowsStrategy: ProcessCleanupStrategy = {
-  killPty: (_pid, pty) => {
-    pty.ptyProcess.kill();
-  },
-  killChildProcesses: (pids) => {
-    if (pids.size > 0) {
-      try {
-        const args = ['/f', '/t'];
-        for (const pid of pids) {
-          args.push('/pid', pid.toString());
-        }
-        spawnSync('taskkill', args);
-      } catch {
-        // ignore
-      }
-    }
-  },
-};
-
-const posixStrategy: ProcessCleanupStrategy = {
-  killPty: (pid, _pty) => {
-    process.kill(-pid, 'SIGKILL');
-  },
-  killChildProcesses: (pids) => {
-    for (const pid of pids) {
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        // ignore
-      }
-    }
-  },
-};
-
-const getCleanupStrategy = () =>
-  os.platform() === 'win32' ? windowsStrategy : posixStrategy;
 
 /**
  * A centralized service for executing shell commands with robust process
