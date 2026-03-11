@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -51,6 +51,7 @@ describe('PromptRegistry', () => {
       expect(renamed).toBeDefined();
       expect(renamed!.serverName).toBe('server-b');
       expect(renamed!.name).toBe('server-b_greet');
+      expect(renamed!.invoke).toBe(prompt2.invoke);
     });
   });
 

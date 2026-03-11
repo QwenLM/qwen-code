@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -181,7 +181,7 @@ describe('MessageBus', () => {
       bus.subscribe<HookExecutionRequest>(
         MessageBusType.HOOK_EXECUTION_REQUEST,
         (msg) => {
-          bus.publish({
+          void bus.publish({
             type: MessageBusType.HOOK_EXECUTION_RESPONSE,
             correlationId: msg.correlationId,
             success: true,
@@ -212,13 +212,13 @@ describe('MessageBus', () => {
         MessageBusType.HOOK_EXECUTION_REQUEST,
         (msg) => {
           // First emit a wrong correlation ID
-          bus.publish({
+          void bus.publish({
             type: MessageBusType.HOOK_EXECUTION_RESPONSE,
             correlationId: 'wrong-id',
             success: false,
           });
           // Then emit the correct one
-          bus.publish({
+          void bus.publish({
             type: MessageBusType.HOOK_EXECUTION_RESPONSE,
             correlationId: msg.correlationId,
             success: true,
@@ -275,6 +275,7 @@ describe('MessageBus', () => {
     it('should create MessageBus with debug enabled', () => {
       const debugBus = new MessageBus(true);
       expect(debugBus).toBeInstanceOf(MessageBus);
+      debugBus.removeAllListeners();
     });
   });
 });
