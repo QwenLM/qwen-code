@@ -38,6 +38,7 @@ export interface OAuthProtectedResourceMetadata {
   resource_signing_alg_values_supported?: string[];
   resource_encryption_alg_values_supported?: string[];
   resource_encryption_enc_values_supported?: string[];
+  scopes_supported?: string[];
 }
 
 /**
@@ -251,6 +252,11 @@ export class OAuthUtils {
 
         if (authServerMetadata) {
           const config = this.metadataToOAuthConfig(authServerMetadata);
+          // Merge scopes from protected resource metadata (RFC 9728)
+          // Protected resource scopes take precedence as they define the specific access requirements
+          if (resourceMetadata.scopes_supported?.length) {
+            config.scopes = resourceMetadata.scopes_supported;
+          }
           if (authServerMetadata.registration_endpoint) {
             debugLogger.debug(
               `Dynamic client registration is supported at: ${authServerMetadata.registration_endpoint}`,
@@ -325,7 +331,13 @@ export class OAuthUtils {
       await this.discoverAuthorizationServerMetadata(authServerUrl);
 
     if (authServerMetadata) {
-      return this.metadataToOAuthConfig(authServerMetadata);
+      const config = this.metadataToOAuthConfig(authServerMetadata);
+      // Merge scopes from protected resource metadata (RFC 9728)
+      // Protected resource scopes take precedence as they define the specific access requirements
+      if (resourceMetadata.scopes_supported?.length) {
+        config.scopes = resourceMetadata.scopes_supported;
+      }
+      return config;
     }
 
     return null;

@@ -34,9 +34,28 @@ import {
   TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 
-import * as acp from '../acp.js';
+import { RequestError } from '@agentclientprotocol/sdk';
+import type {
+  AvailableCommand,
+  ContentBlock,
+  EmbeddedResourceResource,
+  PermissionOption,
+  PromptRequest,
+  PromptResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionNotification,
+  SessionUpdate,
+  SetSessionModeRequest,
+  SetSessionModeResponse,
+  SetSessionModelRequest,
+  SetSessionModelResponse,
+  ToolCallContent,
+  AgentSideConnection,
+} from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
@@ -45,24 +64,15 @@ import {
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import type {
-  AvailableCommand,
-  AvailableCommandsUpdate,
-  SetModeRequest,
-  SetModeResponse,
-  SetModelRequest,
-  SetModelResponse,
-  ApprovalModeValue,
-  CurrentModeUpdate,
-} from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
-import {
-  formatAcpModelId,
-  parseAcpModelOption,
-} from '../../utils/acpModelUtils.js';
+import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 
 // Import modular session components
-import type { SessionContext, ToolCallStartParams } from './types.js';
+import type {
+  ApprovalModeValue,
+  SessionContext,
+  ToolCallStartParams,
+} from './types.js';
 import { HistoryReplayer } from './HistoryReplayer.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -96,7 +106,7 @@ export class Session implements SessionContext {
     id: string,
     private readonly chat: GeminiChat,
     readonly config: Config,
-    private readonly client: acp.Client,
+    private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
@@ -133,7 +143,7 @@ export class Session implements SessionContext {
     this.pendingPrompt = null;
   }
 
-  async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+  async prompt(params: PromptRequest): Promise<PromptResponse> {
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
@@ -254,10 +264,7 @@ export class Session implements SessionContext {
         }
       } catch (error) {
         if (getErrorStatus(error) === 429) {
-          throw new acp.RequestError(
-            429,
-            'Rate limit exceeded. Try again later.',
-          );
+          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
 
         throw error;
@@ -287,8 +294,8 @@ export class Session implements SessionContext {
     return { stopReason: 'end_turn' };
   }
 
-  async sendUpdate(update: acp.SessionUpdate): Promise<void> {
-    const params: acp.SessionNotification = {
+  async sendUpdate(update: SessionUpdate): Promise<void> {
+    const params: SessionNotification = {
       sessionId: this.sessionId,
       update,
     };
@@ -314,7 +321,7 @@ export class Session implements SessionContext {
         }),
       );
 
-      const update: AvailableCommandsUpdate = {
+      const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
       };
@@ -331,8 +338,8 @@ export class Session implements SessionContext {
    * Used by SubAgentTracker for sub-agent approval requests.
    */
   async requestPermission(
-    params: acp.RequestPermissionRequest,
-  ): Promise<acp.RequestPermissionResponse> {
+    params: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
     return this.client.requestPermission(params);
   }
 
@@ -340,7 +347,9 @@ export class Session implements SessionContext {
    * Sets the approval mode for the current session.
    * Maps ACP approval mode values to core ApprovalMode enum.
    */
-  async setMode(params: SetModeRequest): Promise<SetModeResponse> {
+  async setMode(
+    params: SetSessionModeRequest,
+  ): Promise<SetSessionModeResponse | void> {
     const modeMap: Record<ApprovalModeValue, ApprovalMode> = {
       plan: ApprovalMode.PLAN,
       default: ApprovalMode.DEFAULT,
@@ -348,21 +357,21 @@ export class Session implements SessionContext {
       yolo: ApprovalMode.YOLO,
     };
 
-    const approvalMode = modeMap[params.modeId];
+    const approvalMode = modeMap[params.modeId as ApprovalModeValue];
     this.config.setApprovalMode(approvalMode);
-
-    return { modeId: params.modeId };
   }
 
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
    */
-  async setModel(params: SetModelRequest): Promise<SetModelResponse> {
+  async setModel(
+    params: SetSessionModelRequest,
+  ): Promise<SetSessionModelResponse | void> {
     const rawModelId = params.modelId.trim();
 
     if (!rawModelId) {
-      throw acp.RequestError.invalidParams('modelId cannot be empty');
+      throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
     const parsed = parseAcpModelOption(rawModelId);
@@ -370,7 +379,8 @@ export class Session implements SessionContext {
     const selectedAuthType = parsed.authType ?? previousAuthType;
 
     if (!selectedAuthType) {
-      throw acp.RequestError.invalidParams(
+      throw RequestError.invalidParams(
+        undefined,
         `authType cannot be determined for modelId "${parsed.modelId}"`,
       );
     }
@@ -383,14 +393,6 @@ export class Session implements SessionContext {
         ? { requireCachedCredentials: true }
         : undefined,
     );
-
-    // Get updated model info
-    const currentModel = this.config.getModel();
-    const currentAuthType = this.config.getAuthType?.() ?? selectedAuthType;
-
-    return {
-      modelId: formatAcpModelId(currentModel, currentAuthType),
-    };
   }
 
   /**
@@ -413,9 +415,9 @@ export class Session implements SessionContext {
         break;
     }
 
-    const update: CurrentModeUpdate = {
+    const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
-      modeId: newModeId,
+      currentModeId: newModeId,
     };
 
     await this.sendUpdate(update);
@@ -512,16 +514,26 @@ export class Session implements SessionContext {
       }
 
       // Use the new permission flow: getDefaultPermission + getConfirmationDetails
+      // ask_user_question must always go through confirmation even in YOLO mode
+      // so the user always has a chance to respond to questions.
+      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
       const defaultPermission =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO
+        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
+        isAskUserQuestionTool
           ? await invocation.getDefaultPermission()
           : 'allow';
 
       const needsConfirmation = defaultPermission === 'ask';
 
       // Check for plan mode enforcement - block non-read-only tools
+      // but allow ask_user_question so users can answer clarification questions
       const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
-      if (isPlanMode && !isExitPlanModeTool && needsConfirmation) {
+      if (
+        isPlanMode &&
+        !isExitPlanModeTool &&
+        !isAskUserQuestionTool &&
+        needsConfirmation
+      ) {
         // In plan mode, block any tool that requires confirmation (write operations)
         return errorResponse(
           new Error(
@@ -542,7 +554,7 @@ export class Session implements SessionContext {
       if (needsConfirmation) {
         const confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
-        const content: acp.ToolCallContent[] = [];
+        const content: ToolCallContent[] = [];
 
         if (confirmationDetails.type === 'edit') {
           content.push({
@@ -567,7 +579,7 @@ export class Session implements SessionContext {
         // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
         const mappedKind = this.toolCallEmitter.mapToolKind(tool.kind, fc.name);
 
-        const params: acp.RequestPermissionRequest = {
+        const params: RequestPermissionRequest = {
           sessionId: this.sessionId,
           options: toPermissionOptions(confirmationDetails),
           toolCall: {
@@ -577,10 +589,15 @@ export class Session implements SessionContext {
             content,
             locations: invocation.toolLocations(),
             kind: mappedKind,
+            rawInput: args,
           },
         };
 
-        const output = await this.client.requestPermission(params);
+        const output = (await this.client.requestPermission(
+          params,
+        )) as RequestPermissionResponse & {
+          answers?: Record<string, string>;
+        };
         const outcome =
           output.outcome.outcome === 'cancelled'
             ? ToolConfirmationOutcome.Cancel
@@ -588,7 +605,9 @@ export class Session implements SessionContext {
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
 
-        await confirmationDetails.onConfirm(outcome);
+        await confirmationDetails.onConfirm(outcome, {
+          answers: output.answers,
+        });
 
         // After exit_plan_mode confirmation, send current_mode_update notification
         if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
@@ -747,7 +766,7 @@ export class Session implements SessionContext {
    */
   async #processSlashCommandResult(
     result: NonInteractiveSlashCommandResult,
-    originalPrompt: acp.ContentBlock[],
+    originalPrompt: ContentBlock[],
   ): Promise<Part[] | null> {
     switch (result.type) {
       case 'submit_prompt':
@@ -756,9 +775,7 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        // 'message' type is not ideal for ACP mode, but we handle it for compatibility
-        // by converting it to a stream_messages-like notification
-        await this.client.sendCustomNotification('_qwencode/slash_command', {
+        await this.client.extNotification('_qwencode/slash_command', {
           sessionId: this.sessionId,
           command: originalPrompt
             .filter((block) => block.type === 'text')
@@ -785,7 +802,7 @@ export class Session implements SessionContext {
 
         // Stream all messages to the client
         for await (const msg of result.messages) {
-          await this.client.sendCustomNotification('_qwencode/slash_command', {
+          await this.client.extNotification('_qwencode/slash_command', {
             sessionId: this.sessionId,
             command,
             messageType: msg.messageType,
@@ -827,12 +844,12 @@ export class Session implements SessionContext {
   }
 
   async #resolvePrompt(
-    message: acp.ContentBlock[],
+    message: ContentBlock[],
     abortSignal: AbortSignal,
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
-    const embeddedContext: acp.EmbeddedResourceResource[] = [];
+    const embeddedContext: EmbeddedResourceResource[] = [];
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -981,7 +998,7 @@ const basicPermissionOptions = [
 
 function toPermissionOptions(
   confirmation: ToolCallConfirmationDetails,
-): acp.PermissionOption[] {
+): PermissionOption[] {
   switch (confirmation.type) {
     case 'edit':
       return [
@@ -1049,6 +1066,19 @@ function toPermissionOptions(
         {
           optionId: ToolConfirmationOutcome.Cancel,
           name: `No, keep planning (esc)`,
+          kind: 'reject_once',
+        },
+      ];
+    case 'ask_user_question':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
           kind: 'reject_once',
         },
       ];

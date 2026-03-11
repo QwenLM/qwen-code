@@ -15,9 +15,22 @@
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: var(--app-background, var(--app-primary-background, #1e1e1e));
+  background-color: var(
+    --app-background,
+    var(--app-primary-background, #1e1e1e)
+  );
   color: var(--app-primary-foreground, #cccccc);
-  font-family: var(--vscode-chat-font-family, var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif));
+  font-family: var(
+    --vscode-chat-font-family,
+    var(
+      --vscode-font-family,
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      Roboto,
+      sans-serif
+    )
+  );
   font-size: var(--vscode-chat-font-size, 13px);
   overflow: hidden;
 }
@@ -58,21 +71,25 @@
 
 /* Light theme scrollbar styling */
 @media (prefers-color-scheme: light) {
-  .chat-viewer-container.auto-theme .chat-viewer-messages::-webkit-scrollbar-thumb {
+  .chat-viewer-container.auto-theme
+    .chat-viewer-messages::-webkit-scrollbar-thumb {
     background: rgba(0, 0, 0, 0.2);
   }
-  
-  .chat-viewer-container.auto-theme .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
+
+  .chat-viewer-container.auto-theme
+    .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
     background: rgba(0, 0, 0, 0.3);
   }
 }
 
 /* Force light theme scrollbar */
-.chat-viewer-container.light-theme .chat-viewer-messages::-webkit-scrollbar-thumb {
+.chat-viewer-container.light-theme
+  .chat-viewer-messages::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.2);
 }
 
-.chat-viewer-container.light-theme .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
+.chat-viewer-container.light-theme
+  .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.3);
 }
 

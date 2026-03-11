@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FC } from 'react';
-import type { ModelInfo } from '../../../types/acpTypes.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
 import { PlanCompletedIcon } from '@qwen-code/webui';
 
 interface ModelSelectorProps {

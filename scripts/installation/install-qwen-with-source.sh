@@ -84,7 +84,9 @@ get_shell_profile() {
             echo "${HOME}/.zshrc"
             ;;
         fish)
-            echo "${HOME}/.config/fish/config.fish"
+            # Fish uses its own syntax; bash/zsh export statements are not compatible.
+            # Return empty string to signal callers to skip automatic profile writes.
+            echo ""
             ;;
         *)
             echo "${HOME}/.profile"
@@ -163,9 +165,16 @@ ensure_download_tool() {
 clean_npmrc_conflict() {
     local npmrc="${HOME}/.npmrc"
     if [[ -f "${npmrc}" ]]; then
-        log_info "Cleaning npmrc conflicts..."
-        grep -Ev '^(prefix|globalconfig) *= *' "${npmrc}" > "${npmrc}.tmp" || true
-        mv -f "${npmrc}.tmp" "${npmrc}" || true
+        # Only clean if conflicting entries actually exist
+        if grep -Eq '^(prefix|globalconfig) *= *' "${npmrc}" 2>/dev/null; then
+            log_info "Cleaning npmrc conflicts..."
+            # Backup original npmrc before modifying
+            cp -f "${npmrc}" "${npmrc}.bak"
+            log_info "Backed up original .npmrc to ${npmrc}.bak"
+            grep -Ev '^(prefix|globalconfig) *= *' "${npmrc}.bak" > "${npmrc}.tmp" || true
+            mv -f "${npmrc}.tmp" "${npmrc}" || true
+            log_success "Removed conflicting prefix/globalconfig entries from .npmrc"
+        fi
     fi
 }
 
@@ -204,8 +213,13 @@ install_nvm() {
     local PROFILE_FILE
     PROFILE_FILE=$(get_shell_profile)
 
+    # Fish shell returns empty string from get_shell_profile because export/source
+    # syntax is incompatible with fish. Skip automatic profile writes for fish users.
+    if [[ -z "${PROFILE_FILE}" ]]; then
+        log_warning "Fish shell detected: automatic shell profile configuration is not supported."
+        log_info "Please add NVM configuration manually. See: https://github.com/nvm-sh/nvm#fish"
     # Check if profile file is writable
-    if [[ -f "${PROFILE_FILE}" ]] && [[ ! -w "${PROFILE_FILE}" ]]; then
+    elif [[ -f "${PROFILE_FILE}" ]] && [[ ! -w "${PROFILE_FILE}" ]]; then
         log_warning "Cannot write to ${PROFILE_FILE} (permission denied)"
         log_info "Skipping shell profile configuration"
         log_info "You may need to manually add NVM configuration to your shell profile"
@@ -284,7 +298,13 @@ check_node_version() {
     local current_version
     current_version=$(node -v | sed 's/v//')
     local major_version
-    major_version=$(echo "${current_version}" | cut -d. -f1)
+    major_version=$(echo "${current_version}" | cut -d. -f1 | sed 's/[^0-9]//g')
+
+    # Handle cases where major_version is empty or non-numeric
+    if [[ -z "${major_version}" ]]; then
+        log_warning "Unable to determine Node.js version from: $(node -v)"
+        return 1
+    fi
 
     if [[ "${major_version}" -ge 20 ]]; then
         log_success "Node.js v${current_version} is already installed (>= 20)"
@@ -356,55 +376,51 @@ fix_npm_permissions() {
 
     local NPM_GLOBAL_DIR
     NPM_GLOBAL_DIR=$(npm config get prefix 2>/dev/null) || true
+
+    # Determine whether we need to fall back to ~/.npm-global:
+    # 1. prefix is empty or contains an error string
+    # 2. prefix is a system directory (would break sudo setuid binaries)
+    # 3. prefix directory is not writable
+    local use_user_dir=false
+
     if [[ -z "${NPM_GLOBAL_DIR}" ]] || [[ "${NPM_GLOBAL_DIR}" == *"error"* ]]; then
+        log_info "npm prefix is unset or invalid, switching to user directory"
+        use_user_dir=true
+    else
+        # SAFETY CHECK: Never use system directories
+        case "${NPM_GLOBAL_DIR}" in
+            /|/usr|/usr/local|/bin|/sbin|/lib|/lib64|/opt|/snap|/var|/etc)
+                log_warning "npm prefix is a system directory (${NPM_GLOBAL_DIR}), switching to user directory to avoid breaking system binaries."
+                use_user_dir=true
+                ;;
+        esac
+    fi
+
+    if [[ "${use_user_dir}" == false ]] && [[ ! -w "${NPM_GLOBAL_DIR}" ]]; then
+        log_warning "npm global directory is not writable: ${NPM_GLOBAL_DIR}, switching to user directory."
+        use_user_dir=true
+    fi
+
+    if [[ "${use_user_dir}" == true ]]; then
         NPM_GLOBAL_DIR="${HOME}/.npm-global"
+        # Create the directory before setting prefix so npm config set succeeds
+        mkdir -p "${NPM_GLOBAL_DIR}"
         npm config set prefix "${NPM_GLOBAL_DIR}"
-        log_info "Set npm prefix to user directory: ${NPM_GLOBAL_DIR}"
-        return 0
-    fi
+        log_success "npm prefix set to: ${NPM_GLOBAL_DIR}"
 
-    # SAFETY CHECK: Never modify system directories
-    # This prevents catastrophic failures like breaking sudo setuid binaries
-    case "${NPM_GLOBAL_DIR}" in
-        /|/usr|/usr/local|/bin|/sbin|/lib|/lib64|/opt|/snap|/var|/etc)
-            log_warning "npm prefix is a system directory (${NPM_GLOBAL_DIR})."
-            log_info "Using user directory instead to avoid breaking system binaries."
-            NPM_GLOBAL_DIR="${HOME}/.npm-global"
-            npm config set prefix "${NPM_GLOBAL_DIR}"
-            log_success "npm prefix set to: ${NPM_GLOBAL_DIR}"
-            return 0
-            ;;
-        *)
-            # Safe to proceed with non-system directory
-            ;;
-    esac
-
-    # Check if npm global directory is writable
-    if [[ -w "${NPM_GLOBAL_DIR}" ]]; then
-        log_info "npm global directory is writable"
-        return 0
-    fi
-
-    # If not writable, use user directory
-    log_warning "npm global directory is not writable: ${NPM_GLOBAL_DIR}"
-    log_info "Setting npm prefix to user directory..."
-
-    NPM_GLOBAL_DIR="${HOME}/.npm-global"
-    mkdir -p "${NPM_GLOBAL_DIR}"
-    npm config set prefix "${NPM_GLOBAL_DIR}"
-
-    log_success "npm prefix set to: ${NPM_GLOBAL_DIR}"
-
-    # Add to PATH in shell profile
-    local PROFILE_FILE
-    PROFILE_FILE=$(get_shell_profile)
-    if ! grep -q '.npm-global/bin' "${PROFILE_FILE}" 2>/dev/null; then
-        {
-            echo ""
-            echo "# NPM global bin (added by Qwen Code installer)"
-            echo "export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
-        } >> "${PROFILE_FILE}"
-        log_info "Added npm global bin to PATH in ${PROFILE_FILE}"
+        # Only add ~/.npm-global/bin to PATH when we actually use it
+        local PROFILE_FILE
+        PROFILE_FILE=$(get_shell_profile)
+        if [[ -n "${PROFILE_FILE}" ]] && ! grep -q '.npm-global/bin' "${PROFILE_FILE}" 2>/dev/null; then
+            {
+                echo ""
+                echo "# NPM global bin (added by Qwen Code installer)"
+                echo "export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
+            } >> "${PROFILE_FILE}" 2>/dev/null || log_warning "Failed to write PATH update to ${PROFILE_FILE}"
+            log_info "Added npm global bin to PATH in ${PROFILE_FILE}"
+        fi
+    else
+        log_info "npm global directory is writable: ${NPM_GLOBAL_DIR}"
     fi
 
     return 0
@@ -421,14 +437,14 @@ install_qwen_code() {
 
     # Add npm global bin to PATH
     local NPM_GLOBAL_BIN
-    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null) || true
+    NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
     if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
         export PATH="${NPM_GLOBAL_BIN}:${PATH}"
     fi
 
     if command_exists qwen; then
         local QWEN_VERSION
-        QWEN_VERSION=$(qwen --version 2>/dev/null) || echo "unknown"
+        QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
         log_success "Qwen Code is already installed: ${QWEN_VERSION}"
         log_info "Upgrading to the latest version..."
     fi
@@ -439,13 +455,9 @@ install_qwen_code() {
     # Fix npm permissions if needed
     fix_npm_permissions
 
-    # Configure npm registry for faster downloads in China
-    npm config set registry https://registry.npmmirror.com
-    log_info "npm registry set to npmmirror"
-
     # Install Qwen Code
     log_info "Installing Qwen Code..."
-    if npm install -g @qwen-code/qwen-code@latest; then
+    if npm install -g @qwen-code/qwen-code@latest --registry https://registry.npmmirror.com; then
         log_success "Qwen Code installed successfully!"
 
         # Verify installation
@@ -532,7 +544,7 @@ main() {
     # shellcheck source=/dev/null
     [[ -s "${NVM_DIR}/nvm.sh" ]] && \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
     local NPM_GLOBAL_BIN
-    NPM_GLOBAL_BIN=$(npm bin -g 2>/dev/null) || true
+    NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
     if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
         export PATH="${NPM_GLOBAL_BIN}:${PATH}"
     fi
@@ -541,15 +553,16 @@ main() {
     if command_exists qwen; then
         log_success "Qwen Code is ready to use!"
         echo ""
-        echo "You can now run: qwen"
+        log_info "Tips: Please restart your terminal and run: qwen"
+        echo ""
     else
-        log_warning "To start using Qwen Code, please run:"
+        log_warning "Tips: To start using Qwen Code, please run:"
         echo ""
         local PROFILE_FILE
         PROFILE_FILE=$(get_shell_profile)
         echo "  source ${PROFILE_FILE}"
         echo ""
-        echo "Or simply restart your terminal, then run: qwen"
+        log_info "Or simply restart your terminal, then run: qwen"
     fi
 }
 

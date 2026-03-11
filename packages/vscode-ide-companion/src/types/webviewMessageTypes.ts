@@ -12,3 +12,14 @@ export interface PermissionResponseMessage {
   type: string;
   data: PermissionResponsePayload;
 }
+
+export interface AskUserQuestionResponsePayload {
+  optionId?: string;
+  answers: Record<string, string>;
+  cancelled?: boolean;
+}
+
+export interface AskUserQuestionResponseMessage {
+  type: string;
+  data: AskUserQuestionResponsePayload;
+}

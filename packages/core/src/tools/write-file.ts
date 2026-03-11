@@ -251,17 +251,25 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // Check if file exists and has BOM to preserve encoding
       // For new files, use the configured default encoding
       let useBOM = false;
+      let detectedEncoding: string | undefined;
       if (!isNewFile) {
-        useBOM = await this.config
+        // Use readTextFileWithInfo for a single I/O pass that returns encoding
+        // and BOM metadata together, avoiding separate detectFileBOM / detectFileEncoding calls.
+        const fileInfo = await this.config
           .getFileSystemService()
-          .detectFileBOM(file_path);
+          .readTextFileWithInfo(file_path);
+        useBOM = fileInfo.bom;
+        detectedEncoding = fileInfo.encoding;
       } else {
         useBOM = this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
       }
 
       await this.config
         .getFileSystemService()
-        .writeTextFile(file_path, fileContent, { bom: useBOM });
+        .writeTextFile(file_path, fileContent, {
+          bom: useBOM,
+          encoding: detectedEncoding,
+        });
 
       // Generate diff for display result
       const fileName = path.basename(file_path);

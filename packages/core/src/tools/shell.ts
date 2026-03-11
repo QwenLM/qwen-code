@@ -18,14 +18,10 @@ import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-
-  ToolConfirmationOutcome} from './tools.js';
-import type { PermissionDecision } from '../permissions/types.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
+  ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
@@ -212,15 +208,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
         finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
-      // pgrep is not available on Windows, so we can't get background PIDs
-      const commandToExecute = isWindows
-        ? finalCommand
-        : (() => {
-            // wrap command to append subprocess pids (via pgrep) to temporary file
-            let command = finalCommand.trim();
-            if (!command.endsWith('&')) command += ';';
-            return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
-          })();
+      // On non-Windows background commands, wrap with pgrep to capture
+      // subprocess PIDs so we can report them to the user.
+      const commandToExecute =
+        !isWindows && shouldRunInBackground
+          ? (() => {
+              let command = finalCommand.trim();
+              if (!command.endsWith('&')) command += ';';
+              return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
+            })()
+          : finalCommand;
 
       const cwd = this.params.directory || this.config.getTargetDir();
 
@@ -271,7 +268,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
           },
           combinedSignal,
-          this.config.getShouldUseNodePtyShell(),
+          shouldRunInBackground
+            ? false
+            : this.config.getShouldUseNodePtyShell(),
           shellExecutionConfig ?? {},
         );
 
@@ -279,14 +278,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      if (shouldRunInBackground) {
-        // For background tasks, return immediately with PID info
-        // Note: We cannot reliably detect startup errors for background processes
-        // since their stdio is typically detached/ignored
+      // On Windows, background commands rely on early return since there's
+      // no & backgrounding or pgrep. Awaiting would block until completion.
+      if (shouldRunInBackground && isWindows) {
         const pidMsg = pid ? ` PID: ${pid}` : '';
-        const killHint = isWindows
-          ? ' (Use taskkill /F /T /PID <pid> to stop)'
-          : ' (Use kill <pid> to stop)';
+        const killHint = ' (Use taskkill /F /T /PID <pid> to stop)';
 
         return {
           llmContent: `Background command started.${pidMsg}${killHint}`,
@@ -296,27 +292,42 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       const result = await resultPromise;
 
-      const backgroundPIDs: number[] = [];
-      if (os.platform() !== 'win32') {
-        if (fs.existsSync(tempFilePath)) {
-          const pgrepLines = fs
-            .readFileSync(tempFilePath, 'utf8')
-            .split(EOL)
-            .filter(Boolean);
-          for (const line of pgrepLines) {
-            if (!/^\d+$/.test(line)) {
-              debugLogger.warn(`pgrep: ${line}`);
+      if (shouldRunInBackground) {
+        // Read subprocess PIDs captured by the pgrep wrapper (non-Windows only)
+        const backgroundPIDs: number[] = [];
+        if (!isWindows) {
+          if (fs.existsSync(tempFilePath)) {
+            const pgrepLines = fs
+              .readFileSync(tempFilePath, 'utf8')
+              .split(EOL)
+              .filter(Boolean);
+            for (const line of pgrepLines) {
+              if (!/^\d+$/.test(line)) {
+                debugLogger.warn(`pgrep: ${line}`);
+                continue;
+              }
+              const bgPid = Number(line);
+              if (bgPid !== result.pid) {
+                backgroundPIDs.push(bgPid);
+              }
             }
-            const pid = Number(line);
-            if (pid !== result.pid) {
-              backgroundPIDs.push(pid);
-            }
-          }
-        } else {
-          if (!signal.aborted) {
+          } else if (!signal.aborted) {
             debugLogger.warn('missing pgrep output');
           }
         }
+
+        const bgPidMsg =
+          backgroundPIDs.length > 0
+            ? ` PIDs: ${backgroundPIDs.join(', ')}`
+            : pid
+              ? ` PID: ${pid}`
+              : '';
+        const killHint = ' (Use kill <pid> to stop)';
+
+        return {
+          llmContent: `Background command started.${bgPidMsg}${killHint}`,
+          returnDisplay: `Background command started.${bgPidMsg}${killHint}`,
+        };
       }
 
       let llmContent = '';
@@ -358,9 +369,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           `Error: ${finalError}`, // Use the cleaned error string.
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
-          `Background PIDs: ${
-            backgroundPIDs.length ? backgroundPIDs.join(', ') : '(none)'
-          }`,
           `Process Group PGID: ${result.pid ?? '(none)'}`,
         ].join('\n');
       }

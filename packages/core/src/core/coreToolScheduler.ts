@@ -979,14 +979,23 @@ export class CoreToolScheduler {
           }
 
           // finalPermission === 'ask' (or 'default' from PM → treat as ask)
-          // Apply ApprovalMode overrides
-          if (approvalMode === ApprovalMode.YOLO) {
+          // apply ApprovalMode overrides.
+          // ask_user_question always needs confirmation so the user can answer;
+          // it must bypass both YOLO auto-approve and plan-mode blocking.
+          const isAskUserQuestionTool =
+            reqInfo.name === ToolNames.ASK_USER_QUESTION;
+
+          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
-          } else if (isPlanMode && !isExitPlanModeTool) {
+          } else if (
+            isPlanMode &&
+            !isExitPlanModeTool &&
+            !isAskUserQuestionTool
+          ) {
             this.setStatusInternal(reqInfo.callId, 'error', {
               callId: reqInfo.callId,
               responseParts: convertToFunctionResponse(

@@ -42,6 +42,7 @@ import {
 import { GitService } from '../services/gitService.js';
 
 // Tools
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { EditTool } from '../tools/edit.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { GlobTool } from '../tools/glob.js';
@@ -85,6 +86,13 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
+import { HookSystem } from '../hooks/index.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -387,6 +395,12 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Enable hook system for lifecycle events */
+  enableHooks?: boolean;
+  /** Hooks configuration from settings */
+  hooks?: Record<string, unknown>;
+  /** Hooks config settings (enabled, disabled list) */
+  hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /**
@@ -474,7 +488,7 @@ export class Config {
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private readonly allowedMcpServers?: string[];
-  private readonly excludedMcpServers?: string[];
+  private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -552,6 +566,11 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType;
+  private readonly enableHooks: boolean;
+  private readonly hooks?: Record<string, unknown>;
+  private readonly hooksConfig?: Record<string, unknown>;
+  private hookSystem?: HookSystem;
+  private messageBus?: MessageBus;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -654,7 +673,7 @@ export class Config {
     this.webSearch = params.webSearch;
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
-    this.shouldUseNodePtyShell = params.shouldUseNodePtyShell ?? false;
+    this.shouldUseNodePtyShell = params.shouldUseNodePtyShell ?? true;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? true;
     this.shellExecutionConfig = {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
@@ -710,6 +729,9 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableHooks = params.enableHooks ?? false;
+    this.hooks = params.hooks;
+    this.hooksConfig = params.hooksConfig;
   }
 
   /**
@@ -732,6 +754,75 @@ export class Config {
     this.extensionManager.setConfig(this);
     await this.extensionManager.refreshCache();
     this.debugLogger.debug('Extension manager initialized');
+
+    // Initialize hook system if enabled
+    if (this.enableHooks) {
+      this.hookSystem = new HookSystem(this);
+      await this.hookSystem.initialize();
+      this.debugLogger.debug('Hook system initialized');
+
+      // Initialize MessageBus for hook execution
+      this.messageBus = new MessageBus();
+
+      // Subscribe to HOOK_EXECUTION_REQUEST to execute hooks
+      this.messageBus.subscribe<HookExecutionRequest>(
+        MessageBusType.HOOK_EXECUTION_REQUEST,
+        async (request: HookExecutionRequest) => {
+          try {
+            const hookSystem = this.hookSystem;
+            if (!hookSystem) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook system not initialized'),
+              } as HookExecutionResponse);
+              return;
+            }
+
+            // Execute the appropriate hook based on eventName
+            let result;
+            const input = request.input || {};
+            switch (request.eventName) {
+              case 'UserPromptSubmit':
+                result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                );
+                break;
+              case 'Stop':
+                result = await hookSystem.fireStopEvent(
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['last_assistant_message'] as string) || '',
+                );
+                break;
+              default:
+                this.debugLogger.warn(
+                  `Unknown hook event: ${request.eventName}`,
+                );
+                result = undefined;
+            }
+
+            // Send response
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: true,
+              output: result,
+            } as HookExecutionResponse);
+          } catch (error) {
+            this.debugLogger.warn(`Hook execution failed: ${error}`);
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            } as HookExecutionResponse);
+          }
+        },
+      );
+
+      this.debugLogger.debug('MessageBus initialized with hook subscription');
+    }
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
@@ -1258,15 +1349,23 @@ export class Config {
       );
     }
 
-    if (this.excludedMcpServers) {
-      mcpServers = Object.fromEntries(
-        Object.entries(mcpServers).filter(
-          ([key]) => !this.excludedMcpServers?.includes(key),
-        ),
-      );
-    }
+    // Note: We no longer filter out excluded servers here.
+    // The UI layer should check isMcpServerDisabled() to determine
+    // whether to show a server as disabled.
 
     return mcpServers;
+  }
+
+  getExcludedMcpServers(): string[] | undefined {
+    return this.excludedMcpServers;
+  }
+
+  setExcludedMcpServers(excluded: string[]): void {
+    this.excludedMcpServers = excluded;
+  }
+
+  isMcpServerDisabled(serverName: string): boolean {
+    return this.excludedMcpServers?.includes(serverName) ?? false;
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
@@ -1478,6 +1577,66 @@ export class Config {
 
   getExtensionManager(): ExtensionManager {
     return this.extensionManager;
+  }
+
+  /**
+   * Get the hook system instance if hooks are enabled.
+   * Returns undefined if hooks are not enabled.
+   */
+  getHookSystem(): HookSystem | undefined {
+    return this.hookSystem;
+  }
+
+  /**
+   * Check if hooks are enabled.
+   */
+  getEnableHooks(): boolean {
+    return this.enableHooks;
+  }
+
+  /**
+   * Get the message bus instance.
+   * Returns undefined if not set.
+   */
+  getMessageBus(): MessageBus | undefined {
+    return this.messageBus;
+  }
+
+  /**
+   * Set the message bus instance.
+   * This is called by the CLI layer to inject the MessageBus.
+   */
+  setMessageBus(messageBus: MessageBus): void {
+    this.messageBus = messageBus;
+  }
+
+  /**
+   * Get the list of disabled hook names.
+   * This is used by the HookRegistry to filter out disabled hooks.
+   */
+  getDisabledHooks(): string[] {
+    const hooksConfig = this.hooksConfig;
+    if (!hooksConfig) return [];
+    const disabled = hooksConfig['disabled'];
+    return Array.isArray(disabled) ? (disabled as string[]) : [];
+  }
+
+  /**
+   * Get project-level hooks configuration.
+   * This is used by the HookRegistry to load project-specific hooks.
+   */
+  getProjectHooks(): Record<string, unknown> | undefined {
+    // This will be populated from settings by the CLI layer
+    // The core Config doesn't have direct access to settings
+    return undefined;
+  }
+
+  /**
+   * Get all hooks configuration (merged from all sources).
+   * This is used by the HookRegistry to load hooks.
+   */
+  getHooks(): Record<string, unknown> | undefined {
+    return this.hooks;
   }
 
   getExtensions(): Extension[] {
@@ -1717,6 +1876,21 @@ export class Config {
   }
 
   /**
+   * Returns the transcript file path for the current session.
+   * This is the path to the JSONL file where the conversation is recorded.
+   * Returns empty string if chat recording is disabled.
+   */
+  getTranscriptPath(): string {
+    if (!this.chatRecordingEnabled) {
+      return '';
+    }
+    const projectDir = this.storage.getProjectDir();
+    const sessionId = this.getSessionId();
+    const safeFilename = `${sessionId}.jsonl`;
+    return path.join(projectDir, 'chats', safeFilename);
+  }
+
+  /**
    * Gets or creates a SessionService for managing chat sessions.
    */
   getSessionService(): SessionService {
@@ -1836,6 +2010,7 @@ export class Config {
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
+    registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured

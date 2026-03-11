@@ -624,7 +624,10 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
-        version: config.version,
+        version:
+          config.version ||
+          installMetadata?.marketplaceConfig?.metadata?.version ||
+          '1.0.0',
         path: effectiveExtensionPath,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
@@ -1238,7 +1241,21 @@ export async function copyExtension(
   source: string,
   destination: string,
 ): Promise<void> {
-  await fs.promises.cp(source, destination, { recursive: true });
+  await fs.promises.cp(source, destination, {
+    recursive: true,
+    dereference: true,
+    filter: async (src: string) => {
+      try {
+        const stats = await fs.promises.stat(src);
+        // Only copy regular files and directories
+        // Skip sockets, FIFOs, block devices, and character devices
+        return stats.isFile() || stats.isDirectory();
+      } catch {
+        // If we can't stat the file, skip it
+        return false;
+      }
+    },
+  });
 }
 
 export function getExtensionId(

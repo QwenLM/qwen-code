@@ -604,6 +604,8 @@ export interface ToolConfirmationPayload {
   // Populated by the tool's getConfirmationDetails() and read by
   // coreToolScheduler.handleConfirmationResponse() for persistence.
   permissionRules?: string[];
+  // used to pass user answers from ask_user_question tool
+  answers?: Record<string, string>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -657,7 +659,8 @@ export type ToolCallConfirmationDetails =
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
-  | ToolPlanConfirmationDetails;
+  | ToolPlanConfirmationDetails
+  | ToolAskUserQuestionConfirmationDetails;
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -665,6 +668,27 @@ export interface ToolPlanConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   plan: string;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
+}
+
+export interface ToolAskUserQuestionConfirmationDetails {
+  type: 'ask_user_question';
+  title: string;
+  questions: Array<{
+    question: string;
+    header: string;
+    options: Array<{
+      label: string;
+      description: string;
+    }>;
+    multiSelect: boolean;
+  }>;
+  metadata?: {
+    source?: string;
+  };
   onConfirm: (
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,

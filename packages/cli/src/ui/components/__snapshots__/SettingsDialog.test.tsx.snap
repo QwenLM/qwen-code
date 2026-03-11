@@ -11,7 +11,7 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -32,7 +32,7 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -53,7 +53,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 true* │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -74,7 +74,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                false* │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                     false* │
 │ ▼                                                                                                │
@@ -95,7 +95,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode (Modified in System)                                                            false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -116,7 +116,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode (Modified in Workspace)                                                         false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -137,7 +137,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -158,7 +158,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                false* │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -179,7 +179,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 false │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
@@ -200,7 +200,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │   Language: Model                                                                           auto │
 │   Theme                                                                                Qwen Dark │
 │   Vim Mode                                                                                 true* │
-│   Interactive Shell (PTY)                                                                  false │
+│   Interactive Shell (PTY)                                                                   true │
 │   Preferred Editor                                                                               │
 │   Auto-connect to IDE                                                                      true* │
 │ ▼                                                                                                │

@@ -24,7 +24,12 @@ import { z } from 'zod';
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type * as acp from '../acp.js';
+import type {
+  AgentSideConnection,
+  PermissionOption,
+  RequestPermissionRequest,
+  ToolCallContent,
+} from '@agentclientprotocol/sdk';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 
@@ -80,7 +85,7 @@ export class SubAgentTracker {
 
   constructor(
     private readonly ctx: SessionContext,
-    private readonly client: acp.Client,
+    private readonly client: AgentSideConnection,
     private readonly parentToolCallId: string,
     private readonly subagentType: string,
   ) {
@@ -214,7 +219,7 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
-      const content: acp.ToolCallContent[] = [];
+      const content: ToolCallContent[] = [];
 
       // Handle edit confirmation type - show diff
       if (event.confirmationDetails.type === 'edit') {
@@ -243,7 +248,7 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
-      const params: acp.RequestPermissionRequest = {
+      const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
         options: this.toPermissionOptions(fullConfirmationDetails),
         toolCall: {
@@ -324,7 +329,7 @@ export class SubAgentTracker {
    */
   private toPermissionOptions(
     confirmation: ToolCallConfirmationDetails,
-  ): acp.PermissionOption[] {
+  ): PermissionOption[] {
     const hideAlwaysAllow =
       'hideAlwaysAllow' in confirmation && confirmation.hideAlwaysAllow;
     switch (confirmation.type) {
