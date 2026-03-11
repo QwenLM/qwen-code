@@ -6,6 +6,9 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DataProcessor } from './DataProcessor.js';
+import { MetricsCalculator } from './MetricsCalculator.js';
+import { SessionAnalyzer } from './SessionAnalyzer.js';
+import { QualitativeInsightGenerator } from './QualitativeInsightGenerator.js';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
@@ -24,6 +27,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
       info: vi.fn(),
       error: vi.fn(),
       warn: vi.fn(),
+      debug: vi.fn(),
     })),
   };
 });
@@ -43,9 +47,236 @@ import { read as readJsonlFile } from '@qwen-code/qwen-code-core';
 const mockedFs = vi.mocked(fs);
 const mockedReadJsonlFile = vi.mocked(readJsonlFile);
 
-describe('DataProcessor', () => {
+// ============================================================================
+// MetricsCalculator Tests
+// ============================================================================
+
+describe('MetricsCalculator', () => {
+  let metricsCalculator: MetricsCalculator;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    metricsCalculator = new MetricsCalculator();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('formatDate', () => {
+    it('should format date as YYYY-MM-DD', () => {
+      const date = new Date('2025-01-15T10:30:00Z');
+      const result = metricsCalculator.formatDate(date);
+      expect(result).toBe('2025-01-15');
+    });
+
+    it('should handle different timezones correctly', () => {
+      const date = new Date('2025-12-31T23:59:59Z');
+      const result = metricsCalculator.formatDate(date);
+      // Result depends on local timezone, but should be a valid date string
+      expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+  });
+
+  describe('calculateStreaks', () => {
+    it('should return zero streaks for empty dates array', () => {
+      const result = metricsCalculator.calculateStreaks([]);
+      expect(result.currentStreak).toBe(0);
+      expect(result.longestStreak).toBe(0);
+      expect(result.dates).toEqual([]);
+    });
+
+    it('should calculate streak of 1 for single date', () => {
+      const result = metricsCalculator.calculateStreaks(['2025-01-15']);
+      expect(result.currentStreak).toBe(1);
+      expect(result.longestStreak).toBe(1);
+    });
+
+    it('should calculate consecutive day streak', () => {
+      const dates = ['2025-01-15', '2025-01-16', '2025-01-17'];
+      const result = metricsCalculator.calculateStreaks(dates);
+      expect(result.currentStreak).toBe(3);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('should handle non-consecutive dates', () => {
+      const dates = ['2025-01-15', '2025-01-17', '2025-01-18'];
+      const result = metricsCalculator.calculateStreaks(dates);
+      expect(result.longestStreak).toBe(2); // Jan 17-18
+    });
+
+    it('should sort dates before calculating streaks', () => {
+      const dates = ['2025-01-18', '2025-01-15', '2025-01-16', '2025-01-17'];
+      const result = metricsCalculator.calculateStreaks(dates);
+      expect(result.longestStreak).toBe(4);
+    });
+
+    it('should handle duplicate dates', () => {
+      const dates = ['2025-01-15', '2025-01-15', '2025-01-16'];
+      const result = metricsCalculator.calculateStreaks(dates);
+      expect(result.longestStreak).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('generateMetrics', () => {
+    it('should generate metrics from chat files', async () => {
+      const mockRecords: ChatRecord[] = [
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'system',
+          subtype: 'slash_command',
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:05:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:06:00Z',
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            parts: [{ functionCall: { name: 'read_file', args: {} } }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = await metricsCalculator.generateMetrics(files);
+
+      expect(result).toMatchObject({
+        totalMessages: 2,
+        totalSessions: 1,
+        heatmap: expect.any(Object),
+        activeHours: expect.any(Object),
+        topTools: expect.any(Array),
+      });
+    });
+
+    it('should track tool usage correctly', async () => {
+      const mockRecords: ChatRecord[] = [
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            parts: [{ functionCall: { name: 'read_file', args: {} } }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            parts: [{ functionCall: { name: 'read_file', args: {} } }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:02:00Z',
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            parts: [{ functionCall: { name: 'write_file', args: {} } }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = await metricsCalculator.generateMetrics(files);
+
+      expect(result.topTools).toContainEqual(['read_file', 2]);
+      expect(result.topTools).toContainEqual(['write_file', 1]);
+    });
+
+    it('should handle file read errors gracefully', async () => {
+      mockedReadJsonlFile.mockRejectedValue(new Error('Read failed'));
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = await metricsCalculator.generateMetrics(files);
+
+      expect(result.totalMessages).toBe(0);
+    });
+
+    it('should call progress callback during processing', async () => {
+      const mockRecords: ChatRecord[] = [
+        {
+          sessionId: 'session1',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [
+        { path: '/test/chat1.jsonl', mtime: 1234567890 },
+        { path: '/test/chat2.jsonl', mtime: 1234567891 },
+      ];
+      const onProgress = vi.fn();
+
+      await metricsCalculator.generateMetrics(files, onProgress);
+
+      expect(onProgress).toHaveBeenCalled();
+    });
+  });
+});
+
+// ============================================================================
+// SessionAnalyzer Tests
+// ============================================================================
+
+describe('SessionAnalyzer', () => {
   let mockConfig: Config;
-  let dataProcessor: DataProcessor;
+  let sessionAnalyzer: SessionAnalyzer;
   let mockGenerateJson: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -59,41 +290,17 @@ describe('DataProcessor', () => {
       getModel: vi.fn(() => 'test-model'),
     } as unknown as Config;
 
-    dataProcessor = new DataProcessor(mockConfig);
+    sessionAnalyzer = new SessionAnalyzer(mockConfig);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  describe('formatDate', () => {
-    it('should format date as YYYY-MM-DD', () => {
-      const date = new Date('2025-01-15T10:30:00Z');
-      // Access private method through any cast for testing
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      expect(result).toBe('2025-01-15');
-    });
-
-    it('should handle different timezones correctly', () => {
-      const date = new Date('2025-12-31T23:59:59Z');
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      // Result depends on local timezone, but should be a valid date string
-      expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    });
-  });
-
   describe('formatRecordsForAnalysis', () => {
     it('should format empty records array', () => {
       const records: ChatRecord[] = [];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).toContain('Session: unknown');
       expect(result).toContain('Duration: 0 turns');
     });
@@ -114,11 +321,7 @@ describe('DataProcessor', () => {
           version: '',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).toContain('Session: test-session');
       expect(result).toContain('[User]: Hello, world!');
     });
@@ -139,11 +342,7 @@ describe('DataProcessor', () => {
           version: '',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).toContain('[Assistant]: I can help you with that.');
     });
 
@@ -163,11 +362,7 @@ describe('DataProcessor', () => {
           version: '',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).toContain('[Tool: read_file]');
     });
 
@@ -190,11 +385,7 @@ describe('DataProcessor', () => {
           version: '',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).toContain('[Assistant]: Let me check that.');
       expect(result).toContain('[Tool: search]');
     });
@@ -214,116 +405,14 @@ describe('DataProcessor', () => {
           version: '',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          formatRecordsForAnalysis(records: ChatRecord[]): string;
-        }
-      ).formatRecordsForAnalysis(records);
+      const result = sessionAnalyzer.formatRecordsForAnalysis(records);
       expect(result).not.toContain('[Assistant]:');
-    });
-  });
-
-  describe('calculateStreaks', () => {
-    it('should return zero streaks for empty dates array', () => {
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks([]);
-      expect(result.currentStreak).toBe(0);
-      expect(result.longestStreak).toBe(0);
-      expect(result.dates).toEqual([]);
-    });
-
-    it('should calculate streak of 1 for single date', () => {
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks(['2025-01-15']);
-      expect(result.currentStreak).toBe(1);
-      expect(result.longestStreak).toBe(1);
-    });
-
-    it('should calculate consecutive day streak', () => {
-      const dates = ['2025-01-15', '2025-01-16', '2025-01-17'];
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks(dates);
-      expect(result.currentStreak).toBe(3);
-      expect(result.longestStreak).toBe(3);
-    });
-
-    it('should handle non-consecutive dates', () => {
-      const dates = ['2025-01-15', '2025-01-17', '2025-01-18'];
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks(dates);
-      expect(result.longestStreak).toBe(2); // Jan 17-18
-    });
-
-    it('should sort dates before calculating streaks', () => {
-      const dates = ['2025-01-18', '2025-01-15', '2025-01-16', '2025-01-17'];
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks(dates);
-      expect(result.longestStreak).toBe(4);
-    });
-
-    it('should handle duplicate dates', () => {
-      const dates = ['2025-01-15', '2025-01-15', '2025-01-16'];
-      const result = (
-        dataProcessor as unknown as {
-          calculateStreaks(dates: string[]): {
-            currentStreak: number;
-            longestStreak: number;
-            dates: string[];
-          };
-        }
-      ).calculateStreaks(dates);
-      expect(result.longestStreak).toBeGreaterThanOrEqual(1);
     });
   });
 
   describe('aggregateFacetsData', () => {
     it('should return empty aggregates for empty facets array', () => {
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            satisfactionAgg: Record<string, number>;
-            frictionAgg: Record<string, number>;
-            primarySuccessAgg: Record<string, number>;
-            outcomesAgg: Record<string, number>;
-            goalsAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData([]);
+      const result = sessionAnalyzer.aggregateFacetsData([]);
       expect(result.satisfactionAgg).toEqual({});
       expect(result.frictionAgg).toEqual({});
       expect(result.primarySuccessAgg).toEqual({});
@@ -360,13 +449,7 @@ describe('DataProcessor', () => {
           brief_summary: 'Test summary 2',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            satisfactionAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData(facets);
+      const result = sessionAnalyzer.aggregateFacetsData(facets);
       expect(result.satisfactionAgg).toEqual({
         satisfied: 3,
         neutral: 1,
@@ -403,13 +486,7 @@ describe('DataProcessor', () => {
           brief_summary: 'Test summary 2',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            frictionAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData(facets);
+      const result = sessionAnalyzer.aggregateFacetsData(facets);
       expect(result.frictionAgg).toEqual({
         slow_response: 3,
         unclear_answer: 2,
@@ -458,13 +535,7 @@ describe('DataProcessor', () => {
           brief_summary: 'Test summary 3',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            primarySuccessAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData(facets);
+      const result = sessionAnalyzer.aggregateFacetsData(facets);
       expect(result.primarySuccessAgg).toEqual({
         correct_code_edits: 1,
         good_explanations: 1,
@@ -514,13 +585,7 @@ describe('DataProcessor', () => {
           brief_summary: 'Test summary 3',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            outcomesAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData(facets);
+      const result = sessionAnalyzer.aggregateFacetsData(facets);
       expect(result.outcomesAgg).toEqual({
         fully_achieved: 2,
         partially_achieved: 1,
@@ -556,13 +621,7 @@ describe('DataProcessor', () => {
           brief_summary: 'Test summary 2',
         },
       ];
-      const result = (
-        dataProcessor as unknown as {
-          aggregateFacetsData(facets: SessionFacets[]): {
-            goalsAgg: Record<string, number>;
-          };
-        }
-      ).aggregateFacetsData(facets);
+      const result = sessionAnalyzer.aggregateFacetsData(facets);
       expect(result.goalsAgg).toEqual({
         coding: 3,
         debugging: 1,
@@ -573,11 +632,7 @@ describe('DataProcessor', () => {
 
   describe('analyzeSession', () => {
     it('should return null for empty records', async () => {
-      const result = await (
-        dataProcessor as unknown as {
-          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
-        }
-      ).analyzeSession([]);
+      const result = await sessionAnalyzer.analyzeSession([]);
       expect(result).toBeNull();
     });
 
@@ -613,11 +668,7 @@ describe('DataProcessor', () => {
         },
       ];
 
-      const result = await (
-        dataProcessor as unknown as {
-          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
-        }
-      ).analyzeSession(records);
+      const result = await sessionAnalyzer.analyzeSession(records);
 
       expect(result).not.toBeNull();
       expect(result?.session_id).toBe('test-session');
@@ -649,12 +700,7 @@ describe('DataProcessor', () => {
         },
       ];
 
-      const result = await (
-        dataProcessor as unknown as {
-          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
-        }
-      ).analyzeSession(records);
-
+      const result = await sessionAnalyzer.analyzeSession(records);
       expect(result).toBeNull();
     });
 
@@ -677,14 +723,226 @@ describe('DataProcessor', () => {
         },
       ];
 
-      const result = await (
-        dataProcessor as unknown as {
-          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
-        }
-      ).analyzeSession(records);
-
+      const result = await sessionAnalyzer.analyzeSession(records);
       expect(result).toBeNull();
     });
+  });
+
+  describe('generateFacets', () => {
+    it('should skip non-conversational sessions', async () => {
+      const userOnlyRecords: ChatRecord[] = [
+        {
+          sessionId: 'user-only',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'conversational',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'conversational',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      // First file is user-only, second is conversational
+      mockedReadJsonlFile
+        .mockResolvedValueOnce(userOnlyRecords)
+        .mockResolvedValueOnce(conversationalRecords);
+
+      const mockFacet = {
+        underlying_goal: 'Test',
+        goal_categories: {},
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'single_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test',
+      };
+      mockGenerateJson.mockResolvedValue(mockFacet);
+
+      const files = [
+        { path: '/test/user-only.jsonl', mtime: 2000 },
+        { path: '/test/conversational.jsonl', mtime: 1000 },
+      ];
+
+      const result = await sessionAnalyzer.generateFacets(files);
+
+      // Only the conversational session should be analyzed
+      expect(mockGenerateJson).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(1);
+      expect(result[0].session_id).toBe('conversational');
+    });
+  });
+});
+
+// ============================================================================
+// QualitativeInsightGenerator Tests
+// ============================================================================
+
+describe('QualitativeInsightGenerator', () => {
+  let mockConfig: Config;
+  let qualitativeGenerator: QualitativeInsightGenerator;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockConfig = {
+      getBaseLlmClient: vi.fn(() => ({
+        generateJson: vi.fn(),
+      })),
+      getModel: vi.fn(() => 'test-model'),
+    } as unknown as Config;
+
+    qualitativeGenerator = new QualitativeInsightGenerator(mockConfig);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('prepareCommonPromptData', () => {
+    it('should prepare prompt data with all required sections', () => {
+      const metrics = {
+        heatmap: { '2025-01-15': 5, '2025-01-16': 3 },
+        totalSessions: 10,
+        totalMessages: 100,
+        totalHours: 5,
+        topTools: [
+          ['read_file', 20],
+          ['write_file', 10],
+        ],
+      } as unknown as Omit<InsightData, 'facets' | 'qualitative'>;
+
+      const facets: SessionFacets[] = [
+        {
+          session_id: 's1',
+          underlying_goal: 'Goal 1',
+          goal_categories: { coding: 2, debugging: 1 },
+          outcome: 'fully_achieved',
+          user_satisfaction_counts: { satisfied: 2 },
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: { slow: 1 },
+          friction_detail: 'Some friction detail',
+          primary_success: 'correct_code_edits',
+          brief_summary: 'Summary 1',
+        },
+      ];
+
+      const result = qualitativeGenerator.prepareCommonPromptData(
+        metrics,
+        facets,
+      );
+
+      expect(result).toContain('DATA:');
+      expect(result).toContain('SESSION SUMMARIES:');
+      expect(result).toContain('FRICTION DETAILS:');
+      expect(result).toContain('Summary 1');
+      expect(result).toContain('Some friction detail');
+    });
+
+    it('should filter out empty friction details', () => {
+      const metrics = {
+        heatmap: {},
+        totalSessions: 1,
+        totalMessages: 10,
+        totalHours: 1,
+        topTools: [],
+      } as unknown as Omit<InsightData, 'facets' | 'qualitative'>;
+
+      const facets: SessionFacets[] = [
+        {
+          session_id: 's1',
+          underlying_goal: 'Goal 1',
+          goal_categories: {},
+          outcome: 'fully_achieved',
+          user_satisfaction_counts: {},
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: {},
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Summary 1',
+        },
+        {
+          session_id: 's2',
+          underlying_goal: 'Goal 2',
+          goal_categories: {},
+          outcome: 'mostly_achieved',
+          user_satisfaction_counts: {},
+          Qwen_helpfulness: 'moderately_helpful',
+          session_type: 'multi_task',
+          friction_counts: {},
+          friction_detail: '   ',
+          primary_success: 'none',
+          brief_summary: 'Summary 2',
+        },
+      ];
+
+      const result = qualitativeGenerator.prepareCommonPromptData(
+        metrics,
+        facets,
+      );
+
+      // Check that FRICTION DETAILS section is empty or only contains whitespace
+      const frictionSection =
+        result.split('FRICTION DETAILS:')[1]?.split('USER INSTRUCTIONS')[0] ||
+        '';
+      const hasNonEmptyFrictionDetail =
+        frictionSection.trim().length > 0 && frictionSection.includes('-');
+      expect(hasNonEmptyFrictionDetail).toBe(false);
+    });
+  });
+});
+
+// ============================================================================
+// DataProcessor (Orchestrator) Tests
+// ============================================================================
+
+describe('DataProcessor', () => {
+  let mockConfig: Config;
+  let dataProcessor: DataProcessor;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockConfig = {
+      getBaseLlmClient: vi.fn(() => ({
+        generateJson: vi.fn(),
+      })),
+      getModel: vi.fn(() => 'test-model'),
+    } as unknown as Config;
+
+    dataProcessor = new DataProcessor(mockConfig);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('scanChatFiles', () => {
@@ -856,362 +1114,6 @@ describe('DataProcessor', () => {
 
       // When stat fails for a file, it should be skipped but not crash
       expect(result).toEqual([]);
-    });
-  });
-
-  describe('generateMetrics', () => {
-    it('should generate metrics from chat files', async () => {
-      const mockRecords: ChatRecord[] = [
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:01:00Z',
-          type: 'system',
-          subtype: 'slash_command',
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:05:00Z',
-          type: 'assistant',
-          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:06:00Z',
-          type: 'assistant',
-          message: {
-            role: 'assistant',
-            parts: [{ functionCall: { name: 'read_file', args: {} } }],
-          },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-      ];
-
-      mockedReadJsonlFile.mockResolvedValue(mockRecords);
-
-      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
-      const result = await (
-        dataProcessor as unknown as {
-          generateMetrics(
-            files: Array<{ path: string; mtime: number }>,
-          ): Promise<unknown>;
-        }
-      ).generateMetrics(files);
-
-      expect(result).toMatchObject({
-        totalMessages: 2,
-        totalSessions: 1,
-        heatmap: expect.any(Object),
-        activeHours: expect.any(Object),
-        topTools: expect.any(Array),
-      });
-    });
-
-    it('should track tool usage correctly', async () => {
-      const mockRecords: ChatRecord[] = [
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:00:00Z',
-          type: 'assistant',
-          message: {
-            role: 'assistant',
-            parts: [{ functionCall: { name: 'read_file', args: {} } }],
-          },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:01:00Z',
-          type: 'assistant',
-          message: {
-            role: 'assistant',
-            parts: [{ functionCall: { name: 'read_file', args: {} } }],
-          },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:02:00Z',
-          type: 'assistant',
-          message: {
-            role: 'assistant',
-            parts: [{ functionCall: { name: 'write_file', args: {} } }],
-          },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-      ];
-
-      mockedReadJsonlFile.mockResolvedValue(mockRecords);
-
-      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
-      const result = await (
-        dataProcessor as unknown as {
-          generateMetrics(
-            files: Array<{ path: string; mtime: number }>,
-          ): Promise<{ topTools: Array<[string, number]> }>;
-        }
-      ).generateMetrics(files);
-
-      expect(result.topTools).toContainEqual(['read_file', 2]);
-      expect(result.topTools).toContainEqual(['write_file', 1]);
-    });
-
-    it('should handle file read errors gracefully', async () => {
-      mockedReadJsonlFile.mockRejectedValue(new Error('Read failed'));
-
-      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
-      const result = await (
-        dataProcessor as unknown as {
-          generateMetrics(
-            files: Array<{ path: string; mtime: number }>,
-          ): Promise<{ totalMessages: number }>;
-        }
-      ).generateMetrics(files);
-
-      expect(result.totalMessages).toBe(0);
-    });
-
-    it('should call progress callback during processing', async () => {
-      const mockRecords: ChatRecord[] = [
-        {
-          sessionId: 'session1',
-          timestamp: '2025-01-15T10:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-      ];
-
-      mockedReadJsonlFile.mockResolvedValue(mockRecords);
-
-      const files = [
-        { path: '/test/chat1.jsonl', mtime: 1234567890 },
-        { path: '/test/chat2.jsonl', mtime: 1234567891 },
-      ];
-      const onProgress = vi.fn();
-
-      await (
-        dataProcessor as unknown as {
-          generateMetrics(
-            files: Array<{ path: string; mtime: number }>,
-            onProgress?: (stage: string, progress: number) => void,
-          ): Promise<unknown>;
-        }
-      ).generateMetrics(files, onProgress);
-
-      expect(onProgress).toHaveBeenCalled();
-    });
-  });
-
-  describe('prepareCommonPromptData', () => {
-    it('should prepare prompt data with all required sections', () => {
-      const metrics = {
-        heatmap: { '2025-01-15': 5, '2025-01-16': 3 },
-        totalSessions: 10,
-        totalMessages: 100,
-        totalHours: 5,
-        topTools: [
-          ['read_file', 20],
-          ['write_file', 10],
-        ],
-      } as unknown as Omit<InsightData, 'facets' | 'qualitative'>;
-
-      const facets: SessionFacets[] = [
-        {
-          session_id: 's1',
-          underlying_goal: 'Goal 1',
-          goal_categories: { coding: 2, debugging: 1 },
-          outcome: 'fully_achieved',
-          user_satisfaction_counts: { satisfied: 2 },
-          Qwen_helpfulness: 'very_helpful',
-          session_type: 'single_task',
-          friction_counts: { slow: 1 },
-          friction_detail: 'Some friction detail',
-          primary_success: 'correct_code_edits',
-          brief_summary: 'Summary 1',
-        },
-      ];
-
-      const result = (
-        dataProcessor as unknown as {
-          prepareCommonPromptData(
-            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
-            facets: SessionFacets[],
-          ): string;
-        }
-      ).prepareCommonPromptData(metrics, facets);
-
-      expect(result).toContain('DATA:');
-      expect(result).toContain('SESSION SUMMARIES:');
-      expect(result).toContain('FRICTION DETAILS:');
-      expect(result).toContain('Summary 1');
-      expect(result).toContain('Some friction detail');
-    });
-
-    it('should filter out empty friction details', () => {
-      const metrics = {
-        heatmap: {},
-        totalSessions: 1,
-        totalMessages: 10,
-        totalHours: 1,
-        topTools: [],
-      } as unknown as Omit<InsightData, 'facets' | 'qualitative'>;
-
-      const facets: SessionFacets[] = [
-        {
-          session_id: 's1',
-          underlying_goal: 'Goal 1',
-          goal_categories: {},
-          outcome: 'fully_achieved',
-          user_satisfaction_counts: {},
-          Qwen_helpfulness: 'very_helpful',
-          session_type: 'single_task',
-          friction_counts: {},
-          friction_detail: '',
-          primary_success: 'none',
-          brief_summary: 'Summary 1',
-        },
-        {
-          session_id: 's2',
-          underlying_goal: 'Goal 2',
-          goal_categories: {},
-          outcome: 'mostly_achieved',
-          user_satisfaction_counts: {},
-          Qwen_helpfulness: 'moderately_helpful',
-          session_type: 'multi_task',
-          friction_counts: {},
-          friction_detail: '   ',
-          primary_success: 'none',
-          brief_summary: 'Summary 2',
-        },
-      ];
-
-      const result = (
-        dataProcessor as unknown as {
-          prepareCommonPromptData(
-            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
-            facets: SessionFacets[],
-          ): string;
-        }
-      ).prepareCommonPromptData(metrics, facets);
-
-      // Check that FRICTION DETAILS section is empty or only contains whitespace
-      const frictionSection =
-        result.split('FRICTION DETAILS:')[1]?.split('USER INSTRUCTIONS')[0] ||
-        '';
-      const hasNonEmptyFrictionDetail =
-        frictionSection.trim().length > 0 && frictionSection.includes('-');
-      expect(hasNonEmptyFrictionDetail).toBe(false);
-    });
-  });
-
-  describe('generateFacets', () => {
-    it('should skip non-conversational sessions', async () => {
-      const userOnlyRecords: ChatRecord[] = [
-        {
-          sessionId: 'user-only',
-          timestamp: '2025-01-15T10:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-      ];
-
-      const conversationalRecords: ChatRecord[] = [
-        {
-          sessionId: 'conversational',
-          timestamp: '2025-01-15T10:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-        {
-          sessionId: 'conversational',
-          timestamp: '2025-01-15T10:01:00Z',
-          type: 'assistant',
-          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
-          uuid: '',
-          parentUuid: null,
-          cwd: '',
-          version: '',
-        },
-      ];
-
-      // First file is user-only, second is conversational
-      mockedReadJsonlFile
-        .mockResolvedValueOnce(userOnlyRecords)
-        .mockResolvedValueOnce(conversationalRecords);
-
-      const mockFacet = {
-        underlying_goal: 'Test',
-        goal_categories: {},
-        outcome: 'fully_achieved',
-        user_satisfaction_counts: {},
-        Qwen_helpfulness: 'very_helpful',
-        session_type: 'single_task',
-        friction_counts: {},
-        friction_detail: '',
-        primary_success: 'none',
-        brief_summary: 'Test',
-      };
-      mockGenerateJson.mockResolvedValue(mockFacet);
-
-      const files = [
-        { path: '/test/user-only.jsonl', mtime: 2000 },
-        { path: '/test/conversational.jsonl', mtime: 1000 },
-      ];
-
-      const result = await (
-        dataProcessor as unknown as {
-          generateFacets(
-            files: Array<{ path: string; mtime: number }>,
-            facetsOutputDir?: string,
-          ): Promise<SessionFacets[]>;
-        }
-      ).generateFacets(files);
-
-      // Only the conversational session should be analyzed
-      expect(mockGenerateJson).toHaveBeenCalledTimes(1);
-      expect(result).toHaveLength(1);
-      expect(result[0].session_id).toBe('conversational');
     });
   });
 });
