@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -78,19 +78,12 @@ describe('initializeApp', () => {
   });
 
   it('should initialize i18n with QWEN_CODE_LANG env var if set', async () => {
-    const originalEnv = process.env['QWEN_CODE_LANG'];
-    process.env['QWEN_CODE_LANG'] = 'zh';
+    vi.stubEnv('QWEN_CODE_LANG', 'zh');
 
-    try {
-      await initializeApp(mockConfig as never, mockSettings as never);
-      expect(mockInitializeI18n).toHaveBeenCalledWith('zh');
-    } finally {
-      if (originalEnv === undefined) {
-        delete process.env['QWEN_CODE_LANG'];
-      } else {
-        process.env['QWEN_CODE_LANG'] = originalEnv;
-      }
-    }
+    await initializeApp(mockConfig as never, mockSettings as never);
+    expect(mockInitializeI18n).toHaveBeenCalledWith('zh');
+
+    vi.unstubAllEnvs();
   });
 
   it('should return no errors on successful initialization', async () => {
