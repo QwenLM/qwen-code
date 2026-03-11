@@ -553,7 +553,21 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
 
         // Loop to handle "block" decisions (prevent subagent from stopping)
         let continueExecution = true;
+        let iterationCount = 0;
+        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
+
         while (continueExecution) {
+          iterationCount++;
+
+          // Safety check to prevent infinite loops
+          if (iterationCount >= maxIterations) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+            );
+            continueExecution = false;
+            break;
+          }
+
           try {
             const stopHookOutput = await hookSystem.fireSubagentStopEvent(
               agentId,

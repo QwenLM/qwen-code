@@ -3,6 +3,9 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 export enum HooksConfigSource {
   Project = 'project',
@@ -293,6 +296,8 @@ export class PreToolUseHookOutput extends DefaultHookOutput {
 
 /**
  * Specific hook output class for PostToolUse events.
+ * Default behavior is to allow tool usage if the hook does not explicitly set a decision.
+ * This follows the security model of allowing by default unless explicitly blocked.
  */
 export class PostToolUseHookOutput extends DefaultHookOutput {
   override decision: HookDecision;
@@ -300,9 +305,22 @@ export class PostToolUseHookOutput extends DefaultHookOutput {
 
   constructor(data: Partial<HookOutput> = {}) {
     super(data);
-    // Ensure required fields are present
+    // Default to allowing tool usage if hook does not provide explicit decision
+    // This maintains backward compatibility and follows security model of allowing by default
     this.decision = data.decision ?? 'allow';
     this.reason = data.reason ?? 'No reason provided';
+
+    // Log when default values are used to help with debugging
+    if (data.decision === undefined) {
+      debugLogger.debug(
+        'PostToolUseHookOutput: No explicit decision set, defaulting to "allow"',
+      );
+    }
+    if (data.reason === undefined) {
+      debugLogger.debug(
+        'PostToolUseHookOutput: No explicit reason set, defaulting to "No reason provided"',
+      );
+    }
   }
 }
 

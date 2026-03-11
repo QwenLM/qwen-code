@@ -167,9 +167,6 @@ export const useAuthCommand = (
       // Log authentication success
       const authEvent = new AuthEvent(authType, 'manual', 'success');
       logAuth(config, authEvent);
-
-      // Note: auth_success notification hook is now fired inside config.refreshAuth()
-      // to ensure consistent behavior across interactive and non-interactive modes
     },
     [settings, handleAuthFailure, config, addItem, onAuthChange],
   );
