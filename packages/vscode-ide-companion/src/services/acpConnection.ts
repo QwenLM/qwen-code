@@ -164,6 +164,7 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks
+    // Using `self` alias because `this` is needed inside nested callback functions
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     this.sdkConnection = new ClientSideConnection(
