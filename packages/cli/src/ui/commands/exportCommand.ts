@@ -50,9 +50,10 @@ async function exportMarkdownAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -122,9 +123,10 @@ async function exportHtmlAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -194,9 +196,10 @@ async function exportJsonAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -266,9 +269,10 @@ async function exportJsonlAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {

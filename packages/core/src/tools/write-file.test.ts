@@ -277,6 +277,26 @@ describe('WriteFileTool', () => {
       fs.chmodSync(filePath, 0o600);
     });
 
+    it('should return false and skip confirmation when approval mode is AUTO_EDIT', async () => {
+      mockConfigInternal.getApprovalMode.mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const filePath = path.join(rootDir, 'auto_edit_skip_confirm.txt');
+      const params = { file_path: filePath, content: 'content' };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
+      expect(confirmation).toBe(false);
+    });
+
+    it('should return false and skip confirmation when approval mode is YOLO', async () => {
+      mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.YOLO);
+      const filePath = path.join(rootDir, 'yolo_skip_confirm.txt');
+      const params = { file_path: filePath, content: 'content' };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
+      expect(confirmation).toBe(false);
+    });
+
     it('should request confirmation with diff for a new file', async () => {
       const filePath = path.join(rootDir, 'confirm_new_file.txt');
       const proposedContent = 'Proposed new content for confirmation.';

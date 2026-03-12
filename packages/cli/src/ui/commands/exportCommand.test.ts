@@ -19,14 +19,14 @@ import {
 } from '../utils/export/index.js';
 
 const mockSessionServiceMocks = vi.hoisted(() => ({
-  loadLastSession: vi.fn(),
+  loadSession: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => {
   class SessionService {
     constructor(_cwd: string) {}
-    async loadLastSession() {
-      return mockSessionServiceMocks.loadLastSession();
+    async loadSession(_sessionId: string) {
+      return mockSessionServiceMocks.loadSession();
     }
   }
 
@@ -68,13 +68,14 @@ describe('exportCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    mockSessionServiceMocks.loadLastSession.mockResolvedValue(mockSessionData);
+    mockSessionServiceMocks.loadSession.mockResolvedValue(mockSessionData);
 
     mockContext = createMockCommandContext({
       services: {
         config: {
           getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
           getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          getSessionId: vi.fn().mockReturnValue('test-session-id'),
         },
       },
     });
@@ -132,7 +133,7 @@ describe('exportCommand', () => {
         content: expect.stringContaining('export-2025-01-01T00-00-00-000Z.md'),
       });
 
-      expect(mockSessionServiceMocks.loadLastSession).toHaveBeenCalled();
+      expect(mockSessionServiceMocks.loadSession).toHaveBeenCalled();
       expect(collectSessionData).toHaveBeenCalledWith(
         mockSessionData.conversation,
         expect.anything(),
@@ -191,7 +192,7 @@ describe('exportCommand', () => {
     });
 
     it('should return error when no session is found', async () => {
-      mockSessionServiceMocks.loadLastSession.mockResolvedValue(undefined);
+      mockSessionServiceMocks.loadSession.mockResolvedValue(undefined);
 
       const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
       if (!mdCommand?.action) {
@@ -260,7 +261,7 @@ describe('exportCommand', () => {
         ),
       });
 
-      expect(mockSessionServiceMocks.loadLastSession).toHaveBeenCalled();
+      expect(mockSessionServiceMocks.loadSession).toHaveBeenCalled();
       expect(collectSessionData).toHaveBeenCalledWith(
         mockSessionData.conversation,
         expect.anything(),
@@ -323,7 +324,7 @@ describe('exportCommand', () => {
     });
 
     it('should return error when no session is found', async () => {
-      mockSessionServiceMocks.loadLastSession.mockResolvedValue(undefined);
+      mockSessionServiceMocks.loadSession.mockResolvedValue(undefined);
 
       const htmlCommand = exportCommand.subCommands?.find(
         (c) => c.name === 'html',

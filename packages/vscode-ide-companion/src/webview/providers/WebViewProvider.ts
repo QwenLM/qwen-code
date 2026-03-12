@@ -5,23 +5,23 @@
  */
 
 import * as vscode from 'vscode';
-import { QwenAgentManager } from '../services/qwenAgentManager.js';
-import { ConversationStore } from '../services/conversationStore.js';
+import { QwenAgentManager } from '../../services/qwenAgentManager.js';
+import { ConversationStore } from '../../services/conversationStore.js';
 import type {
   RequestPermissionRequest,
   ModelInfo,
 } from '@agentclientprotocol/sdk';
-import type { AskUserQuestionRequest } from '../types/acpTypes.js';
+import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
 import type {
   PermissionResponseMessage,
   AskUserQuestionResponseMessage,
-} from '../types/webviewMessageTypes.js';
-import { PanelManager } from '../webview/PanelManager.js';
-import { MessageHandler } from '../webview/MessageHandler.js';
-import { WebViewContent } from '../webview/WebViewContent.js';
-import { getFileName } from './utils/webviewUtils.js';
-import { type ApprovalModeValue } from '../types/approvalModeValueTypes.js';
-import { isAuthenticationRequiredError } from '../utils/authErrors.js';
+} from '../../types/webviewMessageTypes.js';
+import { PanelManager } from './PanelManager.js';
+import { MessageHandler } from './MessageHandler.js';
+import { WebViewContent } from './WebViewContent.js';
+import { getFileName } from '../utils/webviewUtils.js';
+import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
+import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -45,6 +45,16 @@ export class WebViewProvider {
   private authState: boolean | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
+  /** Reference to a WebviewView webview (sidebar/panel/secondary) when attached via attachToView */
+  private attachedWebview: vscode.Webview | null = null;
+  /**
+   * Whether this provider is hosted inside a WebviewView (sidebar / secondary bar).
+   * When true, "New Session" resets the conversation in-place instead of opening
+   * a new editor tab.
+   */
+  private isViewHost = false;
+  /** Guards against concurrent auth-restore / connection init */
+  private initializationPromise: Promise<void> | null = null;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -265,48 +275,32 @@ export class WebViewProvider {
           data: request,
         });
 
+        // If a previous permission request is still pending, cancel it so its
+        // promise settles instead of leaking (issue: handler overwrite leak).
+        if (this.pendingPermissionResolve) {
+          this.pendingPermissionResolve('cancel');
+        }
+
         // Wait for user response
         return new Promise((resolve) => {
-          // cache the pending request and its resolver so commands can resolve it
+          // Cache the pending request and its resolver so extension commands
+          // (e.g. diff accept/cancel) can resolve it externally.
           this.pendingPermissionRequest = request;
           this.pendingPermissionResolve = (optionId: string) => {
-            try {
-              resolve(optionId);
-            } finally {
-              // Always clear pending state
-              this.pendingPermissionRequest = null;
-              this.pendingPermissionResolve = null;
-              // Also instruct the webview UI to close its drawer if it is open
-              this.sendMessageToWebView({
-                type: 'permissionResolved',
-                data: { optionId },
-              });
-              // If allowed/proceeded, close any open qwen-diff editors and suppress re-open briefly
-              const isCancel =
-                optionId === 'cancel' ||
-                optionId.toLowerCase().includes('reject');
-              if (!isCancel) {
-                try {
-                  void vscode.commands.executeCommand('qwen.diff.closeAll');
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] Failed to close diffs after allow (resolver):',
-                    err,
-                  );
-                }
-                try {
-                  void vscode.commands.executeCommand(
-                    'qwen.diff.suppressBriefly',
-                  );
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] Failed to suppress diffs briefly:',
-                    err,
-                  );
-                }
-              }
-            }
+            // Clear pending state BEFORE resolving to prevent re-entrant calls
+            this.pendingPermissionRequest = null;
+            this.pendingPermissionResolve = null;
+            // Resolve the ACP promise
+            resolve(optionId);
+            // Instruct the webview UI to close its drawer
+            this.sendMessageToWebView({
+              type: 'permissionResolved',
+              data: { optionId },
+            });
+            // NOTE: Diff management (closeAll, suppressBriefly) is handled
+            // exclusively in the message handler below to avoid double execution.
           };
+
           const handler = (message: PermissionResponseMessage) => {
             if (message.type !== 'permissionResponse') {
               return;
@@ -314,29 +308,20 @@ export class WebViewProvider {
 
             const optionId = message.data.optionId || '';
 
-            // 1) First resolve the optionId back to ACP so the agent isn't blocked
+            // Resolve the optionId back to ACP so the agent isn't blocked
             this.pendingPermissionResolve?.(optionId);
 
-            // 2) If user cancelled/rejected, proactively stop current generation
             const isCancel =
               optionId === 'cancel' ||
               optionId.toLowerCase().includes('reject');
 
-            if (isCancel) {
-              // Close any open qwen-diff editors first
-              try {
-                void vscode.commands.executeCommand('qwen.diff.closeAll');
-              } catch (err) {
-                console.warn(
-                  '[WebViewProvider] Failed to close diffs after reject:',
-                  err,
-                );
-              }
+            // Always close open qwen-diff editors after any permission decision
+            void vscode.commands.executeCommand('qwen.diff.closeAll');
 
-              // Fire and forget – do not block the ACP resolve
-              (async () => {
+            if (isCancel) {
+              // Fire and forget — cancel generation and update UI
+              void (async () => {
                 try {
-                  // Stop server-side generation
                   await this.agentManager.cancelCurrentPrompt();
                 } catch (err) {
                   console.warn(
@@ -345,7 +330,6 @@ export class WebViewProvider {
                   );
                 }
 
-                // Ensure the webview exits streaming state immediately
                 this.sendMessageToWebView({
                   type: 'streamEnd',
                   data: { timestamp: Date.now(), reason: 'user_cancelled' },
@@ -400,27 +384,9 @@ export class WebViewProvider {
                   );
                 }
               })();
-            }
-            // If user allowed/proceeded, proactively close any open qwen-diff editors and suppress re-open briefly
-            else {
-              try {
-                void vscode.commands.executeCommand('qwen.diff.closeAll');
-              } catch (err) {
-                console.warn(
-                  '[WebViewProvider] Failed to close diffs after allow:',
-                  err,
-                );
-              }
-              try {
-                void vscode.commands.executeCommand(
-                  'qwen.diff.suppressBriefly',
-                );
-              } catch (err) {
-                console.warn(
-                  '[WebViewProvider] Failed to suppress diffs briefly:',
-                  err,
-                );
-              }
+            } else {
+              // Allowed/proceeded — suppress diff re-open briefly
+              void vscode.commands.executeCommand('qwen.diff.suppressBriefly');
             }
           };
           // Store handler in message handler
@@ -484,6 +450,153 @@ export class WebViewProvider {
     );
   }
 
+  /**
+   * Attach the provider to a WebviewView (sidebar / panel / secondary sidebar).
+   * Called from ChatWebviewViewProvider.resolveWebviewView when VS Code opens
+   * the view for the first time.
+   *
+   * @param webviewView - The WebviewView provided by VS Code
+   * @param viewType - The view identifier (e.g. sidebar, panel, secondary)
+   */
+  async attachToView(
+    webviewView: vscode.WebviewView,
+    viewType: string,
+  ): Promise<void> {
+    console.log(
+      `[WebViewProvider] Attaching to WebviewView (viewType=${viewType})`,
+    );
+
+    const webview = webviewView.webview;
+
+    // Configure webview options
+    webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.extensionUri, 'dist'),
+        vscode.Uri.joinPath(this.extensionUri, 'assets'),
+      ],
+    };
+
+    // Store reference so sendMessageToWebView can reach it
+    this.attachedWebview = webview;
+    // Mark this provider as a view host (sidebar / secondary bar)
+    this.isViewHost = true;
+
+    // Generate HTML content
+    webview.html = WebViewContent.generate(webview, this.extensionUri);
+
+    // Handle messages from WebView
+    webview.onDidReceiveMessage(
+      async (message: { type: string; data?: unknown }) => {
+        if (message.type === 'openDiff' && this.isAutoMode()) {
+          return;
+        }
+        if (message.type === 'webviewReady') {
+          this.handleWebviewReady();
+          return;
+        }
+        if (this.handleNewChatByContext(message)) {
+          return;
+        }
+        await this.messageHandler.route(message);
+      },
+      null,
+      this.disposables,
+    );
+
+    // Listen for active editor changes and notify WebView
+    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
+      (editor) => {
+        if (!editor) {
+          return;
+        }
+        const filePath = editor.document.uri.fsPath || null;
+        const fileName = filePath ? getFileName(filePath) : null;
+
+        let selectionInfo = null;
+        if (editor && !editor.selection.isEmpty) {
+          const selection = editor.selection;
+          selectionInfo = {
+            startLine: selection.start.line + 1,
+            endLine: selection.end.line + 1,
+          };
+        }
+
+        this.sendMessageToWebView({
+          type: 'activeEditorChanged',
+          data: { fileName, filePath, selection: selectionInfo },
+        });
+      },
+    );
+    this.disposables.push(editorChangeDisposable);
+
+    // Listen for text selection changes
+    const selectionChangeDisposable =
+      vscode.window.onDidChangeTextEditorSelection((event) => {
+        const editor = event.textEditor;
+        if (editor === vscode.window.activeTextEditor) {
+          const filePath = editor.document.uri.fsPath || null;
+          const fileName = filePath ? getFileName(filePath) : null;
+
+          let selectionInfo = null;
+          if (!event.selections[0].isEmpty) {
+            const selection = event.selections[0];
+            selectionInfo = {
+              startLine: selection.start.line + 1,
+              endLine: selection.end.line + 1,
+            };
+          }
+
+          this.sendMessageToWebView({
+            type: 'activeEditorChanged',
+            data: { fileName, filePath, selection: selectionInfo },
+          });
+        }
+      });
+    this.disposables.push(selectionChangeDisposable);
+
+    // Send initial active editor state
+    const initialEditor = vscode.window.activeTextEditor;
+    if (initialEditor) {
+      const filePath = initialEditor.document.uri.fsPath || null;
+      const fileName = filePath ? getFileName(filePath) : null;
+
+      let selectionInfo = null;
+      if (!initialEditor.selection.isEmpty) {
+        const selection = initialEditor.selection;
+        selectionInfo = {
+          startLine: selection.start.line + 1,
+          endLine: selection.end.line + 1,
+        };
+      }
+
+      this.sendMessageToWebView({
+        type: 'activeEditorChanged',
+        data: { fileName, filePath, selection: selectionInfo },
+      });
+    }
+
+    // Re-initialize when the view becomes visible after being hidden,
+    // in case the agent was never connected (e.g. sidebar opened but collapsed).
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible && !this.agentInitialized) {
+        void this.attemptAuthStateRestoration();
+      }
+    });
+
+    // Clean up when the view is disposed
+    webviewView.onDidDispose(() => {
+      this.attachedWebview = null;
+      this.disposables.forEach((d) => d.dispose());
+    });
+
+    // Attempt to restore auth state and initialize connection
+    console.log(
+      '[WebViewProvider] Attempting to restore auth state and connection for view...',
+    );
+    await this.attemptAuthStateRestoration();
+  }
+
   async show(): Promise<void> {
     const panel = this.panelManager.getPanel();
 
@@ -520,7 +633,7 @@ export class WebViewProvider {
     await this.panelManager.autoLockEditorGroup();
 
     newPanel.webview.html = WebViewContent.generate(
-      newPanel,
+      newPanel.webview,
       this.extensionUri,
     );
 
@@ -544,6 +657,9 @@ export class WebViewProvider {
           if (panelRef) {
             panelRef.title = title || 'Qwen Code';
           }
+          return;
+        }
+        if (this.handleNewChatByContext(message)) {
           return;
         }
         await this.messageHandler.route(message);
@@ -653,17 +769,28 @@ export class WebViewProvider {
    * This is called when the webview is first shown
    */
   private async attemptAuthStateRestoration(): Promise<void> {
-    try {
-      console.log('[WebViewProvider] Attempting connection...');
-      // Attempt a connection to detect prior auth without forcing login
-      await this.initializeAgentConnection({ autoAuthenticate: false });
-    } catch (error) {
-      console.error(
-        '[WebViewProvider] Error in attemptAuthStateRestoration:',
-        error,
-      );
-      await this.initializeEmptyConversation();
+    // Prevent concurrent initialization attempts (e.g. visibility toggle + webviewReady race)
+    if (this.initializationPromise) {
+      return this.initializationPromise;
     }
+
+    this.initializationPromise = (async () => {
+      try {
+        console.log('[WebViewProvider] Attempting connection...');
+        // Attempt a connection to detect prior auth without forcing login
+        await this.initializeAgentConnection({ autoAuthenticate: false });
+      } catch (error) {
+        console.error(
+          '[WebViewProvider] Error in attemptAuthStateRestoration:',
+          error,
+        );
+        await this.initializeEmptyConversation();
+      } finally {
+        this.initializationPromise = null;
+      }
+    })();
+
+    return this.initializationPromise;
   }
 
   /**
@@ -1067,12 +1194,37 @@ export class WebViewProvider {
   }
 
   /**
+   * Context-aware handler for the "New Chat" action (openNewChatTab message).
+   *
+   * - View host (sidebar / secondary bar): resets the conversation in-place by
+   *   routing to the newQwenSession handler (includes auth checks and UI clearing).
+   * - Editor tab: returns false so the message falls through to
+   *   SessionMessageHandler which opens a brand-new editor tab.
+   *
+   * @returns true if the message was handled, false otherwise.
+   */
+  private handleNewChatByContext(message: {
+    type: string;
+    data?: unknown;
+  }): boolean {
+    if (message.type !== 'openNewChatTab' || !this.isViewHost) {
+      return false;
+    }
+    void this.messageHandler.route({ type: 'newQwenSession', data: {} });
+    return true;
+  }
+
+  /**
    * Send message to WebView
    */
   private sendMessageToWebView(message: unknown): void {
     this.updateAuthStateFromMessage(message);
     const panel = this.panelManager.getPanel();
-    panel?.webview.postMessage(message);
+    if (panel) {
+      panel.webview.postMessage(message);
+    } else if (this.attachedWebview) {
+      this.attachedWebview.postMessage(message);
+    }
   }
 
   /**
@@ -1202,7 +1354,10 @@ export class WebViewProvider {
       );
     }
 
-    panel.webview.html = WebViewContent.generate(panel, this.extensionUri);
+    panel.webview.html = WebViewContent.generate(
+      panel.webview,
+      this.extensionUri,
+    );
 
     // Handle messages from WebView (restored panel)
     panel.webview.onDidReceiveMessage(
@@ -1242,6 +1397,9 @@ export class WebViewProvider {
               answers,
             });
           }
+          return;
+        }
+        if (this.handleNewChatByContext(message)) {
           return;
         }
         await this.messageHandler.route(message);
@@ -1400,7 +1558,10 @@ export class WebViewProvider {
     // Reload content after restore
     const panel = this.panelManager.getPanel();
     if (panel) {
-      panel.webview.html = WebViewContent.generate(panel, this.extensionUri);
+      panel.webview.html = WebViewContent.generate(
+        panel.webview,
+        this.extensionUri,
+      );
     }
   }
 

@@ -41,6 +41,36 @@ import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
 /**
+ * Extract session list items from ACP response.
+ * Handles both 'sessions' (new) and 'items' (legacy) response shapes.
+ * @param response - The ACP session/list response
+ * @returns Array of session items, or empty array if invalid
+ */
+export function extractSessionListItems(
+  response: unknown,
+): Array<Record<string, unknown>> {
+  if (!response || typeof response !== 'object') {
+    return [];
+  }
+
+  const payload = response as {
+    sessions?: unknown;
+    items?: unknown;
+  };
+
+  // Prefer 'sessions' field, fall back to 'items' for backwards compatibility
+  if (Array.isArray(payload.sessions)) {
+    return payload.sessions as Array<Record<string, unknown>>;
+  }
+
+  if (Array.isArray(payload.items)) {
+    return payload.items as Array<Record<string, unknown>>;
+  }
+
+  return [];
+}
+
+/**
  * Qwen Agent Manager
  *
  * Coordinates various modules and provides unified interface
@@ -413,14 +443,7 @@ export class QwenAgentManager {
       console.log('[QwenAgentManager] ACP session list response:', response);
 
       const res: unknown = response;
-      let items: Array<Record<string, unknown>> = [];
-
-      if (res && typeof res === 'object' && 'sessions' in res) {
-        const sessionsValue = (res as { sessions?: unknown }).sessions;
-        items = Array.isArray(sessionsValue)
-          ? (sessionsValue as Array<Record<string, unknown>>)
-          : [];
-      }
+      const items = extractSessionListItems(res);
 
       console.log(
         '[QwenAgentManager] Sessions retrieved via ACP:',
@@ -514,14 +537,7 @@ export class QwenAgentManager {
         ...(cursor !== undefined ? { cursor } : {}),
       });
       const res: unknown = response;
-      let items: Array<Record<string, unknown>> = [];
-
-      if (res && typeof res === 'object' && 'sessions' in res) {
-        const sessionsValue = (res as { sessions?: unknown }).sessions;
-        items = Array.isArray(sessionsValue)
-          ? (sessionsValue as Array<Record<string, unknown>>)
-          : [];
-      }
+      const items = extractSessionListItems(res);
 
       const mapped = items.map((item) => ({
         id: item.sessionId || item.id,
