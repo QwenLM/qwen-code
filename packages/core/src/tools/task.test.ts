@@ -134,6 +134,21 @@ describe('TaskTool', () => {
       );
     });
 
+    it('should include guidance to run dependent subagent work sequentially', () => {
+      expect(taskTool.description).toContain(
+        'Launch multiple agents concurrently whenever possible',
+      );
+      expect(taskTool.description).toContain(
+        "If one agent depends on another agent's output or side effects",
+      );
+      expect(taskTool.description).toContain(
+        'Never emit a dependent chain in one message',
+      );
+      expect(taskTool.description).toContain(
+        'If dependency is uncertain, default to one Task call per turn',
+      );
+    });
+
     it('should handle empty subagents list gracefully', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 

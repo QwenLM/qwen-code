@@ -10,6 +10,7 @@ import { openChatCommand } from '../commands/index.js';
 /**
  * Find the editor group immediately to the left of the Qwen chat webview.
  * - If the chat webview group is the leftmost group, returns undefined.
+ * - If no chat webview is found in any editor group, returns undefined.
  * - Uses the webview tab viewType 'mainThreadWebview-qwenCode.chat'.
  */
 export function findLeftGroupOfChatWebview(): vscode.ViewColumn | undefined {

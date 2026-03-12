@@ -60,6 +60,17 @@ export enum AuthType {
   USE_ANTHROPIC = 'anthropic',
 }
 
+/**
+ * Supported input modalities for a model.
+ * Omitted or false fields mean the model does not support that input type.
+ */
+export type InputModalities = {
+  image?: boolean;
+  pdf?: boolean;
+  audio?: boolean;
+  video?: boolean;
+};
+
 export type ContentGeneratorConfig = {
   model: string;
   apiKey?: string;
@@ -70,7 +81,8 @@ export type ContentGeneratorConfig = {
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
-  maxRetries?: number; // Maximum retries for failed requests
+  maxRetries?: number; // Maximum retries for rate-limit errors
+  retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
   samplingParams?: {
     top_p?: number;
@@ -98,6 +110,9 @@ export type ContentGeneratorConfig = {
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body
   extra_body?: Record<string, unknown>;
+  // Supported input modalities. Unsupported media types are replaced with text
+  // placeholders. Leave undefined to use automatic detection from model name.
+  modalities?: InputModalities;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

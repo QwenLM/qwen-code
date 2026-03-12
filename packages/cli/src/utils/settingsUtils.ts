@@ -129,6 +129,13 @@ export function getNestedValue(
   return undefined;
 }
 
+export function getNestedProperty(
+  obj: Record<string, unknown>,
+  path: string,
+): unknown {
+  return getNestedValue(obj, path.split('.'));
+}
+
 /**
  * Get the effective value for a setting, considering inheritance from higher scopes
  * Always returns a value (never undefined) - falls back to default if not set anywhere
@@ -382,30 +389,69 @@ export function settingExistsInScope(
   return value !== undefined;
 }
 
-/**
- * Recursively sets a value in a nested object using a key path array.
- */
-function setNestedValue(
+export function setNestedPropertyForce(
   obj: Record<string, unknown>,
-  path: string[],
+  path: string,
   value: unknown,
-): Record<string, unknown> {
-  const [first, ...rest] = path;
-  if (!first) {
-    return obj;
+): void {
+  const keys = path.split('.');
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    if (!current[key] || typeof current[key] !== 'object') {
+      current[key] = {};
+    }
+    current = current[key] as Record<string, unknown>;
   }
 
-  if (rest.length === 0) {
-    obj[first] = value;
-    return obj;
+  current[lastKey] = value;
+}
+
+export function setNestedPropertySafe(
+  obj: Record<string, unknown>,
+  path: string,
+  value: unknown,
+): void {
+  const keys = path.split('.');
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    if (current[key] === undefined) {
+      current[key] = {};
+    }
+    const next = current[key];
+    if (typeof next === 'object' && next !== null) {
+      current = next as Record<string, unknown>;
+    } else {
+      return;
+    }
   }
 
-  if (!obj[first] || typeof obj[first] !== 'object') {
-    obj[first] = {};
+  current[lastKey] = value;
+}
+
+export function deleteNestedPropertySafe(
+  obj: Record<string, unknown>,
+  path: string,
+): void {
+  const keys = path.split('.');
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    const next = current[key];
+    if (typeof next !== 'object' || next === null) {
+      return;
+    }
+    current = next as Record<string, unknown>;
   }
 
-  setNestedValue(obj[first] as Record<string, unknown>, rest, value);
-  return obj;
+  delete current[lastKey];
 }
 
 /**
@@ -416,9 +462,8 @@ export function setPendingSettingValue(
   value: boolean,
   pendingSettings: Settings,
 ): Settings {
-  const path = key.split('.');
   const newSettings = JSON.parse(JSON.stringify(pendingSettings));
-  setNestedValue(newSettings, path, value);
+  setNestedPropertyForce(newSettings, key, value);
   return newSettings;
 }
 
@@ -430,9 +475,8 @@ export function setPendingSettingValueAny(
   value: SettingsValue,
   pendingSettings: Settings,
 ): Settings {
-  const path = key.split('.');
   const newSettings = structuredClone(pendingSettings);
-  setNestedValue(newSettings, path, value);
+  setNestedPropertyForce(newSettings, key, value);
   return newSettings;
 }
 

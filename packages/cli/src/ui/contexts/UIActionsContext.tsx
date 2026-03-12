@@ -66,6 +66,7 @@ export interface UIActions {
   onSuggestionsVisibilityChange: (visible: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
+  handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
@@ -73,6 +74,10 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Extensions manager dialog
+  closeExtensionsManagerDialog: () => void;
+  // MCP dialog
+  closeMcpDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

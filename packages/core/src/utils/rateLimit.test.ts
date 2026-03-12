@@ -33,6 +33,13 @@ describe('isRateLimitError — detection paths', () => {
     expect(info).toBe(true);
   });
 
+  it('should detect 1305 code from ApiError (issue #1918)', () => {
+    const info = isRateLimitError({
+      error: { code: 1305, message: 'IdealTalk rate limit' },
+    });
+    expect(info).toBe(true);
+  });
+
   it('should detect rate-limit from StructuredError.status', () => {
     const error: StructuredError = { message: 'Rate limited', status: 429 };
     const info = isRateLimitError(error);
@@ -49,6 +56,21 @@ describe('isRateLimitError — detection paths', () => {
   it('should return null for non-rate-limit codes', () => {
     expect(
       isRateLimitError({ error: { code: 400, message: 'Bad Request' } }),
+    ).toBe(false);
+  });
+
+  it('should detect custom error code passed via extraCodes', () => {
+    expect(
+      isRateLimitError(
+        { error: { code: 9999, message: 'Custom rate limit' } },
+        [9999],
+      ),
+    ).toBe(true);
+  });
+
+  it('should not detect custom code when extraCodes is not provided', () => {
+    expect(
+      isRateLimitError({ error: { code: 9999, message: 'Custom rate limit' } }),
     ).toBe(false);
   });
 

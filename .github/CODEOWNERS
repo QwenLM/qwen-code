@@ -1,3 +1,6 @@
-* @tanzhenxin @DennisYu07 @gwinthis @LaZzyMan @pomelo-nwu @Mingholy
+* @tanzhenxin @DennisYu07 @gwinthis @LaZzyMan @pomelo-nwu @Mingholy @DragonnZhang
 # SDK TypeScript package changes require review from Mingholy
 packages/sdk-typescript/** @Mingholy
+# vscode-ide-companion and webui packages require review from yiliang114
+packages/vscode-ide-companion/** @yiliang114
+packages/webui/** @yiliang114

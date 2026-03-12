@@ -1,21 +1,26 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FileSystemService } from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
-import { ACP_ERROR_CODES } from '../errorCodes.js';
+import type {
+  AgentSideConnection,
+  FileSystemCapability,
+} from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
+import type {
+  FileReadResult,
+  FileSystemService,
+} from '@qwen-code/qwen-code-core';
 
-/**
- * ACP client-based implementation of FileSystemService
- */
+const RESOURCE_NOT_FOUND_CODE = -32002;
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
-    private readonly client: acp.Client,
+    private readonly connection: AgentSideConnection,
     private readonly sessionId: string,
-    private readonly capabilities: acp.FileSystemCapability,
+    private readonly capabilities: FileSystemCapability,
     private readonly fallback: FileSystemService,
   ) {}
 
@@ -26,19 +31,19 @@ export class AcpFileSystemService implements FileSystemService {
 
     let response: { content: string };
     try {
-      response = await this.client.readTextFile({
+      response = await this.connection.readTextFile({
         path: filePath,
         sessionId: this.sessionId,
-        line: null,
-        limit: null,
       });
     } catch (error) {
       const errorCode =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? (error as { code?: unknown }).code
-          : undefined;
+        error instanceof RequestError
+          ? error.code
+          : typeof error === 'object' && error !== null && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
 
-      if (errorCode === ACP_ERROR_CODES.RESOURCE_NOT_FOUND) {
+      if (errorCode === RESOURCE_NOT_FOUND_CODE) {
         const err = new Error(
           `File not found: ${filePath}`,
         ) as NodeJS.ErrnoException;
@@ -54,19 +59,24 @@ export class AcpFileSystemService implements FileSystemService {
     return response.content;
   }
 
+  async readTextFileWithInfo(filePath: string): Promise<FileReadResult> {
+    // ACP protocol does not expose encoding metadata; delegate to the local
+    // fallback which performs a single-pass read with encoding detection.
+    return this.fallback.readTextFileWithInfo(filePath);
+  }
+
   async writeTextFile(
     filePath: string,
     content: string,
-    options?: { bom?: boolean },
+    options?: { bom?: boolean; encoding?: string },
   ): Promise<void> {
     if (!this.capabilities.writeTextFile) {
       return this.fallback.writeTextFile(filePath, content, options);
     }
 
-    // Prepend BOM character if requested
     const finalContent = options?.bom ? '\uFEFF' + content : content;
 
-    await this.client.writeTextFile({
+    await this.connection.writeTextFile({
       path: filePath,
       content: finalContent,
       sessionId: this.sessionId,
@@ -74,17 +84,13 @@ export class AcpFileSystemService implements FileSystemService {
   }
 
   async detectFileBOM(filePath: string): Promise<boolean> {
-    // Try to detect BOM through ACP client first by reading first line
     if (this.capabilities.readTextFile) {
       try {
-        const response = await this.client.readTextFile({
+        const response = await this.connection.readTextFile({
           path: filePath,
           sessionId: this.sessionId,
-          line: null,
           limit: 1,
         });
-        // Check if content starts with BOM character (U+FEFF)
-        // Use codePointAt for better Unicode support and check content length first
         return (
           response.content.length > 0 &&
           response.content.codePointAt(0) === 0xfeff
@@ -93,7 +99,6 @@ export class AcpFileSystemService implements FileSystemService {
         // Fall through to fallback if ACP read fails
       }
     }
-    // Fall back to local filesystem detection
     return this.fallback.detectFileBOM(filePath);
   }
 

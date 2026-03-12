@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
-import type * as acp from '../../../acp-integration/acp.js';
+import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
 import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
@@ -34,7 +34,7 @@ class ExportSessionContext implements SessionContext {
     this.config = config;
   }
 
-  async sendUpdate(update: acp.SessionUpdate): Promise<void> {
+  async sendUpdate(update: SessionUpdate): Promise<void> {
     switch (update.sessionUpdate) {
       case 'user_message_chunk':
         this.handleMessageChunk('user', update.content);
@@ -108,7 +108,7 @@ class ExportSessionContext implements SessionContext {
     }
   }
 
-  private handleToolCallStart(update: acp.ToolCall): void {
+  private handleToolCallStart(update: ToolCall): void {
     const toolCall: ExportMessage['toolCall'] = {
       toolCallId: update.toolCallId,
       kind: update.kind || 'other',

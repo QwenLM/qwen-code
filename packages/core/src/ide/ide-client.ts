@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as dns from 'node:dns';
 import * as fs from 'node:fs';
 import { isSubpath } from '../utils/paths.js';
 import { detectIde, type IdeInfo } from '../ide/detect-ide.js';
@@ -585,7 +586,33 @@ export class IdeClient {
     }
 
     // Legacy discovery for VSCode extension < v0.5.1.
-    return this.getLegacyConnectionConfig(portFromEnv);
+    const legacyConfig = await this.getLegacyConnectionConfig(portFromEnv);
+    if (legacyConfig) {
+      return legacyConfig;
+    }
+
+    // Scan lock directory as a last resort when neither env var nor legacy
+    // file is available (e.g. code-server where the env var is not injected).
+    // Configs are sorted by modification time (most recent first). Pick the
+    // first one whose workspace matches the current working directory.
+    if (!portFromEnv) {
+      const ideDir = Storage.getGlobalIdeDir();
+      const configs = await this.getAllConnectionConfigs(ideDir);
+      if (configs.length > 0) {
+        debugLogger.debug(
+          `Discovered ${configs.length} IDE lock file(s) via directory scan`,
+        );
+        const cwd = process.cwd();
+        const match = configs.find(
+          (c) =>
+            c.workspacePath !== undefined &&
+            IdeClient.validateWorkspacePath(c.workspacePath, cwd).isValid,
+        );
+        return match;
+      }
+    }
+
+    return undefined;
   }
 
   // Legacy connection files were written in the global temp directory.
@@ -671,11 +698,13 @@ export class IdeClient {
       .map(({ parsed }) => parsed);
   }
 
-  private createProxyAwareFetch() {
-    // ignore proxy for '127.0.0.1' by deafult to allow connecting to the ide mcp server
+  private createProxyAwareFetch(ideHost: string) {
+    // Ignore proxy for IDE server host to allow connecting to the ide mcp
+    // server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
+    const noProxyHosts = [existingNoProxy, ideHost];
     const agent = new EnvHttpProxyAgent({
-      noProxy: [existingNoProxy, '127.0.0.1'].filter(Boolean).join(','),
+      noProxy: noProxyHosts.filter(Boolean).join(','),
     });
     const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
@@ -778,9 +807,34 @@ export class IdeClient {
   }
 
   private async establishHttpConnection(port: string): Promise<boolean> {
+    // Always try localhost first. This covers the most common scenarios:
+    // non-container environments, and code-server where the extension runs
+    // inside the same container as the CLI.
+    const connected = await this.tryHttpConnect(port, LOCAL_HOST);
+    if (connected) {
+      return true;
+    }
+
+    // If localhost failed and we are inside a container, the IDE server may
+    // be running on the host machine (e.g. VS Code Dev Containers). Try
+    // host.docker.internal as a fallback when it is DNS-resolvable.
+    const ideHost = await getIdeServerHost();
+    if (ideHost === CONTAINER_HOST) {
+      debugLogger.debug(
+        `Connection to ${LOCAL_HOST}:${port} failed, retrying with ${CONTAINER_HOST}`,
+      );
+      return this.tryHttpConnect(port, CONTAINER_HOST);
+    }
+
+    return false;
+  }
+
+  private async tryHttpConnect(port: string, host: string): Promise<boolean> {
     let transport: StreamableHTTPClientTransport | undefined;
     try {
-      debugLogger.debug('Attempting to connect to IDE via HTTP SSE');
+      debugLogger.debug(
+        `Attempting to connect to IDE via HTTP at ${host}:${port}`,
+      );
       this.client = new Client({
         name: 'streamable-http-client',
         // TODO(#3487): use the CLI version here.
@@ -788,9 +842,9 @@ export class IdeClient {
       });
 
       transport = new StreamableHTTPClientTransport(
-        new URL(`http://${getIdeServerHost()}:${port}/mcp`),
+        new URL(`http://${host}:${port}/mcp`),
         {
-          fetch: this.createProxyAwareFetch(),
+          fetch: this.createProxyAwareFetch(host),
           requestInit: {
             headers: this.authToken
               ? { Authorization: `Bearer ${this.authToken}` }
@@ -806,7 +860,8 @@ export class IdeClient {
       await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;
-    } catch (_error) {
+    } catch (error) {
+      debugLogger.debug(`HTTP connection to ${host}:${port} failed:`, error);
       if (transport) {
         try {
           await transport.close();
@@ -853,8 +908,76 @@ export class IdeClient {
   }
 }
 
-function getIdeServerHost() {
+const CONTAINER_HOST = 'host.docker.internal';
+const LOCAL_HOST = '127.0.0.1';
+const DNS_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
+ * Cached promise for IDE server host. Caching the promise itself handles both
+ * result caching and concurrent-call deduplication in one mechanism: a resolved
+ * promise returns instantly, and a pending promise is shared across callers.
+ */
+let hostPromise: Promise<string> | undefined;
+
+/**
+ * Reset the cached host promise. Exported for testing only.
+ * @internal
+ */
+export function _resetCachedIdeServerHost(): void {
+  hostPromise = undefined;
+}
+
+/**
+ * Check if a hostname is DNS-resolvable, with a timeout guard.
+ */
+async function isHostResolvable(hostname: string): Promise<boolean> {
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('DNS lookup timeout')),
+        DNS_LOOKUP_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    await Promise.race([dns.promises.lookup(hostname), timeout]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Determine the IDE server host to connect to.
+ *
+ * In container environments (`/.dockerenv` or `/run/.containerenv`), verify
+ * `host.docker.internal` is DNS-resolvable and use it if reachable.
+ * Otherwise fall back to `127.0.0.1`.
+ *
+ * Results are cached; concurrent calls share a single lookup.
+ */
+async function resolveIdeServerHost(): Promise<string> {
   const isInContainer =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
-  return isInContainer ? 'host.docker.internal' : '127.0.0.1';
+
+  if (!isInContainer) {
+    return LOCAL_HOST;
+  }
+
+  const reachable = await isHostResolvable(CONTAINER_HOST);
+  if (reachable) {
+    debugLogger.debug('Container detected, host.docker.internal is reachable');
+    return CONTAINER_HOST;
+  }
+
+  debugLogger.debug(
+    'Container detected, but host.docker.internal is NOT reachable, falling back to 127.0.0.1',
+  );
+  return LOCAL_HOST;
+}
+
+export async function getIdeServerHost(): Promise<string> {
+  if (!hostPromise) {
+    hostPromise = resolveIdeServerHost();
+  }
+  return hostPromise;
 }

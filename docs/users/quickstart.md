@@ -16,19 +16,39 @@ Make sure you have:
 
 To install Qwen Code, use one of the following methods:
 
-### NPM (recommended)
+### Quick Install (Recommended)
 
-Requires [Node.js 20+](https://nodejs.org/download), you can use `node -v` check the version. If it's not installed, use the following command to install it.
-
-If you have [Node.js or newer installed](https://nodejs.org/en/download/):
+**Linux / macOS**
 
 ```sh
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+```
+
+**Windows (Run as Administrator CMD)**
+
+```sh
+curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
+```
+
+> [!note]
+>
+> It's recommended to restart your terminal after installation to ensure environment variables take effect.
+
+### Manual Installation
+
+**Prerequisites**
+
+Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+
+**NPM**
+
+```bash
 npm install -g @qwen-code/qwen-code@latest
 ```
 
-### Homebrew (macOS, Linux)
+**Homebrew (macOS, Linux)**
 
-```sh
+```bash
 brew install qwen-code
 ```
 

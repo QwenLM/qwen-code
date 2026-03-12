@@ -107,6 +107,20 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot();
   });
 
+  it('should instruct sequential execution for dependent tool calls', () => {
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain(
+      'Execute multiple independent tool calls in parallel',
+    );
+    expect(prompt).toContain(
+      'If one tool call depends on the output or side effects of another',
+    );
+    expect(prompt).toContain('Never emit a dependency chain in one message');
+    expect(prompt).toContain(
+      'If dependency is uncertain, default to sequential',
+    );
+  });
+
   it('should include git instructions when in a git repo', () => {
     vi.stubEnv('SANDBOX', undefined);
     vi.mocked(isGitRepository).mockReturnValue(true);

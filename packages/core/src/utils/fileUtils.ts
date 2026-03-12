@@ -9,10 +9,16 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { PartUnion } from '@google/genai';
 import mime from 'mime/lite';
+import {
+  iconvDecode,
+  iconvEncodingExists,
+  isUtf8CompatibleEncoding,
+} from './iconvHelper.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { detectEncodingFromBuffer } from './systemEncoding.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -118,23 +124,41 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
 }
 
 /**
- * Read a file as text, honoring BOM encodings (UTF‑8/16/32) and stripping the BOM.
- * Falls back to utf8 when no BOM is present.
+ * Check whether a buffer is valid UTF-8 by attempting a strict decode.
+ * If any invalid byte sequence is encountered, TextDecoder with `fatal: true` throws.
  */
-export async function readFileWithEncoding(filePath: string): Promise<string> {
-  // Read the file once; detect BOM and decode from the single buffer.
-  const full = await fs.promises.readFile(filePath);
-  if (full.length === 0) return '';
-
-  const bom = detectBOM(full);
-  if (!bom) {
-    // No BOM → treat as UTF‑8
-    return full.toString('utf8');
+function isValidUtf8(buffer: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    return true;
+  } catch {
+    return false;
   }
+}
 
-  // Strip BOM and decode per encoding
-  const content = full.subarray(bom.bomLength);
-  switch (bom.encoding) {
+/**
+ * Result of reading a file with encoding detection.
+ */
+export interface FileReadResult {
+  /** Decoded text content of the file (BOM stripped if present). */
+  content: string;
+  /** Detected encoding name (e.g. 'utf-8', 'gb18030', 'utf-16le'). */
+  encoding: string;
+  /**
+   * Whether the file had a Unicode BOM (UTF-8, UTF-16 LE/BE, or UTF-32 LE/BE).
+   * When true, the same BOM should be re-written on save to preserve the file's
+   * original byte-order mark.
+   */
+  bom: boolean;
+}
+
+/**
+ * Internal helper: decode a buffer given a BOMInfo.
+ * Returns the decoded string for each supported BOM encoding.
+ */
+function decodeBOMBuffer(buf: Buffer, bomInfo: BOMInfo): string {
+  const content = buf.subarray(bomInfo.bomLength);
+  switch (bomInfo.encoding) {
     case 'utf8':
       return content.toString('utf8');
     case 'utf16le':
@@ -148,6 +172,153 @@ export async function readFileWithEncoding(filePath: string): Promise<string> {
     default:
       // Defensive fallback; should be unreachable
       return content.toString('utf8');
+  }
+}
+
+/**
+ * Map a BOMInfo encoding to a canonical encoding name string.
+ */
+function bomEncodingToName(bomEncoding: UnicodeEncoding): string {
+  switch (bomEncoding) {
+    case 'utf8':
+      return 'utf-8';
+    case 'utf16le':
+      return 'utf-16le';
+    case 'utf16be':
+      return 'utf-16be';
+    case 'utf32le':
+      return 'utf-32le';
+    case 'utf32be':
+      return 'utf-32be';
+    default:
+      return 'utf-8';
+  }
+}
+
+/**
+ * Read a file as text, honoring BOM encodings (UTF‑8/16/32) and stripping the BOM.
+ * For files without BOM, validates UTF-8 first. If invalid UTF-8, uses chardet
+ * to detect encoding (e.g. GBK, Big5, Shift_JIS) and iconv-lite to decode.
+ * Falls back to utf8 when detection fails.
+ *
+ * Returns both the decoded content and the detected encoding/BOM information
+ * in a single I/O pass, avoiding redundant file reads.
+ */
+export async function readFileWithEncodingInfo(
+  filePath: string,
+): Promise<FileReadResult> {
+  // Read the file once; detect BOM and decode from the single buffer.
+  const full = await fs.promises.readFile(filePath);
+  if (full.length === 0) return { content: '', encoding: 'utf-8', bom: false };
+
+  const bomInfo = detectBOM(full);
+  if (bomInfo) {
+    return {
+      content: decodeBOMBuffer(full, bomInfo),
+      encoding: bomEncodingToName(bomInfo.encoding),
+      // Mark bom: true for all Unicode BOM variants (UTF-8/16/32) so that
+      // the BOM is re-written on save and the file's original format is preserved.
+      bom: true,
+    };
+  }
+
+  // No BOM — check if it's valid UTF-8 first (fast path for the common case)
+  if (isValidUtf8(full)) {
+    return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+  }
+
+  // Not valid UTF-8 — try chardet-based encoding detection
+  const detected = detectEncodingFromBuffer(full);
+  if (detected && !isUtf8CompatibleEncoding(detected)) {
+    try {
+      if (iconvEncodingExists(detected)) {
+        return {
+          content: iconvDecode(full, detected),
+          encoding: detected,
+          bom: false,
+        };
+      }
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to decode file ${filePath} as ${detected}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  // Final fallback: UTF-8 with replacement characters
+  return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
+}
+
+/**
+ * Read a file as text, honoring BOM encodings (UTF‑8/16/32) and stripping the BOM.
+ * For files without BOM, validates UTF-8 first. If invalid UTF-8, uses chardet
+ * to detect encoding (e.g. GBK, Big5, Shift_JIS) and iconv-lite to decode.
+ * Falls back to utf8 when detection fails.
+ */
+export async function readFileWithEncoding(filePath: string): Promise<string> {
+  const result = await readFileWithEncodingInfo(filePath);
+  return result.content;
+}
+
+/**
+ * Detect the encoding of a file by reading a sample from its beginning.
+ * Returns the encoding name (e.g. 'utf-8', 'gbk', 'shift_jis').
+ * Uses BOM detection first, then UTF-8 validation, then chardet as fallback.
+ */
+export async function detectFileEncoding(filePath: string): Promise<string> {
+  let fh: fs.promises.FileHandle | null = null;
+  try {
+    fh = await fs.promises.open(filePath, 'r');
+    const stats = await fh.stat();
+    if (stats.size === 0) return 'utf-8';
+
+    // Read a sample (up to 8KB) for detection
+    const sampleSize = Math.min(8192, stats.size);
+    const buf = Buffer.alloc(sampleSize);
+    const { bytesRead } = await fh.read(buf, 0, sampleSize, 0);
+    if (bytesRead === 0) return 'utf-8';
+    const sample = buf.subarray(0, bytesRead);
+
+    // 1. Check for BOM
+    const bom = detectBOM(sample);
+    if (bom) {
+      switch (bom.encoding) {
+        case 'utf8':
+          return 'utf-8';
+        case 'utf16le':
+          return 'utf-16le';
+        case 'utf16be':
+          return 'utf-16be';
+        case 'utf32le':
+          return 'utf-32le';
+        case 'utf32be':
+          return 'utf-32be';
+        default:
+          return 'utf-8';
+      }
+    }
+
+    // 2. Validate UTF-8
+    if (isValidUtf8(sample)) return 'utf-8';
+
+    // 3. Use chardet for detection
+    const detected = detectEncodingFromBuffer(sample);
+    if (detected && !isUtf8CompatibleEncoding(detected)) {
+      return detected;
+    }
+
+    return 'utf-8';
+  } catch {
+    // If file can't be read, default to UTF-8
+    return 'utf-8';
+  } finally {
+    if (fh) {
+      try {
+        await fh.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
   }
 }
 
@@ -340,11 +511,12 @@ export async function processSingleFileContent(
     }
 
     const fileSizeInMB = stats.size / (1024 * 1024);
-    if (fileSizeInMB > 20) {
+    // Use 9.9MB instead of 10MB to leave margin for encoding overhead (#1880)
+    if (fileSizeInMB > 9.9) {
       return {
-        llmContent: 'File size exceeds the 20MB limit.',
-        returnDisplay: 'File size exceeds the 20MB limit.',
-        error: `File size exceeds the 20MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        llmContent: 'File size exceeds the 10MB limit.',
+        returnDisplay: 'File size exceeds the 10MB limit.',
+        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
@@ -465,6 +637,16 @@ export async function processSingleFileContent(
       case 'pdf': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
+        const base64SizeInMB = base64Data.length / (1024 * 1024);
+        // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
+        if (base64SizeInMB > 9.9) {
+          return {
+            llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
+            returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            errorType: ToolErrorType.FILE_TOO_LARGE,
+          };
+        }
         return {
           llmContent: {
             inlineData: {
