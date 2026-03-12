@@ -103,6 +103,19 @@ describe('LSTool', () => {
       expect(result.returnDisplay).toBe('Listed 2 item(s).');
     });
 
+    it('should include unicode name mappings for non-ascii entries', async () => {
+      await fs.writeFile(path.join(tempRootDir, '中文中文-1.md'), 'content1');
+
+      const invocation = lsTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('中文中文-1.md');
+      expect(result.llmContent).toContain('Unicode names:');
+      expect(result.llmContent).toContain(
+        '中文中文-1.md => \\u4e2d\\u6587\\u4e2d\\u6587-1.md',
+      );
+    });
+
     it('should list files from secondary workspace directory', async () => {
       await fs.writeFile(path.join(tempRootDir, 'file1.txt'), 'content1');
       await fs.mkdir(path.join(tempRootDir, 'subdir'));

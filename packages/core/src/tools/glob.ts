@@ -20,6 +20,7 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { buildUnicodeMappingSection } from '../utils/unicodeEscaping.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
@@ -198,6 +199,11 @@ class GlobToolInvocation extends BaseToolInvocation<
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }
+
+      resultMessage += buildUnicodeMappingSection(
+        sortedAbsolutePaths,
+        'Unicode paths',
+      );
 
       return {
         llmContent: resultMessage,

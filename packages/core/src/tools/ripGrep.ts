@@ -17,8 +17,18 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { buildUnicodeMappingSection } from '../utils/unicodeEscaping.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
+
+function extractRipgrepFilePath(line: string): string | null {
+  const match = line.match(/^(.*):(\d+):(.*)$/);
+  if (!match) {
+    return null;
+  }
+
+  return match[1];
+}
 
 /**
  * Parameters for the GrepTool (Simplified)
@@ -140,8 +150,16 @@ class GrepToolInvocation extends BaseToolInvocation<
         includedLines = linesToInclude.length;
       }
 
+      const unicodePathSection = buildUnicodeMappingSection(
+        linesToInclude
+          .map((line) => extractRipgrepFilePath(line))
+          .filter((value): value is string => value !== null),
+        'Unicode paths',
+      );
+
       // Build result
       let llmContent = header + grepOutput;
+      llmContent += unicodePathSection;
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {

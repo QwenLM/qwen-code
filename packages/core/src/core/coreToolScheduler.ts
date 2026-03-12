@@ -42,6 +42,10 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  decodeUnicodeEscapedString,
+  shouldUseUnicodeEscapedPaths,
+} from '../utils/unicodeEscaping.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -305,6 +309,69 @@ const createErrorResponse = (
   errorType,
   contentLength: error.message.length,
 });
+
+function getModelForUnicodeNormalization(config: Config): string | undefined {
+  const partialConfig = config as Partial<Config>;
+
+  if (typeof partialConfig.getModel === 'function') {
+    return partialConfig.getModel();
+  }
+
+  if (typeof partialConfig.getContentGeneratorConfig === 'function') {
+    return partialConfig.getContentGeneratorConfig()?.model;
+  }
+
+  return undefined;
+}
+
+function normalizeUnicodeEscapedToolArgs(
+  model: string | undefined,
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!shouldUseUnicodeEscapedPaths(model)) {
+    return args;
+  }
+
+  let fieldsToNormalize: string[] = [];
+  switch (toolName) {
+    case ToolNames.READ_FILE:
+      fieldsToNormalize = ['absolute_path'];
+      break;
+    case ToolNames.WRITE_FILE:
+    case ToolNames.EDIT:
+      fieldsToNormalize = ['file_path'];
+      break;
+    case ToolNames.LS:
+    case ToolNames.GLOB:
+    case ToolNames.GREP:
+      fieldsToNormalize = ['path'];
+      break;
+    case ToolNames.SHELL:
+      fieldsToNormalize = ['command'];
+      break;
+    default:
+      return args;
+  }
+
+  let changed = false;
+  const normalizedArgs: Record<string, unknown> = { ...args };
+
+  for (const field of fieldsToNormalize) {
+    const value = normalizedArgs[field];
+    if (typeof value !== 'string') {
+      continue;
+    }
+
+    const decoded = decodeUnicodeEscapedString(value);
+    if (decoded !== value) {
+      normalizedArgs[field] = decoded;
+      changed = true;
+    }
+  }
+
+  return changed ? normalizedArgs : args;
+}
 
 export async function truncateAndSaveToFile(
   content: string,
@@ -594,10 +661,13 @@ export class CoreToolScheduler {
         return call;
       }
 
-      const invocationOrError = this.buildInvocation(
-        call.tool,
+      const normalizedArgs = normalizeUnicodeEscapedToolArgs(
+        getModelForUnicodeNormalization(this.config),
+        call.tool.name,
         args as Record<string, unknown>,
       );
+
+      const invocationOrError = this.buildInvocation(call.tool, normalizedArgs);
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
           call.request,
@@ -605,7 +675,7 @@ export class CoreToolScheduler {
           ToolErrorType.INVALID_TOOL_PARAMS,
         );
         return {
-          request: { ...call.request, args: args as Record<string, unknown> },
+          request: { ...call.request, args: normalizedArgs },
           status: 'error',
           tool: call.tool,
           response,
@@ -614,7 +684,7 @@ export class CoreToolScheduler {
 
       return {
         ...call,
-        request: { ...call.request, args: args as Record<string, unknown> },
+        request: { ...call.request, args: normalizedArgs },
         invocation: invocationOrError,
       };
     });
@@ -786,22 +856,32 @@ export class CoreToolScheduler {
             };
           }
 
-          const invocationOrError = this.buildInvocation(
-            toolInstance,
+          const normalizedArgs = normalizeUnicodeEscapedToolArgs(
+            getModelForUnicodeNormalization(this.config),
+            reqInfo.name,
             reqInfo.args,
           );
+          const normalizedRequest =
+            normalizedArgs === reqInfo.args
+              ? reqInfo
+              : { ...reqInfo, args: normalizedArgs };
+
+          const invocationOrError = this.buildInvocation(
+            toolInstance,
+            normalizedRequest.args,
+          );
           if (invocationOrError instanceof Error) {
-            const error = reqInfo.wasOutputTruncated
+            const error = normalizedRequest.wasOutputTruncated
               ? new Error(
                   `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
                 )
               : invocationOrError;
             return {
               status: 'error',
-              request: reqInfo,
+              request: normalizedRequest,
               tool: toolInstance,
               response: createErrorResponse(
-                reqInfo,
+                normalizedRequest,
                 error,
                 ToolErrorType.INVALID_TOOL_PARAMS,
               ),
@@ -811,14 +891,17 @@ export class CoreToolScheduler {
 
           // Reject file-modifying calls when truncated to prevent
           // writing incomplete content.
-          if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+          if (
+            normalizedRequest.wasOutputTruncated &&
+            toolInstance.kind === Kind.Edit
+          ) {
             const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
             return {
               status: 'error',
-              request: reqInfo,
+              request: normalizedRequest,
               tool: toolInstance,
               response: createErrorResponse(
-                reqInfo,
+                normalizedRequest,
                 truncationError,
                 ToolErrorType.OUTPUT_TRUNCATED,
               ),
@@ -828,7 +911,7 @@ export class CoreToolScheduler {
 
           return {
             status: 'validating',
-            request: reqInfo,
+            request: normalizedRequest,
             tool: toolInstance,
             invocation: invocationOrError,
             startTime: Date.now(),

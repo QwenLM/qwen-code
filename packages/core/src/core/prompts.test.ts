@@ -45,6 +45,17 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
   });
 
+  it('should include unicode path handling instructions for qwen3.5-plus', () => {
+    const prompt = getCoreSystemPrompt(undefined, 'qwen3.5-plus');
+    expect(prompt).toContain('# Unicode Path Handling');
+    expect(prompt).toContain('\\u4e2d\\u6587\\u4e2d\\u6587-1.md');
+  });
+
+  it('should include unicode path handling instructions for qwen3.5-397B-A17B', () => {
+    const prompt = getCoreSystemPrompt(undefined, 'qwen3.5-397B-A17B');
+    expect(prompt).toContain('# Unicode Path Handling');
+  });
+
   it('should return the base prompt when no userMemory is provided', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();

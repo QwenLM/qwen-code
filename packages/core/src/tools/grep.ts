@@ -22,6 +22,7 @@ import type { Config } from '../config/config.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
+import { buildUnicodeMappingSection } from '../utils/unicodeEscaping.js';
 
 // --- Interfaces ---
 
@@ -168,6 +169,10 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
+      llmContent += buildUnicodeMappingSection(
+        matchesToInclude.map((match) => match.filePath),
+        'Unicode paths',
+      );
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
