@@ -234,7 +234,7 @@ describe('AgentInteractive', () => {
     resolveLoop!();
 
     await vi.waitFor(() => {
-      expect(agent.getStatus()).toBe('failed');
+      expect(agent.getStatus()).toBe('idle');
     });
 
     await agent.shutdown();

@@ -176,6 +176,8 @@ export interface AgentStatusChangeEvent {
   agentId: string;
   previousStatus: AgentStatus;
   newStatus: AgentStatus;
+  /** True when the transition to IDLE was caused by user cancelling the round. */
+  roundCancelledByUser?: boolean;
   timestamp: number;
 }
 

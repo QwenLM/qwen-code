@@ -80,9 +80,17 @@ export function ArenaStopDialog({
           sessionStatus === ArenaSessionStatus.RUNNING ||
           sessionStatus === ArenaSessionStatus.INITIALIZING
         ) {
+          pushMessage({
+            messageType: 'info',
+            content: 'Stopping Arena agents…',
+          });
           await mgr.cancel();
         }
         await mgr.waitForSettled();
+        pushMessage({
+          messageType: 'info',
+          content: 'Cleaning up Arena resources…',
+        });
 
         if (action === 'preserve') {
           await mgr.cleanupRuntime();

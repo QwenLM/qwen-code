@@ -74,6 +74,10 @@ export function ArenaSelectDialog({
         mgr.getAgentStates().find((item) => item.agentId === agentId);
       const label = agent?.model.modelId || agentId;
 
+      pushMessage({
+        messageType: 'info',
+        content: `Applying changes from ${label}…`,
+      });
       const result = await mgr.applyAgentResult(agentId);
       if (!result.success) {
         pushMessage({
@@ -111,6 +115,10 @@ export function ArenaSelectDialog({
     }
 
     try {
+      pushMessage({
+        messageType: 'info',
+        content: 'Discarding Arena results and cleaning up…',
+      });
       await config.cleanupArenaRuntime(true);
       pushMessage({
         messageType: 'info',

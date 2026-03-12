@@ -124,7 +124,8 @@ export function useAgentStreamingState(
   }, [status, hasPendingApprovals]);
 
   const isInputActive =
-    streamingState === StreamingState.Idle &&
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.Responding) &&
     status !== undefined &&
     !isTerminalStatus(status);
 

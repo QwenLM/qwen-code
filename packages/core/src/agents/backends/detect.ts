@@ -6,10 +6,10 @@
 
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { Config } from '../../config/config.js';
-import { TmuxBackend } from './TmuxBackend.js';
+// import { TmuxBackend } from './TmuxBackend.js';
 import { InProcessBackend } from './InProcessBackend.js';
 import { type Backend, DISPLAY_MODE, type DisplayMode } from './types.js';
-import { isTmuxAvailable } from './tmux-commands.js';
+// import { isTmuxAvailable } from './tmux-commands.js';
 
 const debugLogger = createDebugLogger('BACKEND_DETECT');
 
@@ -35,44 +35,54 @@ export async function detectBackend(
   preference: DisplayMode | undefined,
   runtimeContext: Config,
 ): Promise<DetectBackendResult> {
-  // 1. User explicit preference
-  if (preference === DISPLAY_MODE.IN_PROCESS) {
-    debugLogger.info('Using InProcessBackend (user preference)');
-    return { backend: new InProcessBackend(runtimeContext) };
-  }
+  // Currently only in-process mode is supported. Other backends (tmux,
+  // iterm2) are kept in the codebase but not wired up as entry points.
+  const warning =
+    preference && preference !== DISPLAY_MODE.IN_PROCESS
+      ? `Display mode "${preference}" is not currently supported. Using in-process mode instead.`
+      : undefined;
+  debugLogger.info('Using InProcessBackend');
+  return { backend: new InProcessBackend(runtimeContext), warning };
 
-  if (preference === DISPLAY_MODE.ITERM2) {
-    throw new Error(
-      `Arena display mode "${DISPLAY_MODE.ITERM2}" is not implemented yet. Please use "${DISPLAY_MODE.TMUX}" or "${DISPLAY_MODE.IN_PROCESS}".`,
-    );
-  }
-
-  if (preference === DISPLAY_MODE.TMUX) {
-    debugLogger.info('Using TmuxBackend (user preference)');
-    return { backend: new TmuxBackend() };
-  }
-
-  // 2. Auto-detect
-  if (process.env['TMUX']) {
-    debugLogger.info('Detected $TMUX — attempting TmuxBackend');
-    return { backend: new TmuxBackend() };
-  }
-
-  // Other terminals (including iTerm2): use tmux external session mode if available.
-  if (isTmuxAvailable()) {
-    debugLogger.info(
-      'tmux is available — using TmuxBackend external session mode',
-    );
-    return { backend: new TmuxBackend() };
-  }
-
-  // Fallback: use InProcessBackend
-  debugLogger.info(
-    'No PTY backend available — falling back to InProcessBackend',
-  );
-  return {
-    backend: new InProcessBackend(runtimeContext),
-    warning:
-      'tmux is not available. Using in-process mode (no split-pane terminal view).',
-  };
+  // --- Disabled backends (kept for future use) ---
+  // // 1. User explicit preference
+  // if (preference === DISPLAY_MODE.IN_PROCESS) {
+  //   debugLogger.info('Using InProcessBackend (user preference)');
+  //   return { backend: new InProcessBackend(runtimeContext) };
+  // }
+  //
+  // if (preference === DISPLAY_MODE.ITERM2) {
+  //   throw new Error(
+  //     `Arena display mode "${DISPLAY_MODE.ITERM2}" is not implemented yet. Please use "${DISPLAY_MODE.TMUX}" or "${DISPLAY_MODE.IN_PROCESS}".`,
+  //   );
+  // }
+  //
+  // if (preference === DISPLAY_MODE.TMUX) {
+  //   debugLogger.info('Using TmuxBackend (user preference)');
+  //   return { backend: new TmuxBackend() };
+  // }
+  //
+  // // 2. Auto-detect
+  // if (process.env['TMUX']) {
+  //   debugLogger.info('Detected $TMUX — attempting TmuxBackend');
+  //   return { backend: new TmuxBackend() };
+  // }
+  //
+  // // Other terminals (including iTerm2): use tmux external session mode if available.
+  // if (isTmuxAvailable()) {
+  //   debugLogger.info(
+  //     'tmux is available — using TmuxBackend external session mode',
+  //   );
+  //   return { backend: new TmuxBackend() };
+  // }
+  //
+  // // Fallback: use InProcessBackend
+  // debugLogger.info(
+  //   'No PTY backend available — falling back to InProcessBackend',
+  // );
+  // return {
+  //   backend: new InProcessBackend(runtimeContext),
+  //   warning:
+  //     'tmux is not available. Using in-process mode (no split-pane terminal view).',
+  // };
 }

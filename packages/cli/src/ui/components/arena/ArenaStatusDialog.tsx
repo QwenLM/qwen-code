@@ -264,7 +264,11 @@ export function ArenaStatusDialog({
                     <Text color={theme.status.error}>{failedToolCalls}</Text>
                   </Text>
                 ) : (
-                  <Text color={theme.text.primary}>
+                  <Text
+                    color={
+                      toolCalls > 0 ? theme.status.success : theme.text.primary
+                    }
+                  >
                     {pad(String(toolCalls), colTools - 1, 'right')}
                   </Text>
                 )}

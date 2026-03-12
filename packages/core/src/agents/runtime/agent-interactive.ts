@@ -25,9 +25,10 @@ import type { AgentCore } from './agent-core.js';
 import type { ContextState } from './agent-headless.js';
 import type { GeminiChat } from '../../core/geminiChat.js';
 import type { FunctionDeclaration } from '@google/genai';
-import type {
-  ToolCallConfirmationDetails,
-  ToolResultDisplay,
+import {
+  ToolConfirmationOutcome,
+  type ToolCallConfirmationDetails,
+  type ToolResultDisplay,
 } from '../../tools/tools.js';
 import { AsyncMessageQueue } from '../../utils/asyncMessageQueue.js';
 import {
@@ -64,6 +65,7 @@ export class AgentInteractive {
   private chat: GeminiChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
+  private roundCancelledByUser = false;
 
   // Pending tool approval requests. Keyed by callId.
   // Populated by TOOL_WAITING_APPROVAL, removed by TOOL_RESULT or when
@@ -161,6 +163,7 @@ export class AgentInteractive {
 
     this.setStatus(AgentStatus.RUNNING);
     this.lastRoundError = undefined;
+    this.roundCancelledByUser = false;
     this.roundAbortController = new AbortController();
 
     // Propagate master abort to round
@@ -199,6 +202,8 @@ export class AgentInteractive {
         this.lastRoundError = `Terminated: ${result.terminateMode}`;
       }
     } catch (err) {
+      // User-initiated cancellation already logged by cancelCurrentRound().
+      if (this.roundCancelledByUser) return;
       // Agent survives round errors — log and settle status in runLoop.
       const errorMessage = err instanceof Error ? err.message : String(err);
       this.lastRoundError = errorMessage;
@@ -220,6 +225,7 @@ export class AgentInteractive {
    * Adds a visible "cancelled" info message and clears pending approvals.
    */
   cancelCurrentRound(): void {
+    this.roundCancelledByUser = true;
     this.roundAbortController?.abort();
     this.pendingApprovals.clear();
     this.addMessage('info', 'Agent round cancelled.', {
@@ -344,7 +350,7 @@ export class AgentInteractive {
    * On error → FAILED (terminal).
    */
   private settleRoundStatus(): void {
-    if (this.lastRoundError) {
+    if (this.lastRoundError && !this.roundCancelledByUser) {
       this.setStatus(AgentStatus.FAILED);
     } else {
       this.setStatus(AgentStatus.IDLE);
@@ -361,6 +367,7 @@ export class AgentInteractive {
       agentId: this.config.agentId,
       previousStatus,
       newStatus,
+      roundCancelledByUser: this.roundCancelledByUser || undefined,
       timestamp: Date.now(),
     });
   }
@@ -462,6 +469,11 @@ export class AgentInteractive {
               timestamp: Date.now(),
             } as AgentToolOutputUpdateEvent);
             await event.respond(outcome, payload);
+            // When the user denies a tool, cancel the round immediately
+            // so the agent doesn't waste a turn "acknowledging" the denial.
+            if (outcome === ToolConfirmationOutcome.Cancel) {
+              this.cancelCurrentRound();
+            }
           },
         } as ToolCallConfirmationDetails;
 

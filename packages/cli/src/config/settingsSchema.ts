@@ -1193,12 +1193,12 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'Display mode for multi-agent sessions. "tmux" uses tmux panes, "iterm2" uses iTerm2 tabs, "in-process" runs in the current terminal.',
+          'Display mode for multi-agent sessions. Currently only "in-process" is supported.',
         showInDialog: false,
         options: [
           { value: 'in-process', label: 'In-process' },
-          { value: 'tmux', label: 'tmux' },
-          { value: 'iterm2', label: 'iTerm2' },
+          // { value: 'tmux', label: 'tmux' },
+          // { value: 'iterm2', label: 'iTerm2' },
         ],
       },
       arena: {

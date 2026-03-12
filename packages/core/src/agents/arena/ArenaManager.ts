@@ -1105,7 +1105,11 @@ export class ArenaManager {
     return incoming;
   }
 
-  private updateAgentStatus(agentId: string, newStatus: AgentStatus): void {
+  private updateAgentStatus(
+    agentId: string,
+    newStatus: AgentStatus,
+    options?: { roundCancelledByUser?: boolean },
+  ): void {
     const agent = this.agents.get(agentId);
     if (!agent) {
       return;
@@ -1130,7 +1134,11 @@ export class ArenaManager {
       previousStatus === AgentStatus.RUNNING &&
       newStatus === AgentStatus.IDLE
     ) {
-      this.emitProgress(`Agent ${label} finished initial task.`, 'success');
+      if (options?.roundCancelledByUser) {
+        this.emitProgress(`Agent ${label} is cancelled by user.`, 'warning');
+      } else {
+        this.emitProgress(`Agent ${label} finished initial task.`, 'success');
+      }
     }
 
     // Emit progress messages for follow-up transitions (only after
@@ -1145,7 +1153,14 @@ export class ArenaManager {
         previousStatus === AgentStatus.RUNNING &&
         newStatus === AgentStatus.IDLE
       ) {
-        this.emitProgress(`Agent ${label} finished follow-up task.`, 'success');
+        if (options?.roundCancelledByUser) {
+          this.emitProgress(`Agent ${label} is cancelled by user.`, 'warning');
+        } else {
+          this.emitProgress(
+            `Agent ${label} finished follow-up task.`,
+            'success',
+          );
+        }
       }
     }
 
@@ -1317,7 +1332,10 @@ export class ArenaManager {
 
       agent.syncStats = syncStats;
 
-      const applyStatus = (incoming: AgentStatus) => {
+      const applyStatus = (
+        incoming: AgentStatus,
+        options?: { roundCancelledByUser?: boolean },
+      ) => {
         const resolved = this.resolveTransition(agent.status, incoming);
         if (!resolved) return;
         if (resolved === AgentStatus.FAILED) {
@@ -1327,14 +1345,16 @@ export class ArenaManager {
         if (isSettledStatus(resolved)) {
           agent.stats.durationMs = Date.now() - agent.startedAt;
         }
-        this.updateAgentStatus(agent.agentId, resolved);
+        this.updateAgentStatus(agent.agentId, resolved, options);
       };
 
       // Sync stats before mapping so counters are up-to-date even when
       // the provider omits usage_metadata events.
       const onStatusChange = (event: AgentStatusChangeEvent) => {
         syncStats();
-        applyStatus(event.newStatus);
+        applyStatus(event.newStatus, {
+          roundCancelledByUser: event.roundCancelledByUser,
+        });
         // Write status files so external consumers get a consistent
         // file-based view regardless of backend mode.
         this.flushInProcessStatusFiles().catch((err) =>

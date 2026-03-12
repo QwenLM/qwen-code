@@ -18,9 +18,10 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AgentStatus,
+  isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
@@ -38,6 +39,7 @@ import { useTextBuffer } from '../shared/text-buffer.js';
 import { calculatePromptWidths } from '../../utils/layoutUtils.js';
 import { BaseTextInput } from '../BaseTextInput.js';
 import { LoadingIndicator } from '../LoadingIndicator.js';
+import { QueuedMessageDisplay } from '../QueuedMessageDisplay.js';
 import { AgentFooter } from './AgentFooter.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
@@ -182,13 +184,35 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     [buffer, agentTabBarFocused, setAgentTabBarFocused],
   );
 
+  // ── Message queue (accumulate while streaming, flush as one prompt on idle) ──
+
+  const [messageQueue, setMessageQueue] = useState<string[]>([]);
+
+  // When agent becomes idle (and not terminal), flush queued messages.
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      messageQueue.length > 0 &&
+      status !== undefined &&
+      !isTerminalStatus(status)
+    ) {
+      const combined = messageQueue.join('\n');
+      setMessageQueue([]);
+      interactiveAgent?.enqueueMessage(combined);
+    }
+  }, [streamingState, messageQueue, interactiveAgent, status]);
+
   const handleSubmit = useCallback(
     (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || !interactiveAgent) return;
-      interactiveAgent.enqueueMessage(trimmed);
+      if (streamingState === StreamingState.Idle) {
+        interactiveAgent.enqueueMessage(trimmed);
+      } else {
+        setMessageQueue((prev) => [...prev, trimmed]);
+      }
     },
-    [interactiveAgent],
+    [interactiveAgent, streamingState],
   );
 
   // ── Render ──
@@ -254,6 +278,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
             <Text color={statusLabel.color}>{statusLabel.text}</Text>
           </Box>
         )}
+
+        <QueuedMessageDisplay messageQueue={messageQueue} />
 
         {/* Input prompt — always visible, like the main Composer */}
         <BaseTextInput

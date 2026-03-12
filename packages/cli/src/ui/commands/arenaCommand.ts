@@ -249,10 +249,7 @@ function executeArenaCommand(
     } else if (event.type === 'info') {
       addAndRecordArenaMessage(MessageType.INFO, event.message);
     } else {
-      addAndRecordArenaMessage(
-        MessageType.WARNING,
-        `Arena warning: ${event.message}`,
-      );
+      addAndRecordArenaMessage(MessageType.WARNING, event.message);
     }
   };
 
