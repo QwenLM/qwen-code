@@ -1610,4 +1610,25 @@ export default {
     '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
+  'Disable an active hook': 'Einen aktiven Hook deaktivieren',
+  'Enable a disabled hook': 'Einen deaktivierten Hook aktivieren',
+  'Export current session message history to a file':
+    'Den Nachrichtenverlauf der aktuellen Sitzung in eine Datei exportieren',
+  'Export session to HTML format': 'Sitzung in das HTML-Format exportieren',
+  'Export session to JSON format': 'Sitzung in das JSON-Format exportieren',
+  'Export session to JSONL format (one message per line)':
+    'Sitzung in das JSONL-Format exportieren (eine Nachricht pro Zeile)',
+  'Export session to markdown format':
+    'Sitzung in das Markdown-Format exportieren',
+  'generate personalized programming insights from your chat history':
+    'Personalisierte Programmier-Einblicke aus Ihrem Chatverlauf generieren',
+  'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
+  'List available skills.': 'Verfuegbare Skills auflisten.',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    'Verfuegbare Qwen Code-Tools auflisten. Verwendung: /tools [desc]',
+  'Manage installed extensions': 'Installierte Erweiterungen verwalten',
+  'Manage Qwen Code hooks': 'Qwen Code-Hooks verwalten',
+  'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurueckgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
 };

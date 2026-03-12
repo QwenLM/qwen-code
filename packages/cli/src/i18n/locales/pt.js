@@ -1605,4 +1605,25 @@ export default {
     '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
+  'Disable an active hook': 'Desativar um hook ativo',
+  'Enable a disabled hook': 'Ativar um hook desativado',
+  'Export current session message history to a file':
+    'Exportar o historico de mensagens da sessao atual para um arquivo',
+  'Export session to HTML format': 'Exportar a sessao para o formato HTML',
+  'Export session to JSON format': 'Exportar a sessao para o formato JSON',
+  'Export session to JSONL format (one message per line)':
+    'Exportar a sessao para o formato JSONL (uma mensagem por linha)',
+  'Export session to markdown format':
+    'Exportar a sessao para o formato Markdown',
+  'generate personalized programming insights from your chat history':
+    'Gerar insights personalizados de programacao a partir do seu historico de chat',
+  'List all configured hooks': 'Listar todos os hooks configurados',
+  'List available skills.': 'Listar habilidades disponiveis.',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    'Listar as ferramentas disponiveis do Qwen Code. Uso: /tools [desc]',
+  'Manage installed extensions': 'Gerenciar extensoes instaladas',
+  'Manage Qwen Code hooks': 'Gerenciar hooks do Qwen Code',
+  'Resume a previous session': 'Retomar uma sessao anterior',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restaurar uma chamada de ferramenta. Isso redefinira o historico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
 };

@@ -1617,4 +1617,25 @@ export default {
     '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
+  'Disable an active hook': 'Отключить активный хук',
+  'Enable a disabled hook': 'Включить отключенный хук',
+  'Export current session message history to a file':
+    'Экспортировать историю сообщений текущей сессии в файл',
+  'Export session to HTML format': 'Экспортировать сессию в формат HTML',
+  'Export session to JSON format': 'Экспортировать сессию в формат JSON',
+  'Export session to JSONL format (one message per line)':
+    'Экспортировать сессию в формат JSONL (одно сообщение на строку)',
+  'Export session to markdown format':
+    'Экспортировать сессию в формат Markdown',
+  'generate personalized programming insights from your chat history':
+    'Создать персонализированные инсайты по программированию на основе истории чата',
+  'List all configured hooks': 'Показать все настроенные хуки',
+  'List available skills.': 'Показать доступные навыки.',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    'Показать доступные инструменты Qwen Code. Использование: /tools [desc]',
+  'Manage installed extensions': 'Управлять установленными расширениями',
+  'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
+  'Resume a previous session': 'Продолжить предыдущую сессию',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Восстановить вызов инструмента. Это вернет историю разговора и файлов к состоянию на момент, когда был предложен этот вызов инструмента',
 };

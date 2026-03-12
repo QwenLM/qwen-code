@@ -1114,4 +1114,25 @@ export default {
     '↑/↓: ナビゲート | Space/Enter: 切り替え | Esc: キャンセル',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: ナビゲート | Enter: 選択 | Esc: キャンセル',
+  'Disable an active hook': '有効なフックを無効にする',
+  'Enable a disabled hook': '無効なフックを有効にする',
+  'Export current session message history to a file':
+    '現在のセッションのメッセージ履歴をファイルにエクスポートする',
+  'Export session to HTML format': 'セッションを HTML 形式でエクスポートする',
+  'Export session to JSON format': 'セッションを JSON 形式でエクスポートする',
+  'Export session to JSONL format (one message per line)':
+    'セッションを JSONL 形式でエクスポートする（1 行に 1 メッセージ）',
+  'Export session to markdown format':
+    'セッションを Markdown 形式でエクスポートする',
+  'generate personalized programming insights from your chat history':
+    'チャット履歴からパーソナライズされたプログラミングインサイトを生成する',
+  'List all configured hooks': '設定済みのフックをすべて表示する',
+  'List available skills.': '利用可能なスキルを一覧表示する。',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    '利用可能な Qwen Code ツールを一覧表示する。使用方法: /tools [desc]',
+  'Manage installed extensions': 'インストール済みの拡張機能を管理する',
+  'Manage Qwen Code hooks': 'Qwen Code のフックを管理する',
+  'Resume a previous session': '前のセッションを再開する',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'ツール呼び出しを復元します。これにより、会話とファイルの履歴はそのツール呼び出しが提案された時点の状態に戻ります',
 };
