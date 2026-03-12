@@ -1608,22 +1608,22 @@ export default {
   'Disable an active hook': 'Desativar um hook ativo',
   'Enable a disabled hook': 'Ativar um hook desativado',
   'Export current session message history to a file':
-    'Exportar o historico de mensagens da sessao atual para um arquivo',
-  'Export session to HTML format': 'Exportar a sessao para o formato HTML',
-  'Export session to JSON format': 'Exportar a sessao para o formato JSON',
+    'Exportar o histórico de mensagens da sessão atual para um arquivo',
+  'Export session to HTML format': 'Exportar a sessão para o formato HTML',
+  'Export session to JSON format': 'Exportar a sessão para o formato JSON',
   'Export session to JSONL format (one message per line)':
-    'Exportar a sessao para o formato JSONL (uma mensagem por linha)',
+    'Exportar a sessão para o formato JSONL (uma mensagem por linha)',
   'Export session to markdown format':
-    'Exportar a sessao para o formato Markdown',
+    'Exportar a sessão para o formato Markdown',
   'generate personalized programming insights from your chat history':
-    'Gerar insights personalizados de programacao a partir do seu historico de chat',
+    'Gerar insights personalizados de programação a partir do seu histórico de chat',
   'List all configured hooks': 'Listar todos os hooks configurados',
-  'List available skills.': 'Listar habilidades disponiveis.',
+  'List available skills.': 'Listar habilidades disponíveis.',
   'list available Qwen Code tools. Usage: /tools [desc]':
-    'Listar as ferramentas disponiveis do Qwen Code. Uso: /tools [desc]',
-  'Manage installed extensions': 'Gerenciar extensoes instaladas',
+    'Listar as ferramentas disponíveis do Qwen Code. Uso: /tools [desc]',
+  'Manage installed extensions': 'Gerenciar extensões instaladas',
   'Manage Qwen Code hooks': 'Gerenciar hooks do Qwen Code',
-  'Resume a previous session': 'Retomar uma sessao anterior',
+  'Resume a previous session': 'Retomar uma sessão anterior',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
-    'Restaurar uma chamada de ferramenta. Isso redefinira o historico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
+    'Restaurar uma chamada de ferramenta. Isso redefinirá o histórico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
 };

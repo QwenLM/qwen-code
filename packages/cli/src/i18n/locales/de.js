@@ -1623,12 +1623,12 @@ export default {
   'generate personalized programming insights from your chat history':
     'Personalisierte Programmier-Einblicke aus Ihrem Chatverlauf generieren',
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
-  'List available skills.': 'Verfuegbare Skills auflisten.',
+  'List available skills.': 'Verfügbare Skills auflisten.',
   'list available Qwen Code tools. Usage: /tools [desc]':
-    'Verfuegbare Qwen Code-Tools auflisten. Verwendung: /tools [desc]',
+    'Verfügbare Qwen Code-Tools auflisten. Verwendung: /tools [desc]',
   'Manage installed extensions': 'Installierte Erweiterungen verwalten',
   'Manage Qwen Code hooks': 'Qwen Code-Hooks verwalten',
   'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
-    'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurueckgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
+    'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurückgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
 };
