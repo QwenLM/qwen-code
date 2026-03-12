@@ -9,10 +9,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import Link from 'ink-link';
-import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
 import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 
@@ -30,23 +28,15 @@ interface QwenOAuthProgressProps {
   authMessage?: string | null;
 }
 
-const debugLogger = createDebugLogger('QWEN_OAUTH_PROGRESS');
-
 /**
- * Static QR Code Display Component
- * Renders the QR code and URL once and doesn't re-render unless the URL changes
+ * Static Auth URL Display Component
+ * Renders the authorization URL once and doesn't re-render unless the URL changes
  */
-function QrCodeDisplay({
+function AuthUrlDisplay({
   verificationUrl,
-  qrCodeData,
 }: {
   verificationUrl: string;
-  qrCodeData: string | null;
-}): React.JSX.Element | null {
-  if (!qrCodeData) {
-    return null;
-  }
-
+}): React.JSX.Element {
   return (
     <Box
       borderStyle="round"
@@ -68,14 +58,6 @@ function QrCodeDisplay({
           {verificationUrl}
         </Text>
       </Link>
-
-      <Box marginTop={1}>
-        <Text>{t('Or scan the QR code below:')}</Text>
-      </Box>
-
-      <Box marginTop={1}>
-        <Text>{qrCodeData}</Text>
-      </Box>
     </Box>
   );
 }
@@ -134,7 +116,6 @@ export function QwenOAuthProgress({
   const defaultTimeout = deviceAuth?.expires_in || 300; // Default 5 minutes
   const [timeRemaining, setTimeRemaining] = useState<number>(defaultTimeout);
   const [dots, setDots] = useState<string>('');
-  const [qrCodeData, setQrCodeData] = useState<string | null>(null);
 
   useKeypress(
     (key) => {
@@ -147,30 +128,6 @@ export function QwenOAuthProgress({
     },
     { isActive: true },
   );
-
-  // Generate QR code once when device auth is available
-  useEffect(() => {
-    if (!deviceAuth?.verification_uri_complete) {
-      return;
-    }
-
-    const generateQR = () => {
-      try {
-        qrcode.generate(
-          deviceAuth.verification_uri_complete,
-          { small: true },
-          (qrcode: string) => {
-            setQrCodeData(qrcode);
-          },
-        );
-      } catch (error) {
-        debugLogger.error('Failed to generate QR code:', error);
-        setQrCodeData(null);
-      }
-    };
-
-    generateQR();
-  }, [deviceAuth?.verification_uri_complete]);
 
   // Countdown timer
   useEffect(() => {
@@ -199,17 +156,14 @@ export function QwenOAuthProgress({
     return () => clearInterval(dotsTimer);
   }, []);
 
-  // Memoize the QR code display to prevent unnecessary re-renders
-  const qrCodeDisplay = useMemo(() => {
+  // Memoize the auth URL display to prevent unnecessary re-renders
+  const authUrlDisplay = useMemo(() => {
     if (!deviceAuth?.verification_uri_complete) return null;
 
     return (
-      <QrCodeDisplay
-        verificationUrl={deviceAuth.verification_uri_complete}
-        qrCodeData={qrCodeData}
-      />
+      <AuthUrlDisplay verificationUrl={deviceAuth.verification_uri_complete} />
     );
-  }, [deviceAuth?.verification_uri_complete, qrCodeData]);
+  }, [deviceAuth?.verification_uri_complete]);
 
   // Handle timeout state
   if (authStatus === 'timeout') {
@@ -306,8 +260,8 @@ export function QwenOAuthProgress({
 
   return (
     <Box flexDirection="column" width="100%">
-      {/* Static QR Code Display */}
-      {qrCodeDisplay}
+      {/* Static Auth URL Display */}
+      {authUrlDisplay}
 
       {/* Dynamic Status Display */}
       <StatusDisplay timeRemaining={timeRemaining} dots={dots} />
