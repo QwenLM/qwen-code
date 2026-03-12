@@ -831,7 +831,7 @@ export class CoreToolScheduler {
               response: createErrorResponse(
                 reqInfo,
                 truncationError,
-                undefined,
+                ToolErrorType.OUTPUT_TRUNCATED,
               ),
               durationMs: 0,
             };
