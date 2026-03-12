@@ -127,5 +127,153 @@ describe('AcpFileHandler', () => {
         'utf-8',
       );
     });
+
+    it('trims whitespace from path', async () => {
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+
+      await handler.handleWriteTextFile({
+        path: '  /test/dir/file.txt  ',
+        content: 'hello',
+        sessionId: 'sid',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/dir/file.txt',
+        'hello',
+        'utf-8',
+      );
+    });
+
+    it('rejects empty path', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: '',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path: path must be a non-empty string');
+    });
+
+    it('rejects whitespace-only path', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: '   ',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow(
+        'Invalid path: path cannot be empty or whitespace-only',
+      );
+    });
+
+    it('rejects non-string path (number)', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: 123 as unknown as string,
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path: path must be a non-empty string');
+    });
+
+    it('rejects null path', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: null as unknown as string,
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path: path must be a non-empty string');
+    });
+
+    it('rejects undefined path', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: undefined as unknown as string,
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path: path must be a non-empty string');
+    });
+
+    it('rejects path with null byte', async () => {
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/test/file\0.txt',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path: path contains null byte character');
+    });
+
+    it('handles EINVAL error with helpful message', async () => {
+      vi.mocked(fs.mkdir).mockRejectedValue(
+        Object.assign(new Error('invalid argument'), { code: 'EINVAL' }),
+      );
+
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/invalid:path/file.txt',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Invalid path');
+    });
+
+    it('handles EACCES error with helpful message', async () => {
+      vi.mocked(fs.mkdir).mockRejectedValue(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/root/protected/file.txt',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Permission denied');
+    });
+
+    it('handles ENOSPC error with helpful message', async () => {
+      vi.mocked(fs.mkdir).mockRejectedValue(
+        Object.assign(new Error('no space left'), { code: 'ENOSPC' }),
+      );
+
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/test/file.txt',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('No space left on device');
+    });
+
+    it('handles EISDIR error with helpful message', async () => {
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.writeFile).mockRejectedValue(
+        Object.assign(new Error('is a directory'), { code: 'EISDIR' }),
+      );
+
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/test/directory',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow('Cannot write to directory');
+    });
+
+    it('handles generic errors', async () => {
+      vi.mocked(fs.mkdir).mockRejectedValue(new Error('something went wrong'));
+
+      await expect(
+        handler.handleWriteTextFile({
+          path: '/test/file.txt',
+          content: 'hello',
+          sessionId: 'sid',
+        }),
+      ).rejects.toThrow("Failed to write file '/test/file.txt'");
+    });
   });
 });

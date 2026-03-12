@@ -97,22 +97,76 @@ export class AcpFileHandler {
     );
     console.log(`[ACP] Content size: ${params.content.length} bytes`);
 
+    // Validate path parameter
+    if (!params.path || typeof params.path !== 'string') {
+      const error = new Error(
+        `Invalid path: path must be a non-empty string, received ${String(params.path)}`,
+      );
+      console.error(`[ACP] Invalid path parameter:`, params.path);
+      throw error;
+    }
+
+    // Trim and validate the path
+    const trimmedPath = params.path.trim();
+    if (!trimmedPath) {
+      const error = new Error(
+        'Invalid path: path cannot be empty or whitespace-only',
+      );
+      console.error(`[ACP] Empty path provided`);
+      throw error;
+    }
+
+    // Check for null bytes which can cause security issues
+    if (trimmedPath.includes('\0')) {
+      const error = new Error(
+        'Invalid path: path contains null byte character',
+      );
+      console.error(`[ACP] Path contains null byte:`, trimmedPath);
+      throw error;
+    }
+
     try {
       // Ensure directory exists
-      const dirName = path.dirname(params.path);
+      const dirName = path.dirname(trimmedPath);
       console.log(`[ACP] Ensuring directory exists: ${dirName}`);
       await fs.mkdir(dirName, { recursive: true });
 
       // Write file
-      await fs.writeFile(params.path, params.content, 'utf-8');
+      await fs.writeFile(trimmedPath, params.content, 'utf-8');
 
-      console.log(`[ACP] Successfully wrote file: ${params.path}`);
+      console.log(`[ACP] Successfully wrote file: ${trimmedPath}`);
       return null;
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error(`[ACP] Failed to write file ${params.path}:`, errorMsg);
+      console.error(`[ACP] Failed to write file ${trimmedPath}:`, errorMsg);
 
-      throw new Error(`Failed to write file '${params.path}': ${errorMsg}`);
+      // Provide more specific error messages based on error code
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError?.code === 'EINVAL') {
+        throw new Error(
+          `Invalid path '${trimmedPath}': ${errorMsg}. Ensure the path format is valid for your operating system.`,
+          { cause: error },
+        );
+      } else if (nodeError?.code === 'EACCES') {
+        throw new Error(
+          `Permission denied writing to '${trimmedPath}': ${errorMsg}`,
+          { cause: error },
+        );
+      } else if (nodeError?.code === 'ENOSPC') {
+        throw new Error(
+          `No space left on device while writing to '${trimmedPath}': ${errorMsg}`,
+          { cause: error },
+        );
+      } else if (nodeError?.code === 'EISDIR') {
+        throw new Error(
+          `Cannot write to directory '${trimmedPath}': ${errorMsg}. Expected a file path.`,
+          { cause: error },
+        );
+      }
+
+      throw new Error(`Failed to write file '${trimmedPath}': ${errorMsg}`, {
+        cause: error,
+      });
     }
   }
 }
