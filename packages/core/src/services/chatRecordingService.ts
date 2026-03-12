@@ -81,6 +81,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Response ID from the LLM API for telemetry/tracing correlation */
+  response_id?: string;
   /**
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
@@ -299,12 +301,14 @@ export class ChatRecordingService {
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
    * @param data.tokens Token usage statistics
+   * @param data.responseId Response ID from the LLM API
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    responseId?: string;
   }): void {
     try {
       const record: ChatRecord = {
@@ -318,6 +322,10 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+      }
+
+      if (data.responseId) {
+        record.response_id = data.responseId;
       }
 
       this.appendRecord(record);
