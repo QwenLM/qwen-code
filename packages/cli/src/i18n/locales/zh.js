@@ -1482,4 +1482,24 @@ export default {
     '↑/↓: 导航 | Space/Enter: 切换 | Esc: 取消',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: 导航 | Enter: 选择 | Esc: 取消',
+  'Disable an active hook': '禁用已启用的 Hook',
+  'Enable a disabled hook': '启用已禁用的 Hook',
+  'Export current session message history to a file':
+    '将当前会话的消息记录导出到文件',
+  'Export session to HTML format': '将会话导出为 HTML 文件',
+  'Export session to JSON format': '将会话导出为 JSON 文件',
+  'Export session to JSONL format (one message per line)':
+    '将会话导出为 JSONL 文件（每行一条消息）',
+  'Export session to markdown format': '将会话导出为 Markdown 文件',
+  'generate personalized programming insights from your chat history':
+    '根据你的聊天记录生成个性化编程洞察',
+  'List all configured hooks': '列出所有已配置的 Hook',
+  'List available skills.': '列出可用技能。',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    '列出可用的 Qwen Code 工具。用法：/tools [desc]',
+  'Manage installed extensions': '管理已安装的扩展',
+  'Manage Qwen Code hooks': '管理 Qwen Code Hook',
+  'Resume a previous session': '恢复先前会话',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    '恢复某次工具调用。这将把对话与文件历史重置到提出该工具调用建议时的状态',
 };

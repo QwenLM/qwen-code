@@ -1662,4 +1662,24 @@ export default {
     '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigate | Enter: Select | Esc: Cancel',
+  'Disable an active hook': 'Disable an active hook',
+  'Enable a disabled hook': 'Enable a disabled hook',
+  'Export current session message history to a file':
+    'Export current session message history to a file',
+  'Export session to HTML format': 'Export session to HTML format',
+  'Export session to JSON format': 'Export session to JSON format',
+  'Export session to JSONL format (one message per line)':
+    'Export session to JSONL format (one message per line)',
+  'Export session to markdown format': 'Export session to markdown format',
+  'generate personalized programming insights from your chat history':
+    'generate personalized programming insights from your chat history',
+  'List all configured hooks': 'List all configured hooks',
+  'List available skills.': 'List available skills.',
+  'list available Qwen Code tools. Usage: /tools [desc]':
+    'list available Qwen Code tools. Usage: /tools [desc]',
+  'Manage installed extensions': 'Manage installed extensions',
+  'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
+  'Resume a previous session': 'Resume a previous session',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
 };
