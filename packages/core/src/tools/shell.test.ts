@@ -37,7 +37,6 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import * as summarizer from '../utils/summarizer.js';
 import { ToolErrorType } from './tool-error.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
@@ -933,44 +932,29 @@ describe('ShellTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
     it('should not request confirmation for read-only commands', async () => {
       const invocation = shellTool.build({
         command: 'ls -la',
         is_background: false,
       });
 
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
+      const permission = await invocation.getDefaultPermission();
 
-      expect(confirmation).toBe(false);
+      expect(permission).toBe('allow');
     });
 
-    it('should request confirmation for a new command and whitelist it on "Always"', async () => {
+    it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-
-      expect(confirmation).not.toBe(false);
-      expect(confirmation && confirmation.type).toBe('exec');
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (confirmation as any).onConfirm(
-        ToolConfirmationOutcome.ProceedAlways,
-      );
-
-      // Should now be whitelisted
-      const secondInvocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
-      });
-      const secondConfirmation = await secondInvocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(secondConfirmation).toBe(false);
+      expect(details.type).toBe('exec');
     });
 
     it('should throw an error if validation fails', () => {

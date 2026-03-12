@@ -197,11 +197,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return `Use skill: "${this.params.skill}"`;
   }
 
-  override async shouldConfirmExecute(): Promise<false> {
-    // Skill loading is a read-only operation, no confirmation needed
-    return false;
-  }
-
   async execute(
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,

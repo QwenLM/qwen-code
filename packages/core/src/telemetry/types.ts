@@ -71,7 +71,11 @@ export class StartSessionEvent implements BaseTelemetryEvent {
     this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    this.core_tools_enabled = (config.getCoreTools() ?? []).join(',');
+    this.core_tools_enabled = (
+      config.getPermissionManager?.()?.getAllowRawStrings() ??
+      config.getCoreTools() ??
+      []
+    ).join(',');
     this.approval_mode = config.getApprovalMode();
     this.api_key_enabled = useGemini || useVertex;
     this.vertex_ai_enabled = useVertex;

@@ -18,13 +18,10 @@ import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
   ToolConfirmationOutcome,
-  Kind,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
@@ -37,11 +34,14 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpath } from '../utils/paths.js';
 import {
   getCommandRoots,
-  isCommandAllowed,
-  isCommandNeedsPermission,
   stripShellWrapper,
+  detectCommandSubstitution,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isShellCommandReadOnlyAST,
+  extractCommandRules,
+} from '../utils/shellAstParser.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -63,7 +63,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
-    private readonly allowlist: Set<string>,
   ) {
     super(params);
   }
@@ -89,36 +88,64 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
+  /**
+   * AST-based permission check for the shell command.
+   * - Command substitution → 'deny' (security)
+   * - Read-only commands (via AST analysis) → 'allow'
+   * - All other commands → 'ask'
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
     const command = stripShellWrapper(this.params.command);
-    const rootCommands = [...new Set(getCommandRoots(command))];
-    const commandsToConfirm = rootCommands.filter(
-      (command) => !this.allowlist.has(command),
-    );
 
-    if (commandsToConfirm.length === 0) {
-      return false; // already approved and allowlisted
+    // Security: command substitution ($(), ``, <(), >()) → deny
+    if (detectCommandSubstitution(command)) {
+      return 'deny';
     }
 
-    const permissionCheck = isCommandNeedsPermission(command);
-    if (!permissionCheck.requiresPermission) {
-      return false;
+    // AST-based read-only detection
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
+    }
+
+    return 'ask';
+  }
+
+  /**
+   * Constructs confirmation dialog details for a shell command that needs
+   * user approval.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const command = stripShellWrapper(this.params.command);
+    const rootCommands = [...new Set(getCommandRoots(command))];
+
+    // Extract minimum-scope permission rules for this command.
+    let permissionRules: string[] = [];
+    try {
+      permissionRules = (await extractCommandRules(command)).map(
+        (rule) => `Bash(${rule})`,
+      );
+    } catch (e) {
+      debugLogger.warn('Failed to extract command rules:', e);
     }
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
       command: this.params.command,
-      rootCommand: commandsToConfirm.join(', '),
+      rootCommand: rootCommands.join(', '),
+      permissionRules,
       onConfirm: async (
-        outcome: ToolConfirmationOutcome,
+        _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          commandsToConfirm.forEach((command) => this.allowlist.add(command));
-        }
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
@@ -541,7 +568,6 @@ export class ShellTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static Name: string = ToolNames.SHELL;
-  private allowlist: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
     super(
@@ -586,16 +612,9 @@ export class ShellTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ShellToolParams,
   ): string | null {
-    const commandCheck = isCommandAllowed(params.command, this.config);
-    if (!commandCheck.allowed) {
-      if (!commandCheck.reason) {
-        debugLogger.error(
-          'Unexpected: isCommandAllowed returned false without a reason',
-        );
-        return `Command is not allowed: ${params.command}`;
-      }
-      return commandCheck.reason;
-    }
+    // NOTE: Permission checks (command substitution, read-only detection, PM rules)
+    // are now handled at L3 (getDefaultPermission) and L4 (PM override) in
+    // coreToolScheduler. This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
@@ -646,6 +665,6 @@ export class ShellTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ShellToolParams,
   ): ToolInvocation<ShellToolParams, ToolResult> {
-    return new ShellToolInvocation(this.config, params, this.allowlist);
+    return new ShellToolInvocation(this.config, params);
   }
 }

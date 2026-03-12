@@ -42,6 +42,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import { buildPermissionRules } from '../permissions/rule-parser.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -51,7 +52,6 @@ import {
 import * as Diff from 'diff';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
@@ -746,27 +746,43 @@ export class CoreToolScheduler {
         (reqInfo): ToolCall => {
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
-          const excludeTools = this.config.getExcludeTools?.() ?? undefined;
-          if (excludeTools && excludeTools.length > 0) {
-            const normalizedToolName = reqInfo.name.toLowerCase().trim();
-            const excludedMatch = excludeTools.find(
-              (excludedTool) =>
-                excludedTool.toLowerCase().trim() === normalizedToolName,
-            );
+          const pm = this.config.getPermissionManager?.();
+          if (pm && !pm.isToolEnabled(reqInfo.name)) {
+            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            return {
+              status: 'error',
+              request: reqInfo,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(permissionErrorMessage),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+              durationMs: 0,
+            };
+          }
 
-            if (excludedMatch) {
-              // The tool exists but is excluded - return permission error directly
-              const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
-              return {
-                status: 'error',
-                request: reqInfo,
-                response: createErrorResponse(
-                  reqInfo,
-                  new Error(permissionErrorMessage),
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-                durationMs: 0,
-              };
+          // Legacy fallback: check getExcludeTools() when PM is not available
+          if (!pm) {
+            const excludeTools = this.config.getExcludeTools?.() ?? undefined;
+            if (excludeTools && excludeTools.length > 0) {
+              const normalizedToolName = reqInfo.name.toLowerCase().trim();
+              const excludedMatch = excludeTools.find(
+                (excludedTool) =>
+                  excludedTool.toLowerCase().trim() === normalizedToolName,
+              );
+              if (excludedMatch) {
+                const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
+                return {
+                  status: 'error',
+                  request: reqInfo,
+                  response: createErrorResponse(
+                    reqInfo,
+                    new Error(permissionErrorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                  durationMs: 0,
+                };
+              }
             }
           }
 
@@ -856,10 +872,86 @@ export class CoreToolScheduler {
             continue;
           }
 
-          const confirmationDetails =
-            await invocation.shouldConfirmExecute(signal);
+          // =================================================================
+          // L3→L4→L5 Permission Flow
+          // =================================================================
 
-          if (!confirmationDetails) {
+          // ---- L3: Tool's default permission ----
+          const defaultPermission: string =
+            await invocation.getDefaultPermission();
+
+          // ---- L4: PermissionManager override (if relevant rules exist) ----
+          const pm = this.config.getPermissionManager?.();
+          let finalPermission = defaultPermission;
+          let pmForcedAsk = false;
+
+          // Build invocation context from tool params.
+          // This is used both by the PM evaluation below and later by
+          // centralized permission-rule generation (Always Allow).
+          const toolParams = invocation.params as Record<string, unknown>;
+          const shellCommand =
+            'command' in toolParams ? String(toolParams['command']) : undefined;
+          // Extract file path — tools use 'absolute_path', 'file_path',
+          // or 'path' (LS / grep / glob).
+          let invocationFilePath =
+            typeof toolParams['absolute_path'] === 'string'
+              ? toolParams['absolute_path']
+              : typeof toolParams['file_path'] === 'string'
+                ? toolParams['file_path']
+                : undefined;
+          if (
+            invocationFilePath === undefined &&
+            typeof toolParams['path'] === 'string'
+          ) {
+            // LS uses absolute paths; grep/glob may be relative to targetDir.
+            invocationFilePath = path.isAbsolute(toolParams['path'])
+              ? toolParams['path']
+              : path.resolve(this.config.getTargetDir(), toolParams['path']);
+          }
+          let invocationDomain: string | undefined;
+          if (typeof toolParams['url'] === 'string') {
+            try {
+              invocationDomain = new URL(toolParams['url']).hostname;
+            } catch {
+              // malformed URL — leave domain undefined
+            }
+          }
+          // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+          const literalSpecifier =
+            typeof toolParams['skill'] === 'string'
+              ? toolParams['skill']
+              : typeof toolParams['subagent_type'] === 'string'
+                ? toolParams['subagent_type']
+                : undefined;
+          const pmCtx = {
+            toolName: reqInfo.name,
+            command: shellCommand,
+            filePath: invocationFilePath,
+            domain: invocationDomain,
+            specifier: literalSpecifier,
+          };
+
+          if (pm && defaultPermission !== 'deny') {
+            if (pm.hasRelevantRules(pmCtx)) {
+              const pmDecision = pm.evaluate(pmCtx);
+              if (pmDecision !== 'default') {
+                finalPermission = pmDecision;
+                // If PM explicitly forces 'ask', adding allow rules won't help
+                // because ask has higher priority. Hide "Always allow" options.
+                if (pmDecision === 'ask') {
+                  pmForcedAsk = true;
+                }
+              }
+            }
+          }
+
+          // ---- L5: Final decision based on permission + ApprovalMode ----
+          const approvalMode = this.config.getApprovalMode();
+          const isPlanMode = approvalMode === ApprovalMode.PLAN;
+          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+
+          if (finalPermission === 'allow') {
+            // Auto-approve: tool is inherently safe (read-only) or PM allows
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -868,54 +960,89 @@ export class CoreToolScheduler {
             continue;
           }
 
-          const allowedTools = this.config.getAllowedTools() || [];
-          const isPlanMode =
-            this.config.getApprovalMode() === ApprovalMode.PLAN;
-          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+          if (finalPermission === 'deny') {
+            // Hard deny: security violation or PM explicit deny
+            const denyMessage =
+              defaultPermission === 'deny'
+                ? `Tool "${reqInfo.name}" is denied: command substitution is not allowed for security reasons.`
+                : `Tool "${reqInfo.name}" is denied by permission rules.`;
+            this.setStatusInternal(
+              reqInfo.callId,
+              'error',
+              createErrorResponse(
+                reqInfo,
+                new Error(denyMessage),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+            continue;
+          }
 
-          // ask_user_question needs the confirmation flow even in plan mode
-          // so the user can actually answer the questions
+          // finalPermission === 'ask' (or 'default' from PM → treat as ask)
+          // apply ApprovalMode overrides.
+          // ask_user_question always needs confirmation so the user can answer;
+          // it must bypass both YOLO auto-approve and plan-mode blocking.
           const isAskUserQuestionTool =
-            confirmationDetails &&
-            confirmationDetails.type === 'ask_user_question';
+            reqInfo.name === ToolNames.ASK_USER_QUESTION;
 
-          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
-            if (confirmationDetails) {
-              this.setStatusInternal(reqInfo.callId, 'error', {
-                callId: reqInfo.callId,
-                responseParts: convertToFunctionResponse(
-                  reqInfo.name,
-                  reqInfo.callId,
-                  getPlanModeSystemReminder(),
-                ),
-                resultDisplay: 'Plan mode blocked a non-read-only tool call.',
-                error: undefined,
-                errorType: undefined,
-              });
-            } else {
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
-            }
-          } else if (
-            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
-              doesToolInvocationMatch(
-                toolCall.tool,
-                invocation,
-                allowedTools,
-              )) &&
-            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
-            confirmationDetails.type !== 'ask_user_question'
-          ) {
+          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
+          } else if (
+            isPlanMode &&
+            !isExitPlanModeTool &&
+            !isAskUserQuestionTool
+          ) {
+            this.setStatusInternal(reqInfo.callId, 'error', {
+              callId: reqInfo.callId,
+              responseParts: convertToFunctionResponse(
+                reqInfo.name,
+                reqInfo.callId,
+                getPlanModeSystemReminder(),
+              ),
+              resultDisplay: 'Plan mode blocked a non-read-only tool call.',
+              error: undefined,
+              errorType: undefined,
+            });
           } else {
+            // Get confirmation details from the tool
+            const confirmationDetails =
+              await invocation.getConfirmationDetails(signal);
+
+            // ── Centralised rule injection ──────────────────────────────────
+            // If the tool did not provide its own permissionRules (e.g. Shell
+            // and WebFetch already do), generate minimum-scope rules from
+            // the invocation context so that "Always Allow" persists a
+            // properly scoped rule rather than nothing.
+            // Only exec/mcp/info types support the permissionRules field.
+            if (
+              (confirmationDetails.type === 'exec' ||
+                confirmationDetails.type === 'mcp' ||
+                confirmationDetails.type === 'info') &&
+              !confirmationDetails.permissionRules
+            ) {
+              confirmationDetails.permissionRules = buildPermissionRules(pmCtx);
+            }
+
+            // AUTO_EDIT mode: auto-approve edit-like and info tools
+            if (
+              approvalMode === ApprovalMode.AUTO_EDIT &&
+              (confirmationDetails.type === 'edit' ||
+                confirmationDetails.type === 'info')
+            ) {
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              continue;
+            }
+
             /**
-             * In non-interactive mode where no user will respond to approval prompts,
-             * and not running as IDE companion or Zed integration, automatically deny approval.
-             * This is intended to create an explicit denial of the tool call,
-             * rather than silently waiting for approval and hanging forever.
+             * In non-interactive mode, automatically deny.
              */
             const shouldAutoDeny =
               !this.config.isInteractive() &&
@@ -963,6 +1090,10 @@ export class CoreToolScheduler {
             const originalOnConfirm = confirmationDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
+              // When PM has an explicit 'ask' rule, 'always allow' would be
+              // ineffective because ask takes priority over allow.
+              // Hide the option so users aren't misled.
+              ...(pmForcedAsk ? { hideAlwaysAllow: true } : {}),
               onConfirm: (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
@@ -1025,7 +1156,43 @@ export class CoreToolScheduler {
 
     await originalOnConfirm(outcome, payload);
 
-    if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+    if (
+      outcome === ToolConfirmationOutcome.ProceedAlways ||
+      outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+      outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+    ) {
+      // Persist permission rules for Project/User scope outcomes
+      if (
+        outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+        outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+      ) {
+        const scope =
+          outcome === ToolConfirmationOutcome.ProceedAlwaysProject
+            ? 'project'
+            : 'user';
+        // Read permissionRules from the stored confirmation details first,
+        // falling back to payload for backward compatibility.
+        const details = (toolCall as WaitingToolCall | undefined)
+          ?.confirmationDetails;
+        const detailsRules = (details as Record<string, unknown> | undefined)?.[
+          'permissionRules'
+        ] as string[] | undefined;
+        const payloadRules = payload?.permissionRules;
+        const rules = payloadRules ?? detailsRules ?? [];
+        const persistFn = this.config.getOnPersistPermissionRule?.();
+        const pm = this.config.getPermissionManager?.();
+        if (rules.length > 0) {
+          for (const rule of rules) {
+            // 1. Persist to disk (settings.json)
+            if (persistFn) {
+              await persistFn(scope, 'allow', rule);
+            }
+            // 2. Immediately update in-memory PermissionManager so the
+            //    new rule takes effect without restart.
+            pm?.addPersistentRule(rule, 'allow');
+          }
+        }
+      }
       await this.autoApproveCompatiblePendingTools(signal, callId);
     }
 
@@ -1385,10 +1552,57 @@ export class CoreToolScheduler {
 
     for (const pendingTool of pendingTools) {
       try {
-        const stillNeedsConfirmation =
-          await pendingTool.invocation.shouldConfirmExecute(signal);
+        // Re-run L3→L4 to see if the tool can now be auto-approved
+        const defaultPermission =
+          await pendingTool.invocation.getDefaultPermission();
+        let finalPermission = defaultPermission;
 
-        if (!stillNeedsConfirmation) {
+        // L4: PM override
+        const pm = this.config.getPermissionManager?.();
+        if (pm && defaultPermission !== 'deny') {
+          const params = pendingTool.invocation.params as Record<
+            string,
+            unknown
+          >;
+          const shellCommand =
+            'command' in params ? String(params['command']) : undefined;
+          const filePath =
+            typeof params['absolute_path'] === 'string'
+              ? params['absolute_path']
+              : typeof params['file_path'] === 'string'
+                ? params['file_path']
+                : undefined;
+          let domain: string | undefined;
+          if (typeof params['url'] === 'string') {
+            try {
+              domain = new URL(params['url']).hostname;
+            } catch {
+              // malformed URL
+            }
+          }
+          // Generic specifier for literal matching (Skill name, Task subagent type, etc.)
+          const literalSpecifier =
+            typeof params['skill'] === 'string'
+              ? params['skill']
+              : typeof params['subagent_type'] === 'string'
+                ? params['subagent_type']
+                : undefined;
+          const pmCtx = {
+            toolName: pendingTool.request.name,
+            command: shellCommand,
+            filePath,
+            domain,
+            specifier: literalSpecifier,
+          };
+          if (pm.hasRelevantRules(pmCtx)) {
+            const pmDecision = pm.evaluate(pmCtx);
+            if (pmDecision !== 'default') {
+              finalPermission = pmDecision;
+            }
+          }
+        }
+
+        if (finalPermission === 'allow') {
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,

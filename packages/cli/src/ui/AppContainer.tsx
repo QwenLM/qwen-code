@@ -236,6 +236,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
     useCodingPlanUpdates(settings, config, historyManager.addItem);
 
+  const [isTrustDialogOpen, setTrustDialogOpen] = useState(false);
+  const openTrustDialog = useCallback(() => setTrustDialogOpen(true), []);
+  const closeTrustDialog = useCallback(() => setTrustDialogOpen(false), []);
+
   const [isPermissionsDialogOpen, setPermissionsDialogOpen] = useState(false);
   const openPermissionsDialog = useCallback(
     () => setPermissionsDialogOpen(true),
@@ -509,6 +513,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
@@ -535,6 +540,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openModelDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
+      openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
       addConfirmUpdateExtensionRequest,
@@ -1304,6 +1310,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isModelDialogOpen ||
+    isTrustDialogOpen ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
     isAuthenticating ||
@@ -1354,6 +1361,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isTrustDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1447,6 +1455,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isTrustDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1544,6 +1553,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeSettingsDialog,
       closeModelDialog,
       dismissCodingPlanUpdate,
+      closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,
@@ -1593,6 +1603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeSettingsDialog,
       closeModelDialog,
       dismissCodingPlanUpdate,
+      closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,

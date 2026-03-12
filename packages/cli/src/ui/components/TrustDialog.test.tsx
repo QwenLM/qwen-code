@@ -9,13 +9,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
+import { TrustDialog } from './TrustDialog.js';
 import { TrustLevel } from '../../config/trustedFolders.js';
 import { waitFor, act } from '@testing-library/react';
 import * as processUtils from '../../utils/processUtils.js';
-import { usePermissionsModifyTrust } from '../hooks/usePermissionsModifyTrust.js';
+import { useTrustModify } from '../hooks/useTrustModify.js';
 
-// Hoist mocks for dependencies of the usePermissionsModifyTrust hook
+// Hoist mocks for dependencies of the useTrustModify hook
 const mockedCwd = vi.hoisted(() => vi.fn());
 const mockedLoadTrustedFolders = vi.hoisted(() => vi.fn());
 const mockedIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
@@ -39,16 +39,16 @@ vi.mock('../../config/trustedFolders.js', () => ({
   },
 }));
 
-vi.mock('../hooks/usePermissionsModifyTrust.js');
+vi.mock('../hooks/useTrustModify.js');
 
-describe('PermissionsModifyTrustDialog', () => {
+describe('TrustDialog', () => {
   let mockUpdateTrustLevel: Mock;
   let mockCommitTrustLevelChange: Mock;
 
   beforeEach(() => {
     mockUpdateTrustLevel = vi.fn();
     mockCommitTrustLevelChange = vi.fn();
-    vi.mocked(usePermissionsModifyTrust).mockReturnValue({
+    vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
       isInheritedTrustFromParent: false,
@@ -66,7 +66,7 @@ describe('PermissionsModifyTrustDialog', () => {
 
   it('should render the main dialog with current trust level', async () => {
     const { lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
+      <TrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -77,7 +77,7 @@ describe('PermissionsModifyTrustDialog', () => {
   });
 
   it('should display the inherited trust note from parent', async () => {
-    vi.mocked(usePermissionsModifyTrust).mockReturnValue({
+    vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
       isInheritedTrustFromParent: true,
@@ -88,7 +88,7 @@ describe('PermissionsModifyTrustDialog', () => {
       isFolderTrustEnabled: true,
     });
     const { lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
+      <TrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -99,7 +99,7 @@ describe('PermissionsModifyTrustDialog', () => {
   });
 
   it('should display the inherited trust note from IDE', async () => {
-    vi.mocked(usePermissionsModifyTrust).mockReturnValue({
+    vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
       isInheritedTrustFromParent: false,
@@ -110,7 +110,7 @@ describe('PermissionsModifyTrustDialog', () => {
       isFolderTrustEnabled: true,
     });
     const { lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
+      <TrustDialog onExit={vi.fn()} addItem={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -123,7 +123,7 @@ describe('PermissionsModifyTrustDialog', () => {
   it('should call onExit when escape is pressed', async () => {
     const onExit = vi.fn();
     const { stdin, lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={onExit} addItem={vi.fn()} />,
+      <TrustDialog onExit={onExit} addItem={vi.fn()} />,
     );
 
     await waitFor(() => expect(lastFrame()).not.toContain('Loading...'));
@@ -141,7 +141,7 @@ describe('PermissionsModifyTrustDialog', () => {
     const mockRelaunchApp = vi
       .spyOn(processUtils, 'relaunchApp')
       .mockResolvedValue(undefined);
-    vi.mocked(usePermissionsModifyTrust).mockReturnValue({
+    vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
       isInheritedTrustFromParent: false,
@@ -154,7 +154,7 @@ describe('PermissionsModifyTrustDialog', () => {
 
     const onExit = vi.fn();
     const { stdin, lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={onExit} addItem={vi.fn()} />,
+      <TrustDialog onExit={onExit} addItem={vi.fn()} />,
     );
 
     await waitFor(() => expect(lastFrame()).not.toContain('Loading...'));
@@ -171,7 +171,7 @@ describe('PermissionsModifyTrustDialog', () => {
   });
 
   it('should not commit when escape is pressed during restart prompt', async () => {
-    vi.mocked(usePermissionsModifyTrust).mockReturnValue({
+    vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
       isInheritedTrustFromParent: false,
@@ -184,7 +184,7 @@ describe('PermissionsModifyTrustDialog', () => {
 
     const onExit = vi.fn();
     const { stdin, lastFrame } = renderWithProviders(
-      <PermissionsModifyTrustDialog onExit={onExit} addItem={vi.fn()} />,
+      <TrustDialog onExit={onExit} addItem={vi.fn()} />,
     );
 
     await waitFor(() => expect(lastFrame()).not.toContain('Loading...'));

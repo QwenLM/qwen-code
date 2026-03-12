@@ -933,6 +933,8 @@ export default {
   'No, suggest changes (esc)': 'Нет, предложить изменения (esc)',
   "Allow execution of: '{{command}}'?": "Разрешить выполнение: '{{command}}'?",
   'Yes, allow always ...': 'Да, всегда разрешать ...',
+  'Always allow in this project': 'Всегда разрешать в этом проекте',
+  'Always allow for this user': 'Всегда разрешать для этого пользователя',
   'Yes, and auto-accept edits': 'Да, и автоматически принимать правки',
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',
@@ -1097,6 +1099,76 @@ export default {
   // Диалоги - Разрешения
   // ============================================================================
   'Manage folder trust settings': 'Управление настройками доверия к папкам',
+  'Manage permission rules': 'Управление правилами разрешений',
+  Allow: 'Разрешить',
+  Ask: 'Спросить',
+  Deny: 'Запретить',
+  Workspace: 'Рабочая область',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code не будет спрашивать перед использованием разрешённых инструментов.',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code спросит перед использованием этих инструментов.',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code не может использовать запрещённые инструменты.',
+  'Manage trusted directories for this workspace.':
+    'Управление доверенными каталогами для этой рабочей области.',
+  'Any use of the {{tool}} tool': 'Любое использование инструмента {{tool}}',
+  "{{tool}} commands matching '{{pattern}}'":
+    "Команды {{tool}}, соответствующие '{{pattern}}'",
+  'From user settings': 'Из пользовательских настроек',
+  'From project settings': 'Из настроек проекта',
+  'From session': 'Из сессии',
+  'Project settings (local)': 'Настройки проекта (локальные)',
+  'Saved in .qwen/settings.local.json': 'Сохранено в .qwen/settings.local.json',
+  'Project settings': 'Настройки проекта',
+  'Checked in at .qwen/settings.json': 'Зафиксировано в .qwen/settings.json',
+  'User settings': 'Пользовательские настройки',
+  'Saved in at ~/.qwen/settings.json': 'Сохранено в ~/.qwen/settings.json',
+  'Add a new rule…': 'Добавить новое правило…',
+  'Add {{type}} permission rule': 'Добавить правило разрешения {{type}}',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    'Правила разрешений — это имя инструмента, за которым может следовать спецификатор в скобках.',
+  'e.g.,': 'напр.',
+  or: 'или',
+  'Enter permission rule…': 'Введите правило разрешения…',
+  'Enter to submit · Esc to cancel': 'Enter для отправки · Esc для отмены',
+  'Where should this rule be saved?': 'Где сохранить это правило?',
+  'Enter to confirm · Esc to cancel':
+    'Enter для подтверждения · Esc для отмены',
+  'Delete {{type}} rule?': 'Удалить правило {{type}}?',
+  'Are you sure you want to delete this permission rule?':
+    'Вы уверены, что хотите удалить это правило разрешения?',
+  'Permissions:': 'Разрешения:',
+  '(←/→ or tab to cycle)': '(←/→ или Tab для переключения)',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '↑↓ навигация · Enter выбор · Ввод для поиска · Esc отмена',
+  'Search…': 'Поиск…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    'Используйте /trust для управления настройками доверия к папкам этой рабочей области.',
+  // Workspace directory management
+  'Add directory…': 'Добавить каталог…',
+  'Add directory to workspace': 'Добавить каталог в рабочую область',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code может читать файлы в рабочей области и вносить правки, когда автоприём правок включён.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code сможет читать файлы в этом каталоге и вносить правки, когда автоприём правок включён.',
+  'Enter the path to the directory:': 'Введите путь к каталогу:',
+  'Enter directory path…': 'Введите путь к каталогу…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab для завершения · Enter для добавления · Esc для отмены',
+  'Remove directory?': 'Удалить каталог?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Вы уверены, что хотите удалить этот каталог из рабочей области?',
+  '  (Original working directory)': '  (Исходный рабочий каталог)',
+  '  (from settings)': '  (из настроек)',
+  'Directory does not exist.': 'Каталог не существует.',
+  'Path is not a directory.': 'Путь не является каталогом.',
+  'This directory is already in the workspace.':
+    'Этот каталог уже есть в рабочей области.',
+  'Already covered by existing directory: {{dir}}':
+    'Уже охвачен существующим каталогом: {{dir}}',
+  'Add directories to the workspace (alias for /directory add)':
+    'Добавить каталоги в рабочую область (псевдоним для /directory add)',
 
   // ============================================================================
   // Строка состояния

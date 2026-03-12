@@ -69,6 +69,7 @@ import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import {
@@ -97,7 +98,7 @@ import {
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
@@ -297,9 +298,18 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
+  /** @deprecated Use `permissions.allow` instead. Migrated automatically. */
   coreTools?: string[];
+  /** @deprecated Use `permissions.allow` instead. Migrated automatically. */
   allowedTools?: string[];
+  /** @deprecated Use `permissions.deny` instead. Migrated automatically. */
   excludeTools?: string[];
+  /** Merged permission rules from all sources (settings + CLI args). */
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+  };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -393,6 +403,20 @@ export interface ConfigParameters {
   hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /**
+   * Callback for persisting a permission rule to settings.
+   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
+   * to project or user settings when the user clicks "Always Allow".
+   *
+   * @param scope - 'project' for workspace settings, 'user' for user settings.
+   * @param ruleType - 'allow' | 'ask' | 'deny'.
+   * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   */
+  onPersistPermissionRule?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
 }
 
 function normalizeConfigOutputFormat(
@@ -434,6 +458,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
+  private permissionManager: PermissionManager | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -453,6 +478,9 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly permissionsAllow: string[] | undefined;
+  private readonly permissionsAsk: string[] | undefined;
+  private readonly permissionsDeny: string[] | undefined;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -524,6 +552,11 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly onPersistPermissionRuleCallback?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
@@ -563,6 +596,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.permissionsAllow = params.permissions?.allow;
+    this.permissionsAsk = params.permissions?.ask;
+    this.permissionsDeny = params.permissions?.deny;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -631,6 +667,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -791,6 +828,10 @@ export class Config {
     this.skillManager = new SkillManager(this);
     await this.skillManager.startWatching();
     this.debugLogger.debug('Skill manager initialized');
+
+    this.permissionManager = new PermissionManager(this);
+    this.permissionManager.initialize();
+    this.debugLogger.debug('Permission manager initialized');
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
@@ -1164,6 +1205,10 @@ export class Config {
     return this.targetDir;
   }
 
+  getCwd(): string {
+    return this.targetDir;
+  }
+
   getWorkspaceContext(): WorkspaceContext {
     return this.workspaceContext;
   }
@@ -1206,16 +1251,67 @@ export class Config {
     return this.question;
   }
 
+  /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
     return this.coreTools;
   }
 
+  /** @deprecated Use getPermissionsAllow() instead. */
   getAllowedTools(): string[] | undefined {
     return this.allowedTools;
   }
 
+  /** @deprecated Use getPermissionsDeny() instead. */
   getExcludeTools(): string[] | undefined {
     return this.excludeTools;
+  }
+
+  /**
+   * Returns the merged allow-rules for PermissionManager.
+   *
+   * This merges all sources so that PermissionManager receives a single,
+   * authoritative list:
+   *   - settings.permissions.allow  (persistent rules from all scopes)
+   *   - coreTools param  (SDK / argv allowlist mode: only these tools run)
+   *   - allowedTools param  (SDK / argv auto-approve list)
+   *
+   * CLI callers (loadCliConfig) already pre-merge argv into permissionsAllow
+   * before constructing Config, so those fields will be empty for CLI usage.
+   * SDK callers construct Config directly and rely on coreTools/allowedTools.
+   */
+  getPermissionsAllow(): string[] | undefined {
+    const base = this.permissionsAllow ?? [];
+    const sdkAllow = [...(this.coreTools ?? []), ...(this.allowedTools ?? [])];
+    if (sdkAllow.length === 0) return base.length > 0 ? base : undefined;
+    const merged = [...base];
+    for (const t of sdkAllow) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
+  }
+
+  getPermissionsAsk(): string[] | undefined {
+    return this.permissionsAsk;
+  }
+
+  /**
+   * Returns the merged deny-rules for PermissionManager.
+   *
+   * Merges:
+   *   - settings.permissions.deny  (persistent rules from all scopes)
+   *   - excludeTools param  (SDK / argv blocklist)
+   *
+   * CLI callers pre-merge argv.excludeTools into permissionsDeny.
+   */
+  getPermissionsDeny(): string[] | undefined {
+    const base = this.permissionsDeny ?? [];
+    const sdkDeny = this.excludeTools ?? [];
+    if (sdkDeny.length === 0) return base.length > 0 ? base : undefined;
+    const merged = [...base];
+    for (const t of sdkDeny) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
   }
 
   getToolDiscoveryCommand(): string | undefined {
@@ -1816,6 +1912,24 @@ export class Config {
     return this.skillManager;
   }
 
+  getPermissionManager(): PermissionManager | null {
+    return this.permissionManager;
+  }
+
+  /**
+   * Returns the callback for persisting permission rules to settings files.
+   * Returns undefined if no callback was provided (e.g. SDK mode).
+   */
+  getOnPersistPermissionRule():
+    | ((
+        scope: 'project' | 'user',
+        ruleType: 'allow' | 'ask' | 'deny',
+        rule: string,
+      ) => Promise<void>)
+    | undefined {
+    return this.onPersistPermissionRuleCallback;
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ): Promise<ToolRegistry> {
@@ -1824,9 +1938,6 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
-
-    const coreToolsConfig = this.getCoreTools();
-    const excludeToolsConfig = this.getExcludeTools();
 
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1843,7 +1954,13 @@ export class Config {
         return;
       }
 
-      if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      const pmEnabled = this.permissionManager
+        ? this.permissionManager.isToolEnabled(toolName)
+        : true; // Should never reach here after initialize(), but safe default.
+
+      if (pmEnabled) {
         try {
           registry.registerTool(new ToolClass(...args));
         } catch (error) {

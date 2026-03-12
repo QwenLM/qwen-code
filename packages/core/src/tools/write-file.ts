@@ -17,6 +17,7 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -132,14 +133,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-const mode = this.config.getApprovalMode();
-  if (mode === ApprovalMode.AUTO_EDIT || mode === ApprovalMode.YOLO) {
-      return false;
-    }
+  /**
+   * Write operations always need user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
 
+  /**
+   * Constructs the write-file diff confirmation details.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     const correctedContentResult = await getCorrectedFileContent(
       this.config,
       this.params.file_path,
@@ -147,8 +153,9 @@ const mode = this.config.getApprovalMode();
     );
 
     if (correctedContentResult.error) {
-      // If file exists but couldn't be read, we can't show a diff for confirmation.
-      return false;
+      throw new Error(
+        `Error checking existing file '${this.params.file_path}': ${correctedContentResult.error.message}`,
+      );
     }
 
     const { originalContent, correctedContent } = correctedContentResult;
@@ -160,8 +167,8 @@ const mode = this.config.getApprovalMode();
 
     const fileDiff = Diff.createPatch(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      correctedContent, // Content after potential correction
+      originalContent,
+      correctedContent,
       'Current',
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
@@ -421,14 +428,6 @@ export class WriteFileTool
 
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute: ${filePath}`;
-    }
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(filePath)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
     }
 
     try {

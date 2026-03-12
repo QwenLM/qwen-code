@@ -13,13 +13,10 @@ import type {
   ToolResultDisplay,
   ToolConfirmationPayload,
   McpToolProgressData,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
   ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
@@ -110,8 +107,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
-  private static readonly allowlist: Set<string> = new Set();
-
   constructor(
     private readonly mcpTool: CallableTool,
     readonly serverName: string,
@@ -119,7 +114,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     readonly displayName: string,
     readonly trust?: boolean,
     params: ToolParams = {},
-    private readonly cliConfig?: Config,
+    _cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
     private readonly annotations?: McpToolAnnotations,
@@ -127,44 +122,43 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     super(params);
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    const serverAllowListKey = this.serverName;
-    const toolAllowListKey = `${this.serverName}.${this.serverToolName}`;
-
-    if (this.cliConfig?.isTrustedFolder() && this.trust) {
-      return false; // server is trusted, no confirmation needed
-    }
-
-    // MCP tools annotated with readOnlyHint: true are safe to execute
-    // without confirmation, especially important for plan mode support
+  /**
+   * MCP tool default permission based on annotations:
+   * - readOnlyHint → 'allow'
+   * - All other MCP tools → 'ask'
+   *
+   * Note: trust/isTrustedFolder logic is now handled by PM rules,
+   * not by getDefaultPermission().
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    // MCP tools annotated with readOnlyHint: true are safe
     if (this.annotations?.readOnlyHint === true) {
-      return false;
+      return 'allow';
     }
+    return 'ask';
+  }
 
-    if (
-      DiscoveredMCPToolInvocation.allowlist.has(serverAllowListKey) ||
-      DiscoveredMCPToolInvocation.allowlist.has(toolAllowListKey)
-    ) {
-      return false; // server and/or tool already allowlisted
-    }
+  /**
+   * Constructs confirmation dialog details for an MCP tool call.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    // Construct the permission rule for this specific MCP tool.
+    const permissionRule = `mcp__${this.serverName}__${this.serverToolName}`;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
       type: 'mcp',
       title: 'Confirm MCP Tool Execution',
       serverName: this.serverName,
-      toolName: this.serverToolName, // Display original tool name in confirmation
-      toolDisplayName: this.displayName, // Display global registry name exposed to model and user
+      toolName: this.serverToolName,
+      toolDisplayName: this.displayName,
+      permissionRules: [permissionRule],
       onConfirm: async (
-        outcome: ToolConfirmationOutcome,
+        _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlwaysServer) {
-          DiscoveredMCPToolInvocation.allowlist.add(serverAllowListKey);
-        } else if (outcome === ToolConfirmationOutcome.ProceedAlwaysTool) {
-          DiscoveredMCPToolInvocation.allowlist.add(toolAllowListKey);
-        }
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;

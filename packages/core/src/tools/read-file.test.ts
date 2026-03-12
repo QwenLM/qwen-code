@@ -73,13 +73,12 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('should throw error if path is outside root', () => {
+    it('should allow path outside root (external path support)', () => {
       const params: ReadFileToolParams = {
         absolute_path: '/outside/root.txt',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should allow access to files in project temp directory', () => {
@@ -91,13 +90,12 @@ describe('ReadFileTool', () => {
       expect(typeof result).not.toBe('string');
     });
 
-    it('should show temp directory in error message when path is outside workspace and temp dir', () => {
+    it('should allow path completely outside workspace (external path support)', () => {
       const params: ReadFileToolParams = {
         absolute_path: '/completely/outside/path.txt',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories.*or within the project temp directory/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should throw error if path is empty', () => {
@@ -127,6 +125,36 @@ describe('ReadFileTool', () => {
       expect(() => tool.build(params)).toThrow(
         'Limit must be a positive number',
       );
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const params: ReadFileToolParams = {
+        absolute_path: path.join(tempRootDir, 'test.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths outside workspace', async () => {
+      const params: ReadFileToolParams = {
+        absolute_path: '/outside/workspace/file.txt',
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should return allow for paths within temp directory', async () => {
+      const tempDir = path.join(tempRootDir, '.temp');
+      const params: ReadFileToolParams = {
+        absolute_path: path.join(tempDir, 'temp-file.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
     });
   });
 

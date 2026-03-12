@@ -37,12 +37,22 @@ vi.mock('../ui/commands/ideCommand.js', async () => {
 vi.mock('../ui/commands/restoreCommand.js', () => ({
   restoreCommand: vi.fn(),
 }));
+vi.mock('../ui/commands/trustCommand.js', async () => {
+  const { CommandKind } = await import('../ui/commands/types.js');
+  return {
+    trustCommand: {
+      name: 'trust',
+      description: 'Trust command',
+      kind: CommandKind.BUILT_IN,
+    },
+  };
+});
 vi.mock('../ui/commands/permissionsCommand.js', async () => {
   const { CommandKind } = await import('../ui/commands/types.js');
   return {
     permissionsCommand: {
       name: 'permissions',
-      description: 'Permissions command',
+      description: 'Manage permission rules',
       kind: CommandKind.BUILT_IN,
     },
   };
@@ -162,19 +172,19 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd).toBeDefined();
   });
 
-  it('should include permissions command when folder trust is enabled', async () => {
+  it('should include trust command when folder trust is enabled', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     const commands = await loader.loadCommands(new AbortController().signal);
-    const permissionsCmd = commands.find((c) => c.name === 'permissions');
-    expect(permissionsCmd).toBeDefined();
+    const trustCmd = commands.find((c) => c.name === 'trust');
+    expect(trustCmd).toBeDefined();
   });
 
-  it('should exclude permissions command when folder trust is disabled', async () => {
+  it('should exclude trust command when folder trust is disabled', async () => {
     (mockConfig.getFolderTrust as Mock).mockReturnValue(false);
     const loader = new BuiltinCommandLoader(mockConfig);
     const commands = await loader.loadCommands(new AbortController().signal);
-    const permissionsCmd = commands.find((c) => c.name === 'permissions');
-    expect(permissionsCmd).toBeUndefined();
+    const trustCmd = commands.find((c) => c.name === 'trust');
+    expect(trustCmd).toBeUndefined();
   });
 
   it('should always include modelCommand', async () => {

@@ -55,6 +55,7 @@ export interface UIActions {
   closeSettingsDialog: () => void;
   closeModelDialog: () => void;
   dismissCodingPlanUpdate: () => void;
+  closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;

@@ -9,6 +9,7 @@ import type {
   ToolConfirmationPayload,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -154,20 +155,26 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolAskUserQuestionConfirmationDetails | false> {
-    // Check if we're in a mode that supports user interaction
-    // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
+  /**
+   * ask_user_question always requires user confirmation so the user can
+   * provide answers. In non-interactive mode without ACP support, we skip
+   * confirmation (and subsequently skip execution).
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
     const isAcpMode =
       this._config.getExperimentalZedIntegration() ||
       this._config.getInputFormat() === InputFormat.STREAM_JSON;
 
     if (!this._config.isInteractive() && !isAcpMode) {
-      // In non-interactive mode without ACP support, we cannot collect user input
-      return false;
+      // Non-interactive + no ACP: skip entirely
+      return 'allow';
     }
+    return 'ask';
+  }
 
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolAskUserQuestionConfirmationDetails> {
     const details: ToolAskUserQuestionConfirmationDetails = {
       type: 'ask_user_question',
       title: 'Please answer the following question(s):',
