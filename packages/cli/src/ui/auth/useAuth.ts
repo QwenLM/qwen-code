@@ -300,7 +300,7 @@ export const useAuthCommand = (
         setAuthError(null);
 
         // Get configuration based on region
-        const { template, version, regionName } = getCodingPlanConfig(region);
+        const { template, version } = getCodingPlanConfig(region);
 
         // Get persist scope
         const persistScope = getPersistScopeForModelSelection(settings);
@@ -389,8 +389,19 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
-              { region: regionName },
+              'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.',
+              { region: t('Alibaba Cloud Coding Plan') },
+            ),
+          },
+          Date.now(),
+        );
+
+        // Hint about /model command
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'Tip: Use /model to switch between available Coding Plan models.',
             ),
           },
           Date.now(),

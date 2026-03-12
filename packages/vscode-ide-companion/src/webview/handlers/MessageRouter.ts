@@ -7,7 +7,10 @@
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
-import type { PermissionResponseMessage } from '../../types/webviewMessageTypes.js';
+import type {
+  PermissionResponseMessage,
+  AskUserQuestionResponseMessage,
+} from '../../types/webviewMessageTypes.js';
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
 import { EditorMessageHandler } from './EditorMessageHandler.js';
@@ -24,6 +27,9 @@ export class MessageRouter {
   private currentConversationId: string | null = null;
   private permissionHandler:
     | ((message: PermissionResponseMessage) => void)
+    | null = null;
+  private askUserQuestionHandler:
+    | ((message: AskUserQuestionResponseMessage) => void)
     | null = null;
 
   constructor(
@@ -86,6 +92,14 @@ export class MessageRouter {
       return;
     }
 
+    // Handle ask user question response specially
+    if (message.type === 'askUserQuestionResponse') {
+      if (this.askUserQuestionHandler) {
+        this.askUserQuestionHandler(message as AskUserQuestionResponseMessage);
+      }
+      return;
+    }
+
     // Find appropriate handler
     const handler = this.handlers.find((h) => h.canHandle(message.type));
 
@@ -133,6 +147,15 @@ export class MessageRouter {
     handler: (message: PermissionResponseMessage) => void,
   ): void {
     this.permissionHandler = handler;
+  }
+
+  /**
+   * Set ask user question handler
+   */
+  setAskUserQuestionHandler(
+    handler: (message: AskUserQuestionResponseMessage) => void,
+  ): void {
+    this.askUserQuestionHandler = handler;
   }
 
   /**

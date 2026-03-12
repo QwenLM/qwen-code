@@ -75,7 +75,12 @@ export async function cloneFromGit(
         // We let git handle the source as is.
       }
     }
-    await git.clone(sourceUrl, './', ['--depth', '1']);
+    await git.clone(sourceUrl, './', [
+      '-c',
+      'core.symlinks=true',
+      '--depth',
+      '1',
+    ]);
 
     const remotes = await git.getRemotes(true);
     if (remotes.length === 0) {
@@ -167,6 +172,7 @@ export async function checkForExtensionUpdate(
   }
   if (
     !installMetadata ||
+    installMetadata.originSource === 'Claude' ||
     (installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release')
   ) {

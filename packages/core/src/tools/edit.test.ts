@@ -280,6 +280,38 @@ describe('EditTool', () => {
       );
     });
 
+    it('should return false and skip confirmation when approval mode is AUTO_EDIT', async () => {
+      fs.writeFileSync(filePath, 'some old content here');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
+      expect(confirmation).toBe(false);
+    });
+
+    it('should return false and skip confirmation when approval mode is YOLO', async () => {
+      fs.writeFileSync(filePath, 'some old content here');
+      (mockConfig.getApprovalMode as Mock).mockReturnValue(ApprovalMode.YOLO);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
+      expect(confirmation).toBe(false);
+    });
+
     it('should return false if old_string is not found', async () => {
       fs.writeFileSync(filePath, 'some content here');
       const params: EditToolParams = {

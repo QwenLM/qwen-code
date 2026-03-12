@@ -32,6 +32,7 @@ import {
   logToolOutputTruncated,
   ToolOutputTruncatedEvent,
   InputFormat,
+  Kind,
   SkillTool,
 } from '../index.js';
 import type {
@@ -54,6 +55,23 @@ import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+
+const TRUNCATION_PARAM_GUIDANCE =
+  'Note: Your previous response was truncated due to max_tokens limit, ' +
+  'which likely caused incomplete tool call parameters. ' +
+  'Please retry the tool call with complete parameters. ' +
+  'If the content is too large for a single response, ' +
+  'consider splitting it into smaller parts.';
+
+const TRUNCATION_EDIT_REJECTION =
+  'Your previous response was truncated due to max_tokens limit, ' +
+  'which likely produced incomplete file content. ' +
+  'The tool call has been rejected to prevent writing ' +
+  'truncated content to the file. ' +
+  'Please retry the tool call with complete content. ' +
+  'If the content is too large for a single response, ' +
+  'consider splitting it into smaller parts ' +
+  '(e.g., write_file for initial content, then edit for additions).';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -773,14 +791,36 @@ export class CoreToolScheduler {
             reqInfo.args,
           );
           if (invocationOrError instanceof Error) {
+            const error = reqInfo.wasOutputTruncated
+              ? new Error(
+                  `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
+                )
+              : invocationOrError;
             return {
               status: 'error',
               request: reqInfo,
               tool: toolInstance,
               response: createErrorResponse(
                 reqInfo,
-                invocationOrError,
+                error,
                 ToolErrorType.INVALID_TOOL_PARAMS,
+              ),
+              durationMs: 0,
+            };
+          }
+
+          // Reject file-modifying calls when truncated to prevent
+          // writing incomplete content.
+          if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+            const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+            return {
+              status: 'error',
+              request: reqInfo,
+              tool: toolInstance,
+              response: createErrorResponse(
+                reqInfo,
+                truncationError,
+                ToolErrorType.OUTPUT_TRUNCATED,
               ),
               durationMs: 0,
             };
@@ -833,7 +873,13 @@ export class CoreToolScheduler {
             this.config.getApprovalMode() === ApprovalMode.PLAN;
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
 
-          if (isPlanMode && !isExitPlanModeTool) {
+          // ask_user_question needs the confirmation flow even in plan mode
+          // so the user can actually answer the questions
+          const isAskUserQuestionTool =
+            confirmationDetails &&
+            confirmationDetails.type === 'ask_user_question';
+
+          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
             if (confirmationDetails) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
@@ -850,8 +896,14 @@ export class CoreToolScheduler {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
           } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
+            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
+              doesToolInvocationMatch(
+                toolCall.tool,
+                invocation,
+                allowedTools,
+              )) &&
+            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
+            confirmationDetails.type !== 'ask_user_question'
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,

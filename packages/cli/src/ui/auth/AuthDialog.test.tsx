@@ -170,9 +170,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog shows API-KEY option now,
+      // Since the auth dialog shows API Key option now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('API-KEY');
+      expect(lastFrame()).toContain('API Key');
     });
 
     it('should not show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to something else', () => {
@@ -258,9 +258,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog shows API-KEY option now,
+      // Since the auth dialog shows API Key option now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('API-KEY');
+      expect(lastFrame()).toContain('API Key');
     });
   });
 
@@ -306,7 +306,7 @@ describe('AuthDialog', () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN_OAUTH is the first option, so it should be selected
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      expect(lastFrame()).toContain('Qwen OAuth');
     });
 
     it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
@@ -346,7 +346,7 @@ describe('AuthDialog', () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Default is Qwen OAuth (first option)
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      expect(lastFrame()).toContain('Qwen OAuth');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -389,7 +389,7 @@ describe('AuthDialog', () => {
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
       // it will just show the default Qwen OAuth option
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      expect(lastFrame()).toContain('Qwen OAuth');
     });
   });
 

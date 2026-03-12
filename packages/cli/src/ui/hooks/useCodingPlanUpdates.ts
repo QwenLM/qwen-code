@@ -42,6 +42,7 @@ export function useCodingPlanUpdates(
   /**
    * Execute the Coding Plan configuration update.
    * Removes old Coding Plan configs and replaces them with new ones from the template.
+   * Preserves the user's current model selection if it still exists in the new template.
    * Uses the region from settings.codingPlan.region (defaults to CHINA).
    */
   const executeUpdate = useCallback(
@@ -68,7 +69,7 @@ export function useCodingPlanUpdates(
         );
 
         // Get the configuration for the current region
-        const { template, version, regionName } = getCodingPlanConfig(region);
+        const { template, version } = getCodingPlanConfig(region);
 
         // Generate new configs from template
         const newConfigs = template.map((templateConfig) => ({
@@ -81,6 +82,12 @@ export function useCodingPlanUpdates(
           ...newConfigs,
           ...(nonCodingPlanConfigs as Array<Record<string, unknown>>),
         ] as Array<Record<string, unknown>>;
+
+        // Record the user's current model before the update
+        const previousModel = config.getModel();
+        const previousModelStillAvailable = newConfigs.some(
+          (cfg) => cfg.id === previousModel,
+        );
 
         // Hot-reload model providers configuration first (in-memory only)
         const updatedModelProviders = {
@@ -112,12 +119,34 @@ export function useCodingPlanUpdates(
 
         const activeModel = config.getModel();
 
+        if (previousModelStillAvailable && activeModel === previousModel) {
+          addItem(
+            {
+              type: 'info',
+              text: t('{{region}} configuration updated successfully.', {
+                region: t('Alibaba Cloud Coding Plan'),
+              }),
+            },
+            Date.now(),
+          );
+        } else {
+          addItem(
+            {
+              type: 'info',
+              text: t(
+                '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+                { region: t('Alibaba Cloud Coding Plan'), model: activeModel },
+              ),
+            },
+            Date.now(),
+          );
+        }
+
         addItem(
           {
             type: 'info',
             text: t(
-              '{{region}} configuration updated successfully. Model switched to "{{model}}".',
-              { region: regionName, model: activeModel },
+              'Tip: Use /model to switch between available Coding Plan models.',
             ),
           },
           Date.now(),
@@ -170,11 +199,10 @@ export function useCodingPlanUpdates(
 
     // Check if version matches
     if (savedVersion !== currentVersion) {
-      const { regionName } = getCodingPlanConfig(region);
       setUpdateRequest({
         prompt: t(
           'New model configurations are available for {{region}}. Update now?',
-          { region: regionName },
+          { region: t('Alibaba Cloud Coding Plan') },
         ),
         onConfirm: async (confirmed: boolean) => {
           setUpdateRequest(undefined);

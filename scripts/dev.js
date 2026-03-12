@@ -15,17 +15,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
-
-// Resolve tsx from node_modules
-const tsxPath = resolve(root, 'node_modules', '.bin', 'tsx');
 
 // Entry point for the CLI
 const cliEntry = join(cliPackageDir, 'index.ts');
@@ -79,12 +76,16 @@ const env = {
   NODE_OPTIONS: `${existingNodeOptions} ${importFlag}`.trim(),
 };
 
-const nodeArgs = [tsxPath, cliEntry, ...process.argv.slice(2)];
+// On Windows, use tsx.cmd; on Unix, use tsx directly
+const isWin = platform() === 'win32';
+const tsxCmd = isWin ? 'tsx.cmd' : 'tsx';
+const tsxArgs = [cliEntry, ...process.argv.slice(2)];
 
-const child = spawn('node', nodeArgs, {
+const child = spawn(tsxCmd, tsxArgs, {
   stdio: 'inherit',
   env,
   cwd: process.cwd(),
+  shell: isWin, // Use shell on Windows to resolve .cmd files
 });
 
 child.on('error', (err) => {
