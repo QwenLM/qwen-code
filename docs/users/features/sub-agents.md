@@ -150,6 +150,136 @@ Have the documentation-writer Subagents update the API reference
 Get the react-specialist Subagents to optimize this component's performance
 ```
 
+## Advanced Configuration
+
+### Runtime Configuration Options
+
+Subagents support advanced runtime configuration options that control context behavior and output formatting. These can be specified in the agent's configuration file or passed dynamically when delegating tasks.
+
+#### `useCleanContext`
+
+When enabled, the subagent starts with a fresh context window instead of inheriting the full main session history. This prevents context bloat during long sessions.
+
+```yaml
+---
+name: focused-researcher
+description: Researches topics without carrying main session context
+runConfig:
+  useCleanContext: true
+---
+```
+
+**Benefits:**
+
+- Reduces token usage for focused tasks
+- Prevents context pollution from unrelated conversations
+- Improves performance for long-running sessions
+
+#### `maxContextTokens`
+
+Sets a maximum token budget for the subagent's context. When exceeded, older messages are truncated to fit within the budget.
+
+```yaml
+---
+name: budget-conscious-agent
+description: Works within strict token limits
+runConfig:
+  maxContextTokens: 4000
+---
+```
+
+**Benefits:**
+
+- Controls costs for expensive operations
+- Ensures predictable token usage
+- Automatically truncates old context when needed
+
+#### `useStructuredOutput`
+
+Instructs the subagent to format its output using a structured summary schema (findings, files changed, conclusion). This ensures only distilled summaries are injected back into the main context.
+
+```yaml
+---
+name: concise-reporter
+description: Provides structured, concise reports
+runConfig:
+  useStructuredOutput: true
+---
+```
+
+**Output Format:**
+When enabled, the subagent formats results as:
+
+```markdown
+## Findings
+
+- Key discovery 1
+- Key discovery 2
+
+## Files Changed
+
+- path/to/modified/file.ts
+- path/to/new/file.test.ts
+
+## Conclusion
+
+Concise summary of what was accomplished.
+
+## Recommendations (Optional)
+
+- Suggested next steps
+```
+
+### Dynamic Configuration
+
+You can also pass runtime configuration overrides when delegating tasks:
+
+```typescript
+// Example: Pass runConfig when using Task tool programmatically
+{
+  description: "Research with clean context",
+  prompt: "Find all usages of deprecated APIs",
+  subagent_type: "code-analyst",
+  runConfig: {
+    useCleanContext: true,
+    maxContextTokens: 2000,
+    useStructuredOutput: true
+  }
+}
+```
+
+### Complete Example
+
+```yaml
+---
+name: efficient-tester
+description: Writes tests efficiently with controlled context and structured output
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
+modelConfig:
+  model: qwen3-coder-plus
+  temp: 0.7
+runConfig:
+  useCleanContext: true
+  maxContextTokens: 8000
+  useStructuredOutput: true
+  max_turns: 10
+  max_time_minutes: 5
+---
+
+You are a testing specialist focused on efficient, targeted test creation.
+
+Your approach:
+1. Quickly identify the code under test
+2. Create focused tests for key functionality
+3. Report results in a structured format
+
+Work efficiently within the token budget.
+```
+
 ## Examples
 
 ### Development Workflow Agents

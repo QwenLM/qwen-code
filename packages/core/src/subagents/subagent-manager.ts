@@ -583,6 +583,8 @@ export class SubagentManager {
    *
    * @param config - Subagent configuration
    * @param runtimeContext - Runtime context
+   * @param options - Optional event emitter and hooks
+   * @param runConfigOverrides - Optional runtime configuration overrides
    * @returns Promise resolving to SubAgentScope
    */
   async createSubagentScope(
@@ -592,9 +594,13 @@ export class SubagentManager {
       eventEmitter?: import('./subagent-events.js').SubAgentEventEmitter;
       hooks?: import('./subagent-hooks.js').SubagentHooks;
     },
+    runConfigOverrides?: Partial<RunConfig>,
   ): Promise<SubAgentScope> {
     try {
-      const runtimeConfig = this.convertToRuntimeConfig(config);
+      const runtimeConfig = this.convertToRuntimeConfig(
+        config,
+        runConfigOverrides,
+      );
 
       return await SubAgentScope.create(
         config.name,
@@ -623,9 +629,13 @@ export class SubagentManager {
    * compatible with SubAgentScope.create().
    *
    * @param config - File-based subagent configuration
+   * @param runConfigOverrides - Optional runtime configuration overrides
    * @returns Runtime configuration for SubAgentScope
    */
-  convertToRuntimeConfig(config: SubagentConfig): SubagentRuntimeConfig {
+  convertToRuntimeConfig(
+    config: SubagentConfig,
+    runConfigOverrides?: Partial<RunConfig>,
+  ): SubagentRuntimeConfig {
     // Build prompt configuration
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
@@ -636,9 +646,10 @@ export class SubagentManager {
       ...config.modelConfig,
     };
 
-    // Build run configuration
+    // Build run configuration with overrides
     const runConfig: RunConfig = {
       ...config.runConfig,
+      ...runConfigOverrides,
     };
 
     // Build tool configuration if tools are specified

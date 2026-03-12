@@ -18,6 +18,7 @@ import {
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
+  truncateContentToTokenBudget,
 } from './environmentContext.js';
 import type { Config } from '../config/config.js';
 import { getFolderStructure } from './getFolderStructure.js';
@@ -149,15 +150,20 @@ describe('getEnvironmentContext', () => {
 
 describe('getInitialChatHistory', () => {
   let mockConfig: Partial<Config>;
+  let mockGeminiClient: { getHistory: () => Content[] };
 
   beforeEach(() => {
     vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
+    mockGeminiClient = {
+      getHistory: vi.fn().mockReturnValue([]),
+    };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
     };
   });
 
@@ -200,10 +206,9 @@ describe('getInitialChatHistory', () => {
       { role: 'user', parts: [{ text: 'custom context' }] },
     ];
 
-    const history = await getInitialChatHistory(
-      mockConfig as Config,
+    const history = await getInitialChatHistory(mockConfig as Config, {
       extraHistory,
-    );
+    });
 
     expect(mockConfig.getSkipStartupContext).toHaveBeenCalled();
     expect(history).toEqual(extraHistory);
@@ -221,5 +226,239 @@ describe('getInitialChatHistory', () => {
     const history = await getInitialChatHistory(mockConfig as Config);
 
     expect(history).toEqual([]);
+  });
+
+  it('returns clean context without session history when useCleanContext is true', async () => {
+    const mockGeminiClient = {
+      getHistory: vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'Previous conversation' }] },
+        { role: 'model', parts: [{ text: 'Previous response' }] },
+      ]),
+    };
+    mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockGeminiClient);
+
+    const history = await getInitialChatHistory(mockConfig as Config, {
+      useCleanContext: true,
+    });
+
+    // Should only have environment context, not the session history
+    expect(history).toHaveLength(2);
+    expect(history[0]?.role).toBe('user');
+    expect(history[0]?.parts?.[0]?.text).toContain(
+      "I'm currently working in the directory",
+    );
+    expect(history[1]?.role).toBe('model');
+    expect(history[1]?.parts?.[0]?.text).toBe(
+      'Got it. Thanks for the context!',
+    );
+
+    // Session history should NOT be included
+    expect(history).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          parts: [expect.objectContaining({ text: 'Previous conversation' })],
+        }),
+      ]),
+    );
+  });
+
+  it('includes session history when useCleanContext is false (default)', async () => {
+    const mockGeminiClient = {
+      getHistory: vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'Previous conversation' }] },
+        { role: 'model', parts: [{ text: 'Previous response' }] },
+      ]),
+    };
+    mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockGeminiClient);
+
+    const history = await getInitialChatHistory(mockConfig as Config, {
+      useCleanContext: false,
+    });
+
+    // Should have environment context + session history
+    expect(history.length).toBeGreaterThan(2);
+    expect(history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          parts: [expect.objectContaining({ text: 'Previous conversation' })],
+        }),
+      ]),
+    );
+  });
+
+  it('truncates content to fit within maxContextTokens budget', async () => {
+    const mockGeminiClient = {
+      getHistory: vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'A'.repeat(400) }] }, // ~100 tokens
+        { role: 'model', parts: [{ text: 'B'.repeat(400) }] }, // ~100 tokens
+        { role: 'user', parts: [{ text: 'C'.repeat(400) }] }, // ~100 tokens
+      ]),
+    };
+    mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockGeminiClient);
+
+    // Set a very low token budget that should truncate
+    const history = await getInitialChatHistory(mockConfig as Config, {
+      useCleanContext: false,
+      maxContextTokens: 150,
+    });
+
+    // Should have truncated the content
+    expect(history.length).toBeLessThanOrEqual(3);
+    // First item (environment context) should always be preserved
+    expect(history[0]?.role).toBe('user');
+    expect(history[0]?.parts?.[0]?.text).toContain(
+      "I'm currently working in the directory",
+    );
+  });
+
+  it('does not truncate when content is already under token budget', async () => {
+    const mockGeminiClient = {
+      getHistory: vi
+        .fn()
+        .mockReturnValue([
+          { role: 'user', parts: [{ text: 'Short message' }] },
+        ]),
+    };
+    mockConfig.getGeminiClient = vi.fn().mockReturnValue(mockGeminiClient);
+
+    const history = await getInitialChatHistory(mockConfig as Config, {
+      useCleanContext: false,
+      maxContextTokens: 1000,
+    });
+
+    // Should not truncate - all content should be present
+    expect(history.length).toBeGreaterThan(2);
+    expect(history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          parts: [expect.objectContaining({ text: 'Short message' })],
+        }),
+      ]),
+    );
+  });
+
+  it('truncates to minimum when maxContextTokens is very low', async () => {
+    mockGeminiClient.getHistory = vi
+      .fn()
+      .mockReturnValue([
+        { role: 'user', parts: [{ text: 'Previous'.repeat(100) }] },
+      ]);
+    const history = await getInitialChatHistory(mockConfig as Config, {
+      useCleanContext: false,
+      maxContextTokens: 50,
+    });
+
+    // Very low token budget should truncate but preserve at least environment context
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0]?.role).toBe('user');
+    // The text should be truncated but still start with the context preamble
+    expect(history[0]?.parts?.[0]?.text).toContain('This is the Qwen Code');
+    expect(history[0]?.parts?.[0]?.text).toContain(
+      '[truncated due to token budget]',
+    );
+  });
+});
+
+describe('truncateContentToTokenBudget', () => {
+  it('returns content as-is when under token budget', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'Short text' }] },
+      { role: 'model', parts: [{ text: 'Response' }] },
+    ];
+
+    const result = truncateContentToTokenBudget(contents, 1000);
+
+    // Should return a clone with same structure (not mutate original)
+    expect(result).not.toBe(contents);
+    expect(result).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'Short text' }),
+          ]),
+        }),
+        expect.objectContaining({
+          role: 'model',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'Response' }),
+          ]),
+        }),
+      ]),
+    );
+  });
+
+  it('truncates oldest messages first when over budget', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'Environment context' }] }, // Should be preserved
+      { role: 'user', parts: [{ text: 'A'.repeat(400) }] }, // ~100 tokens - should be removed
+      { role: 'model', parts: [{ text: 'B'.repeat(400) }] }, // ~100 tokens - should be removed
+      { role: 'user', parts: [{ text: 'Keep this' }] }, // Should be kept
+    ];
+
+    const result = truncateContentToTokenBudget(contents, 150);
+
+    // First item and last item should be kept
+    expect(result.length).toBeLessThan(contents.length);
+    expect(result[0]?.parts?.[0]?.text).toContain('Environment context');
+  });
+
+  it('preserves first item (environment context) even when over budget', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'Important environment info' }] },
+      { role: 'user', parts: [{ text: 'A'.repeat(1000) }] },
+    ];
+
+    const result = truncateContentToTokenBudget(contents, 50);
+
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0]?.parts?.[0]?.text).toContain('Important environment info');
+  });
+
+  it('returns empty array when maxTokens is 0 or negative', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'Some content' }] },
+    ];
+
+    expect(truncateContentToTokenBudget(contents, 0)).toEqual([]);
+    expect(truncateContentToTokenBudget(contents, -10)).toEqual([]);
+  });
+
+  it('truncates text with ellipsis when still over budget after removing items', () => {
+    const longText = 'A'.repeat(1000);
+    const contents: Content[] = [
+      { role: 'user', parts: [{ text: 'Env' }] },
+      { role: 'user', parts: [{ text: longText }] },
+    ];
+
+    const result = truncateContentToTokenBudget(contents, 50);
+
+    expect(result.length).toBe(2);
+    expect(result[1]?.parts?.[0]?.text).toContain(
+      '... [truncated due to token budget]',
+    );
+  });
+
+  it('handles empty content array', () => {
+    const result = truncateContentToTokenBudget([], 100);
+    expect(result).toEqual([]);
+  });
+
+  it('handles content without parts', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: undefined },
+      { role: 'model', parts: [] },
+    ];
+
+    const result = truncateContentToTokenBudget(contents, 100);
+
+    // Should return a clone (not mutate original)
+    expect(result).not.toBe(contents);
+    expect(result).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', parts: undefined }),
+        expect.objectContaining({ role: 'model', parts: [] }),
+      ]),
+    );
   });
 });
