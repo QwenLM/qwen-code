@@ -118,6 +118,7 @@ export default {
     'Analyzes the project and creates a tailored QWEN.md file.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'List available Qwen Code tools. Usage: /tools [desc]',
+  'List available skills.': 'List available skills.',
   'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
@@ -459,6 +460,7 @@ export default {
     'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.',
   'Your preferred editor is:': 'Your preferred editor is:',
   'Manage extensions': 'Manage extensions',
+  'Manage installed extensions': 'Manage installed extensions',
   'List active extensions': 'List active extensions',
   'Update extensions. Usage: update <extension-names>|--all':
     'Update extensions. Usage: update <extension-names>|--all',
@@ -659,6 +661,37 @@ export default {
     'Failed to configure {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
+  'List all configured hooks': 'List all configured hooks',
+  'Enable a disabled hook': 'Enable a disabled hook',
+  'Disable an active hook': 'Disable an active hook',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Export current session message history to a file',
+  'Export session to HTML format': 'Export session to HTML format',
+  'Export session to JSON format': 'Export session to JSON format',
+  'Export session to JSONL format (one message per line)':
+    'Export session to JSONL format (one message per line)',
+  'Export session to markdown format': 'Export session to markdown format',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'generate personalized programming insights from your chat history',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Resume a previous session',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -1662,24 +1695,4 @@ export default {
     '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigate | Enter: Select | Esc: Cancel',
-  'Disable an active hook': 'Disable an active hook',
-  'Enable a disabled hook': 'Enable a disabled hook',
-  'Export current session message history to a file':
-    'Export current session message history to a file',
-  'Export session to HTML format': 'Export session to HTML format',
-  'Export session to JSON format': 'Export session to JSON format',
-  'Export session to JSONL format (one message per line)':
-    'Export session to JSONL format (one message per line)',
-  'Export session to markdown format': 'Export session to markdown format',
-  'generate personalized programming insights from your chat history':
-    'generate personalized programming insights from your chat history',
-  'List all configured hooks': 'List all configured hooks',
-  'List available skills.': 'List available skills.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'list available Qwen Code tools. Usage: /tools [desc]',
-  'Manage installed extensions': 'Manage installed extensions',
-  'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
-  'Resume a previous session': 'Resume a previous session',
-  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
-    'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
 };
