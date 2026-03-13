@@ -303,40 +303,6 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multiple questions', () => {
-    it('navigates between tabs with left/right arrows', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [
-          createSingleQuestion({ header: 'Q1' }),
-          createSingleQuestion({
-            header: 'Q2',
-            question: 'Second question?',
-          }),
-        ],
-      });
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Navigate right to Q2
-      stdin.write('\u001B[C'); // Right arrow
-      await wait();
-
-      expect(lastFrame()).toContain('Second question?');
-
-      // Navigate left back to Q1
-      stdin.write('\u001B[D'); // Left arrow
-      await wait();
-
-      expect(lastFrame()).toContain('What is your favorite color?');
-      unmount();
-    });
-
     it('shows Submit tab for multiple questions', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails({

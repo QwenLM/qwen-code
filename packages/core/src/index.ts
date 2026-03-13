@@ -202,7 +202,11 @@ export * from './lsp/types.js';
 // ============================================================================
 
 export { MCPOAuthProvider } from './mcp/oauth-provider.js';
-export type { MCPOAuthConfig } from './mcp/oauth-provider.js';
+export type {
+  MCPOAuthConfig,
+  OAuthDisplayMessage,
+  OAuthDisplayPayload,
+} from './mcp/oauth-provider.js';
 export { MCPOAuthTokenStorage } from './mcp/oauth-token-storage.js';
 export { KeychainTokenStorage } from './mcp/token-storage/keychain-token-storage.js';
 export type {

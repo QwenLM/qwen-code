@@ -16,13 +16,15 @@ import {
   MCPOAuthTokenStorage,
   getErrorMessage,
 } from '@qwen-code/qwen-code-core';
+import type { OAuthDisplayPayload } from '@qwen-code/qwen-code-core';
 import { appEvents, AppEvent } from '../../../../utils/events.js';
 
 type AuthState = 'idle' | 'authenticating' | 'success' | 'error';
 
+const AUTO_BACK_DELAY_MS = 2000;
+
 export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   server,
-  onSuccess,
   onBack,
 }) => {
   const config = useConfig();
@@ -39,9 +41,12 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     setMessages([]);
     setErrorMessage(null);
 
-    // Listen for OAuth display messages (same as mcpCommand.ts)
-    const displayListener = (message: string) => {
-      setMessages((prev) => [...prev, message]);
+    // Listen for OAuth display messages - supports both plain strings and
+    // structured i18n messages ({ key, params }) emitted by the core layer.
+    const displayListener = (message: OAuthDisplayPayload) => {
+      const text =
+        typeof message === 'string' ? message : t(message.key, message.params);
+      setMessages((prev) => [...prev, text]);
     };
     appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
 
@@ -83,6 +88,16 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
           }),
         ]);
         await toolRegistry.discoverToolsForServer(server.name);
+
+        // Show discovered tool count
+        const discoveredTools = toolRegistry.getToolsByServer(server.name);
+        setMessages((prev) => [
+          ...prev,
+          t("Discovered {{count}} tool(s) from '{{name}}'.", {
+            count: String(discoveredTools.length),
+            name: server.name,
+          }),
+        ]);
       }
 
       // Update the client with the new tools
@@ -91,8 +106,12 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         await geminiClient.setTools();
       }
 
+      setMessages((prev) => [
+        ...prev,
+        t('Authentication complete. Returning to server details...'),
+      ]);
+
       setAuthState('success');
-      onSuccess?.();
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
       setAuthState('error');
@@ -100,12 +119,21 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
       isRunning.current = false;
       appEvents.removeListener(AppEvent.OauthDisplayMessage, displayListener);
     }
-  }, [server, config, onSuccess]);
+  }, [server, config]);
 
   useEffect(() => {
     runAuthentication();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-navigate back after authentication succeeds
+  useEffect(() => {
+    if (authState !== 'success') return;
+    const timer = setTimeout(() => {
+      onBack();
+    }, AUTO_BACK_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [authState, onBack]);
 
   useKeypress(
     (key) => {
@@ -156,6 +184,11 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         {authState === 'authenticating' && (
           <Text color={theme.text.secondary}>
             {t('Authenticating... Please complete the login in your browser.')}
+          </Text>
+        )}
+        {authState === 'success' && (
+          <Text color={theme.status.success}>
+            {t('Authentication successful.')}
           </Text>
         )}
       </Box>

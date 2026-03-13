@@ -745,6 +745,15 @@ export default {
     "Authentifizierung mit MCP-Server '{{name}}' fehlgeschlagen: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Werkzeuge von '{{name}}' werden neu erkannt...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "{{count}} Werkzeug(e) von '{{name}}' entdeckt.",
+  'Authentication complete. Returning to server details...':
+    'Authentifizierung abgeschlossen. Zurück zu den Serverdetails...',
+  'Authentication successful.': 'Authentifizierung erfolgreich.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Falls der Browser sich nicht öffnet, kopieren Sie diese URL und fügen Sie sie in Ihren Browser ein:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Stellen Sie sicher, dass Sie die VOLLSTÄNDIGE URL kopieren – sie kann über mehrere Zeilen gehen.',
 
   // ============================================================================
   // Commands - Chat
@@ -916,6 +925,8 @@ export default {
   Disable: 'Deaktivieren',
   Enable: 'Aktivieren',
   Authenticate: 'Authentifizieren',
+  'Re-authenticate': 'Erneut authentifizieren',
+  'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',

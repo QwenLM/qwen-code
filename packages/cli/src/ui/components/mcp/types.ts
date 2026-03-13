@@ -48,6 +48,8 @@ export interface MCPServerDisplayInfo {
   errorMessage?: string;
   /** 是否被禁用（在排除列表中） */
   isDisabled: boolean;
+  /** 是否存储有 OAuth 认证信息 */
+  hasOAuthTokens?: boolean;
 }
 
 /**
@@ -132,6 +134,8 @@ export interface ServerDetailStepProps {
   onDisable?: () => void;
   /** OAuth 认证回调 */
   onAuthenticate?: () => void;
+  /** 清空认证信息回调 */
+  onClearAuth?: () => void;
   /** 返回回调 */
   onBack: () => void;
 }
@@ -178,8 +182,6 @@ export interface ToolDetailStepProps {
 export interface AuthenticateStepProps {
   /** 服务器信息 */
   server: MCPServerDisplayInfo | null;
-  /** 认证成功回调 */
-  onSuccess?: () => void;
   /** 返回回调 */
   onBack: () => void;
 }
