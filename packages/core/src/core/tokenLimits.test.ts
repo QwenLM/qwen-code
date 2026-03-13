@@ -288,8 +288,8 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(16384);
-      expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
+      expect(tokenLimit('glm-5', 'output')).toBe(131072);
+      expect(tokenLimit('glm-4.7', 'output')).toBe(131072);
     });
 
     it('should return correct output limits for MiniMax', () => {
