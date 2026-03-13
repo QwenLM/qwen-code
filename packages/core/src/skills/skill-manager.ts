@@ -441,7 +441,7 @@ export class SkillManager {
       case 'user':
         return path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
       case 'bundled':
-        return this.getBundledSkillsDir();
+        return this.bundledSkillsDir;
       case 'extension':
         throw new Error(
           'Extension skills do not have a base directory; they are loaded from active extensions.',
@@ -449,13 +449,6 @@ export class SkillManager {
       default:
         throw new Error(`Unknown skill level: ${level as string}`);
     }
-  }
-
-  /**
-   * Gets the directory for bundled skills shipped with qwen-code.
-   */
-  private getBundledSkillsDir(): string {
-    return this.bundledSkillsDir;
   }
 
   /**
@@ -493,7 +486,7 @@ export class SkillManager {
     }
 
     if (level === 'bundled') {
-      const bundledDir = this.getBundledSkillsDir();
+      const bundledDir = this.bundledSkillsDir;
       if (!fsSync.existsSync(bundledDir)) {
         debugLogger.warn(
           `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,

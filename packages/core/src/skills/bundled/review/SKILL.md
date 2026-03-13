@@ -1,6 +1,12 @@
 ---
 name: review
 description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, or `/review <file-path>`.
+allowedTools:
+  - Agent
+  - Bash
+  - Grep
+  - Read
+  - Glob
 ---
 
 # Code Review

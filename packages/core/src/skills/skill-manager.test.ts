@@ -520,7 +520,7 @@ Skill 3 content`);
     it('should return bundled-level base dir', () => {
       const baseDir = manager.getSkillsBaseDir('bundled');
 
-      expect(baseDir).toContain('bundled');
+      expect(baseDir).toMatch(/skills[/\\]bundled$/);
     });
 
     it('should throw for extension level', () => {
@@ -531,25 +531,44 @@ Skill 3 content`);
   });
 
   describe('bundled skills', () => {
-    it('should load bundled skills in listSkills', async () => {
-      // Mock project and user dirs as empty
+    const bundledDirSegment = path.join('skills', 'bundled');
+    const projectDirSegment = path.join('.qwen', 'skills');
+    const userDirSegment = path.join('.qwen', 'skills');
+
+    const reviewDirEntry = {
+      name: 'review',
+      isDirectory: () => true,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    };
+
+    const emptyDir = [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+
+    function mockReaddirForLevels(levels: Set<string>) {
       vi.mocked(fs.readdir).mockImplementation((dirPath) => {
         const pathStr = String(dirPath);
-        if (pathStr.includes('bundled')) {
-          return Promise.resolve([
-            {
-              name: 'review',
-              isDirectory: () => true,
-              isFile: () => false,
-              isSymbolicLink: () => false,
-            },
-          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-        }
-        return Promise.resolve(
-          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
-        );
-      });
+        const isBundled =
+          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isProject =
+          pathStr.includes(projectDirSegment) &&
+          pathStr.startsWith('/test/project');
+        const isUser =
+          pathStr.includes(userDirSegment) && pathStr.startsWith('/home/user');
 
+        if (
+          (levels.has('bundled') && isBundled) ||
+          (levels.has('project') && isProject) ||
+          (levels.has('user') && isUser)
+        ) {
+          return Promise.resolve([reviewDirEntry] as unknown as Awaited<
+            ReturnType<typeof fs.readdir>
+          >);
+        }
+        return Promise.resolve(emptyDir);
+      });
+    }
+
+    function setupReviewSkillMocks() {
       vi.mocked(fs.access).mockResolvedValue(undefined);
       vi.mocked(fs.readFile).mockResolvedValue(`---
 name: review
@@ -561,6 +580,11 @@ Review content`);
         name: 'review',
         description: 'Review code changes',
       });
+    }
+
+    it('should load bundled skills in listSkills', async () => {
+      mockReaddirForLevels(new Set(['bundled']));
+      setupReviewSkillMocks();
 
       const skills = await manager.listSkills({ force: true });
 
@@ -570,34 +594,8 @@ Review content`);
     });
 
     it('should prioritize project-level over bundled skills with same name', async () => {
-      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
-        const pathStr = String(dirPath);
-        if (pathStr.includes('.qwen') || pathStr.includes('bundled')) {
-          return Promise.resolve([
-            {
-              name: 'review',
-              isDirectory: () => true,
-              isFile: () => false,
-              isSymbolicLink: () => false,
-            },
-          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-        }
-        return Promise.resolve(
-          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
-        );
-      });
-
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: review
-description: Review code changes
----
-Review content`);
-
-      mockParseYaml.mockReturnValue({
-        name: 'review',
-        description: 'Review code changes',
-      });
+      mockReaddirForLevels(new Set(['project', 'bundled']));
+      setupReviewSkillMocks();
 
       const skills = await manager.listSkills({ force: true });
 
@@ -606,36 +604,21 @@ Review content`);
       expect(reviewSkills[0].level).toBe('project');
     });
 
+    it('should prioritize user-level over bundled skills with same name', async () => {
+      mockReaddirForLevels(new Set(['user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      const reviewSkills = skills.filter((s) => s.name === 'review');
+      expect(reviewSkills).toHaveLength(1);
+      expect(reviewSkills[0].level).toBe('user');
+    });
+
     it('should fall back to bundled level in loadSkill', async () => {
       // Project, user, extension all empty; bundled has the skill
-      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
-        const pathStr = String(dirPath);
-        if (pathStr.includes('bundled')) {
-          return Promise.resolve([
-            {
-              name: 'review',
-              isDirectory: () => true,
-              isFile: () => false,
-              isSymbolicLink: () => false,
-            },
-          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
-        }
-        return Promise.resolve(
-          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
-        );
-      });
-
-      vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(`---
-name: review
-description: Review code changes
----
-Review content`);
-
-      mockParseYaml.mockReturnValue({
-        name: 'review',
-        description: 'Review code changes',
-      });
+      mockReaddirForLevels(new Set(['bundled']));
+      setupReviewSkillMocks();
 
       const skill = await manager.loadSkill('review');
 
