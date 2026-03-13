@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   getSettingsSchema,
@@ -307,6 +309,81 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should describe hook array item shapes in the schema source', () => {
+      const hookDefinition =
+        getSettingsSchema().hooks.properties.UserPromptSubmit;
+
+      expect(hookDefinition.type).toBe('array');
+      expect(hookDefinition.properties?.['matcher'].type).toBe('string');
+      expect(hookDefinition.properties?.['sequential'].type).toBe('boolean');
+      expect(hookDefinition.properties?.['hooks'].type).toBe('array');
+      expect(
+        hookDefinition.properties?.['hooks'].properties?.['command'].type,
+      ).toBe('string');
+      expect(
+        hookDefinition.properties?.['hooks'].properties?.['type'].type,
+      ).toBe('enum');
+      expect(
+        hookDefinition.properties?.['hooks'].properties?.['timeout'].type,
+      ).toBe('number');
+      expect(
+        hookDefinition.properties?.['hooks'].properties?.['env'].type,
+      ).toBe('object');
+    });
+
+    it('should generate object-based JSON schema for hook settings', () => {
+      const jsonSchema = JSON.parse(
+        readFileSync(
+          path.resolve(
+            process.cwd(),
+            '../vscode-ide-companion/schemas/settings.schema.json',
+          ),
+          'utf8',
+        ),
+      ) as {
+        properties: {
+          hooks: {
+            properties: {
+              UserPromptSubmit: {
+                items: {
+                  type: string;
+                  properties: {
+                    hooks: {
+                      type: string;
+                      items: {
+                        type: string;
+                        properties: {
+                          command: {
+                            type: string;
+                          };
+                        };
+                      };
+                    };
+                  };
+                };
+              };
+            };
+          };
+        };
+      };
+
+      expect(
+        jsonSchema.properties.hooks.properties.UserPromptSubmit.items.type,
+      ).toBe('object');
+      expect(
+        jsonSchema.properties.hooks.properties.UserPromptSubmit.items.properties
+          .hooks.type,
+      ).toBe('array');
+      expect(
+        jsonSchema.properties.hooks.properties.UserPromptSubmit.items.properties
+          .hooks.items.type,
+      ).toBe('object');
+      expect(
+        jsonSchema.properties.hooks.properties.UserPromptSubmit.items.properties
+          .hooks.items.properties.command.type,
+      ).toBe('string');
     });
   });
 });

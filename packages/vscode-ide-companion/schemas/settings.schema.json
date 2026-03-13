@@ -600,14 +600,108 @@
           "description": "Hooks that execute before agent processing. Can modify prompts or inject context.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "Optional matcher used to scope the hook definition.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Run hooks in this definition sequentially.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "Hook implementations to execute for this definition.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "Hook implementation type. Options: command",
+                      "enum": [
+                        "command"
+                      ],
+                      "default": "command"
+                    },
+                    "command": {
+                      "description": "Command to execute for this hook.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Optional name used to identify or disable the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Optional human-readable description of the hook.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Optional environment variables passed to the hook.",
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "Stop": {
           "description": "Hooks that execute after agent processing. Can post-process responses or log interactions.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "Optional matcher used to scope the hook definition.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Run hooks in this definition sequentially.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "Hook implementations to execute for this definition.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "Hook implementation type. Options: command",
+                      "enum": [
+                        "command"
+                      ],
+                      "default": "command"
+                    },
+                    "command": {
+                      "description": "Command to execute for this hook.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Optional name used to identify or disable the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Optional human-readable description of the hook.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Optional environment variables passed to the hook.",
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

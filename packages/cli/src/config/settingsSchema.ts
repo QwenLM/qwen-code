@@ -85,6 +85,104 @@ export interface SettingsSchema {
 export type MemoryImportFormat = 'tree' | 'flat';
 export type DnsResolutionOrder = 'ipv4first' | 'verbatim';
 
+type HookCommandSetting = {
+  type: 'command';
+  command: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+};
+
+const HOOK_COMMAND_PROPERTIES: SettingsSchema = {
+  type: {
+    type: 'enum',
+    label: 'Hook Type',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: 'command',
+    description: 'Hook implementation type.',
+    showInDialog: false,
+    options: [{ value: 'command', label: 'Command' }],
+  },
+  command: {
+    type: 'string',
+    label: 'Hook Command',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as string | undefined,
+    description: 'Command to execute for this hook.',
+    showInDialog: false,
+  },
+  name: {
+    type: 'string',
+    label: 'Hook Name',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as string | undefined,
+    description: 'Optional name used to identify or disable the hook.',
+    showInDialog: false,
+  },
+  description: {
+    type: 'string',
+    label: 'Hook Description',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as string | undefined,
+    description: 'Optional human-readable description of the hook.',
+    showInDialog: false,
+  },
+  timeout: {
+    type: 'number',
+    label: 'Hook Timeout',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as number | undefined,
+    description: 'Optional timeout in milliseconds.',
+    showInDialog: false,
+  },
+  env: {
+    type: 'object',
+    label: 'Hook Environment',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as Record<string, string> | undefined,
+    description: 'Optional environment variables passed to the hook.',
+    showInDialog: false,
+  },
+};
+
+const HOOK_EVENT_PROPERTIES: SettingsSchema = {
+  matcher: {
+    type: 'string',
+    label: 'Hook Matcher',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as string | undefined,
+    description: 'Optional matcher used to scope the hook definition.',
+    showInDialog: false,
+  },
+  sequential: {
+    type: 'boolean',
+    label: 'Sequential Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: undefined as boolean | undefined,
+    description: 'Run hooks in this definition sequentially.',
+    showInDialog: false,
+  },
+  hooks: {
+    type: 'array',
+    label: 'Hook Commands',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: [] as HookCommandSetting[],
+    description: 'Hook implementations to execute for this definition.',
+    showInDialog: false,
+    properties: HOOK_COMMAND_PROPERTIES,
+  },
+};
+
 /**
  * The canonical schema for all settings.
  * The structure of this object defines the structure of the `Settings` type.
@@ -1232,6 +1330,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Hooks that execute before agent processing. Can modify prompts or inject context.',
         showInDialog: false,
+        properties: HOOK_EVENT_PROPERTIES,
         mergeStrategy: MergeStrategy.CONCAT,
       },
       Stop: {
@@ -1243,6 +1342,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
         showInDialog: false,
+        properties: HOOK_EVENT_PROPERTIES,
         mergeStrategy: MergeStrategy.CONCAT,
       },
     },

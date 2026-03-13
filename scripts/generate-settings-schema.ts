@@ -60,13 +60,28 @@ function convertSettingToJsonSchema(
       break;
     case 'array':
       schema.type = 'array';
-      schema.items = { type: 'string' };
+      if (setting.properties) {
+        schema.items = {
+          type: 'object',
+          properties: {},
+        };
+        for (const [key, childDef] of Object.entries(setting.properties)) {
+          schema.items.properties![key] = convertSettingToJsonSchema(
+            childDef as SettingDefinition,
+          );
+        }
+      } else {
+        schema.items = { type: 'string' };
+      }
       break;
     case 'enum':
       if (setting.options && setting.options.length > 0) {
         schema.enum = setting.options.map((o) => o.value);
-        schema.description +=
-          ' Options: ' + setting.options.map((o) => `${o.value}`).join(', ');
+        const optionsDescription =
+          'Options: ' + setting.options.map((o) => `${o.value}`).join(', ');
+        schema.description = schema.description
+          ? `${schema.description} ${optionsDescription}`
+          : optionsDescription;
       } else {
         // Enum without predefined options - accept any string
         schema.type = 'string';
