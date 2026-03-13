@@ -111,7 +111,10 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/gitService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/sessionService.js';
+export * from './services/conversationUtils.js';
 export * from './services/fileSystemService.js';
+export * from './services/shellTypes.js';
+export * from './services/processCleanup.js';
 
 // Export IDE specific logic
 export * from './ide/ide-client.js';
@@ -176,11 +179,14 @@ export * from './tools/write-file.js';
 // ============================================================================
 
 export * from './services/chatRecordingService.js';
+export * from './services/conversationUtils.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
+export * from './services/processCleanup.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+export * from './services/shellTypes.js';
 
 // ============================================================================
 // LSP Support
