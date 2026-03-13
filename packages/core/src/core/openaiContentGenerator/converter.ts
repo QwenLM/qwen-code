@@ -821,8 +821,13 @@ export class OpenAIContentConverter {
   convertOpenAIResponseToGemini(
     openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
-    const choice = openaiResponse.choices[0];
+    const choice = openaiResponse.choices?.[0];
     const response = new GenerateContentResponse();
+
+    if (!choice) {
+      response.candidates = [];
+      return response;
+    }
 
     const parts: Part[] = [];
 
