@@ -190,7 +190,9 @@ export class SkillManager {
     if (bundledSkill) {
       debugLogger.debug(`Found skill ${name} at bundled level`);
     } else {
-      debugLogger.debug(`Skill ${name} not found at any level`);
+      debugLogger.debug(
+        `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
+      );
     }
     return bundledSkill;
   }
@@ -492,6 +494,12 @@ export class SkillManager {
 
     if (level === 'bundled') {
       const bundledDir = this.getBundledSkillsDir();
+      if (!fsSync.existsSync(bundledDir)) {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
+        );
+        return [];
+      }
       debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
       const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);

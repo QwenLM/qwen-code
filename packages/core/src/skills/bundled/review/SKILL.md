@@ -13,7 +13,7 @@ Based on the arguments provided:
 
 - **No arguments**: Review local uncommitted changes
   - Run `git diff` and `git diff --staged` to get all changes
-  - If no changes found, tell the user there are no changes to review
+  - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
 
 - **PR number or URL** (e.g., `123` or `https://github.com/.../pull/123`):
   - Run `gh pr view <number>` to get PR details
@@ -109,3 +109,4 @@ One of:
 - Focus on the diff, not pre-existing issues in unchanged code.
 - Keep the review concise. Don't repeat the same point for every occurrence.
 - When suggesting a fix, show the actual code change.
+- Flag any exposed secrets, credentials, API keys, or tokens in the diff as **Critical**.
