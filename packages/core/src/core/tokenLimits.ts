@@ -169,6 +169,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
+  [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
