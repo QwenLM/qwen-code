@@ -8,6 +8,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import type {
@@ -89,7 +90,7 @@ export class SkillManager {
 
     const levelsToCheck: SkillLevel[] = options.level
       ? [options.level]
-      : ['project', 'user', 'extension'];
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
@@ -175,10 +176,17 @@ export class SkillManager {
     const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
     if (extensionSkill) {
       debugLogger.debug(`Found skill ${name} at extension level`);
+      return extensionSkill;
+    }
+
+    // Try bundled level (lowest precedence)
+    const bundledSkill = await this.findSkillByNameAtLevel(name, 'bundled');
+    if (bundledSkill) {
+      debugLogger.debug(`Found skill ${name} at bundled level`);
     } else {
       debugLogger.debug(`Skill ${name} not found at any level`);
     }
-    return extensionSkill;
+    return bundledSkill;
   }
 
   /**
@@ -226,7 +234,7 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension'];
+    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
     let totalSkills = 0;
 
     for (const level of levels) {
@@ -428,6 +436,15 @@ export class SkillManager {
   }
 
   /**
+   * Gets the directory for bundled skills shipped with qwen-code.
+   * Uses import.meta.url to resolve relative to the package source.
+   */
+  private getBundledSkillsDir(): string {
+    const currentDir = path.dirname(fileURLToPath(import.meta.url));
+    return path.join(currentDir, 'bundled');
+  }
+
+  /**
    * Lists skills at a specific level.
    *
    * @param level - Storage level to scan
@@ -458,6 +475,14 @@ export class SkillManager {
       debugLogger.debug(
         `Loaded ${skills.length} extension-level skills from ${extensions.length} extensions`,
       );
+      return skills;
+    }
+
+    if (level === 'bundled') {
+      const bundledDir = this.getBundledSkillsDir();
+      debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
+      const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
+      debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
 
