@@ -260,6 +260,40 @@ export async function readFileWithEncoding(filePath: string): Promise<string> {
   return result.content;
 }
 
+export async function countFileLines(filePath: string): Promise<number> {
+  const result = await readFileWithEncodingInfo(filePath);
+  return result.content.split('\n').length;
+}
+
+export async function readFileWithLineAndLimit(params: {
+  path: string;
+  limit: number;
+  line?: number;
+}): Promise<{
+  content: string;
+  bom?: boolean;
+  encoding?: string;
+  originalLineCount: number;
+}> {
+  const { path: filePath, limit, line } = params;
+  const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
+  const lines = content.split('\n').map((line) => line.trimEnd());
+  const originalLineCount = lines.length;
+  const startLine = line || 0;
+  // Ensure endLine does not exceed originalLineCount
+  const endLine = Math.min(startLine + limit, originalLineCount);
+  // Ensure selectedLines doesn't try to slice beyond array bounds if startLine is too high
+  const actualStartLine = Math.min(startLine, originalLineCount);
+  const selectedLines = lines.slice(actualStartLine, endLine);
+
+  return {
+    content: selectedLines.join('\n'),
+    bom,
+    encoding,
+    originalLineCount,
+  };
+}
+
 /**
  * Detect the encoding of a file by reading a sample from its beginning.
  * Returns the encoding name (e.g. 'utf-8', 'gbk', 'shift_jis').
@@ -468,8 +502,8 @@ export interface ProcessedFileReadResult {
   returnDisplay: string;
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
+  originalLineCount?: number; // For text files, the total number of lines in the original file
   isTruncated?: boolean; // For text files, indicates if content was truncated
-  originalLineCount?: number; // For text files
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
 }
 
@@ -550,20 +584,18 @@ export async function processSingleFileContent(
       }
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
-        const content = await readFileWithEncoding(filePath);
-        const lines = content.split('\n').map((line) => line.trimEnd());
-        const originalLineCount = lines.length;
-
+        const { content, _meta } = await config
+          .getFileSystemService()
+          .readTextFile({
+            path: filePath,
+            limit: limit ?? config.getTruncateToolOutputLines(),
+            line: offset,
+          });
+        const originalLineCount =
+          _meta?.originalLineCount ?? (await countFileLines(filePath));
+        const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
-        const configLineLimit = config.getTruncateToolOutputLines();
         const configCharLimit = config.getTruncateToolOutputThreshold();
-        const effectiveLimit = limit === undefined ? configLineLimit : limit;
-
-        // Ensure endLine does not exceed originalLineCount
-        const endLine = Math.min(startLine + effectiveLimit, originalLineCount);
-        // Ensure selectedLines doesn't try to slice beyond array bounds if startLine is too high
-        const actualStartLine = Math.min(startLine, originalLineCount);
-        const selectedLines = lines.slice(actualStartLine, endLine);
 
         // Apply character limit truncation
         let llmContent = '';
@@ -603,11 +635,7 @@ export async function processSingleFileContent(
           linesIncluded = selectedLines.length;
         }
 
-        // Calculate actual end line shown
-        const actualEndLine = contentLengthTruncated
-          ? actualStartLine + linesIncluded
-          : endLine;
-
+        const actualEndLine = startLine + linesIncluded;
         const contentRangeTruncated =
           startLine > 0 || actualEndLine < originalLineCount;
         const isTruncated = contentRangeTruncated || contentLengthTruncated;
@@ -616,7 +644,7 @@ export async function processSingleFileContent(
         let returnDisplay = '';
         if (isTruncated) {
           returnDisplay = `Read lines ${
-            actualStartLine + 1
+            startLine + 1
           }-${actualEndLine} of ${originalLineCount} from ${relativePathForDisplay}`;
           if (contentLengthTruncated) {
             returnDisplay += ' (truncated)';
@@ -628,7 +656,7 @@ export async function processSingleFileContent(
           returnDisplay,
           isTruncated,
           originalLineCount,
-          linesShown: [actualStartLine + 1, actualEndLine],
+          linesShown: [startLine + 1, actualEndLine],
         };
       }
       case 'image':
