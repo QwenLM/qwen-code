@@ -418,16 +418,21 @@ export class ShellExecutionService {
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
-      const { executable, argsPrefix } = getShellConfiguration();
-      // On Windows, pass args as a single string instead of an array.
-      // node-pty's argsToCommandLine re-quotes array elements that contain
-      // spaces, which mangles user-provided quoted arguments (e.g.,
-      // `type "hello world"` becomes `"type \"hello world\""`).
-      // When args is a string, node-pty concatenates it verbatim.
-      const isWin = os.platform() === 'win32';
-      const args: string[] | string = isWin
-        ? [...argsPrefix, commandToExecute].join(' ')
-        : [...argsPrefix, commandToExecute];
+      const { executable, argsPrefix, shell } = getShellConfiguration();
+      // On Windows with cmd.exe, pass args as a single string instead of
+      // an array. node-pty's argsToCommandLine re-quotes array elements
+      // that contain spaces, which mangles user-provided quoted arguments
+      // for cmd.exe (e.g., `type "hello world"` becomes
+      // `"type \"hello world\""`).
+      //
+      // For PowerShell, keep the array form: argsToCommandLine escapes for
+      // CommandLineToArgvW round-tripping, which .NET correctly parses.
+      // The string form breaks quoted paths ending in \ (e.g., "C:\Temp\")
+      // because CommandLineToArgvW treats \" as an escaped quote.
+      const args: string[] | string =
+        os.platform() === 'win32' && shell === 'cmd'
+          ? [...argsPrefix, commandToExecute].join(' ')
+          : [...argsPrefix, commandToExecute];
 
       const ptyProcess = ptyInfo.module.spawn(executable, args, {
         cwd,

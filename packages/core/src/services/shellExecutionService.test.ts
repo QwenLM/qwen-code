@@ -441,6 +441,29 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('should use PowerShell on Windows with array args', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        expect.any(Object),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
     it('should use bash on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
       await simulateExecution('ls "foo bar"', (pty) =>
