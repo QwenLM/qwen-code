@@ -166,7 +166,6 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
