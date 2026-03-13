@@ -498,6 +498,142 @@ describe('subagent.ts', () => {
         );
       });
 
+      it('should append Unicode path handling instructions when the subagent model requires them', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const modelConfig: ModelConfig = {
+          model: 'qwen3.5-plus',
+          temp: 0.5,
+          top_p: 1,
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          modelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+
+        expect(sysPrompt).toContain('You are a test agent.');
+        expect(sysPrompt).toContain('Important Rules:');
+        expect(sysPrompt).toContain('# Unicode Path Handling');
+        expect(sysPrompt).toContain('\\u4e2d\\u6587\\u4e2d\\u6587-1.md');
+      });
+
+      it('should not append Unicode path handling instructions for models that do not require them', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const modelConfig: ModelConfig = {
+          model: 'qwen3-coder-plus',
+          temp: 0.5,
+          top_p: 1,
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          modelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+
+        expect(sysPrompt).toContain('You are a test agent.');
+        expect(sysPrompt).toContain('Important Rules:');
+        expect(sysPrompt).not.toContain('# Unicode Path Handling');
+      });
+
+      it('should append Unicode path handling instructions using runtimeContext.getModel() when subagent model is not set', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getModel').mockReturnValue('qwen3.5-plus');
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const modelConfig: ModelConfig = {
+          temp: 0.5,
+          top_p: 1,
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          modelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+
+        expect(sysPrompt).toContain('# Unicode Path Handling');
+        expect(sysPrompt).toContain('\\u4e2d\\u6587\\u4e2d\\u6587-1.md');
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream.mock.calls[0]?.[0]).toBe('qwen3.5-plus');
+      });
+
+      it('should append Unicode path handling instructions for qwen3.5-397B-A17B', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const modelConfig: ModelConfig = {
+          model: 'qwen3.5-397B-A17B',
+          temp: 0.5,
+          top_p: 1,
+        };
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          modelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+
+        expect(sysPrompt).toContain('# Unicode Path Handling');
+      });
+
       it('should not append userMemory separator when userMemory is empty', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');

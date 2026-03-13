@@ -28,7 +28,7 @@ function shouldUseUnicodeEscapedPaths(model?: string): boolean {
   );
 }
 
-function getUnicodePathHandlingInstructions(model?: string): string {
+export function getUnicodePathHandlingInstructions(model?: string): string {
   if (!shouldUseUnicodeEscapedPaths(model)) {
     return '';
   }

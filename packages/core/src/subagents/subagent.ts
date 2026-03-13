@@ -58,6 +58,7 @@ import { logSubagentExecution } from '../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../telemetry/types.js';
 import { TaskTool } from '../tools/task.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { getUnicodePathHandlingInstructions } from '../core/prompts.js';
 
 /**
  * @fileoverview Defines the configuration interfaces for a subagent.
@@ -998,6 +999,15 @@ Important Rules:
  - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
  - Use tools only when necessary to obtain facts or make changes.
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
+    const model =
+      this.modelConfig.model ||
+      this.runtimeContext.getModel() ||
+      DEFAULT_QWEN_MODEL;
+
+    const unicodePathInstructions = getUnicodePathHandlingInstructions(model);
+    if (unicodePathInstructions) {
+      finalPrompt += `\n\n${unicodePathInstructions}`;
+    }
 
     // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
     const userMemory = this.runtimeContext.getUserMemory();
