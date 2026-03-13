@@ -431,7 +431,7 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/d', '/s', '/c', 'dir "foo bar"'],
+        '/d /s /c dir "foo bar"',
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({

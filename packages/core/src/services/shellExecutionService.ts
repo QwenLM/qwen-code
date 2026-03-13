@@ -419,7 +419,15 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix } = getShellConfiguration();
-      const args = [...argsPrefix, commandToExecute];
+      // On Windows, pass args as a single string instead of an array.
+      // node-pty's argsToCommandLine re-quotes array elements that contain
+      // spaces, which mangles user-provided quoted arguments (e.g.,
+      // `type "hello world"` becomes `"type \"hello world\""`).
+      // When args is a string, node-pty concatenates it verbatim.
+      const isWin = os.platform() === 'win32';
+      const args: string[] | string = isWin
+        ? [...argsPrefix, commandToExecute].join(' ')
+        : [...argsPrefix, commandToExecute];
 
       const ptyProcess = ptyInfo.module.spawn(executable, args, {
         cwd,
