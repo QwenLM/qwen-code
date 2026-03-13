@@ -8,6 +8,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type {
   Client,
@@ -37,6 +38,7 @@ import { spawn } from 'child_process';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
+import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -163,7 +165,7 @@ export class AcpConnection {
 
     const stream = ndJsonStream(stdin, stdout);
 
-    // Build the SDK Client implementation that bridges to our callbacks
+    // Build the SDK Client implementation that bridges to our callbacks.
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     this.sdkConnection = new ClientSideConnection(
@@ -266,13 +268,17 @@ export class AcpConnection {
         async readTextFile(
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> {
-          const result = await self.fileHandler.handleReadTextFile({
-            path: params.path,
-            sessionId: params.sessionId,
-            line: params.line ?? null,
-            limit: params.limit ?? null,
-          });
-          return { content: result.content };
+          try {
+            const result = await self.fileHandler.handleReadTextFile({
+              path: params.path,
+              sessionId: params.sessionId,
+              line: params.line ?? null,
+              limit: params.limit ?? null,
+            });
+            return { content: result.content };
+          } catch (error) {
+            throw self.mapReadTextFileError(error, params.path);
+          }
         },
 
         async writeTextFile(
@@ -332,6 +338,22 @@ export class AcpConnection {
       throw new Error('Not connected to ACP agent');
     }
     return this.sdkConnection;
+  }
+
+  private mapReadTextFileError(error: unknown, filePath: string): unknown {
+    const errorCode =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+
+    if (errorCode === 'ENOENT') {
+      throw new RequestError(
+        ACP_ERROR_CODES.RESOURCE_NOT_FOUND,
+        `File not found: ${filePath}`,
+      );
+    }
+
+    return error;
   }
 
   private resolvePermissionOptionId(

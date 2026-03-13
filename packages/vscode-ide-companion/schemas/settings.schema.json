@@ -579,11 +579,9 @@
       "type": "object",
       "properties": {
         "displayMode": {
-          "description": "Display mode for multi-agent sessions. \"tmux\" uses tmux panes, \"iterm2\" uses iTerm2 tabs, \"in-process\" runs in the current terminal. Options: in-process, tmux, iterm2",
+          "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
           "enum": [
-            "in-process",
-            "tmux",
-            "iterm2"
+            "in-process"
           ]
         },
         "arena": {

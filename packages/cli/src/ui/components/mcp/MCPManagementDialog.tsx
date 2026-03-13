@@ -25,6 +25,7 @@ import { useConfig } from '../../contexts/ConfigContext.js';
 import {
   getMCPServerStatus,
   DiscoveredMCPTool,
+  MCPOAuthTokenStorage,
   type MCPServerConfig,
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
@@ -95,16 +96,10 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       let source: 'user' | 'project' | 'extension' = 'user';
       if (serverConfig.extensionName) {
         source = 'extension';
-      }
-
-      // Determine the scope of the configuration
-      let scope: 'user' | 'workspace' | 'extension' = 'user';
-      if (serverConfig.extensionName) {
-        scope = 'extension';
       } else if (workspaceSettings.mcpServers?.[name]) {
-        scope = 'workspace';
+        source = 'project';
       } else if (userSettings.mcpServers?.[name]) {
-        scope = 'user';
+        source = 'user';
       }
 
       // Use config.isMcpServerDisabled() to check if server is disabled
@@ -115,16 +110,26 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         (t) => !t.name || !t.description,
       ).length;
 
+      // Check if OAuth tokens exist for this server
+      let hasOAuthTokens = false;
+      try {
+        const tokenStorage = new MCPOAuthTokenStorage();
+        const credentials = await tokenStorage.getCredentials(name);
+        hasOAuthTokens = credentials !== null;
+      } catch {
+        // Ignore errors when checking token existence
+      }
+
       serverInfos.push({
         name,
         status,
         source,
-        scope,
         config: serverConfig,
         toolCount: serverTools.length,
         invalidToolCount,
         promptCount: serverPrompts.length,
         isDisabled,
+        hasOAuthTokens,
       });
     }
 
@@ -256,6 +261,36 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     }
   }, [fetchServerData]);
 
+  // Clear OAuth authentication tokens and disconnect the server
+  const handleClearAuth = useCallback(async () => {
+    if (!config || !selectedServer) return;
+
+    try {
+      setIsLoading(true);
+      const tokenStorage = new MCPOAuthTokenStorage();
+      await tokenStorage.deleteCredentials(selectedServer.name);
+      debugLogger.info(
+        `Cleared OAuth tokens for server '${selectedServer.name}'`,
+      );
+
+      // Disconnect the server so it no longer appears as connected
+      const toolRegistry = config.getToolRegistry();
+      if (toolRegistry) {
+        await toolRegistry.disconnectServer(selectedServer.name);
+      }
+
+      // Reload to update hasOAuthTokens flag and server status
+      await reloadServers();
+    } catch (error) {
+      debugLogger.error(
+        `Error clearing OAuth tokens for server '${selectedServer.name}':`,
+        error,
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [config, selectedServer, reloadServers]);
+
   // Reconnect server
   const handleReconnect = useCallback(async () => {
     if (!config || !selectedServer) return;
@@ -343,7 +378,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
         // Determine the scope based on server configuration location
         let targetScope: 'user' | 'workspace' = 'user';
-        if (server.scope === 'extension') {
+        if (server.source === 'extension') {
           // Extension servers should not be disabled through user/workspace settings
           // Show error message and return
           debugLogger.warn(
@@ -351,7 +386,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           );
           setIsLoading(false);
           return;
-        } else if (server.scope === 'workspace') {
+        } else if (server.source === 'project') {
           targetScope = 'workspace';
         }
 
@@ -544,6 +579,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
             onReconnect={handleReconnect}
             onDisable={handleDisable}
             onAuthenticate={handleAuthenticate}
+            onClearAuth={handleClearAuth}
             onBack={handleNavigateBack}
           />
         );
@@ -576,10 +612,10 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         return (
           <AuthenticateStep
             server={selectedServer}
-            onSuccess={() => {
+            onBack={() => {
+              handleNavigateBack();
               void reloadServers();
             }}
-            onBack={handleNavigateBack}
           />
         );
 
@@ -601,6 +637,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     handleReconnect,
     handleDisable,
     handleAuthenticate,
+    handleClearAuth,
     handleNavigateBack,
     handleSelectTool,
     handleSelectDisableScope,

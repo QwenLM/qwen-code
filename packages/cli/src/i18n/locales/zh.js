@@ -138,7 +138,7 @@ export default {
     '在所选作用域中未找到主题 "{{themeName}}"。',
   'Clear conversation history and free up context': '清除对话历史并释放上下文',
   'Compresses the context by replacing it with a summary.':
-    '通过用摘要替换来压缩上下文',
+    '通过摘要替换来压缩上下文',
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
@@ -763,6 +763,15 @@ export default {
     "认证 MCP 服务器 '{{name}}' 失败：{{error}}",
   "Re-discovering tools from '{{name}}'...":
     "正在重新发现 '{{name}}' 的工具...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "从 '{{name}}' 发现了 {{count}} 个工具。",
+  'Authentication complete. Returning to server details...':
+    '认证完成，正在返回服务器详情...',
+  'Authentication successful.': '认证成功。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    '如果浏览器未自动打开，请复制以下 URL 并粘贴到浏览器中：',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  请确保复制完整的 URL —— 它可能跨越多行。',
 
   // ============================================================================
   // MCP Management Dialog
@@ -793,6 +802,8 @@ export default {
   Enable: '启用',
   Disable: '禁用',
   Authenticate: '认证',
+  'Re-authenticate': '重新认证',
+  'Clear Authentication': '清空认证',
   disabled: '已禁用',
   'Server:': '服务器：',
   '(disabled)': '(已禁用)',

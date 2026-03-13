@@ -27,7 +27,10 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
+import {
+  getSpecificMimeType,
+  fileExists as isFilefileExists,
+} from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import type {
   ModifiableDeclarativeTool,
@@ -133,33 +136,40 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
-    let fileExists = false;
+    let fileExists = await isFilefileExists(params.file_path);
     let isNewFile = false;
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
     let occurrences = 0;
-    let encoding = 'utf-8';
-    let bom = false;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
-
-    try {
-      const fileInfo = await this.config
-        .getFileSystemService()
-        .readTextFileWithInfo(params.file_path);
-      // Normalize line endings to LF for consistent processing.
-      currentContent = fileInfo.content.replace(/\r\n/g, '\n');
-      fileExists = true;
-      // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
-      encoding = fileInfo.encoding;
-      bom = fileInfo.bom;
-    } catch (err: unknown) {
-      if (!isNodeError(err) || err.code !== 'ENOENT') {
-        // Rethrow unexpected FS errors (permissions, etc.)
-        throw err;
+    let useBOM = false;
+    let detectedEncoding = 'utf-8';
+    if (fileExists) {
+      try {
+        const fileInfo = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: params.file_path });
+        if (fileInfo._meta?.bom !== undefined) {
+          useBOM = fileInfo._meta.bom;
+        } else {
+          useBOM =
+            fileInfo.content.length > 0 &&
+            fileInfo.content.codePointAt(0) === 0xfeff;
+        }
+        detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        // Normalize line endings to LF for consistent processing.
+        currentContent = fileInfo.content.replace(/\r\n/g, '\n');
+        fileExists = true;
+        // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
+      } catch (err: unknown) {
+        if (!isNodeError(err) || err.code !== 'ENOENT') {
+          // Rethrow unexpected FS errors (permissions, etc.)
+          throw err;
+        }
+        fileExists = false;
       }
-      fileExists = false;
     }
 
     const normalizedStrings = normalizeEditStrings(
@@ -247,8 +257,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       occurrences,
       error,
       isNewFile,
-      encoding,
-      bom,
+      bom: useBOM,
+      encoding: detectedEncoding,
     };
   }
 
@@ -259,7 +269,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   async shouldConfirmExecute(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
+    const mode = this.config.getApprovalMode();
+    if (mode === ApprovalMode.AUTO_EDIT || mode === ApprovalMode.YOLO) {
       return false;
     }
 
@@ -388,18 +399,22 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (editData.isNewFile) {
         const useBOM =
           this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
-        await this.config
-          .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
             bom: useBOM,
-          });
+          },
+        });
       } else {
-        await this.config
-          .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
             bom: editData.bom,
             encoding: editData.encoding,
-          });
+          },
+        });
       }
 
       const fileName = path.basename(this.params.file_path);
@@ -581,28 +596,38 @@ Expectation for required parameters:
     return {
       getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          return this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        const fileExists = await isFilefileExists(params.file_path);
+        if (fileExists) {
+          try {
+            const { content } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return content;
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          const currentContent = await this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-          return applyReplacement(
-            currentContent,
-            params.old_string,
-            params.new_string,
-            params.old_string === '' && currentContent === '',
-          );
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        if (fs.existsSync(params.file_path)) {
+          try {
+            const { content: currentContent } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return applyReplacement(
+              currentContent,
+              params.old_string,
+              params.new_string,
+              params.old_string === '' && currentContent === '',
+            );
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },

@@ -14,8 +14,6 @@ import {
   QWEN_DIR,
   getErrorMessage,
   Storage,
-  setDebugLogSession,
-  sanitizeCwd,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
@@ -476,16 +474,6 @@ export function loadEnvironment(settings: Settings): void {
 export function loadSettings(
   workspaceDir: string = process.cwd(),
 ): LoadedSettings {
-  // Set up a temporary debug log session for the startup phase.
-  // This allows migration errors to be logged to file instead of being
-  // exposed to users via stderr. The Config class will override this
-  // with the actual session once initialized.
-  const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const sanitizedProjectId = sanitizeCwd(resolvedWorkspaceDir);
-  setDebugLogSession({
-    getSessionId: () => `startup-${sanitizedProjectId}`,
-  });
-
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
@@ -496,7 +484,7 @@ export function loadSettings(
   const migratedInMemorScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
-  // Note: resolvedWorkspaceDir is already defined at the top of the function
+  const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;

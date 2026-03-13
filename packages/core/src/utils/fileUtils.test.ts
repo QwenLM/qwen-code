@@ -33,6 +33,7 @@ import {
   fileExists,
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -52,10 +53,13 @@ describe('fileUtils', () => {
   let nonexistentFilePath: string;
   let directoryPath: string;
 
+  const fsService = new StandardFileSystemService();
+
   const mockConfig = {
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getTargetDir: () => tempRootDir,
+    getFileSystemService: () => fsService,
   } as unknown as Config;
 
   beforeEach(() => {
@@ -838,7 +842,7 @@ describe('fileUtils', () => {
     it('should handle read errors for text files', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'content'); // File must exist for initial statSync
       const readError = new Error('Simulated read error');
-      vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(readError);
 
       const result = await processSingleFileContent(
         testTextFilePath,

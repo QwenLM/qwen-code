@@ -246,6 +246,22 @@ export class ToolRegistry {
   }
 
   /**
+   * Disconnects an MCP server by removing its tools, prompts, and disconnecting the client.
+   * Unlike disableMcpServer, this does NOT add the server to the exclusion list.
+   * @param serverName The name of the server to disconnect.
+   */
+  async disconnectServer(serverName: string): Promise<void> {
+    // Remove tools from registry
+    this.removeMcpToolsByServer(serverName);
+
+    // Remove prompts
+    this.config.getPromptRegistry().removePromptsByServer(serverName);
+
+    // Disconnect the MCP client
+    await this.mcpClientManager.disconnectServer(serverName);
+  }
+
+  /**
    * Disables an MCP server by removing its tools, prompts, and disconnecting the client.
    * Also updates the config's exclusion list.
    * @param serverName The name of the server to disable.

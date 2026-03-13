@@ -2245,6 +2245,7 @@ describe('useGeminiStream', () => {
     it('should show a retry countdown and update pending history over time', async () => {
       vi.useFakeTimers();
       try {
+        let continueToRetryAttempt: (() => void) | undefined;
         let resolveStream: (() => void) | undefined;
         mockSendMessageStream.mockReturnValue(
           (async function* () {
@@ -2257,6 +2258,9 @@ describe('useGeminiStream', () => {
                 delayMs: 3000,
               },
             };
+            await new Promise<void>((resolve) => {
+              continueToRetryAttempt = resolve;
+            });
             yield {
               type: ServerGeminiEventType.Retry,
             };
@@ -2331,6 +2335,12 @@ describe('useGeminiStream', () => {
           '2s',
         );
 
+        continueToRetryAttempt?.();
+
+        await act(async () => {
+          await Promise.resolve();
+        });
+
         resolveStream?.();
 
         await act(async () => {
@@ -2339,6 +2349,103 @@ describe('useGeminiStream', () => {
         });
 
         // Error item (with hint) should be cleared after retry succeeds
+        const remainingError = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        );
+        expect(remainingError).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should clear retry errors after auto-retry succeeds once the countdown has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        let continueAfterCountdown: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Retry,
+              retryInfo: {
+                message: '[API Error: Rate limit exceeded]',
+                attempt: 1,
+                maxRetries: 3,
+                delayMs: 1000,
+              },
+            };
+            await new Promise<void>((resolve) => {
+              continueAfterCountdown = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+            };
+            yield {
+              type: ServerGeminiEventType.Text,
+              value: 'Success after retry',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        act(() => {
+          void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        let errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        ) as { hint?: string } | undefined;
+        for (let attempts = 0; attempts < 5 && !errorItem; attempts++) {
+          await act(async () => {
+            await Promise.resolve();
+          });
+          errorItem = result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        }
+        expect(errorItem?.hint).toContain('1s');
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        const staleErrorBeforeRetryCompletes =
+          result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        expect(staleErrorBeforeRetryCompletes?.hint).toContain('0s');
+
+        await act(async () => {
+          continueAfterCountdown?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
         const remainingError = result.current.pendingHistoryItems.find(
           (item) => item.type === MessageType.ERROR,
         );
@@ -2526,6 +2633,77 @@ describe('useGeminiStream', () => {
         { message: 'Test error' },
         expect.any(String),
       );
+    });
+
+    it('should clear static error when starting a new query', async () => {
+      // First, mock a stream that yields an error (static error without countdown)
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'First error' } },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      // Submit first query that will fail
+      await act(async () => {
+        await result.current.submitQuery('First query');
+      });
+
+      // Verify error appears in pending history items
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+      });
+
+      // Now mock a successful stream for the second query
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Text,
+            value: 'Success response',
+          };
+        })(),
+      );
+
+      // Submit second query
+      await act(async () => {
+        await result.current.submitQuery('Second query');
+      });
+
+      // Verify the error is cleared (no longer in pending history items)
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeUndefined();
+      });
     });
   });
 

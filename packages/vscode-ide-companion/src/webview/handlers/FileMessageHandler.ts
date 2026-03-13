@@ -14,6 +14,7 @@ import {
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
  * File message handler
@@ -118,9 +119,10 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       console.error('[FileMessageHandler] Failed to attach file:', error);
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to attach file: ${error}` },
+        data: { message: `Failed to attach file: ${errorMsg}` },
       });
     }
   }
@@ -203,9 +205,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         '[FileMessageHandler] Failed to show context picker:',
         error,
       );
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to show context picker: ${error}` },
+        data: { message: `Failed to show context picker: ${errorMsg}` },
       });
     }
   }
@@ -360,9 +363,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         '[FileMessageHandler] Failed to get workspace files:',
         error,
       );
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to get workspace files: ${error}` },
+        data: { message: `Failed to get workspace files: ${errorMsg}` },
       });
     }
   }
@@ -422,7 +426,9 @@ export class FileMessageHandler extends BaseMessageHandler {
       console.log('[FileOperations] File opened successfully:', absolutePath);
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open file:', error);
-      vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+      vscode.window.showErrorMessage(
+        `Failed to open file: ${getErrorMessage(error)}`,
+      );
     }
   }
 
@@ -445,7 +451,9 @@ export class FileMessageHandler extends BaseMessageHandler {
       });
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open diff:', error);
-      vscode.window.showErrorMessage(`Failed to open diff: ${error}`);
+      vscode.window.showErrorMessage(
+        `Failed to open diff: ${getErrorMessage(error)}`,
+      );
     }
   }
 
@@ -544,7 +552,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         error,
       );
       vscode.window.showErrorMessage(
-        `Failed to create and open temporary file: ${error}`,
+        `Failed to create and open temporary file: ${getErrorMessage(error)}`,
       );
     }
   }

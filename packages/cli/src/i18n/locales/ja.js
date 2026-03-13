@@ -507,6 +507,15 @@ export default {
     "MCPサーバー '{{name}}' での認証に失敗: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "'{{name}}' からツールを再検出中...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "'{{name}}' から {{count}} 個のツールを検出しました。",
+  'Authentication complete. Returning to server details...':
+    '認証完了。サーバー詳細に戻ります...',
+  'Authentication successful.': '認証成功。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'ブラウザが開かない場合は、このURLをコピーしてブラウザに貼り付けてください：',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  URL全体をコピーしてください——複数行にまたがる場合があります。',
   'Configured MCP servers:': '設定済みMCPサーバー:',
   Ready: '準備完了',
   Disconnected: '切断',
@@ -655,6 +664,8 @@ export default {
   Disable: '無効化',
   Enable: '有効化',
   Authenticate: '認証',
+  'Re-authenticate': '再認証',
+  'Clear Authentication': '認証をクリア',
   disabled: '無効',
   'Server:': 'サーバー:',
   Reconnect: '再接続',

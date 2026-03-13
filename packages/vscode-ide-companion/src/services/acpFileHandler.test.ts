@@ -5,16 +5,69 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AcpFileHandler } from './acpFileHandler.js';
-import { promises as fs } from 'fs';
 
-vi.mock('fs', () => ({
-  promises: {
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
-    mkdir: vi.fn(),
+// Use vi.hoisted so the mocks are accessible inside the vi.mock factory
+// (vi.mock calls are hoisted to the top of the file by Vitest).
+const {
+  mockGetText,
+  mockPositionAt,
+  mockSave,
+  mockApplyEdit,
+  mockOpenTextDocument,
+  mockCreateDirectory,
+  mockStatFile,
+  mockWriteFile,
+} = vi.hoisted(() => {
+  const mockGetText = vi.fn();
+  const mockPositionAt = vi.fn((offset: number) => ({ offset }));
+  const mockSave = vi.fn().mockResolvedValue(true);
+  const mockApplyEdit = vi.fn().mockResolvedValue(true);
+  const mockOpenTextDocument = vi.fn().mockResolvedValue({
+    getText: mockGetText,
+    positionAt: mockPositionAt,
+    isDirty: false,
+    save: mockSave,
+  });
+  const mockCreateDirectory = vi.fn().mockResolvedValue(undefined);
+  const mockStatFile = vi.fn();
+  const mockWriteFile = vi.fn().mockResolvedValue(undefined);
+  return {
+    mockGetText,
+    mockPositionAt,
+    mockSave,
+    mockApplyEdit,
+    mockOpenTextDocument,
+    mockCreateDirectory,
+    mockStatFile,
+    mockWriteFile,
+  };
+});
+
+vi.mock('vscode', () => ({
+  Uri: {
+    file: (p: string) => ({ fsPath: p, toString: () => p }),
+  },
+  workspace: {
+    openTextDocument: mockOpenTextDocument,
+    applyEdit: mockApplyEdit,
+    fs: {
+      createDirectory: mockCreateDirectory,
+      stat: mockStatFile,
+      writeFile: mockWriteFile,
+    },
+  },
+  WorkspaceEdit: class {
+    replace = vi.fn();
+  },
+  Range: class {
+    constructor(
+      public start: unknown,
+      public end: unknown,
+    ) {}
   },
 }));
+
+import { AcpFileHandler } from './acpFileHandler.js';
 
 describe('AcpFileHandler', () => {
   let handler: AcpFileHandler;
@@ -22,11 +75,21 @@ describe('AcpFileHandler', () => {
   beforeEach(() => {
     handler = new AcpFileHandler();
     vi.clearAllMocks();
+    // Restore default implementations after clearAllMocks
+    mockOpenTextDocument.mockResolvedValue({
+      getText: mockGetText,
+      positionAt: mockPositionAt,
+      isDirty: false,
+      save: mockSave,
+    });
+    mockApplyEdit.mockResolvedValue(true);
+    mockCreateDirectory.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
   });
 
   describe('handleReadTextFile', () => {
     it('returns full content when no line/limit specified', async () => {
-      vi.mocked(fs.readFile).mockResolvedValue('line1\nline2\nline3\n');
+      mockGetText.mockReturnValue('line1\nline2\nline3\n');
 
       const result = await handler.handleReadTextFile({
         path: '/test/file.txt',
@@ -39,9 +102,7 @@ describe('AcpFileHandler', () => {
     });
 
     it('uses 1-based line indexing (ACP spec)', async () => {
-      vi.mocked(fs.readFile).mockResolvedValue(
-        'line1\nline2\nline3\nline4\nline5',
-      );
+      mockGetText.mockReturnValue('line1\nline2\nline3\nline4\nline5');
 
       const result = await handler.handleReadTextFile({
         path: '/test/file.txt',
@@ -54,7 +115,7 @@ describe('AcpFileHandler', () => {
     });
 
     it('treats line=1 as first line', async () => {
-      vi.mocked(fs.readFile).mockResolvedValue('first\nsecond\nthird');
+      mockGetText.mockReturnValue('first\nsecond\nthird');
 
       const result = await handler.handleReadTextFile({
         path: '/test/file.txt',
@@ -67,7 +128,7 @@ describe('AcpFileHandler', () => {
     });
 
     it('defaults to line=1 when line is null but limit is set', async () => {
-      vi.mocked(fs.readFile).mockResolvedValue('a\nb\nc\nd');
+      mockGetText.mockReturnValue('a\nb\nc\nd');
 
       const result = await handler.handleReadTextFile({
         path: '/test/file.txt',
@@ -80,7 +141,7 @@ describe('AcpFileHandler', () => {
     });
 
     it('clamps negative line values to 0', async () => {
-      vi.mocked(fs.readFile).mockResolvedValue('a\nb\nc');
+      mockGetText.mockReturnValue('a\nb\nc');
 
       const result = await handler.handleReadTextFile({
         path: '/test/file.txt',
@@ -95,7 +156,7 @@ describe('AcpFileHandler', () => {
     it('propagates ENOENT errors', async () => {
       const err = new Error('ENOENT') as NodeJS.ErrnoException;
       err.code = 'ENOENT';
-      vi.mocked(fs.readFile).mockRejectedValue(err);
+      mockOpenTextDocument.mockRejectedValue(err);
 
       await expect(
         handler.handleReadTextFile({
@@ -106,12 +167,30 @@ describe('AcpFileHandler', () => {
         }),
       ).rejects.toThrow('ENOENT');
     });
+
+    it('normalises VS Code FileNotFound to ENOENT', async () => {
+      // vscode.FileSystemError.FileNotFound sets code = 'FileNotFound'
+      const err = new Error('file not found') as NodeJS.ErrnoException;
+      (err as unknown as Record<string, unknown>).code = 'FileNotFound';
+      mockOpenTextDocument.mockRejectedValue(err);
+
+      const rejection = handler.handleReadTextFile({
+        path: '/missing/file.txt',
+        sessionId: 'sid',
+        line: null,
+        limit: null,
+      });
+
+      await expect(rejection).rejects.toThrow('ENOENT');
+      await expect(rejection).rejects.toMatchObject({ code: 'ENOENT' });
+    });
   });
 
   describe('handleWriteTextFile', () => {
-    it('creates directories and writes file', async () => {
-      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
-      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+    it('creates directory and uses WorkspaceEdit for existing file', async () => {
+      // stat resolves → file exists
+      mockStatFile.mockResolvedValue({});
+      mockGetText.mockReturnValue('old content');
 
       const result = await handler.handleWriteTextFile({
         path: '/test/dir/file.txt',
@@ -120,11 +199,25 @@ describe('AcpFileHandler', () => {
       });
 
       expect(result).toBeNull();
-      expect(fs.mkdir).toHaveBeenCalledWith('/test/dir', { recursive: true });
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/dir/file.txt',
-        'hello',
-        'utf-8',
+      expect(mockCreateDirectory).toHaveBeenCalled();
+      expect(mockApplyEdit).toHaveBeenCalled();
+    });
+
+    it('writes bytes directly for new (non-existing) file', async () => {
+      // stat rejects → file does not exist
+      mockStatFile.mockRejectedValue(new Error('FileNotFound'));
+
+      const result = await handler.handleWriteTextFile({
+        path: '/test/dir/newfile.txt',
+        content: 'hello',
+        sessionId: 'sid',
+      });
+
+      expect(result).toBeNull();
+      expect(mockCreateDirectory).toHaveBeenCalled();
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.objectContaining({ fsPath: '/test/dir/newfile.txt' }),
+        expect.any(Uint8Array),
       );
     });
   });
