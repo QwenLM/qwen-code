@@ -714,10 +714,10 @@ export function checkCommandPermissions(
 
   // ── Legacy fallback (no PermissionManager) ──────────────────────────────
   // Used by SDK consumers that have not yet migrated to the permissions system,
-  // or in unit tests that mock only getCoreTools/getExcludeTools.
+  // or in unit tests that mock only getCoreTools/getPermissionsDeny.
 
   // 1. Blocklist Check (Highest Priority)
-  const excludeTools = config.getExcludeTools() || [];
+  const excludeTools = config.getPermissionsDeny() || [];
   const isWildcardBlocked = SHELL_TOOL_NAMES.some((name) =>
     excludeTools.includes(name),
   );

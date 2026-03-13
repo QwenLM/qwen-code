@@ -1219,8 +1219,6 @@ export default {
   'Path is not a directory.': '路径不是目录。',
   'This directory is already in the workspace.': '此目录已在工作区中。',
   'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    '将目录添加到工作区（/directory add 的别名）',
 
   // ============================================================================
   // Status Bar

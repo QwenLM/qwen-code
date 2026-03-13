@@ -1240,8 +1240,6 @@ export default {
     'Dieses Verzeichnis ist bereits im Arbeitsbereich.',
   'Already covered by existing directory: {{dir}}':
     'Bereits durch vorhandenes Verzeichnis abgedeckt: {{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    'Verzeichnisse zum Arbeitsbereich hinzufügen (Alias für /directory add)',
 
   // ============================================================================
   // Status Bar

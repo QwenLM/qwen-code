@@ -1256,32 +1256,25 @@ export class Config {
     return this.coreTools;
   }
 
-  /** @deprecated Use getPermissionsAllow() instead. */
-  getAllowedTools(): string[] | undefined {
-    return this.allowedTools;
-  }
-
-  /** @deprecated Use getPermissionsDeny() instead. */
-  getExcludeTools(): string[] | undefined {
-    return this.excludeTools;
-  }
-
   /**
    * Returns the merged allow-rules for PermissionManager.
    *
    * This merges all sources so that PermissionManager receives a single,
    * authoritative list:
    *   - settings.permissions.allow  (persistent rules from all scopes)
-   *   - coreTools param  (SDK / argv allowlist mode: only these tools run)
    *   - allowedTools param  (SDK / argv auto-approve list)
+   *
+   * Note: coreTools is intentionally excluded here — it has whitelist semantics
+   * (only listed tools are registered), not auto-approve semantics. It is
+   * handled separately via PermissionManager.coreToolsAllowList.
    *
    * CLI callers (loadCliConfig) already pre-merge argv into permissionsAllow
    * before constructing Config, so those fields will be empty for CLI usage.
-   * SDK callers construct Config directly and rely on coreTools/allowedTools.
+   * SDK callers construct Config directly and rely on allowedTools.
    */
   getPermissionsAllow(): string[] | undefined {
     const base = this.permissionsAllow ?? [];
-    const sdkAllow = [...(this.coreTools ?? []), ...(this.allowedTools ?? [])];
+    const sdkAllow = [...(this.allowedTools ?? [])];
     if (sdkAllow.length === 0) return base.length > 0 ? base : undefined;
     const merged = [...base];
     for (const t of sdkAllow) {

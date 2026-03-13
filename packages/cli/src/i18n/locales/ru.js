@@ -1167,8 +1167,6 @@ export default {
     'Этот каталог уже есть в рабочей области.',
   'Already covered by existing directory: {{dir}}':
     'Уже охвачен существующим каталогом: {{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    'Добавить каталоги в рабочую область (псевдоним для /directory add)',
 
   // ============================================================================
   // Строка состояния

@@ -761,9 +761,10 @@ export class CoreToolScheduler {
             };
           }
 
-          // Legacy fallback: check getExcludeTools() when PM is not available
+          // Legacy fallback: check getPermissionsDeny() when PM is not available
           if (!pm) {
-            const excludeTools = this.config.getExcludeTools?.() ?? undefined;
+            const excludeTools =
+              this.config.getPermissionsDeny?.() ?? undefined;
             if (excludeTools && excludeTools.length > 0) {
               const normalizedToolName = reqInfo.name.toLowerCase().trim();
               const excludedMatch = excludeTools.find(

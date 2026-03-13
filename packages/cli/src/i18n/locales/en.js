@@ -1291,8 +1291,6 @@ export default {
     'This directory is already in the workspace.',
   'Already covered by existing directory: {{dir}}':
     'Already covered by existing directory: {{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    'Add directories to the workspace (alias for /directory add)',
 
   // ============================================================================
   // Status Bar

@@ -929,8 +929,6 @@ export default {
     'このディレクトリはすでにワークスペースに含まれています。',
   'Already covered by existing directory: {{dir}}':
     '既存のディレクトリによって既にカバーされています: {{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    'ワークスペースにディレクトリを追加（/directory add のエイリアス）',
   // Status Bar
   'Using:': '使用中:',
   '{{count}} open file': '{{count}} 個のファイルを開いています',

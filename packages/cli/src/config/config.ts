@@ -30,6 +30,7 @@ import {
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
+  isToolEnabled,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -837,9 +838,16 @@ export async function loadCliConfig(
 
   // Start from settings-level rules.
   // Read from both new `permissions` and legacy `tools` paths for compatibility.
+  // Note: settings.tools.core / argv.coreTools are intentionally NOT merged into
+  // mergedAllow — they have whitelist semantics (only listed tools are registered),
+  // not auto-approve semantics. They are passed via the `coreTools` Config param
+  // and handled by PermissionManager.coreToolsAllowList.
+  const resolvedCoreTools: string[] = [
+    ...(argv.coreTools ?? []),
+    ...(settings.tools?.core ?? []),
+  ];
   const mergedAllow: string[] = [
     ...(settings.permissions?.allow ?? []),
-    ...(settings.tools?.core ?? []),
     ...(settings.tools?.allowed ?? []),
   ];
   const mergedAsk: string[] = [...(settings.permissions?.ask ?? [])];
@@ -848,10 +856,7 @@ export async function loadCliConfig(
     ...(settings.tools?.exclude ?? []),
   ];
 
-  // argv.coreTools and argv.allowedTools both add allow rules.
-  for (const t of argv.coreTools ?? []) {
-    if (t && !mergedAllow.includes(t)) mergedAllow.push(t);
-  }
+  // argv.allowedTools adds allow rules (auto-approve).
   for (const t of argv.allowedTools ?? []) {
     if (t && !mergedAllow.includes(t)) mergedAllow.push(t);
   }
@@ -861,15 +866,30 @@ export async function loadCliConfig(
     if (t && !mergedDeny.includes(t)) mergedDeny.push(t);
   }
 
-  // Helper: check if a tool is covered by any allow rule (tool-level, no specifier).
+  // Helper: check if a tool is explicitly covered by an allow rule OR by the
+  // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
+  // to preserve the original behaviour where "ShellTool", "Shell", and
+  // "run_shell_command" are all accepted as the same tool.
   const isExplicitlyAllowed = (toolName: ToolName): boolean => {
     const name = toolName as string;
-    return mergedAllow.some((rule) => {
-      const openParen = rule.indexOf('(');
-      const ruleName =
-        openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
-      return ruleName === name;
-    });
+    // 1. Check permissions.allow / allowedTools rules.
+    if (
+      mergedAllow.some((rule) => {
+        const openParen = rule.indexOf('(');
+        const ruleName =
+          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
+        return ruleName === name;
+      })
+    ) {
+      return true;
+    }
+    // 2. Check coreTools whitelist (with alias matching).
+    // If coreTools is non-empty and explicitly includes this tool, it is
+    // considered allowed for non-interactive mode exclusion purposes.
+    if (resolvedCoreTools.length > 0) {
+      return isToolEnabled(toolName, resolvedCoreTools, []);
+    }
+    return false;
   };
 
   // In non-interactive mode, tools that require a user prompt are denied unless
@@ -994,7 +1014,7 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
-    // Legacy fields – kept for backward compatibility with getExcludeTools() etc.
+    // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools: mergedDeny,

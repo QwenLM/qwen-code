@@ -1244,8 +1244,6 @@ export default {
     'Este diretório já está na área de trabalho.',
   'Already covered by existing directory: {{dir}}':
     'Já coberto pelo diretório existente: {{dir}}',
-  'Add directories to the workspace (alias for /directory add)':
-    'Adicionar diretórios à área de trabalho (apelido para /directory add)',
 
   // ============================================================================
   // Status Bar

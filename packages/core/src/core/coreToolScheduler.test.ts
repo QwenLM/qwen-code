@@ -245,7 +245,7 @@ describe('CoreToolScheduler', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -322,7 +322,7 @@ describe('CoreToolScheduler', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -382,7 +382,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
         getGeminiClient: () => null, // No client needed for these tests
-        getExcludeTools: () => undefined,
+        getPermissionsDeny: () => undefined,
         isInteractive: () => true,
       } as unknown as Config;
 
@@ -423,7 +423,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
-        getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
+        getPermissionsDeny: () => ['write_file', 'edit', 'run_shell_command'],
         isInteractive: () => false, // Value doesn't matter, but included for completeness
       } as unknown as Config;
 
@@ -453,7 +453,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
-        getExcludeTools: () => ['write_file', 'edit'],
+        getPermissionsDeny: () => ['write_file', 'edit'],
         isInteractive: () => false, // Value doesn't matter
       } as unknown as Config;
 
@@ -494,7 +494,7 @@ describe('CoreToolScheduler', () => {
         getToolRegistry: () => mockToolRegistry,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
-        getExcludeTools: () => undefined,
+        getPermissionsDeny: () => undefined,
         isInteractive: () => true,
       } as unknown as Config;
 
@@ -554,8 +554,8 @@ describe('CoreToolScheduler', () => {
         getUsageStatisticsEnabled: () => true,
         getDebugMode: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
-        getAllowedTools: () => [],
-        getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
+        getPermissionsAllow: () => [],
+        getPermissionsDeny: () => ['write_file', 'edit', 'run_shell_command'],
         getContentGeneratorConfig: () => ({
           model: 'test-model',
           authType: 'gemini',
@@ -640,8 +640,8 @@ describe('CoreToolScheduler', () => {
         getUsageStatisticsEnabled: () => true,
         getDebugMode: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
-        getAllowedTools: () => [],
-        getExcludeTools: () => ['write_file', 'edit'], // Different excluded tools
+        getPermissionsAllow: () => [],
+        getPermissionsDeny: () => ['write_file', 'edit'], // Different excluded tools
         getContentGeneratorConfig: () => ({
           model: 'test-model',
           authType: 'gemini',
@@ -730,7 +730,7 @@ describe('CoreToolScheduler with payload', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1073,7 +1073,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1180,7 +1180,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.YOLO,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1421,7 +1421,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.YOLO, // Use YOLO to avoid confirmation prompts
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1543,7 +1543,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.YOLO,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1617,7 +1617,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => approvalMode,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       setApprovalMode: (mode: ApprovalMode) => {
         approvalMode = mode;
       },
@@ -1779,8 +1779,8 @@ describe('CoreToolScheduler truncated output protection', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.AUTO_EDIT,
-      getAllowedTools: () => [],
-      getExcludeTools: () => undefined,
+      getPermissionsAllow: () => [],
+      getPermissionsDeny: () => undefined,
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -1978,7 +1978,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.YOLO, // Use YOLO to avoid confirmation prompts
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -2098,7 +2098,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.YOLO,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',
@@ -2490,7 +2490,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.PLAN,
-      getAllowedTools: () => [],
+      getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
         authType: 'gemini',

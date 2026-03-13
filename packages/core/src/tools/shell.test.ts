@@ -51,7 +51,7 @@ describe('ShellTool', () => {
 
     mockConfig = {
       getCoreTools: vi.fn().mockReturnValue([]),
-      getExcludeTools: vi.fn().mockReturnValue([]),
+      getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
@@ -93,7 +93,7 @@ describe('ShellTool', () => {
   describe('isCommandAllowed', () => {
     it('should allow a command if no restrictions are provided', () => {
       (mockConfig.getCoreTools as Mock).mockReturnValue(undefined);
-      (mockConfig.getExcludeTools as Mock).mockReturnValue(undefined);
+      (mockConfig.getPermissionsDeny as Mock).mockReturnValue(undefined);
       expect(isCommandAllowed('ls -l', mockConfig).allowed).toBe(true);
     });
 

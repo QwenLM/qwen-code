@@ -72,7 +72,7 @@ describe('ShellProcessor', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getShellExecutionConfig: vi.fn().mockReturnValue({}),
-      getAllowedTools: vi.fn().mockReturnValue([]),
+      getPermissionsAllow: vi.fn().mockReturnValue([]),
       // Default: no permission manager (tests that need one set it explicitly)
       getPermissionManager: vi.fn().mockReturnValue(null),
     };
