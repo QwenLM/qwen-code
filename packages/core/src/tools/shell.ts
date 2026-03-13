@@ -34,7 +34,7 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import {
   getCommandRoots,
   isCommandAllowed,
@@ -621,10 +621,10 @@ export class ShellTool extends BaseDeclarativeTool<
         return 'Directory must be an absolute path.';
       }
 
-      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
       const resolvedDirectoryPath = path.resolve(params.directory);
-      const isWithinUserSkills = isSubpath(
-        userSkillsDir,
+      const isWithinUserSkills = isSubpaths(
+        userSkillsDirs,
         resolvedDirectoryPath,
       );
       if (isWithinUserSkills) {

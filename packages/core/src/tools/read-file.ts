@@ -20,7 +20,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
 /**
@@ -186,12 +186,12 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const workspaceContext = this.config.getWorkspaceContext();
     const globalTempDir = Storage.getGlobalTempDir();
     const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDir = this.config.storage.getUserSkillsDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const resolvedFilePath = path.resolve(filePath);
     const isWithinTempDir =
       isSubpath(projectTempDir, resolvedFilePath) ||
       isSubpath(globalTempDir, resolvedFilePath);
-    const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
+    const isWithinUserSkills = isSubpaths(userSkillsDirs, resolvedFilePath);
 
     if (
       !workspaceContext.isPathWithinWorkspace(filePath) &&

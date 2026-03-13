@@ -21,6 +21,7 @@ import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 
@@ -412,19 +413,18 @@ export class SkillManager {
    * Gets the base directory for skills at a specific level.
    *
    * @param level - Storage level
-   * @returns Absolute directory path
+   * @returns Absolute directory paths
    */
-  getSkillsBaseDir(level: SkillLevel): string {
-    const baseDir =
+  getSkillsBaseDirs(level: SkillLevel): string[] {
+    const baseDirs =
       level === 'project'
-        ? path.join(
-            this.config.getProjectRoot(),
-            QWEN_CONFIG_DIR,
-            SKILLS_CONFIG_DIR,
+        ? SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+            path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
           )
-        : path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
-
-    return baseDir;
+        : SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+            path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          );
+    return baseDirs;
   }
 
   /**
@@ -461,9 +461,26 @@ export class SkillManager {
       return skills;
     }
 
-    const baseDir = this.getSkillsBaseDir(level);
-    debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-    const skills = await this.loadSkillsFromDir(baseDir, level);
+    // Iterate provider directories in PROVIDER_CONFIG_DIRS order.
+    // The first directory that contains a skill with a given name wins,
+    // so the order defines implicit precedence (.qwen > .agent > .cursor > ...).
+    const baseDirs = this.getSkillsBaseDirs(level);
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    for (const baseDir of baseDirs) {
+      debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
+      const skillsFromDir = await this.loadSkillsFromDir(baseDir, level);
+      for (const skill of skillsFromDir) {
+        if (seenNames.has(skill.name)) {
+          debugLogger.debug(
+            `Skipping duplicate skill at ${level} level: ${skill.name} from ${baseDir}`,
+          );
+          continue;
+        }
+        seenNames.add(skill.name);
+        skills.push(skill);
+      }
+    }
     debugLogger.debug(`Loaded ${skills.length} ${level} level skills`);
     return skills;
   }
@@ -583,7 +600,8 @@ export class SkillManager {
   private updateWatchersFromCache(): void {
     const watchTargets = new Set<string>(
       (['project', 'user'] as const)
-        .map((level) => this.getSkillsBaseDir(level))
+        .map((level) => this.getSkillsBaseDirs(level))
+        .reduce((acc, baseDirs) => acc.concat(baseDirs), [])
         .filter((baseDir) => fsSync.existsSync(baseDir)),
     );
 
@@ -639,7 +657,7 @@ export class SkillManager {
   }
 
   private async ensureUserSkillsDir(): Promise<void> {
-    const baseDir = this.getSkillsBaseDir('user');
+    const baseDir = path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
     try {
       await fs.mkdir(baseDir, { recursive: true });
     } catch (error) {
