@@ -436,22 +436,7 @@ export class WriteFileTool
           return '';
         }
       },
-      getProposedContent: async (params: WriteFileToolParams) => {
-        const fileExists = await isFilefileExists(params.file_path);
-        if (fileExists) {
-          try {
-            const { content } = await this.config
-              .getFileSystemService()
-              .readTextFile({ path: params.file_path });
-            return content;
-          } catch (err) {
-            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
-            return '';
-          }
-        } else {
-          return '';
-        }
-      },
+      getProposedContent: async (params: WriteFileToolParams) => params.content,
       createUpdatedParams: (
         _oldContent: string,
         modifiedProposedContent: string,

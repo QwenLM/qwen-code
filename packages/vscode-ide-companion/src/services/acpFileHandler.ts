@@ -151,7 +151,10 @@ export class AcpFileHandler {
         }
         const updatedDoc = await vscode.workspace.openTextDocument(uri);
         if (updatedDoc.isDirty) {
-          await updatedDoc.save();
+          const saved = await updatedDoc.save();
+          if (!saved) {
+            throw new Error(`File could not be saved: ${params.path}`);
+          }
         }
       } else {
         // New file – write UTF-8 bytes directly.

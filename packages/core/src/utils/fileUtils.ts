@@ -277,7 +277,7 @@ export async function readFileWithLineAndLimit(params: {
 }> {
   const { path: filePath, limit, line } = params;
   const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
-  const lines = content.split('\n').map((line) => line.trimEnd());
+  const lines = content.split('\n');
   const originalLineCount = lines.length;
   const startLine = line || 0;
   // Ensure endLine does not exceed originalLineCount
