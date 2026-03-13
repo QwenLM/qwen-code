@@ -34,7 +34,7 @@ import type {
   ModifyContext,
 } from './modifiable-tool.js';
 import { IdeClient } from '../ide/ide-client.js';
-import { safeLiteralReplace } from '../utils/textUtils.js';
+import { normalizeContent, safeLiteralReplace } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   countOccurrences,
@@ -112,6 +112,8 @@ interface CalculatedEdit {
   encoding: string;
   /** Whether the existing file has a UTF-8 BOM */
   bom: boolean;
+  /** Whether the existing file uses CRLF line endings */
+  usesCRLF: boolean;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -140,6 +142,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let occurrences = 0;
     let encoding = 'utf-8';
     let bom = false;
+    let usesCRLF = false;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
@@ -148,8 +151,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       const fileInfo = await this.config
         .getFileSystemService()
         .readTextFileWithInfo(params.file_path);
-      // Normalize line endings to LF for consistent processing.
-      currentContent = fileInfo.content.replace(/\r\n/g, '\n');
+      // Detect CRLF before normalizing, so we can restore it on write-back.
+      usesCRLF = fileInfo.content.includes('\r\n');
+      // Normalize line endings and strip BOM for consistent processing.
+      currentContent = normalizeContent(fileInfo.content);
       fileExists = true;
       // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
       encoding = fileInfo.encoding;
@@ -249,6 +254,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       isNewFile,
       encoding,
       bom,
+      usesCRLF,
     };
   }
 
@@ -386,18 +392,23 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
+      // Restore CRLF line endings if the original file used them.
+      const contentToWrite = editData.usesCRLF
+        ? editData.newContent.replace(/\n/g, '\r\n')
+        : editData.newContent;
+
       if (editData.isNewFile) {
         const useBOM =
           this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
         await this.config
           .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+          .writeTextFile(this.params.file_path, contentToWrite, {
             bom: useBOM,
           });
       } else {
         await this.config
           .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+          .writeTextFile(this.params.file_path, contentToWrite, {
             bom: editData.bom,
             encoding: editData.encoding,
           });
