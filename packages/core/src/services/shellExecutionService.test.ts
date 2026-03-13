@@ -863,7 +863,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe and hide window on Windows', async () => {
+    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',
@@ -880,6 +880,34 @@ describe('ShellExecutionService child_process fallback', () => {
         expect.objectContaining({
           detached: false,
           windowsHide: true,
+          windowsVerbatimArguments: true,
+        }),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (cp) =>
+        cp.emit('exit', 0, null),
+      );
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        expect.objectContaining({
+          detached: false,
+          windowsHide: true,
+          windowsVerbatimArguments: false,
         }),
       );
       mockGetShellConfiguration.mockReturnValue({

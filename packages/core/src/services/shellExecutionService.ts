@@ -224,15 +224,20 @@ export class ShellExecutionService {
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
-      const { executable, argsPrefix } = getShellConfiguration();
+      const { executable, argsPrefix, shell } = getShellConfiguration();
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
       // This is intentional - CLI tool executes user-provided shell commands.
+      //
+      // windowsVerbatimArguments must only be true for cmd.exe: it skips
+      // Node's MSVC CRT escaping, which cmd.exe doesn't understand. For
+      // PowerShell (.NET), we need the default escaping so that args
+      // round-trip correctly through CommandLineToArgvW.
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsVerbatimArguments: isWindows,
+        windowsVerbatimArguments: isWindows && shell === 'cmd',
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
