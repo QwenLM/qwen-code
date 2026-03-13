@@ -516,6 +516,133 @@ Skill 3 content`);
 
       expect(baseDir).toBe(path.join('/home/user', '.qwen', 'skills'));
     });
+
+    it('should return bundled-level base dir', () => {
+      const baseDir = manager.getSkillsBaseDir('bundled');
+
+      expect(baseDir).toContain('bundled');
+    });
+
+    it('should throw for extension level', () => {
+      expect(() => manager.getSkillsBaseDir('extension')).toThrow(
+        'Extension skills do not have a base directory',
+      );
+    });
+  });
+
+  describe('bundled skills', () => {
+    it('should load bundled skills in listSkills', async () => {
+      // Mock project and user dirs as empty
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        if (pathStr.includes('bundled')) {
+          return Promise.resolve([
+            {
+              name: 'review',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: review
+description: Review code changes
+---
+Review content`);
+
+      mockParseYaml.mockReturnValue({
+        name: 'review',
+        description: 'Review code changes',
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills.some((s) => s.name === 'review')).toBe(true);
+      const reviewSkill = skills.find((s) => s.name === 'review');
+      expect(reviewSkill!.level).toBe('bundled');
+    });
+
+    it('should prioritize project-level over bundled skills with same name', async () => {
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        if (pathStr.includes('.qwen') || pathStr.includes('bundled')) {
+          return Promise.resolve([
+            {
+              name: 'review',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: review
+description: Review code changes
+---
+Review content`);
+
+      mockParseYaml.mockReturnValue({
+        name: 'review',
+        description: 'Review code changes',
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      const reviewSkills = skills.filter((s) => s.name === 'review');
+      expect(reviewSkills).toHaveLength(1);
+      expect(reviewSkills[0].level).toBe('project');
+    });
+
+    it('should fall back to bundled level in loadSkill', async () => {
+      // Project, user, extension all empty; bundled has the skill
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        if (pathStr.includes('bundled')) {
+          return Promise.resolve([
+            {
+              name: 'review',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: review
+description: Review code changes
+---
+Review content`);
+
+      mockParseYaml.mockReturnValue({
+        name: 'review',
+        description: 'Review code changes',
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.name).toBe('review');
+      expect(skill!.level).toBe('bundled');
+    });
   });
 
   describe('change listeners', () => {
