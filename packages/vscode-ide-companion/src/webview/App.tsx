@@ -189,6 +189,7 @@ export const App: React.FC = () => {
             description: cmd.description,
             type: 'command' as const,
             group: 'Slash Commands',
+            value: cmd.name,
           }),
         );
 
@@ -516,9 +517,11 @@ export const App: React.FC = () => {
     setAskUserQuestionRequest(null);
   }, [vscode]);
 
-  // Handle completion selection
+  // Handle completion selection.
+  // When fillOnly is true (Tab), slash commands are inserted into the input
+  // instead of being sent immediately, so users can append arguments.
   const handleCompletionSelect = useCallback(
-    (item: CompletionItem) => {
+    (item: CompletionItem, fillOnly?: boolean) => {
       // Handle completion selection by inserting the value into the input field
       const inputElement = inputFieldRef.current;
       if (!inputElement) {
@@ -605,10 +608,11 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Handle server-provided slash commands by sending them as messages
-        // CLI will detect slash commands in session/prompt and execute them
+        // Handle server-provided slash commands by sending them as messages.
+        // Skip when fillOnly (Tab) — let the generic insertion path fill the
+        // command text so the user can keep typing arguments.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd) {
+        if (serverCmd && !fillOnly) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
@@ -1029,6 +1033,7 @@ export const App: React.FC = () => {
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionFill={(item) => handleCompletionSelect(item, true)}
           onCompletionClose={completion.closeCompletion}
           showModelSelector={showModelSelector}
           availableModels={availableModels}
