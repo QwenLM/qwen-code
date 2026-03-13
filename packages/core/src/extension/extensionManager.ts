@@ -11,6 +11,7 @@ import type {
   SubagentConfig,
   ClaudeMarketplaceConfig,
 } from '../index.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import {
   Storage,
   Config,
@@ -100,6 +101,7 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionConfig {
@@ -112,6 +114,7 @@ export interface ExtensionConfig {
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionUpdateInfo {
@@ -662,6 +665,53 @@ export class ExtensionManager {
         `${effectiveExtensionPath}/agents`,
       );
 
+      if (config.hooks) {
+        // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+        extension.hooks = this.substituteHookVariables(
+          config.hooks,
+          effectiveExtensionPath,
+        );
+      }
+
+      // Also load hooks from hooks directory if available and not already set
+      if (!extension.hooks) {
+        const hooksDir = path.join(effectiveExtensionPath, 'hooks');
+        const hooksJsonPath = path.join(hooksDir, 'hooks.json');
+
+        if (fs.existsSync(hooksJsonPath)) {
+          try {
+            const hooksContent = fs.readFileSync(hooksJsonPath, 'utf-8');
+            const parsedHooks = JSON.parse(hooksContent);
+
+            // Check if the file has a top-level "hooks" property or if the entire file content is the hooks object
+            let hooksData;
+            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+              hooksData = parsedHooks.hooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            } else {
+              // Assume the entire file content is the hooks object
+              hooksData = parsedHooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            }
+
+            // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+            extension.hooks = this.substituteHookVariables(
+              hooksData,
+              effectiveExtensionPath,
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+
+      // Replace variables in all markdown files in the extension
+      this.performVariableReplacement(effectiveExtensionPath);
+
       return extension;
     } catch (e) {
       debugLogger.warn(
@@ -670,6 +720,83 @@ export class ExtensionManager {
         )}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
+   */
+  private substituteHookVariables(
+    hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
+    extensionPath: string,
+  ): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (!hooks) return hooks;
+
+    // Deep clone the hooks to avoid modifying the original
+    const clonedHooks = JSON.parse(JSON.stringify(hooks));
+
+    // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path in all command hooks
+    for (const eventName in clonedHooks) {
+      const eventHooks = clonedHooks[eventName as HookEventName];
+      if (eventHooks && Array.isArray(eventHooks)) {
+        for (const hookDef of eventHooks) {
+          if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
+            for (const hook of hookDef.hooks) {
+              if (hook.type === 'command' && hook.command) {
+                hook.command = hook.command.replace(
+                  /\$\{CLAUDE_PLUGIN_ROOT\}/g,
+                  extensionPath,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return clonedHooks;
+  }
+
+  /**
+   * Perform variable replacement in all markdown files of the extension
+   */
+  private performVariableReplacement(extensionPath: string): void {
+    const globPattern = '**/*.md';
+    const globOptions = {
+      cwd: extensionPath,
+      nodir: true,
+    };
+
+    try {
+      const mdFiles = glob.sync(globPattern, globOptions);
+
+      for (const file of mdFiles) {
+        const filePath = path.join(extensionPath, file);
+
+        try {
+          const content = fs.readFileSync(filePath, 'utf8');
+
+          // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
+          const updatedContent = content.replace(
+            /\$\{CLAUDE_PLUGIN_ROOT\}/g,
+            extensionPath,
+          );
+
+          // Only write if content was actually changed
+          if (updatedContent !== content) {
+            fs.writeFileSync(filePath, updatedContent, 'utf8');
+            debugLogger.debug(`Updated variables in file: ${filePath}`);
+          }
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to scan extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
