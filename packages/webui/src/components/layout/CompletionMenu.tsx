@@ -17,8 +17,10 @@ import type { CompletionItem } from '../../types/completion.js';
 export interface CompletionMenuProps {
   /** List of completion items to display */
   items: CompletionItem[];
-  /** Callback when an item is selected */
+  /** Callback when an item is selected (Enter / click) */
   onSelect: (item: CompletionItem) => void;
+  /** Optional callback for Tab selection (fill without executing). Falls back to onSelect. */
+  onFill?: (item: CompletionItem) => void;
   /** Callback when menu should close */
   onClose: () => void;
   /** Optional section title */
@@ -75,6 +77,7 @@ const groupItems = (
 export const CompletionMenu: FC<CompletionMenuProps> = ({
   items,
   onSelect,
+  onFill,
   onClose,
   title,
   selectedIndex = 0,
@@ -123,10 +126,15 @@ export const CompletionMenu: FC<CompletionMenuProps> = ({
           setSelected((prev) => Math.max(prev - 1, 0));
           break;
         case 'Enter':
-        case 'Tab':
           event.preventDefault();
           if (items[selected]) {
             onSelect(items[selected]);
+          }
+          break;
+        case 'Tab':
+          event.preventDefault();
+          if (items[selected]) {
+            (onFill ?? onSelect)(items[selected]);
           }
           break;
         case 'Escape':
@@ -144,7 +152,7 @@ export const CompletionMenu: FC<CompletionMenuProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [items, selected, onSelect, onClose]);
+  }, [items, selected, onSelect, onFill, onClose]);
 
   useEffect(() => {
     // Only scroll into view for keyboard navigation, not mouse hover
