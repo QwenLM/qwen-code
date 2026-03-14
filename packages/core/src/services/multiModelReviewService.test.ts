@@ -135,6 +135,24 @@ describe('MultiModelReviewService', () => {
       expect(result.modelResults).toHaveLength(0);
     });
 
+    it('should handle createContentGenerator failure gracefully', async () => {
+      const models = [makeModel('model-a'), makeModel('model-b')];
+
+      mockedCreateContentGenerator.mockRejectedValueOnce(
+        new Error('Failed to create generator'),
+      );
+      mockedCreateContentGenerator.mockResolvedValueOnce({
+        generateContent: vi
+          .fn()
+          .mockResolvedValue(makeGeneratorResponse('Review from B')),
+      } as any);
+
+      const result = await service.collectReviews('diff content', models);
+
+      expect(result.modelResults).toHaveLength(1);
+      expect(result.modelResults[0].modelId).toBe('model-b');
+    });
+
     it('should respect abort signal', async () => {
       const models = [makeModel('model-a')];
       const controller = new AbortController();
@@ -194,6 +212,49 @@ describe('MultiModelReviewService', () => {
       await expect(
         service.arbitrateIndependently(collected, arbitrator),
       ).rejects.toThrow(/empty response/i);
+    });
+
+    it('should propagate API errors from arbitrator', async () => {
+      const collected = {
+        modelResults: [
+          { modelId: 'model-a', reviewText: 'Found bug X' },
+        ] as ModelReviewResult[],
+        diff: 'some diff',
+      };
+      const arbitrator = makeModel('arbitrator');
+
+      mockedCreateContentGenerator.mockResolvedValueOnce({
+        generateContent: vi.fn().mockRejectedValue(new Error('Auth failed')),
+      } as any);
+
+      await expect(
+        service.arbitrateIndependently(collected, arbitrator),
+      ).rejects.toThrow(/Auth failed/);
+    });
+
+    it('should include diff in the arbitration prompt', async () => {
+      const collected = {
+        modelResults: [
+          { modelId: 'model-a', reviewText: 'Review A' },
+        ] as ModelReviewResult[],
+        diff: 'important diff content',
+      };
+      const arbitrator = makeModel('arbitrator');
+
+      const mockGenerateContent = vi
+        .fn()
+        .mockResolvedValue(makeGeneratorResponse('report'));
+      mockedCreateContentGenerator.mockResolvedValueOnce({
+        generateContent: mockGenerateContent,
+      } as any);
+
+      await service.arbitrateIndependently(collected, arbitrator);
+
+      const prompt =
+        mockGenerateContent.mock.calls[0][0].contents[0].parts[0].text;
+      expect(prompt).toContain('important diff content');
+      expect(prompt).toContain('<diff>');
+      expect(prompt).toContain('Review by model-a');
     });
   });
 

@@ -14,12 +14,12 @@ import { AuthType } from '../core/contentGenerator.js';
 
 // Mock the service
 vi.mock('../services/multiModelReviewService.js', () => ({
-    MultiModelReviewService: vi.fn().mockImplementation(() => ({
-      collectReviews: vi.fn(),
-      arbitrateIndependently: vi.fn(),
-      buildSessionArbitrationPrompt: vi.fn(),
-    })),
-  }));
+  MultiModelReviewService: vi.fn().mockImplementation(() => ({
+    collectReviews: vi.fn(),
+    arbitrateIndependently: vi.fn(),
+    buildSessionArbitrationPrompt: vi.fn(),
+  })),
+}));
 
 import { MultiModelReviewService } from '../services/multiModelReviewService.js';
 
@@ -68,6 +68,42 @@ describe('MultiModelReviewTool', () => {
     expect(result.llmContent).toContain(
       'Multi-model review requires at least 2 configured models',
     );
+  });
+
+  it('should return guidance when zero models configured', async () => {
+    const config = makeConfig({
+      reviewModels: [],
+      allConfiguredModels: [],
+    });
+    const tool = new MultiModelReviewTool(config);
+    const invocation = (tool as any).createInvocation({ diff: 'some diff' });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain(
+      'Multi-model review requires at least 2 configured models',
+    );
+  });
+
+  it('should list available models in guidance text', async () => {
+    const config = makeConfig({
+      reviewModels: [makeModel('only-one')],
+      allConfiguredModels: [
+        { id: 'gpt-4o', label: 'GPT-4o', authType: AuthType.USE_OPENAI },
+        {
+          id: 'claude-sonnet',
+          label: 'Claude Sonnet',
+          authType: AuthType.USE_OPENAI,
+        },
+      ] as AvailableModel[],
+    });
+    const tool = new MultiModelReviewTool(config);
+    const invocation = (tool as any).createInvocation({ diff: 'some diff' });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('gpt-4o');
+    expect(result.llmContent).toContain('claude-sonnet');
   });
 
   it('should return error when all review models fail', async () => {
