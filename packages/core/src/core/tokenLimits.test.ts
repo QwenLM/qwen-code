@@ -284,6 +284,8 @@ describe('tokenLimit with output type', () => {
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1-0528', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-chat', 'output')).toBe(8192);
     });
 
