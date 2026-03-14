@@ -491,22 +491,17 @@ export const useWebViewMessages = ({
             | undefined;
           const endRequestId = endData?.requestId ?? null;
 
-          // If the streamEnd carries a requestId that doesn't match the
-          // active stream, it's a stale event from a previous request
-          // (e.g., a cancel handler firing after a new stream started).
-          // Ignore it to prevent clearing the new stream's state.
-          if (
-            endRequestId &&
-            activeRequestIdRef.current &&
-            endRequestId !== activeRequestIdRef.current
-          ) {
-            console.log(
-              '[useWebViewMessages] Ignoring stale streamEnd:',
-              endRequestId,
-              'active:',
-              activeRequestIdRef.current,
-            );
-            break;
+          // Drop stale or untagged streamEnd when a tagged stream is active.
+          if (activeRequestIdRef.current) {
+            if (endRequestId !== activeRequestIdRef.current) {
+              console.log(
+                '[useWebViewMessages] Ignoring stale/untagged streamEnd:',
+                endRequestId,
+                'active:',
+                activeRequestIdRef.current,
+              );
+              break;
+            }
           }
 
           // Always end local streaming state and clear thinking state

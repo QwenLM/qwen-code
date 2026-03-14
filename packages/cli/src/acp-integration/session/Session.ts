@@ -151,13 +151,13 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    // Abort the previous prompt and wait for it to fully complete.
-    // This is critical on Windows where process termination is slow:
-    // without this wait, the new prompt could read chat history before
-    // the cancelled prompt's tool results (functionResponse) have been
-    // added, causing malformed history (tool_call → user_query → tool_result
-    // instead of tool_call → tool_result → user_query).
+    // Install this prompt's AbortController before awaiting the previous
+    // prompt, so that a session/cancel during the wait targets us.
     this.pendingPrompt?.abort();
+    const pendingSend = new AbortController();
+    this.pendingPrompt = pendingSend;
+
+    // Wait for the previous prompt to finish so chat history is consistent.
     if (this.pendingPromptCompletion) {
       try {
         await this.pendingPromptCompletion;
@@ -166,8 +166,10 @@ export class Session implements SessionContext {
       }
     }
 
-    const pendingSend = new AbortController();
-    this.pendingPrompt = pendingSend;
+    // Cancelled while waiting for the previous prompt to finish.
+    if (pendingSend.signal.aborted) {
+      return { stopReason: 'cancelled' };
+    }
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
