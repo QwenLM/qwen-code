@@ -136,14 +136,30 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
       };
     }
 
+    if (collected.modelResults.length === 1) {
+      // Only one model succeeded — arbitration adds no value, return its review directly
+      const single = collected.modelResults[0];
+      return {
+        llmContent: [
+          {
+            text: `**Review model:** ${single.modelId}\n**Note:** Only 1 of ${reviewModels.length} review models succeeded. Arbitration skipped.\n\n${single.reviewText}`,
+          },
+        ],
+        returnDisplay: `Single model review (${reviewModels.length - 1} model(s) failed)`,
+      };
+    }
+
     // Phase 2: Arbitration
+    let arbitratorFallbackReason: string | undefined;
     let arbitratorModel: ResolvedModelConfig | undefined;
     try {
       arbitratorModel = this.config.getArbitratorModel();
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
       debugLogger.warn(
-        `Failed to resolve arbitrator model, falling back to session model: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to resolve arbitrator model, falling back to session model: ${errorMsg}`,
       );
+      arbitratorFallbackReason = `Configured arbitrator model could not be resolved (${errorMsg}), falling back to session model.`;
     }
 
     if (arbitratorModel) {
@@ -161,9 +177,11 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
           returnDisplay: `Multi-model review complete (${collected.modelResults.length} models + arbitrator)`,
         };
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
         debugLogger.warn(
-          `Independent arbitration failed, falling back to session model arbitration: ${error instanceof Error ? error.message : String(error)}`,
+          `Independent arbitration failed, falling back to session model arbitration: ${errorMsg}`,
         );
+        arbitratorFallbackReason = `Arbitrator model '${arbitratorModel.id}' failed (${errorMsg}), falling back to session model.`;
         // Fall through to session model arbitration
       }
     }
@@ -172,10 +190,14 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
     const arbitrationPrompt = service.buildSessionArbitrationPrompt(collected);
     const header = this.buildReportHeader(collected, 'session model');
 
+    const fallbackNote = arbitratorFallbackReason
+      ? `\n\n> **Note:** ${arbitratorFallbackReason}\n`
+      : '';
+
     return {
       llmContent: [
         {
-          text: `${header}\n\nThe following reviews were collected from ${collected.modelResults.length} models. Please act as the arbitrator and produce the final unified review report.\n\n${arbitrationPrompt}`,
+          text: `${header}${fallbackNote}\n\nThe following reviews were collected from ${collected.modelResults.length} models. Please act as the arbitrator and produce the final unified review report.\n\n${arbitrationPrompt}`,
         },
       ],
       returnDisplay: `Collected ${collected.modelResults.length} model reviews for arbitration`,

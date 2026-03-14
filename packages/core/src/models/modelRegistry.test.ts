@@ -384,6 +384,49 @@ describe('ModelRegistry', () => {
     });
   });
 
+  describe('findModelById', () => {
+    it('should find a model that exists in exactly one authType', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'gpt-4', name: 'GPT-4', baseUrl: 'https://api.openai.com/v1' },
+        ],
+      });
+
+      const result = registry.findModelById('gpt-4');
+      expect(result).toBeDefined();
+      expect(result?.config.id).toBe('gpt-4');
+      expect(result?.authType).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('should return undefined for a model that does not exist', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      const result = registry.findModelById('non-existent');
+      expect(result).toBeUndefined();
+    });
+
+    it('should throw for ambiguous model id found in multiple authTypes', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'shared-model', name: 'OpenAI Shared' }],
+        gemini: [{ id: 'shared-model', name: 'Gemini Shared' }],
+      });
+
+      expect(() => registry.findModelById('shared-model')).toThrow(
+        /Ambiguous model id/,
+      );
+    });
+
+    it('should find qwen-oauth models', () => {
+      const registry = new ModelRegistry();
+
+      const result = registry.findModelById('coder-model');
+      expect(result).toBeDefined();
+      expect(result?.authType).toBe(AuthType.QWEN_OAUTH);
+    });
+  });
+
   describe('reloadModels', () => {
     it('should reload models from new config', () => {
       const registry = new ModelRegistry({

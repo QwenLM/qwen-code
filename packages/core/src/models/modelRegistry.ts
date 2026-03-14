@@ -217,7 +217,7 @@ export class ModelRegistry {
     if (matches.length > 1) {
       const authTypes = matches.map((m) => m.authType).join(' and ');
       throw new Error(
-        `Ambiguous model id '${modelId}', found in ${authTypes}. Use object form with authType to disambiguate.`,
+        `Ambiguous model id '${modelId}', found in ${authTypes}. Use object form to disambiguate, e.g.: { "id": "${modelId}", "authType": "${matches[0].authType}" }`,
       );
     }
     return matches[0];

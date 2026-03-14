@@ -1159,13 +1159,30 @@ export class Config {
           );
         }
         const authType = authTypeRaw as AuthType;
+        const baseUrl =
+          obj['baseUrl'] !== undefined && obj['baseUrl'] !== null
+            ? String(obj['baseUrl'])
+            : '';
+        if (
+          !baseUrl &&
+          authType !== AuthType.QWEN_OAUTH &&
+          authType !== AuthType.USE_VERTEX_AI &&
+          authType !== AuthType.USE_GEMINI
+        ) {
+          throw new Error(
+            `Inline model config for '${id}' with authType '${authType}' requires a baseUrl.`,
+          );
+        }
         if (!seenIds.has(id)) {
           seenIds.add(id);
           resolved.push({
             id,
             authType,
-            name: String(obj['name'] || id),
-            baseUrl: String(obj['baseUrl'] || ''),
+            name:
+              obj['name'] !== undefined && obj['name'] !== null
+                ? String(obj['name'])
+                : id,
+            baseUrl,
             envKey: obj['envKey'] ? String(obj['envKey']) : undefined,
             generationConfig: {},
             capabilities: {},

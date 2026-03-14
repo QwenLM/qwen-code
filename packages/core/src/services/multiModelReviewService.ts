@@ -95,10 +95,8 @@ export class MultiModelReviewService {
     const results = await Promise.all(
       reviewModels.map((model) =>
         limit(async (): Promise<ModelReviewResult> => {
-          if (signal?.aborted) {
-            return { modelId: model.id, reviewText: '', error: 'Aborted' };
-          }
           try {
+            signal?.throwIfAborted();
             debugLogger.info(`Starting review with model: ${model.id}`);
             const generatorConfig = this.buildGeneratorConfig(model);
             const generator = await createContentGenerator(
@@ -106,6 +104,7 @@ export class MultiModelReviewService {
               this.config,
             );
 
+            signal?.throwIfAborted();
             const response = await generator.generateContent(
               {
                 model: model.id,
@@ -121,6 +120,17 @@ export class MultiModelReviewService {
               response.candidates?.[0]?.content?.parts
                 ?.map((p) => p.text || '')
                 .join('') || '';
+
+            if (!text.trim()) {
+              debugLogger.warn(
+                `Model ${model.id} returned empty review response`,
+              );
+              return {
+                modelId: model.id,
+                reviewText: '',
+                error: 'Empty response',
+              };
+            }
 
             debugLogger.info(`Review complete from model: ${model.id}`);
             return { modelId: model.id, reviewText: text };
@@ -163,9 +173,7 @@ export class MultiModelReviewService {
       `Starting independent arbitration with model: ${arbitratorModel.id}`,
     );
 
-    const modelReviews = collected.modelResults
-      .map((r) => `## Review by ${r.modelId}\n\n${r.reviewText}`)
-      .join('\n\n---\n\n');
+    const modelReviews = this.formatModelReviews(collected.modelResults);
 
     const fullPrompt = `${ARBITRATION_PROMPT_TEMPLATE}\n\n${modelReviews}\n\n<diff>\n${collected.diff}\n</diff>`;
 
@@ -191,6 +199,12 @@ export class MultiModelReviewService {
         ?.map((p) => p.text || '')
         .join('') || '';
 
+    if (!text.trim()) {
+      throw new Error(
+        `Arbitrator model '${arbitratorModel.id}' returned empty response`,
+      );
+    }
+
     debugLogger.info('Independent arbitration complete');
     return { report: text };
   }
@@ -200,11 +214,18 @@ export class MultiModelReviewService {
    * Returns the prompt text that the session model should use to produce the final report.
    */
   buildSessionArbitrationPrompt(collected: CollectedReview): string {
-    const modelReviews = collected.modelResults
-      .map((r) => `## Review by ${r.modelId}\n\n${r.reviewText}`)
-      .join('\n\n---\n\n');
+    const modelReviews = this.formatModelReviews(collected.modelResults);
 
     return `${ARBITRATION_PROMPT_TEMPLATE}\n\n${modelReviews}\n\n<diff>\n${collected.diff}\n</diff>`;
+  }
+
+  /**
+   * Format model review results into sections for the arbitration prompt.
+   */
+  private formatModelReviews(results: ModelReviewResult[]): string {
+    return results
+      .map((r) => `## Review by ${r.modelId}\n\n${r.reviewText}`)
+      .join('\n\n---\n\n');
   }
 
   /**
