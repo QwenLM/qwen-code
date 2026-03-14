@@ -173,6 +173,49 @@ You are a helpful assistant with this skill.
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse content with extends field', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        extends: 'bundled',
+      });
+
+      const markdownWithExtends = `---
+name: test-skill
+description: A test skill
+extends: bundled
+---
+
+Extra review dimensions.
+`;
+
+      const config = parseSkillContent(markdownWithExtends, testFilePath);
+
+      expect(config.extends).toBe('bundled');
+      expect(config.body).toBe('Extra review dimensions.');
+    });
+
+    it('should throw error for unsupported extends value', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        extends: 'project',
+      });
+
+      const markdownWithBadExtends = `---
+name: test-skill
+description: A test skill
+extends: project
+---
+
+Body content.
+`;
+
+      expect(() =>
+        parseSkillContent(markdownWithBadExtends, testFilePath),
+      ).toThrow('Unsupported "extends" value: "project"');
+    });
+
     it('should throw error for invalid format without frontmatter', () => {
       const invalidMarkdown = `# Just a heading
 Some content without frontmatter.
@@ -258,6 +301,54 @@ Valid skill.
 
       expect(result.isValid).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('should accept valid config with extends: bundled', () => {
+      const config = {
+        name: 'test-skill',
+        description: 'A test skill',
+        body: 'Extra dimensions.',
+        level: 'project' as const,
+        filePath: '/path/to/skill',
+        extends: 'bundled' as const,
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should return error for unsupported extends value', () => {
+      const config = {
+        name: 'test-skill',
+        description: 'A test skill',
+        body: 'Body.',
+        level: 'project' as const,
+        filePath: '/path/to/skill',
+        extends: 'project' as unknown as 'bundled',
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors[0]).toContain('"extends" must be "bundled"');
+    });
+
+    it('should warn with extends-specific message when body is empty and extends is set', () => {
+      const config = {
+        name: 'test-skill',
+        description: 'A test skill',
+        body: '',
+        level: 'project' as const,
+        filePath: '/path/to/skill',
+        extends: 'bundled' as const,
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(true);
+      expect(result.warnings[0]).toContain('base content');
     });
 
     it('should return error for missing name', () => {

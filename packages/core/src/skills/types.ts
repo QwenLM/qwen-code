@@ -47,6 +47,13 @@ export interface SkillConfig {
   body: string;
 
   /**
+   * If set, this skill extends a skill with the same name at the specified level.
+   * The extending skill's body is appended to the base skill's body.
+   * Currently only 'bundled' is supported.
+   */
+  extends?: SkillLevel;
+
+  /**
    * For extension-level skills: the name of the providing extension
    */
   extensionName?: string;

@@ -24,12 +24,14 @@ describe('BundledSkillLoader', () => {
   let mockConfig: Config;
   let mockSkillManager: {
     listSkills: ReturnType<typeof vi.fn>;
+    loadSkill: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
+      loadSkill: vi.fn().mockResolvedValue(null),
     };
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
@@ -72,6 +74,7 @@ describe('BundledSkillLoader', () => {
   it('should submit skill body as prompt without args', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);
+    mockSkillManager.loadSkill.mockResolvedValue(skill);
 
     const loader = new BundledSkillLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
@@ -89,6 +92,7 @@ describe('BundledSkillLoader', () => {
   it('should append raw invocation when args are provided', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);
+    mockSkillManager.loadSkill.mockResolvedValue(skill);
 
     const loader = new BundledSkillLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
@@ -100,6 +104,70 @@ describe('BundledSkillLoader', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: [{ text: 'You are an expert code reviewer.\n\n/review 123' }],
+    });
+  });
+
+  it('should use resolved skill body when extends is present', async () => {
+    const bundledSkill = makeSkill();
+    const resolvedSkill = makeSkill({
+      body: 'You are an expert code reviewer.\n\n### Agent 5: Custom\n\nCustom focus.',
+      level: 'project',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([bundledSkill]);
+    mockSkillManager.loadSkill.mockResolvedValue(resolvedSkill);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [
+        {
+          text: 'You are an expert code reviewer.\n\n### Agent 5: Custom\n\nCustom focus.',
+        },
+      ],
+    });
+  });
+
+  it('should fall back to bundled skill when loadSkill returns null', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    mockSkillManager.loadSkill.mockResolvedValue(null);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'You are an expert code reviewer.' }],
+    });
+  });
+
+  it('should fall back to bundled skill when loadSkill throws', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    mockSkillManager.loadSkill.mockRejectedValue(
+      new Error('Cannot extend: bundled skill "review" not found'),
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'You are an expert code reviewer.' }],
     });
   });
 

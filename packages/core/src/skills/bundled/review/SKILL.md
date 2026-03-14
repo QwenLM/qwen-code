@@ -31,7 +31,7 @@ Based on the arguments provided:
 
 ## Step 2: Parallel multi-dimensional review
 
-Launch **four parallel review agents** to analyze the changes from different angles. Each agent should focus exclusively on its dimension.
+Launch **parallel review agents** (one per dimension listed below) to analyze the changes from different angles. Each agent should focus exclusively on its dimension.
 
 ### Agent 1: Correctness & Security
 
@@ -79,7 +79,7 @@ Focus areas:
 
 ## Step 3: Aggregate and present findings
 
-Combine results from all four agents into a single, well-organized review. Use this format:
+Combine results from all agents into a single, well-organized review. Use this format:
 
 ### Summary
 

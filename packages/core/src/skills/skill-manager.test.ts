@@ -630,6 +630,298 @@ Review content`);
     });
   });
 
+  describe('extends resolution', () => {
+    const bundledDirSegment = path.join('skills', 'bundled');
+    const projectDirSegment = path.join('.qwen', 'skills');
+    const projectPrefix = path.join('/test/project');
+
+    function makeDirEntry(name: string) {
+      return {
+        name,
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+
+    function setupExtendsMocks(opts: {
+      skillName?: string;
+      projectBody?: string;
+      bundledBody?: string;
+      levels?: Set<string>;
+    }) {
+      const {
+        skillName = 'review',
+        projectBody = `---\nname: ${skillName}\ndescription: Review code changes\nextends: bundled\n---\nCustom content.`,
+        bundledBody = `---\nname: ${skillName}\ndescription: Review code changes\n---\nBundled review body.`,
+        levels = new Set(['project', 'bundled']),
+      } = opts;
+
+      mockParseYaml.mockImplementation((yamlString: string) => {
+        const base = { name: skillName, description: 'Review code changes' };
+        if (yamlString.includes('extends: bundled')) {
+          return { ...base, extends: 'bundled' };
+        }
+        return base;
+      });
+
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        const isBundled =
+          levels.has('bundled') &&
+          pathStr.endsWith(bundledDirSegment) &&
+          !pathStr.includes('.qwen');
+        const isProject =
+          levels.has('project') &&
+          pathStr.includes(projectDirSegment) &&
+          pathStr.startsWith(projectPrefix);
+
+        if (isBundled || isProject) {
+          return Promise.resolve([
+            makeDirEntry(skillName),
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes('.qwen')) {
+          return Promise.resolve(projectBody);
+        }
+        return Promise.resolve(bundledBody);
+      });
+    }
+
+    it('should merge body when project skill extends bundled', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---
+### Agent 5: Custom Dimension
+
+Custom focus areas.`,
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.body).toContain('Bundled review body.');
+      expect(skill!.body).toContain('### Agent 5: Custom Dimension');
+      expect(skill!.extends).toBeUndefined();
+    });
+
+    it('should merge with bundled body before extending body', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---
+EXTENSION_MARKER`,
+        bundledBody: `---
+name: review
+description: Review code changes
+---
+BASE_MARKER`,
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      const baseIdx = skill!.body.indexOf('BASE_MARKER');
+      const extIdx = skill!.body.indexOf('EXTENSION_MARKER');
+      expect(baseIdx).toBeGreaterThanOrEqual(0);
+      expect(extIdx).toBeGreaterThan(baseIdx);
+    });
+
+    it('should not merge when project skill does not have extends', async () => {
+      // Project skill WITHOUT extends should fully replace bundled
+      mockParseYaml.mockImplementation((yamlString: string) => ({
+          name: 'review',
+          description: yamlString.includes('Project')
+            ? 'Project review'
+            : 'Bundled review',
+        }));
+
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        const isBundled =
+          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isProject =
+          pathStr.includes(projectDirSegment) &&
+          pathStr.startsWith(projectPrefix);
+
+        if (isBundled || isProject) {
+          return Promise.resolve([makeDirEntry('review')] as unknown as Awaited<
+            ReturnType<typeof fs.readdir>
+          >);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes('.qwen')) {
+          return Promise.resolve(`---
+name: review
+description: Project review
+---
+Project-only body.`);
+        }
+        return Promise.resolve(`---
+name: review
+description: Bundled review
+---
+Bundled body.`);
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.body).toBe('Project-only body.');
+      expect(skill!.body).not.toContain('Bundled body.');
+      expect(skill!.description).toBe('Project review');
+    });
+
+    it('should resolve extends when loadSkill is called with explicit level', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---
+Custom dimensions.`,
+      });
+
+      const skill = await manager.loadSkill('review', 'project');
+
+      expect(skill).toBeDefined();
+      expect(skill!.body).toContain('Bundled review body.');
+      expect(skill!.body).toContain('Custom dimensions.');
+      expect(skill!.extends).toBeUndefined();
+    });
+
+    it('should throw when extending a non-existent bundled skill', async () => {
+      setupExtendsMocks({
+        skillName: 'nonexistent',
+        levels: new Set(['project']),
+      });
+
+      await expect(manager.loadSkill('nonexistent')).rejects.toThrow(
+        'Cannot extend: bundled skill "nonexistent" not found',
+      );
+    });
+
+    it('should use bundled body when extending skill has empty body', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---`,
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.body).toBe('Bundled review body.');
+    });
+
+    it('should inherit allowedTools from bundled when extending skill omits them', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---
+Custom dimensions.`,
+        bundledBody: `---
+name: review
+description: Review code changes
+allowedTools:
+  - task
+  - read_file
+---
+Bundled body.`,
+      });
+
+      // Override yaml parser after setupExtendsMocks to include allowedTools
+      mockParseYaml.mockImplementation((yamlString: string) => {
+        if (yamlString.includes('extends: bundled')) {
+          return {
+            name: 'review',
+            description: 'Review code changes',
+            extends: 'bundled',
+          };
+        }
+        return {
+          name: 'review',
+          description: 'Review code changes',
+          allowedTools: ['task', 'read_file'],
+        };
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.allowedTools).toEqual(['task', 'read_file']);
+    });
+
+    it('should resolve extends in listSkills', async () => {
+      setupExtendsMocks({
+        projectBody: `---
+name: review
+description: Review code changes
+extends: bundled
+---
+Custom dimensions.`,
+        bundledBody: `---
+name: review
+description: Review code changes
+---
+Bundled body.`,
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      const review = skills.find((s) => s.name === 'review');
+      expect(review).toBeDefined();
+      expect(review!.body).toContain('Bundled body.');
+      expect(review!.body).toContain('Custom dimensions.');
+      expect(review!.extends).toBeUndefined();
+    });
+
+    it('should reject unsupported extends value in parseSkillContent', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A skill',
+        extends: 'project',
+      });
+
+      expect(() =>
+        manager.parseSkillContent(
+          `---
+name: test-skill
+description: A skill
+extends: project
+---
+Body.`,
+          '/test/SKILL.md',
+          'user',
+        ),
+      ).toThrow('Unsupported "extends" value');
+    });
+  });
+
   describe('change listeners', () => {
     it('should notify listeners when cache is refreshed', async () => {
       const listener = vi.fn();
