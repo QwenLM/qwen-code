@@ -160,15 +160,34 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
+   * Monotonically increasing request counter used to tag streamStart/streamEnd
+   * so the WebView can detect and discard stale events from previous requests.
+   */
+  private requestCounter = 0;
+  private currentRequestId: string | null = null;
+  private streamEndSent = false;
+
+  /**
    * Notify the webview that streaming has finished.
+   * Includes the `requestId` so the webview can ignore stale events.
+   * Guarded by `streamEndSent` to prevent duplicate streamEnd for the
+   * same request (e.g. cancel handler + error handler both sending one).
    */
   private sendStreamEnd(reason?: string): void {
-    const data: { timestamp: number; reason?: string } = {
+    if (this.streamEndSent) {
+      return;
+    }
+    this.streamEndSent = true;
+
+    const data: { timestamp: number; reason?: string; requestId?: string } = {
       timestamp: Date.now(),
     };
 
     if (reason) {
       data.reason = reason;
+    }
+    if (this.currentRequestId) {
+      data.requestId = this.currentRequestId;
     }
 
     this.sendToWebView({
@@ -391,9 +410,18 @@ export class SessionMessageHandler extends BaseMessageHandler {
     try {
       this.resetStreamContent();
 
+      // Generate a unique requestId so the webview can correlate
+      // streamStart/streamEnd and discard stale events.
+      this.requestCounter += 1;
+      this.currentRequestId = `req-${this.requestCounter}-${Date.now()}`;
+      this.streamEndSent = false;
+
       this.sendToWebView({
         type: 'streamStart',
-        data: { timestamp: Date.now() },
+        data: {
+          timestamp: Date.now(),
+          requestId: this.currentRequestId,
+        },
       });
 
       await this.agentManager.sendMessage(formattedText);
@@ -790,21 +818,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Cancel the current streaming operation in the agent manager
       await this.agentManager.cancelCurrentPrompt();
 
-      // Send streamEnd message to WebView to update UI
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
+      // Use sendStreamEnd to include requestId for proper correlation
+      this.sendStreamEnd('user_cancelled');
 
       console.log('[SessionMessageHandler] Streaming cancelled successfully');
     } catch (_error) {
       console.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
 
-      // Always send streamEnd to update UI, regardless of errors
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
+      // Use sendStreamEnd (with duplicate guard) to include requestId
+      this.sendStreamEnd('user_cancelled');
     }
   }
 

@@ -90,6 +90,14 @@ const debugLogger = createDebugLogger('SESSION');
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  /**
+   * Tracks the completion of the current prompt so that the next prompt
+   * can await it.  This prevents a new prompt from reading chat history
+   * before the previous prompt's tool results have been added —
+   * a race condition that causes malformed history on Windows where
+   * process termination is slow.
+   */
+  private pendingPromptCompletion: Promise<void> | null = null;
   private turn: number = 0;
 
   // Modular components
@@ -143,10 +151,41 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    // Abort the previous prompt and wait for it to fully complete.
+    // This is critical on Windows where process termination is slow:
+    // without this wait, the new prompt could read chat history before
+    // the cancelled prompt's tool results (functionResponse) have been
+    // added, causing malformed history (tool_call → user_query → tool_result
+    // instead of tool_call → tool_result → user_query).
     this.pendingPrompt?.abort();
+    if (this.pendingPromptCompletion) {
+      try {
+        await this.pendingPromptCompletion;
+      } catch {
+        // Expected: previous prompt was cancelled or errored
+      }
+    }
+
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
+    // Track this prompt's completion for the next prompt to await
+    let resolveCompletion!: () => void;
+    this.pendingPromptCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      return await this.#executePrompt(params, pendingSend);
+    } finally {
+      resolveCompletion();
+    }
+  }
+
+  async #executePrompt(
+    params: PromptRequest,
+    pendingSend: AbortController,
+  ): Promise<PromptResponse> {
     // Increment turn counter for each user prompt
     this.turn += 1;
 
