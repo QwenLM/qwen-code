@@ -57,6 +57,17 @@ export const btwCommand: SlashCommand = {
       };
     }
 
+    // Guard against concurrent pending operations
+    if (ui.pendingItem) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Another operation is in progress. Please wait for it to complete.',
+        ),
+      };
+    }
+
     // Show pending state
     const pendingItem: HistoryItemBtw = {
       type: MessageType.BTW,
@@ -92,7 +103,6 @@ export const btwCommand: SlashCommand = {
       );
 
       if (abortSignal?.aborted) {
-        ui.setPendingItem(null);
         return;
       }
 
@@ -105,25 +115,20 @@ export const btwCommand: SlashCommand = {
           .join('') || t('No response received.');
 
       // Clear pending and show the completed btw item
-      ui.setPendingItem(null);
-      ui.addItem(
-        {
-          type: MessageType.BTW,
-          btw: {
-            question,
-            answer,
-            isPending: false,
-          },
-        } as HistoryItemBtw,
-        Date.now(),
-      );
+      const completedItem: HistoryItemBtw = {
+        type: MessageType.BTW,
+        btw: {
+          question,
+          answer,
+          isPending: false,
+        },
+      };
+      ui.addItem(completedItem, Date.now());
     } catch (error) {
       if (abortSignal?.aborted) {
-        ui.setPendingItem(null);
         return;
       }
 
-      ui.setPendingItem(null);
       ui.addItem(
         {
           type: MessageType.ERROR,
@@ -133,6 +138,8 @@ export const btwCommand: SlashCommand = {
         },
         Date.now(),
       );
+    } finally {
+      ui.setPendingItem(null);
     }
   },
 };

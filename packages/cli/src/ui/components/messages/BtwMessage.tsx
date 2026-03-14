@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import type { BtwProps } from '../../types.js';
 import Spinner from 'ink-spinner';
 import { Colors } from '../../colors.js';
+import { t } from '../../../i18n/index.js';
 
 export interface BtwDisplayProps {
   btw: BtwProps;
@@ -19,26 +20,26 @@ export interface BtwDisplayProps {
  * Shows an ephemeral question and answer that doesn't affect the main conversation.
  */
 export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
-    <Box flexDirection="column">
-      <Box flexDirection="row">
-        <Text color={Colors.Gray} dimColor>
-          {'btw> '}
-        </Text>
-        <Text color={Colors.Gray}>{btw.question}</Text>
-      </Box>
-      <Box flexDirection="row" marginTop={0}>
-        {btw.isPending ? (
-          <Box>
-            <Box marginRight={1}>
-              <Spinner type="dots" />
-            </Box>
-            <Text color={Colors.AccentPurple}>Thinking...</Text>
-          </Box>
-        ) : (
-          <Box flexDirection="column">
-            <Text color={Colors.AccentCyan}>{btw.answer}</Text>
-          </Box>
-        )}
-      </Box>
+  <Box flexDirection="column">
+    <Box flexDirection="row">
+      <Text color={Colors.Gray} dimColor>
+        {'btw> '}
+      </Text>
+      <Text color={Colors.Gray}>{btw.question}</Text>
     </Box>
-  );
+    <Box flexDirection="row" marginTop={0}>
+      {btw.isPending ? (
+        <Box>
+          <Box marginRight={1}>
+            <Spinner type="dots" />
+          </Box>
+          <Text color={Colors.AccentPurple}>{t('Thinking...')}</Text>
+        </Box>
+      ) : (
+        <Box flexDirection="column">
+          <Text color={Colors.AccentCyan}>{btw.answer}</Text>
+        </Box>
+      )}
+    </Box>
+  </Box>
+);
