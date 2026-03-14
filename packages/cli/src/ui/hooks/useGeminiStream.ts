@@ -25,9 +25,11 @@ import {
   isNodeError,
   MessageSenderType,
   logUserPrompt,
+  logUserRetry,
   GitService,
   UnauthorizedError,
   UserPromptEvent,
+  UserRetryEvent,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   ApprovalMode,
@@ -1183,6 +1185,10 @@ export const useGeminiStream = (
 
           // Reset thought when starting a new prompt
           setThought(null);
+        }
+
+        if (submitType === SendMessageType.Retry) {
+          logUserRetry(config, new UserRetryEvent(prompt_id));
         }
 
         setIsResponding(true);
