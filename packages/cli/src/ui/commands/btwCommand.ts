@@ -45,7 +45,7 @@ async function askBtw(
         ],
       },
     ],
-    { tools: [] },
+    {}, // No tools — btw questions are text-only
     abortSignal,
     model,
   );

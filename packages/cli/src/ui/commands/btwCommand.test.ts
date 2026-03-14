@@ -171,7 +171,7 @@ describe('btwCommand', () => {
             ],
           },
         ],
-        { tools: [] },
+        {},
         expect.any(AbortSignal),
         'test-model',
       );
