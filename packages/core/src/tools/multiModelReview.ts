@@ -128,11 +128,16 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
       signal,
     );
 
+    const failureSummary = this.formatFailureSummary(collected);
+
     if (collected.modelResults.length === 0) {
       return {
-        llmContent:
-          'All review models failed. Please proceed with standard single-model review using the 4-agent approach.',
-        returnDisplay: 'All review models failed',
+        llmContent: [
+          {
+            text: `All review models failed. Please proceed with standard single-model review using the 4-agent approach.\n\n${failureSummary}`,
+          },
+        ],
+        returnDisplay: `All review models failed: ${collected.failedModels.map((r) => r.modelId).join(', ')}`,
       };
     }
 
@@ -142,7 +147,7 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
       return {
         llmContent: [
           {
-            text: `**Review model:** ${single.modelId}\n**Note:** Only 1 of ${reviewModels.length} review models succeeded. Arbitration skipped.\n\n${single.reviewText}`,
+            text: `**Review model:** ${single.modelId}\n**Note:** Only 1 of ${reviewModels.length} review models succeeded. Arbitration skipped.\n${failureSummary}\n\n${single.reviewText}`,
           },
         ],
         returnDisplay: `Single model review (${reviewModels.length - 1} model(s) failed)`,
@@ -171,7 +176,11 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
           signal,
         );
 
-        const header = this.buildReportHeader(collected, arbitratorModel.id);
+        const header = this.buildReportHeader(
+          collected,
+          arbitratorModel.id,
+          failureSummary,
+        );
         return {
           llmContent: [{ text: `${header}\n\n${result.report}` }],
           returnDisplay: `Multi-model review complete (${collected.modelResults.length} models + arbitrator)`,
@@ -188,7 +197,11 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
 
     // Session model arbitration: return collected reviews for the session model
     const arbitrationPrompt = service.buildSessionArbitrationPrompt(collected);
-    const header = this.buildReportHeader(collected, 'session model');
+    const header = this.buildReportHeader(
+      collected,
+      'session model',
+      failureSummary,
+    );
 
     const fallbackNote = arbitratorFallbackReason
       ? `\n\n> **Note:** ${arbitratorFallbackReason}\n`
@@ -207,9 +220,21 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
   private buildReportHeader(
     collected: CollectedReview,
     arbitratorId: string,
+    failureSummary: string,
   ): string {
     const modelNames = collected.modelResults.map((r) => r.modelId).join(', ');
-    return `**Review models:** ${modelNames}\n**Arbitrator:** ${arbitratorId}`;
+    const header = `**Review models:** ${modelNames}\n**Arbitrator:** ${arbitratorId}`;
+    return failureSummary ? `${header}\n${failureSummary}` : header;
+  }
+
+  private formatFailureSummary(collected: CollectedReview): string {
+    if (collected.failedModels.length === 0) {
+      return '';
+    }
+    const details = collected.failedModels
+      .map((r) => `- ${r.modelId}: ${r.error ?? 'unknown error'}`)
+      .join('\n');
+    return `**Failed models (${collected.failedModels.length}):**\n${details}`;
   }
 
   private buildGuidanceText(): string {

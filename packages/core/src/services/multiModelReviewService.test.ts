@@ -84,6 +84,7 @@ describe('MultiModelReviewService', () => {
       expect(result.modelResults[0].reviewText).toBe('Review from A');
       expect(result.modelResults[1].modelId).toBe('model-b');
       expect(result.modelResults[1].reviewText).toBe('Review from B');
+      expect(result.failedModels).toHaveLength(0);
       expect(result.diff).toBe('diff content');
     });
 
@@ -106,6 +107,9 @@ describe('MultiModelReviewService', () => {
       // Only successful results are returned
       expect(result.modelResults).toHaveLength(1);
       expect(result.modelResults[0].modelId).toBe('model-a');
+      expect(result.failedModels).toHaveLength(1);
+      expect(result.failedModels[0].modelId).toBe('model-b');
+      expect(result.failedModels[0].error).toBe('API key invalid');
     });
 
     it('should return empty results when all models fail', async () => {
@@ -121,6 +125,7 @@ describe('MultiModelReviewService', () => {
       const result = await service.collectReviews('diff content', models);
 
       expect(result.modelResults).toHaveLength(0);
+      expect(result.failedModels).toHaveLength(2);
     });
 
     it('should treat empty responses as errors', async () => {
@@ -176,6 +181,7 @@ describe('MultiModelReviewService', () => {
           { modelId: 'model-a', reviewText: 'Found bug X' },
           { modelId: 'model-b', reviewText: 'Found bug Y' },
         ] as ModelReviewResult[],
+        failedModels: [],
         diff: 'some diff',
       };
       const arbitrator = makeModel('arbitrator');
@@ -201,6 +207,7 @@ describe('MultiModelReviewService', () => {
         modelResults: [
           { modelId: 'model-a', reviewText: 'Found bug X' },
         ] as ModelReviewResult[],
+        failedModels: [],
         diff: 'some diff',
       };
       const arbitrator = makeModel('arbitrator');
@@ -219,6 +226,7 @@ describe('MultiModelReviewService', () => {
         modelResults: [
           { modelId: 'model-a', reviewText: 'Found bug X' },
         ] as ModelReviewResult[],
+        failedModels: [],
         diff: 'some diff',
       };
       const arbitrator = makeModel('arbitrator');
@@ -237,6 +245,7 @@ describe('MultiModelReviewService', () => {
         modelResults: [
           { modelId: 'model-a', reviewText: 'Review A' },
         ] as ModelReviewResult[],
+        failedModels: [],
         diff: 'important diff content',
       };
       const arbitrator = makeModel('arbitrator');
@@ -265,6 +274,7 @@ describe('MultiModelReviewService', () => {
           { modelId: 'model-a', reviewText: 'Review A content' },
           { modelId: 'model-b', reviewText: 'Review B content' },
         ] as ModelReviewResult[],
+        failedModels: [],
         diff: 'the diff',
       };
 

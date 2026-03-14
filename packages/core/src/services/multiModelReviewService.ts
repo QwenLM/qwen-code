@@ -64,6 +64,7 @@ export interface ModelReviewResult {
  */
 export interface CollectedReview {
   modelResults: ModelReviewResult[];
+  failedModels: ModelReviewResult[];
   diff: string;
 }
 
@@ -160,6 +161,7 @@ export class MultiModelReviewService {
 
     return {
       modelResults: successful,
+      failedModels: failed,
       diff,
     };
   }

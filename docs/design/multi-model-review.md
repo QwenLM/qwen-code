@@ -615,7 +615,8 @@ Do NOT discard findings just because only one model raised them.
 ## 7. Open Questions
 
 1. **大 diff 的处理**: 当 diff 超过某些模型的上下文窗口时如何处理？
-   - **建议**: MVP 阶段跳过上下文窗口不足的模型并告警，后续迭代支持按文件分片。
+   - **建议**: 后续迭代中检测上下文窗口并跳过不足的模型（含告警），进一步支持按文件分片。
+   - **当前状态**: MVP 未实现上下文窗口检测，超长 diff 会由模型 API 自行报错，被 collectReviews 归入失败模型并展示给用户。
 
 2. **独立仲裁模型的上下文**: 独立仲裁模型通过 API 调用，没有 tool 访问能力，无法主动读取代码文件。
    - **建议**: 仲裁 prompt 中包含完整 diff（审查模型也看的是同一份 diff），这足以让仲裁模型验证 findings。不需要额外提取文件上下文。

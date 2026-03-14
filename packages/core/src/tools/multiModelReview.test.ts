@@ -113,6 +113,10 @@ describe('MultiModelReviewTool', () => {
     const serviceInstance = {
       collectReviews: vi.fn().mockResolvedValue({
         modelResults: [],
+        failedModels: [
+          { modelId: 'model-a', reviewText: '', error: 'timeout' },
+          { modelId: 'model-b', reviewText: '', error: 'rate limit' },
+        ],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi.fn(),
@@ -124,7 +128,14 @@ describe('MultiModelReviewTool', () => {
     const invocation = (tool as any).createInvocation({ diff: 'some diff' });
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.llmContent).toContain('All review models failed');
+    const text = Array.isArray(result.llmContent)
+      ? result.llmContent[0].text
+      : result.llmContent;
+    expect(text).toContain('All review models failed');
+    expect(text).toContain('model-a');
+    expect(text).toContain('timeout');
+    expect(result.returnDisplay).toContain('model-a');
+    expect(result.returnDisplay).toContain('model-b');
   });
 
   it('should return independent arbitration result when arbitrator is configured', async () => {
@@ -141,6 +152,7 @@ describe('MultiModelReviewTool', () => {
           { modelId: 'model-a', reviewText: 'Review A' },
           { modelId: 'model-b', reviewText: 'Review B' },
         ],
+        failedModels: [],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi.fn().mockResolvedValue({
@@ -177,6 +189,7 @@ describe('MultiModelReviewTool', () => {
           { modelId: 'model-a', reviewText: 'Review A' },
           { modelId: 'model-b', reviewText: 'Review B' },
         ],
+        failedModels: [],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi
@@ -210,6 +223,7 @@ describe('MultiModelReviewTool', () => {
           { modelId: 'model-a', reviewText: 'Review A' },
           { modelId: 'model-b', reviewText: 'Review B' },
         ],
+        failedModels: [],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi.fn(),
@@ -237,6 +251,9 @@ describe('MultiModelReviewTool', () => {
     const serviceInstance = {
       collectReviews: vi.fn().mockResolvedValue({
         modelResults: [{ modelId: 'model-a', reviewText: 'Only review' }],
+        failedModels: [
+          { modelId: 'model-b', reviewText: '', error: 'timeout' },
+        ],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi.fn(),
@@ -275,6 +292,7 @@ describe('MultiModelReviewTool', () => {
           { modelId: 'model-a', reviewText: 'Review A' },
           { modelId: 'model-b', reviewText: 'Review B' },
         ],
+        failedModels: [],
         diff: 'some diff',
       }),
       arbitrateIndependently: vi.fn(),
