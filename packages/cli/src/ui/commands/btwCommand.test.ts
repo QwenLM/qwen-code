@@ -110,6 +110,10 @@ describe('btwCommand', () => {
   });
 
   describe('interactive mode', () => {
+    // Helper to flush microtask queue so fire-and-forget promises settle.
+    const flushPromises = () =>
+      new Promise<void>((resolve) => setTimeout(resolve, 0));
+
     it('should set pending item and add completed item on success', async () => {
       mockGenerateContent.mockResolvedValue({
         candidates: [
@@ -123,6 +127,7 @@ describe('btwCommand', () => {
 
       await btwCommand.action!(mockContext, 'what is the meaning of life?');
 
+      // Action returns immediately; pending item is set synchronously
       expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith({
         type: MessageType.BTW,
         btw: {
@@ -131,6 +136,9 @@ describe('btwCommand', () => {
           isPending: true,
         },
       });
+
+      // Wait for background promise to settle
+      await flushPromises();
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -158,6 +166,7 @@ describe('btwCommand', () => {
       });
 
       await btwCommand.action!(mockContext, 'my question');
+      await flushPromises();
 
       expect(mockGenerateContent).toHaveBeenCalledWith(
         [
@@ -181,6 +190,7 @@ describe('btwCommand', () => {
       mockGenerateContent.mockRejectedValue(new Error('API error'));
 
       await btwCommand.action!(mockContext, 'test question');
+      await flushPromises();
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -197,6 +207,7 @@ describe('btwCommand', () => {
       mockGenerateContent.mockRejectedValue('string error');
 
       await btwCommand.action!(mockContext, 'test question');
+      await flushPromises();
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -255,6 +266,7 @@ describe('btwCommand', () => {
       });
 
       await btwCommand.action!(abortContext, 'test question');
+      await flushPromises();
 
       expect(abortContext.ui.addItem).not.toHaveBeenCalled();
       expect(abortContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
@@ -266,6 +278,7 @@ describe('btwCommand', () => {
       });
 
       await btwCommand.action!(mockContext, 'test question');
+      await flushPromises();
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
@@ -278,6 +291,25 @@ describe('btwCommand', () => {
         },
         expect.any(Number),
       );
+    });
+
+    it('should return void immediately without blocking', async () => {
+      mockGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      });
+
+      const result = await btwCommand.action!(mockContext, 'test question');
+
+      // Action should return void (not awaiting the API call)
+      expect(result).toBeUndefined();
+
+      // addItem not yet called — background promise hasn't settled
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+
+      await flushPromises();
+
+      // Now the background work has completed
+      expect(mockContext.ui.addItem).toHaveBeenCalled();
     });
   });
 

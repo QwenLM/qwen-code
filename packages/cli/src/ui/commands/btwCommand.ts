@@ -175,36 +175,35 @@ export const btwCommand: SlashCommand = {
     };
     ui.setPendingItem(pendingItem);
 
-    try {
-      const answer = await askBtw(geminiClient, model, question, abortSignal);
+    // Fire-and-forget: run the API call in the background so the main
+    // conversation is not blocked while waiting for the btw answer.
+    void askBtw(geminiClient, model, question, abortSignal)
+      .then((answer) => {
+        if (abortSignal.aborted) return;
 
-      if (abortSignal.aborted) {
-        return;
-      }
+        const completedItem: HistoryItemBtw = {
+          type: MessageType.BTW,
+          btw: {
+            question,
+            answer,
+            isPending: false,
+          },
+        };
+        ui.addItem(completedItem, Date.now());
+      })
+      .catch((error) => {
+        if (abortSignal.aborted) return;
 
-      const completedItem: HistoryItemBtw = {
-        type: MessageType.BTW,
-        btw: {
-          question,
-          answer,
-          isPending: false,
-        },
-      };
-      ui.addItem(completedItem, Date.now());
-    } catch (error) {
-      if (abortSignal.aborted) {
-        return;
-      }
-
-      ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: formatBtwError(error),
-        },
-        Date.now(),
-      );
-    } finally {
-      ui.setPendingItem(null);
-    }
+        ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: formatBtwError(error),
+          },
+          Date.now(),
+        );
+      })
+      .finally(() => {
+        ui.setPendingItem(null);
+      });
   },
 };
