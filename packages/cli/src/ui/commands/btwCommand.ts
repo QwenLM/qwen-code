@@ -13,20 +13,18 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
+import type { GeminiClient } from '@qwen-code/qwen-code-core';
 
 /**
  * Helper to make the ephemeral generateContent call and extract the answer.
+ * Uses a snapshot of the current conversation history as context.
  */
 async function askBtw(
-  config: NonNullable<CommandContext['services']['config']>,
+  geminiClient: GeminiClient,
+  model: string,
   question: string,
   abortSignal: AbortSignal,
 ): Promise<string> {
-  const geminiClient = config.getGeminiClient();
-  if (!geminiClient) {
-    throw new Error(t('No chat client available.'));
-  }
-
   const history = geminiClient.getHistory();
 
   const response = await geminiClient.generateContent(
@@ -43,7 +41,7 @@ async function askBtw(
     ],
     {},
     abortSignal,
-    config.getModel(),
+    model,
   );
 
   const parts = response.candidates?.[0]?.content?.parts;
@@ -91,13 +89,7 @@ export const btwCommand: SlashCommand = {
     }
 
     const geminiClient = config.getGeminiClient();
-    if (!geminiClient) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('No chat client available.'),
-      };
-    }
+    const model = config.getModel();
 
     // ACP mode: return a stream_messages async generator
     if (executionMode === 'acp') {
@@ -108,7 +100,12 @@ export const btwCommand: SlashCommand = {
             content: t('Thinking...'),
           };
 
-          const answer = await askBtw(config, question, abortSignal);
+          const answer = await askBtw(
+            geminiClient,
+            model,
+            question,
+            abortSignal,
+          );
 
           yield {
             messageType: 'info' as const,
@@ -130,7 +127,7 @@ export const btwCommand: SlashCommand = {
     // Non-interactive mode: return a simple message result
     if (executionMode === 'non_interactive') {
       try {
-        const answer = await askBtw(config, question, abortSignal);
+        const answer = await askBtw(geminiClient, model, question, abortSignal);
         return {
           type: 'message',
           messageType: 'info',
@@ -169,7 +166,7 @@ export const btwCommand: SlashCommand = {
     ui.setPendingItem(pendingItem);
 
     try {
-      const answer = await askBtw(config, question, abortSignal);
+      const answer = await askBtw(geminiClient, model, question, abortSignal);
 
       if (abortSignal.aborted) {
         return;
