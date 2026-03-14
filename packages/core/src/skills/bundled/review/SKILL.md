@@ -7,6 +7,7 @@ allowedTools:
   - grep_search
   - read_file
   - glob
+  - multi_model_review
 ---
 
 # Code Review
@@ -29,7 +30,17 @@ Based on the arguments provided:
   - Run `git diff HEAD -- <file>` to get recent changes
   - If no diff, read the file and review its current state
 
-## Step 2: Parallel multi-dimensional review
+## Step 2: Try multi-model review
+
+Unless the user explicitly specified `--single`, call the `multi_model_review` tool with the diff obtained in Step 1.
+
+- If the tool returns a **complete review report** (from independent arbitration): present it directly as the final output using the format in Step 4, then stop.
+- If the tool returns **collected reviews from multiple models** (for session-model arbitration): you are the arbitrator. Merge, deduplicate, and validate findings from all models, then produce the final report using the format in Step 4. You have access to the full project context and tools to verify findings if needed.
+- If the tool returns **guidance text** indicating multi-model review is not available (fewer than 2 models configured): proceed to Step 3 for standard single-model review.
+
+## Step 3: Single-model parallel multi-dimensional review
+
+This step is used when multi-model review is not available, or when the user specified `--single`.
 
 Launch **four parallel review agents** to analyze the changes from different angles. Each agent should focus exclusively on its dimension.
 
@@ -77,9 +88,9 @@ Focus areas:
 - Unexpected side effects or hidden coupling
 - Anything else that looks off — trust your instincts
 
-## Step 3: Aggregate and present findings
+## Step 4: Aggregate and present findings
 
-Combine results from all four agents into a single, well-organized review. Use this format:
+Combine results into a single, well-organized review. Use this format:
 
 ### Summary
 

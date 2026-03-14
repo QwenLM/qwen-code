@@ -231,6 +231,14 @@ export class ModelsConfig {
   }
 
   /**
+   * Get the underlying ModelRegistry instance.
+   * Used by Config for cross-authType model resolution (e.g., review models).
+   */
+  getModelRegistry(): ModelRegistry {
+    return this.modelRegistry;
+  }
+
+  /**
    * Get available models for current authType
    */
   getAvailableModels(): AvailableModel[] {

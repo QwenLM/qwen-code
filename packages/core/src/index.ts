@@ -91,12 +91,14 @@ export * from './tools/todoWrite.js';
 export * from './tools/web-fetch.js';
 export * from './tools/web-search/index.js';
 export * from './tools/write-file.js';
+export * from './tools/multiModelReview.js';
 
 // ============================================================================
 // Services
 // ============================================================================
 
 export * from './services/chatRecordingService.js';
+export * from './services/multiModelReviewService.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';

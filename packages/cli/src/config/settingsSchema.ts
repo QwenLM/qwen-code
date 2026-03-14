@@ -1247,6 +1247,39 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  // Multi-model code review configuration
+  review: {
+    type: 'object',
+    label: 'Code Review',
+    category: 'Tools',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Multi-model code review configuration. When review.models is configured with 2+ models, /review will use multi-model review automatically.',
+    showInDialog: false,
+    properties: {
+      models: {
+        type: 'array',
+        label: 'Review Models',
+        category: 'Tools',
+        requiresRestart: false,
+        default: [] as Array<string | Record<string, unknown>>,
+        description:
+          'Models for multi-model review. Each entry can be a model ID string (resolved from modelProviders) or a full model config object with id, authType, baseUrl, envKey.',
+        showInDialog: false,
+      },
+      arbitratorModel: {
+        type: 'string',
+        label: 'Arbitrator Model',
+        category: 'Tools',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Model ID for the final arbitrator (resolved from modelProviders). Falls back to the current session model if not set. Recommended: a high-reasoning model.',
+        showInDialog: false,
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

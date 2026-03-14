@@ -1035,6 +1035,14 @@ export async function loadCliConfig(
     },
     hooks: settings.hooks,
     hooksConfig: settings.hooksConfig,
+    reviewConfig: settings.review
+      ? {
+          models: settings.review.models as
+            | Array<string | Record<string, unknown>>
+            | undefined,
+          arbitratorModel: settings.review.arbitratorModel,
+        }
+      : undefined,
     enableHooks:
       argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
     channel: argv.channel,

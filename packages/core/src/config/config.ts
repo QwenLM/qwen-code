@@ -59,6 +59,7 @@ import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
+import { MultiModelReviewTool } from '../tools/multiModelReview.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { LspTool } from '../tools/lsp.js';
@@ -126,6 +127,7 @@ import {
   ModelsConfig,
   type ModelProvidersConfig,
   type AvailableModel,
+  type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -394,6 +396,11 @@ export interface ConfigParameters {
   hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /** Multi-model review configuration */
+  reviewConfig?: {
+    models?: Array<string | Record<string, unknown>>;
+    arbitratorModel?: string;
+  };
 }
 
 function normalizeConfigOutputFormat(
@@ -443,6 +450,10 @@ export class Config {
 
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
+  private readonly reviewConfig?: {
+    models?: Array<string | Record<string, unknown>>;
+    arbitratorModel?: string;
+  };
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -619,6 +630,7 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.reviewConfig = params.reviewConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -1101,6 +1113,88 @@ export class Config {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * Resolve review models from review.models config.
+   * String IDs are resolved from modelProviders via ModelRegistry.findModelById().
+   * Returns ResolvedModelConfig[] ready for createContentGenerator().
+   */
+  getReviewModels(): ResolvedModelConfig[] {
+    const models = this.reviewConfig?.models;
+    if (!models || models.length === 0) {
+      return [];
+    }
+
+    const registry = this.modelsConfig.getModelRegistry();
+    const resolved: ResolvedModelConfig[] = [];
+    const seenIds = new Set<string>();
+
+    for (const entry of models) {
+      if (typeof entry === 'string') {
+        // Resolve string ID from modelProviders
+        const found = registry.findModelById(entry);
+        if (!found) {
+          throw new Error(
+            `Model '${entry}' not found in modelProviders. Add it to modelProviders or use object form with full config.`,
+          );
+        }
+        if (!seenIds.has(found.config.id)) {
+          seenIds.add(found.config.id);
+          resolved.push(found.config);
+        }
+      } else if (entry && typeof entry === 'object' && 'id' in entry) {
+        // Inline model config object — access via index signature
+        const obj = entry as Record<string, unknown>;
+        const id = String(obj['id']);
+        const authTypeRaw = obj['authType'] as string | undefined;
+        if (!authTypeRaw) {
+          throw new Error(
+            `Inline model config for '${id}' missing required field: authType`,
+          );
+        }
+        if (!Object.values(AuthType).includes(authTypeRaw as AuthType)) {
+          throw new Error(
+            `Inline model config for '${id}' has invalid authType: '${authTypeRaw}'. Expected one of: ${Object.values(AuthType).join(', ')}`,
+          );
+        }
+        const authType = authTypeRaw as AuthType;
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          resolved.push({
+            id,
+            authType,
+            name: String(obj['name'] || id),
+            baseUrl: String(obj['baseUrl'] || ''),
+            envKey: obj['envKey'] ? String(obj['envKey']) : undefined,
+            generationConfig: {},
+            capabilities: {},
+          });
+        }
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Resolve the arbitrator model from review.arbitratorModel config.
+   * Returns undefined when session model should act as arbitrator.
+   */
+  getArbitratorModel(): ResolvedModelConfig | undefined {
+    const modelId = this.reviewConfig?.arbitratorModel;
+    if (!modelId) {
+      return undefined;
+    }
+
+    const registry = this.modelsConfig.getModelRegistry();
+    const found = registry.findModelById(modelId);
+    if (!found) {
+      throw new Error(
+        `Arbitrator model '${modelId}' not found in modelProviders. Add it to modelProviders first.`,
+      );
+    }
+    return found.config;
   }
 
   /**
@@ -1898,6 +1992,7 @@ export class Config {
     registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
+    registerCoreTool(MultiModelReviewTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
