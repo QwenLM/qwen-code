@@ -141,7 +141,7 @@ export class SkillManager {
             `Failed to resolve extends for skill "${skill.name}": ${error instanceof Error ? error.message : error}. ` +
               `The skill will be loaded without the base content.`,
           );
-          resolvedSkills.push(skill);
+          resolvedSkills.push({ ...skill, extends: undefined });
         }
       } else {
         resolvedSkills.push(skill);
@@ -172,57 +172,42 @@ export class SkillManager {
       `Loading skill: ${name}${level ? ` at level: ${level}` : ''}`,
     );
 
-    let skill: SkillConfig | null = null;
+    const skill = level
+      ? await this.findSkillByNameAtLevel(name, level)
+      : await this.findFirstSkillByName(name);
 
-    if (level) {
-      skill = await this.findSkillByNameAtLevel(name, level);
-      if (skill) {
-        debugLogger.debug(`Found skill ${name} at ${level} level`);
-      } else {
-        debugLogger.debug(`Skill ${name} not found at ${level} level`);
-      }
+    if (skill) {
+      debugLogger.debug(`Found skill ${name} at ${skill.level} level`);
     } else {
-      // Try project level first
-      skill = await this.findSkillByNameAtLevel(name, 'project');
-      if (skill) {
-        debugLogger.debug(`Found skill ${name} at project level`);
-      }
-
-      // Try user level
-      if (!skill) {
-        skill = await this.findSkillByNameAtLevel(name, 'user');
-        if (skill) {
-          debugLogger.debug(`Found skill ${name} at user level`);
-        }
-      }
-
-      // Try extension level
-      if (!skill) {
-        skill = await this.findSkillByNameAtLevel(name, 'extension');
-        if (skill) {
-          debugLogger.debug(`Found skill ${name} at extension level`);
-        }
-      }
-
-      // Try bundled level (lowest precedence)
-      if (!skill) {
-        skill = await this.findSkillByNameAtLevel(name, 'bundled');
-        if (skill) {
-          debugLogger.debug(`Found skill ${name} at bundled level`);
-        } else {
-          debugLogger.debug(
-            `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
-          );
-        }
-      }
+      debugLogger.debug(
+        level
+          ? `Skill ${name} not found at ${level} level`
+          : `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
+      );
     }
 
     // Resolve extends if present
     if (skill?.extends) {
-      skill = await this.resolveExtends(skill);
+      return this.resolveExtends(skill);
     }
 
     return skill;
+  }
+
+  /**
+   * Finds a skill by name, searching levels in precedence order:
+   * project > user > extension > bundled.
+   */
+  private async findFirstSkillByName(
+    name: string,
+  ): Promise<SkillConfig | null> {
+    for (const level of ['project', 'user', 'extension', 'bundled'] as const) {
+      const skill = await this.findSkillByNameAtLevel(name, level);
+      if (skill) {
+        return skill;
+      }
+    }
+    return null;
   }
 
   /**

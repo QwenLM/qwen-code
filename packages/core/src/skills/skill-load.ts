@@ -16,7 +16,7 @@ const SKILL_MANIFEST_FILE = 'SKILL.md';
 export function parseExtendsField(
   frontmatter: Record<string, unknown>,
 ): SkillConfig['extends'] {
-  const extendsRaw = frontmatter['extends'] as string | undefined;
+  const extendsRaw = frontmatter['extends'];
   if (extendsRaw === undefined) {
     return undefined;
   }
