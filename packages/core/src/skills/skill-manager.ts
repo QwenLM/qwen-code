@@ -19,7 +19,7 @@ import type {
 } from './types.js';
 import { SkillError, SkillErrorCode } from './types.js';
 import type { Config } from '../config/config.js';
-import { validateConfig } from './skill-load.js';
+import { validateConfig, parseExtendsField } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 
@@ -423,19 +423,7 @@ export class SkillManager {
         }
       }
 
-      // Extract optional extends field
-      const extendsRaw = frontmatter['extends'] as string | undefined;
-      let extendsLevel: SkillConfig['extends'];
-
-      if (extendsRaw !== undefined) {
-        const extendsStr = String(extendsRaw);
-        if (extendsStr !== 'bundled') {
-          throw new Error(
-            `Unsupported "extends" value: "${extendsStr}". Only "bundled" is supported.`,
-          );
-        }
-        extendsLevel = extendsStr;
-      }
+      const extendsLevel = parseExtendsField(frontmatter);
 
       const config: SkillConfig = {
         name,
@@ -635,21 +623,13 @@ export class SkillManager {
   private async resolveExtends(skill: SkillConfig): Promise<SkillConfig> {
     const extendsLevel = skill.extends!;
 
-    if (extendsLevel !== 'bundled') {
-      throw new SkillError(
-        `Unsupported extends value: "${extendsLevel}". Only "bundled" is supported.`,
-        SkillErrorCode.INVALID_CONFIG,
-        skill.name,
-      );
-    }
-
     const baseSkill = await this.findSkillByNameAtLevel(
       skill.name,
       extendsLevel,
     );
     if (!baseSkill) {
       throw new SkillError(
-        `Cannot extend: bundled skill "${skill.name}" not found`,
+        `Cannot extend: ${extendsLevel} skill "${skill.name}" not found`,
         SkillErrorCode.NOT_FOUND,
         skill.name,
       );

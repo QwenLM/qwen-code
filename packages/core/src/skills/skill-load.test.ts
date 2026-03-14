@@ -335,6 +335,22 @@ Valid skill.
       expect(result.errors[0]).toContain('"extends" must be "bundled"');
     });
 
+    it('should return error when bundled-level skill uses extends', () => {
+      const config = {
+        name: 'review',
+        description: 'Review code changes',
+        body: 'Body.',
+        level: 'bundled' as const,
+        filePath: '/path/to/skill',
+        extends: 'bundled' as const,
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors[0]).toContain('not allowed on bundled');
+    });
+
     it('should warn with extends-specific message when body is empty and extends is set', () => {
       const config = {
         name: 'test-skill',

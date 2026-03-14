@@ -51,7 +51,7 @@ export interface SkillConfig {
    * The extending skill's body is appended to the base skill's body.
    * Currently only 'bundled' is supported.
    */
-  extends?: SkillLevel;
+  extends?: 'bundled';
 
   /**
    * For extension-level skills: the name of the providing extension
