@@ -162,6 +162,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
+      AuthType.USE_LM_STUDIO,
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,

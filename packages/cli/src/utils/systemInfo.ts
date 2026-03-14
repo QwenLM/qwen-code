@@ -155,9 +155,10 @@ export async function getExtendedSystemInfo(
   // For bug reports, use sandbox name without prefix
   const sandboxEnv = getSandboxEnv(true);
 
-  // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
+  // Get base URL and apiKeyEnvKey if using OpenAI, LM Studio, or Anthropic auth
   const contentGeneratorConfig =
     baseInfo.selectedAuthType === AuthType.USE_OPENAI ||
+    baseInfo.selectedAuthType === AuthType.USE_LM_STUDIO ||
     baseInfo.selectedAuthType === AuthType.USE_ANTHROPIC
       ? context.services.config?.getContentGeneratorConfig()
       : undefined;
