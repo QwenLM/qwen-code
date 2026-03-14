@@ -36,6 +36,8 @@ Unless the user explicitly specified `--single`, check if the `multi_model_revie
 
 - If the tool returns a **complete review report** (from independent arbitration): present it directly as the final output using the format in Step 4, then stop.
 - If the tool returns **collected reviews from multiple models** (for session-model arbitration): you are the arbitrator. Merge, deduplicate, and validate findings from all models, then produce the final report using the format in Step 4. You have access to the full project context and tools to verify findings if needed.
+- If the tool returns a **single-model result** (only one of several models succeeded): treat this as a complete review and present it using the format in Step 4, then stop.
+- For any other tool result — setup guidance (< 2 models configured), all-models-failed message, or configuration error — proceed to Step 3. These are non-final results and the tool output may contain useful context but should not be treated as the final review.
 
 If the `multi_model_review` tool is not available (not in your tool list), or the user specified `--single`, proceed directly to Step 3.
 

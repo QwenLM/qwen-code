@@ -76,6 +76,8 @@ export interface SettingDefinition {
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Custom JSON Schema for array items (overrides default `{ type: 'string' }`) */
+  items?: Record<string, unknown>;
 }
 
 export interface SettingsSchema {
@@ -1267,6 +1269,31 @@ const SETTINGS_SCHEMA = {
         description:
           'Models for multi-model review. Each entry can be a model ID string (resolved from modelProviders) or a full model config object with id, authType, baseUrl, envKey.',
         showInDialog: false,
+        items: {
+          oneOf: [
+            {
+              type: 'string',
+              description: 'Model ID resolved from modelProviders',
+            },
+            {
+              type: 'object',
+              description: 'Inline model configuration',
+              properties: {
+                id: { type: 'string', description: 'Model identifier' },
+                authType: {
+                  type: 'string',
+                  description: 'Authentication type',
+                },
+                baseUrl: { type: 'string', description: 'API base URL' },
+                envKey: {
+                  type: 'string',
+                  description: 'Environment variable for API key',
+                },
+              },
+              required: ['id'],
+            },
+          ],
+        },
       },
       arbitratorModel: {
         type: 'string',
