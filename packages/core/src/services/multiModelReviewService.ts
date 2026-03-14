@@ -238,8 +238,12 @@ export class MultiModelReviewService {
   private buildGeneratorConfig(
     model: ResolvedModelConfig,
   ): ContentGeneratorConfig {
-    // TODO: Consider using a centralized key resolution mechanism instead of direct process.env access
     const apiKey = model.envKey ? process.env[model.envKey] : undefined;
+    if (model.envKey && !apiKey) {
+      throw new Error(
+        `Environment variable '${model.envKey}' required for model '${model.id}' is not set.`,
+      );
+    }
     return {
       ...model.generationConfig,
       model: model.id,

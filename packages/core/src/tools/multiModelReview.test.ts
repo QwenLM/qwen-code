@@ -65,7 +65,10 @@ describe('MultiModelReviewTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.llmContent).toContain(
+    const text = Array.isArray(result.llmContent)
+      ? result.llmContent[0].text
+      : result.llmContent;
+    expect(text).toContain(
       'Multi-model review requires at least 2 configured models',
     );
   });
@@ -80,7 +83,10 @@ describe('MultiModelReviewTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.llmContent).toContain(
+    const text = Array.isArray(result.llmContent)
+      ? result.llmContent[0].text
+      : result.llmContent;
+    expect(text).toContain(
       'Multi-model review requires at least 2 configured models',
     );
   });
@@ -102,8 +108,11 @@ describe('MultiModelReviewTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.llmContent).toContain('gpt-4o');
-    expect(result.llmContent).toContain('claude-sonnet');
+    const text = Array.isArray(result.llmContent)
+      ? result.llmContent[0].text
+      : result.llmContent;
+    expect(text).toContain('gpt-4o');
+    expect(text).toContain('claude-sonnet');
   });
 
   it('should return error when all review models fail', async () => {
@@ -325,7 +334,10 @@ describe('MultiModelReviewTool', () => {
     const invocation = (tool as any).createInvocation({ diff: 'some diff' });
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.llmContent).toContain('configuration error');
+    const text = Array.isArray(result.llmContent)
+      ? result.llmContent[0].text
+      : result.llmContent;
+    expect(text).toContain('configuration error');
   });
 
   describe('validateToolParams', () => {

@@ -104,7 +104,11 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
       const msg = error instanceof Error ? error.message : String(error);
       debugLogger.error(`Failed to resolve review models: ${msg}`);
       return {
-        llmContent: `Multi-model review configuration error: ${msg}`,
+        llmContent: [
+          {
+            text: `Multi-model review configuration error: ${msg}`,
+          },
+        ],
         returnDisplay: `Configuration error: ${msg}`,
       };
     }
@@ -113,7 +117,7 @@ class MultiModelReviewInvocation extends BaseToolInvocation<
       // Return guidance — SKILL.md will naturally fall back to 4-agent flow
       const guidance = this.buildGuidanceText();
       return {
-        llmContent: guidance,
+        llmContent: [{ text: guidance }],
         returnDisplay:
           'Multi-model review not available (< 2 models configured)',
       };

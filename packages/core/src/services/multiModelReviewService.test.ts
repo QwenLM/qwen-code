@@ -158,6 +158,19 @@ describe('MultiModelReviewService', () => {
       expect(result.modelResults[0].modelId).toBe('model-b');
     });
 
+    it('should treat missing env var as error for model with envKey', async () => {
+      const model = makeModel('model-a');
+      model.envKey = 'MISSING_API_KEY';
+      // Ensure the env var is not set
+      delete process.env['MISSING_API_KEY'];
+
+      const result = await service.collectReviews('diff content', [model]);
+
+      expect(result.modelResults).toHaveLength(0);
+      expect(result.failedModels).toHaveLength(1);
+      expect(result.failedModels[0].error).toContain('MISSING_API_KEY');
+    });
+
     it('should respect abort signal', async () => {
       const models = [makeModel('model-a')];
       const controller = new AbortController();
