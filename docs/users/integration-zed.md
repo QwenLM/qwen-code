@@ -18,6 +18,25 @@
 
 ### Installation
 
+#### Install from ACP Registry (Recommend)
+
+1. Install Qwen Code CLI:
+
+```bash
+npm install -g @qwen-code/qwen-code
+```
+
+2. Download and install [Zed Editor](https://zed.dev/)
+
+3. In Zed, click the **settings button** in the top right corner, select **"Add agent"**, choose **"Install from Registry"**, find **Qwen Code**, then click **Install**.
+
+![ACP Registry](assets/integration-zed/acp-registry.png)
+
+![Qwen Code ACP Installed](assets/integration-zed/installed.png)
+
+
+#### Manual Install
+
 1. Install Qwen Code CLI:
 
 ```bash
