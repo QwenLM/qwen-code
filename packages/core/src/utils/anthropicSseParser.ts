@@ -111,10 +111,10 @@ export function parseAnthropicSseData(
     //
     // Try to fix by removing whitespace before } and ]
 
-    // Remove trailing whitespace before closing braces
-    normalizedData = normalizedData.replace(/\s+}/g, '}');
-    // Remove trailing whitespace before closing brackets
-    normalizedData = normalizedData.replace(/\s+]/g, ']');
+    // Remove trailing whitespace before closing braces/brackets, but only
+    // when preceded by a JSON value terminator (" or digit or ] or })
+    // to avoid corrupting whitespace inside string values like "hello   }".
+    normalizedData = normalizedData.replace(/(["\d\]}])\s+([\]}])/g, '$1$2');
 
     try {
       return JSON.parse(normalizedData) as AnthropicStreamEvent;
