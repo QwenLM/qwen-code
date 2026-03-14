@@ -10,30 +10,15 @@ import {
   type ContentGeneratorConfig,
   createContentGenerator,
 } from '../core/contentGenerator.js';
-import type { GenerateContentResponse } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MULTI_MODEL_REVIEW');
 
 const CONCURRENCY_LIMIT = 4;
-
-/**
- * Extract text from a GenerateContentResponse, filtering out thought parts.
- */
-function extractResponseText(response: GenerateContentResponse): string {
-  const parts = response.candidates?.[0]?.content?.parts;
-  if (!parts) return '';
-  return parts
-    .filter(
-      (p): p is typeof p & { text: string } =>
-        !!p.text && !(p as Record<string, unknown>)['thought'],
-    )
-    .map((p) => p.text)
-    .join('');
-}
 
 const REVIEW_PROMPT_PREFIX = `Review the following code changes. Cover these dimensions:
 1. Correctness & Security — bugs, edge cases, vulnerabilities
@@ -106,6 +91,11 @@ export class MultiModelReviewService {
     signal?: AbortSignal,
   ): Promise<CollectedReview> {
     const limit = pLimit(CONCURRENCY_LIMIT);
+    const diffLines = diff.split('\n').length;
+    const diffBytes = Buffer.byteLength(diff, 'utf8');
+    debugLogger.info(
+      `Dispatching diff to ${reviewModels.length} models (${diffLines} lines, ${diffBytes} bytes)`,
+    );
 
     const prompt = `${REVIEW_PROMPT_PREFIX}\n${diff}\n${REVIEW_PROMPT_SUFFIX}`;
 
@@ -133,7 +123,7 @@ export class MultiModelReviewService {
               `review-${model.id}`,
             );
 
-            const text = extractResponseText(response);
+            const text = getResponseText(response) ?? '';
 
             if (!text.trim()) {
               debugLogger.warn(
@@ -208,7 +198,7 @@ export class MultiModelReviewService {
       'review-arbitrator',
     );
 
-    const text = extractResponseText(response);
+    const text = getResponseText(response) ?? '';
 
     if (!text.trim()) {
       throw new Error(
@@ -246,6 +236,7 @@ export class MultiModelReviewService {
   private buildGeneratorConfig(
     model: ResolvedModelConfig,
   ): ContentGeneratorConfig {
+    // TODO: Consider using a centralized key resolution mechanism instead of direct process.env access
     const apiKey = model.envKey ? process.env[model.envKey] : undefined;
     return {
       ...model.generationConfig,

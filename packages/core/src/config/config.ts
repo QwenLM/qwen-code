@@ -2015,11 +2015,12 @@ export class Config {
     registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
-    // Conditionally register multi-model review tool if review models are configured
+    // Register multi-model review tool when review.models is configured (even with < 2 models,
+    // so the tool can surface guidance about how to configure additional models)
     if (
       this.reviewConfig?.models &&
       Array.isArray(this.reviewConfig.models) &&
-      this.reviewConfig.models.length >= 2
+      this.reviewConfig.models.length > 0
     ) {
       registerCoreTool(MultiModelReviewTool, this);
     }

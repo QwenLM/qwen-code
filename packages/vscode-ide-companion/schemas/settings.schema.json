@@ -620,13 +620,25 @@
           "description": "Models for multi-model review. Each entry can be a model ID string (resolved from modelProviders) or a full model config object with id, authType, baseUrl, envKey.",
           "type": "array",
           "items": {
-            "type": "string"
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "authType": { "type": "string" },
+                  "baseUrl": { "type": "string" },
+                  "envKey": { "type": "string" },
+                  "name": { "type": "string" }
+                },
+                "required": ["id", "authType"]
+              }
+            ]
           }
         },
         "arbitratorModel": {
           "description": "Model ID for the final arbitrator (resolved from modelProviders). Falls back to the current session model if not set. Recommended: a high-reasoning model.",
-          "type": "string",
-          "default": ""
+          "type": "string"
         }
       }
     },
