@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import process from 'node:process';
 import pLimit from 'p-limit';
 import {
   type ContentGeneratorConfig,
   createContentGenerator,
 } from '../core/contentGenerator.js';
+import type { GenerateContentResponse } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -17,6 +19,21 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('MULTI_MODEL_REVIEW');
 
 const CONCURRENCY_LIMIT = 4;
+
+/**
+ * Extract text from a GenerateContentResponse, filtering out thought parts.
+ */
+function extractResponseText(response: GenerateContentResponse): string {
+  const parts = response.candidates?.[0]?.content?.parts;
+  if (!parts) return '';
+  return parts
+    .filter(
+      (p): p is typeof p & { text: string } =>
+        !!p.text && !(p as Record<string, unknown>).thought,
+    )
+    .map((p) => p.text)
+    .join('');
+}
 
 const REVIEW_PROMPT_PREFIX = `Review the following code changes. Cover these dimensions:
 1. Correctness & Security — bugs, edge cases, vulnerabilities
@@ -45,7 +62,7 @@ Output format:
 - For each finding: [model names] file:line — title, description, suggested fix
 - End with verdict and one-sentence reasoning
 
-Each model's full review is provided below, followed by the diff.
+Each model's full review is provided below.
 Do NOT discard findings just because only one model raised them.`;
 
 /**
@@ -116,10 +133,7 @@ export class MultiModelReviewService {
               `review-${model.id}`,
             );
 
-            const text =
-              response.candidates?.[0]?.content?.parts
-                ?.map((p) => p.text || '')
-                .join('') || '';
+            const text = extractResponseText(response);
 
             if (!text.trim()) {
               debugLogger.warn(
@@ -194,10 +208,7 @@ export class MultiModelReviewService {
       'review-arbitrator',
     );
 
-    const text =
-      response.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text || '')
-        .join('') || '';
+    const text = extractResponseText(response);
 
     if (!text.trim()) {
       throw new Error(
@@ -211,12 +222,13 @@ export class MultiModelReviewService {
 
   /**
    * Build the arbitration prompt for session-model arbitration.
-   * Returns the prompt text that the session model should use to produce the final report.
+   * Excludes the diff since the session model already has it in context
+   * (it was passed as the tool's input parameter).
    */
   buildSessionArbitrationPrompt(collected: CollectedReview): string {
     const modelReviews = this.formatModelReviews(collected.modelResults);
 
-    return `${ARBITRATION_PROMPT_TEMPLATE}\n\n${modelReviews}\n\n<diff>\n${collected.diff}\n</diff>`;
+    return `${ARBITRATION_PROMPT_TEMPLATE}\n\n${modelReviews}\n\nThe diff is already available in context from the tool input — refer to it when validating findings.`;
   }
 
   /**

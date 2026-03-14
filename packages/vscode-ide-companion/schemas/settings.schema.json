@@ -612,6 +612,24 @@
         }
       }
     },
+    "review": {
+      "description": "Multi-model code review configuration. When review.models is configured with 2+ models, /review will use multi-model review automatically.",
+      "type": "object",
+      "properties": {
+        "models": {
+          "description": "Models for multi-model review. Each entry can be a model ID string (resolved from modelProviders) or a full model config object with id, authType, baseUrl, envKey.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "arbitratorModel": {
+          "description": "Model ID for the final arbitrator (resolved from modelProviders). Falls back to the current session model if not set. Recommended: a high-reasoning model.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",

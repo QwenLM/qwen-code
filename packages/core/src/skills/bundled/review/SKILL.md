@@ -32,11 +32,12 @@ Based on the arguments provided:
 
 ## Step 2: Try multi-model review
 
-Unless the user explicitly specified `--single`, call the `multi_model_review` tool with the diff obtained in Step 1.
+Unless the user explicitly specified `--single`, check if the `multi_model_review` tool is available. If it is, call it with the diff obtained in Step 1.
 
 - If the tool returns a **complete review report** (from independent arbitration): present it directly as the final output using the format in Step 4, then stop.
 - If the tool returns **collected reviews from multiple models** (for session-model arbitration): you are the arbitrator. Merge, deduplicate, and validate findings from all models, then produce the final report using the format in Step 4. You have access to the full project context and tools to verify findings if needed.
-- If the tool returns **guidance text** indicating multi-model review is not available (fewer than 2 models configured): proceed to Step 3 for standard single-model review.
+
+If the `multi_model_review` tool is not available (not in your tool list), or the user specified `--single`, proceed directly to Step 3.
 
 ## Step 3: Single-model parallel multi-dimensional review
 

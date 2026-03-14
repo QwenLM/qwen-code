@@ -418,7 +418,9 @@ describe('ModelRegistry', () => {
       );
     });
 
-    it('should find qwen-oauth models', () => {
+    it('should find qwen-oauth built-in models', () => {
+      // QWEN_OAUTH_MODELS are always registered by the constructor.
+      // 'coder-model' is the default model defined in QWEN_OAUTH_MODELS (constants.ts).
       const registry = new ModelRegistry();
 
       const result = registry.findModelById('coder-model');

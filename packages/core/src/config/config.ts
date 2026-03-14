@@ -58,8 +58,8 @@ import { SkillTool } from '../tools/skill.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
 import { MultiModelReviewTool } from '../tools/multiModelReview.js';
+import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { LspTool } from '../tools/lsp.js';
@@ -1117,7 +1117,7 @@ export class Config {
 
   /**
    * Resolve review models from review.models config.
-   * String IDs are resolved from modelProviders via ModelRegistry.findModelById().
+   * String IDs are resolved from modelProviders via ModelsConfig.findModelById().
    * Returns ResolvedModelConfig[] ready for createContentGenerator().
    */
   getReviewModels(): ResolvedModelConfig[] {
@@ -1126,20 +1126,23 @@ export class Config {
       return [];
     }
 
-    const registry = this.modelsConfig.getModelRegistry();
     const resolved: ResolvedModelConfig[] = [];
     const seenIds = new Set<string>();
 
     for (const entry of models) {
       if (typeof entry === 'string') {
         // Resolve string ID from modelProviders
-        const found = registry.findModelById(entry);
+        const found = this.modelsConfig.findModelById(entry);
         if (!found) {
           throw new Error(
             `Model '${entry}' not found in modelProviders. Add it to modelProviders or use object form with full config.`,
           );
         }
-        if (!seenIds.has(found.config.id)) {
+        if (seenIds.has(found.config.id)) {
+          this.debugLogger.warn(
+            `Duplicate model ID '${found.config.id}' in review.models — skipping`,
+          );
+        } else {
           seenIds.add(found.config.id);
           resolved.push(found.config);
         }
@@ -1173,7 +1176,11 @@ export class Config {
             `Inline model config for '${id}' with authType '${authType}' requires a baseUrl.`,
           );
         }
-        if (!seenIds.has(id)) {
+        if (seenIds.has(id)) {
+          this.debugLogger.warn(
+            `Duplicate model ID '${id}' in review.models — skipping`,
+          );
+        } else {
           seenIds.add(id);
           resolved.push({
             id,
@@ -1204,8 +1211,7 @@ export class Config {
       return undefined;
     }
 
-    const registry = this.modelsConfig.getModelRegistry();
-    const found = registry.findModelById(modelId);
+    const found = this.modelsConfig.findModelById(modelId);
     if (!found) {
       throw new Error(
         `Arbitrator model '${modelId}' not found in modelProviders. Add it to modelProviders first.`,
@@ -2009,7 +2015,14 @@ export class Config {
     registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
-    registerCoreTool(MultiModelReviewTool, this);
+    // Conditionally register multi-model review tool if review models are configured
+    if (
+      this.reviewConfig?.models &&
+      Array.isArray(this.reviewConfig.models) &&
+      this.reviewConfig.models.length >= 2
+    ) {
+      registerCoreTool(MultiModelReviewTool, this);
+    }
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist

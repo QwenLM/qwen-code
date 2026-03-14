@@ -198,7 +198,7 @@ describe('MultiModelReviewService', () => {
   });
 
   describe('buildSessionArbitrationPrompt', () => {
-    it('should build prompt containing all model reviews and diff', () => {
+    it('should build prompt containing all model reviews but not the diff', () => {
       const collected = {
         modelResults: [
           { modelId: 'model-a', reviewText: 'Review A content' },
@@ -213,8 +213,9 @@ describe('MultiModelReviewService', () => {
       expect(prompt).toContain('Review A content');
       expect(prompt).toContain('Review by model-b');
       expect(prompt).toContain('Review B content');
-      expect(prompt).toContain('<diff>');
-      expect(prompt).toContain('the diff');
+      // Diff content is excluded because the session model already has it in context
+      expect(prompt).not.toContain('<diff>');
+      expect(prompt).toContain('already available in context');
     });
   });
 });

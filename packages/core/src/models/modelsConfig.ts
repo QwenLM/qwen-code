@@ -231,11 +231,14 @@ export class ModelsConfig {
   }
 
   /**
-   * Get the underlying ModelRegistry instance.
-   * Used by Config for cross-authType model resolution (e.g., review models).
+   * Find a model by ID across all authTypes.
+   * Returns the resolved config if found in exactly one authType.
+   * Throws if the model ID is ambiguous (found in multiple authTypes).
    */
-  getModelRegistry(): ModelRegistry {
-    return this.modelRegistry;
+  findModelById(
+    modelId: string,
+  ): { config: ResolvedModelConfig; authType: AuthType } | undefined {
+    return this.modelRegistry.findModelById(modelId);
   }
 
   /**

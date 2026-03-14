@@ -1273,7 +1273,7 @@ const SETTINGS_SCHEMA = {
         label: 'Arbitrator Model',
         category: 'Tools',
         requiresRestart: false,
-        default: undefined as string | undefined,
+        default: '',
         description:
           'Model ID for the final arbitrator (resolved from modelProviders). Falls back to the current session model if not set. Recommended: a high-reasoning model.',
         showInDialog: false,
