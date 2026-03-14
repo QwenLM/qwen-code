@@ -534,6 +534,8 @@ Skill 3 content`);
     const bundledDirSegment = path.join('skills', 'bundled');
     const projectDirSegment = path.join('.qwen', 'skills');
     const userDirSegment = path.join('.qwen', 'skills');
+    const projectPrefix = path.join('/test/project');
+    const userPrefix = path.join('/home/user');
 
     const reviewDirEntry = {
       name: 'review',
@@ -551,9 +553,9 @@ Skill 3 content`);
           pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
         const isProject =
           pathStr.includes(projectDirSegment) &&
-          pathStr.startsWith('/test/project');
+          pathStr.startsWith(projectPrefix);
         const isUser =
-          pathStr.includes(userDirSegment) && pathStr.startsWith('/home/user');
+          pathStr.includes(userDirSegment) && pathStr.startsWith(userPrefix);
 
         if (
           (levels.has('bundled') && isBundled) ||
