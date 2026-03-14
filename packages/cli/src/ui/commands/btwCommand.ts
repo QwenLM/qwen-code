@@ -14,6 +14,47 @@ import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 
+/**
+ * Helper to make the ephemeral generateContent call and extract the answer.
+ */
+async function askBtw(
+  config: NonNullable<CommandContext['services']['config']>,
+  question: string,
+  abortSignal: AbortSignal,
+): Promise<string> {
+  const geminiClient = config.getGeminiClient();
+  if (!geminiClient) {
+    throw new Error(t('No chat client available.'));
+  }
+
+  const history = geminiClient.getHistory();
+
+  const response = await geminiClient.generateContent(
+    [
+      ...history,
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `[Side question - answer briefly and concisely, this is a "by the way" question that doesn't need to be part of our main conversation]\n\n${question}`,
+          },
+        ],
+      },
+    ],
+    {},
+    abortSignal,
+    config.getModel(),
+  );
+
+  const parts = response.candidates?.[0]?.content?.parts;
+  return (
+    parts
+      ?.map((part) => part.text)
+      .filter((text): text is string => typeof text === 'string')
+      .join('') || t('No response received.')
+  );
+}
+
 export const btwCommand: SlashCommand = {
   name: 'btw',
   get description() {
@@ -27,6 +68,8 @@ export const btwCommand: SlashCommand = {
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
+    const executionMode = context.executionMode ?? 'interactive';
+    const abortSignal = context.abortSignal ?? new AbortController().signal;
 
     if (!question) {
       return {
@@ -38,7 +81,6 @@ export const btwCommand: SlashCommand = {
 
     const { config } = context.services;
     const { ui } = context;
-    const abortSignal = context.abortSignal;
 
     if (!config) {
       return {
@@ -57,7 +99,55 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // Guard against concurrent pending operations
+    // ACP mode: return a stream_messages async generator
+    if (executionMode === 'acp') {
+      const messages = async function* () {
+        try {
+          yield {
+            messageType: 'info' as const,
+            content: t('Thinking...'),
+          };
+
+          const answer = await askBtw(config, question, abortSignal);
+
+          yield {
+            messageType: 'info' as const,
+            content: `btw> ${question}\n${answer}`,
+          };
+        } catch (error) {
+          yield {
+            messageType: 'error' as const,
+            content: t('Failed to answer btw question: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          };
+        }
+      };
+
+      return { type: 'stream_messages', messages: messages() };
+    }
+
+    // Non-interactive mode: return a simple message result
+    if (executionMode === 'non_interactive') {
+      try {
+        const answer = await askBtw(config, question, abortSignal);
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `btw> ${question}\n${answer}`,
+        };
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Failed to answer btw question: {{error}}', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        };
+      }
+    }
+
+    // Interactive mode: use pending item for spinner, then add to UI history
     if (ui.pendingItem) {
       return {
         type: 'message',
@@ -68,7 +158,6 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // Show pending state
     const pendingItem: HistoryItemBtw = {
       type: MessageType.BTW,
       btw: {
@@ -80,41 +169,12 @@ export const btwCommand: SlashCommand = {
     ui.setPendingItem(pendingItem);
 
     try {
-      // Get current conversation history
-      const history = geminiClient.getHistory();
+      const answer = await askBtw(config, question, abortSignal);
 
-      // Make an ephemeral generateContent call with the conversation context
-      // but WITHOUT tools — the btw response is purely based on existing context
-      const response = await geminiClient.generateContent(
-        [
-          ...history,
-          {
-            role: 'user',
-            parts: [
-              {
-                text: `[Side question - answer briefly and concisely, this is a "by the way" question that doesn't need to be part of our main conversation]\n\n${question}`,
-              },
-            ],
-          },
-        ],
-        {},
-        abortSignal ?? new AbortController().signal,
-        config.getModel(),
-      );
-
-      if (abortSignal?.aborted) {
+      if (abortSignal.aborted) {
         return;
       }
 
-      // Extract the response text
-      const parts = response.candidates?.[0]?.content?.parts;
-      const answer =
-        parts
-          ?.map((part) => part.text)
-          .filter((text): text is string => typeof text === 'string')
-          .join('') || t('No response received.');
-
-      // Clear pending and show the completed btw item
       const completedItem: HistoryItemBtw = {
         type: MessageType.BTW,
         btw: {
@@ -125,7 +185,7 @@ export const btwCommand: SlashCommand = {
       };
       ui.addItem(completedItem, Date.now());
     } catch (error) {
-      if (abortSignal?.aborted) {
+      if (abortSignal.aborted) {
         return;
       }
 

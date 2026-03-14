@@ -25,7 +25,9 @@ export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
       <Text color={Colors.Gray} dimColor>
         {'btw> '}
       </Text>
-      <Text color={Colors.Gray}>{btw.question}</Text>
+      <Text wrap="wrap" color={Colors.Gray}>
+        {btw.question}
+      </Text>
     </Box>
     <Box flexDirection="row" marginTop={0}>
       {btw.isPending ? (
@@ -37,7 +39,9 @@ export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
         </Box>
       ) : (
         <Box flexDirection="column">
-          <Text color={Colors.AccentCyan}>{btw.answer}</Text>
+          <Text wrap="wrap" color={Colors.AccentCyan}>
+            {btw.answer}
+          </Text>
         </Box>
       )}
     </Box>
