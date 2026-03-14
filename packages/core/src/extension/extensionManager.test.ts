@@ -45,9 +45,9 @@ vi.mock('./github.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./github.js')>();
   return {
     ...actual,
-    downloadFromGitHubRelease: vi
+    downloadFromGitRelease: vi
       .fn()
-      .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+      .mockRejectedValue(new Error('Mocked Git release download failure')),
   };
 });
 

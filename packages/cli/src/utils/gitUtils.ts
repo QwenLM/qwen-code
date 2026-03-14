@@ -5,10 +5,32 @@
  */
 
 import { execSync } from 'node:child_process';
-import { ProxyAgent } from 'undici';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  GitProviderFactory,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('GIT');
+
+/**
+ * Checks if a directory is within a supported git repository (e.g., GitHub, GitLab).
+ * @returns true if the directory is in a supported git repository, false otherwise
+ */
+export const isSupportedGitRepository = (): boolean => {
+  try {
+    const remotes = (
+      execSync('git remote -v', {
+        encoding: 'utf-8',
+      }) || ''
+    ).trim();
+
+    return remotes.includes('github.com') || remotes.includes('gitlab.com');
+  } catch (_error) {
+    // If any filesystem error occurs, assume not a git repo
+    debugLogger.debug(`Failed to get git remote:`, _error);
+    return false;
+  }
+};
 
 /**
  * Checks if a directory is within a git repository hosted on GitHub.
@@ -22,9 +44,7 @@ export const isGitHubRepository = (): boolean => {
       }) || ''
     ).trim();
 
-    const pattern = /github\.com/;
-
-    return pattern.test(remotes);
+    return remotes.includes('github.com');
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
     debugLogger.debug(`Failed to get git remote:`, _error);
@@ -52,48 +72,14 @@ export const getGitRepoRoot = (): string => {
 };
 
 /**
- * getLatestGitHubRelease returns the release tag as a string.
+ * getLatestActionRelease returns the release tag for qwen-code-action.
  * @returns string of the release tag (e.g. "v1.2.3").
  */
-export const getLatestGitHubRelease = async (
+export const getLatestActionRelease = async (
   proxy?: string,
 ): Promise<string> => {
-  try {
-    const controller = new AbortController();
-
-    const endpoint = `https://api.github.com/repos/QwenLM/qwen-code-action/releases/latest`;
-
-    const response = await fetch(endpoint, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      dispatcher: proxy ? new ProxyAgent(proxy) : undefined,
-      signal: AbortSignal.any([AbortSignal.timeout(30_000), controller.signal]),
-    } as RequestInit);
-
-    if (!response.ok) {
-      throw new Error(
-        `Invalid response code: ${response.status} - ${response.statusText}`,
-      );
-    }
-
-    const releaseTag = (await response.json()).tag_name;
-    if (!releaseTag) {
-      throw new Error(`Response did not include tag_name field`);
-    }
-    return releaseTag;
-  } catch (_error) {
-    debugLogger.debug(
-      `Failed to determine latest qwen-code-action release:`,
-      _error,
-    );
-    throw new Error(
-      `Unable to determine the latest qwen-code-action release on GitHub.`,
-    );
-  }
+  const provider = GitProviderFactory.getProvider('github.com');
+  return provider.getLatestRelease('QwenLM', 'qwen-code-action', proxy);
 };
 
 /**
@@ -106,38 +92,6 @@ export function getGitHubRepoInfo(): { owner: string; repo: string } {
     encoding: 'utf-8',
   }).trim();
 
-  // Handle SCP-style SSH URLs (git@github.com:owner/repo.git)
-  let urlToParse = remoteUrl;
-  if (remoteUrl.startsWith('git@github.com:')) {
-    urlToParse = remoteUrl.replace('git@github.com:', '');
-  } else if (remoteUrl.startsWith('git@')) {
-    // SSH URL for a different provider (GitLab, Bitbucket, etc.)
-    throw new Error(
-      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
-    );
-  }
-
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(urlToParse, 'https://github.com');
-  } catch {
-    throw new Error(
-      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
-    );
-  }
-
-  if (parsedUrl.host !== 'github.com') {
-    throw new Error(
-      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
-    );
-  }
-
-  const parts = parsedUrl.pathname.split('/').filter((part) => part !== '');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(
-      `Owner & repo could not be extracted from remote URL: ${remoteUrl}`,
-    );
-  }
-
-  return { owner: parts[0], repo: parts[1].replace(/\.git$/, '') };
+  const provider = GitProviderFactory.getProvider(remoteUrl);
+  return provider.getRepoInfo(remoteUrl);
 }
