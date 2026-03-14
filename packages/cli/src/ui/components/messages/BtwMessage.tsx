@@ -29,7 +29,7 @@ export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
         {btw.question}
       </Text>
     </Box>
-    <Box flexDirection="row" marginTop={0}>
+    <Box flexDirection="row">
       {btw.isPending ? (
         <Box>
           <Box marginRight={1}>

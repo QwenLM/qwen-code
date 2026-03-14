@@ -15,6 +15,12 @@ import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 import type { GeminiClient } from '@qwen-code/qwen-code-core';
 
+function formatBtwError(error: unknown): string {
+  return t('Failed to answer btw question: {{error}}', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 /**
  * Helper to make the ephemeral generateContent call and extract the answer.
  * Uses a snapshot of the current conversation history as context.
@@ -114,9 +120,7 @@ export const btwCommand: SlashCommand = {
         } catch (error) {
           yield {
             messageType: 'error' as const,
-            content: t('Failed to answer btw question: {{error}}', {
-              error: error instanceof Error ? error.message : String(error),
-            }),
+            content: formatBtwError(error),
           };
         }
       };
@@ -137,9 +141,7 @@ export const btwCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Failed to answer btw question: {{error}}', {
-            error: error instanceof Error ? error.message : String(error),
-          }),
+          content: formatBtwError(error),
         };
       }
     }
@@ -189,9 +191,7 @@ export const btwCommand: SlashCommand = {
       ui.addItem(
         {
           type: MessageType.ERROR,
-          text: t('Failed to answer btw question: {{error}}', {
-            error: error instanceof Error ? error.message : String(error),
-          }),
+          text: formatBtwError(error),
         },
         Date.now(),
       );
