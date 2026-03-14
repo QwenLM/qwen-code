@@ -87,6 +87,28 @@ describe('btwCommand', () => {
     });
   });
 
+  it('should return error when model is not configured', async () => {
+    const noModelContext = createMockCommandContext({
+      services: {
+        config: {
+          getGeminiClient: () => ({
+            getHistory: mockGetHistory,
+            generateContent: mockGenerateContent,
+          }),
+          getModel: () => '',
+        },
+      },
+    });
+
+    const result = await btwCommand.action!(noModelContext, 'test question');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'No model configured.',
+    });
+  });
+
   describe('interactive mode', () => {
     it('should set pending item and add completed item on success', async () => {
       mockGenerateContent.mockResolvedValue({
@@ -149,7 +171,7 @@ describe('btwCommand', () => {
             ],
           },
         ],
-        {},
+        { tools: [] },
         expect.any(AbortSignal),
         'test-model',
       );

@@ -45,7 +45,7 @@ async function askBtw(
         ],
       },
     ],
-    {},
+    { tools: [] },
     abortSignal,
     model,
   );
@@ -96,6 +96,14 @@ export const btwCommand: SlashCommand = {
 
     const geminiClient = config.getGeminiClient();
     const model = config.getModel();
+
+    if (!model) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('No model configured.'),
+      };
+    }
 
     // ACP mode: return a stream_messages async generator
     if (executionMode === 'acp') {
