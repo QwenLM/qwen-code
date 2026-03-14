@@ -29,7 +29,7 @@ function extractResponseText(response: GenerateContentResponse): string {
   return parts
     .filter(
       (p): p is typeof p & { text: string } =>
-        !!p.text && !(p as Record<string, unknown>).thought,
+        !!p.text && !(p as Record<string, unknown>)['thought'],
     )
     .map((p) => p.text)
     .join('');
