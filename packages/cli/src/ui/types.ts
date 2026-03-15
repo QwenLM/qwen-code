@@ -282,7 +282,12 @@ export interface ContextMemoryDetail {
 
 export interface ContextSkillDetail {
   name: string;
+  /** Token cost of the skill listing (name+description) in the tool definition */
   tokens: number;
+  /** Whether this skill has been invoked and its full body loaded into context */
+  loaded?: boolean;
+  /** Token cost of the loaded SKILL.md body (only set when loaded is true) */
+  bodyTokens?: number;
 }
 
 export type HistoryItemContextUsage = HistoryItemBase & {
@@ -297,6 +302,8 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   skills: ContextSkillDetail[];
   /** True when totalTokens is estimated (no API call yet) rather than from API response */
   isEstimated?: boolean;
+  /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
+  showDetails?: boolean;
 };
 
 export type HistoryItemInsightProgress = HistoryItemBase & {

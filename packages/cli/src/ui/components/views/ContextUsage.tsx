@@ -33,6 +33,8 @@ interface ContextUsageProps {
   skills: ContextSkillDetail[];
   /** True when totalTokens is estimated (no API call yet) */
   isEstimated?: boolean;
+  /** When true, show per-item detail breakdowns. Default: false (compact). */
+  showDetails?: boolean;
 }
 
 /**
@@ -152,6 +154,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   memoryFiles,
   skills,
   isEstimated,
+  showDetails = false,
 }) => {
   const percentage =
     contextWindowSize > 0 ? (totalTokens / contextWindowSize) * 100 : 0;
@@ -164,7 +167,13 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   const sortedMemoryFiles = [...memoryFiles].sort(
     (a, b) => b.tokens - a.tokens,
   );
-  const sortedSkills = [...skills].sort((a, b) => b.tokens - a.tokens);
+  // Sort skills: loaded first, then by total token cost descending
+  const sortedSkills = [...skills].sort((a, b) => {
+    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    const aTotal = a.tokens + (a.bodyTokens ?? 0);
+    const bTotal = b.tokens + (b.bodyTokens ?? 0);
+    return bTotal - aTotal;
+  });
 
   return (
     <Box
@@ -307,55 +316,107 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
         />
       )}
 
-      {/* Built-in tools detail */}
-      {sortedBuiltinTools.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color={theme.text.primary}>
-            {t('Built-in tools')}
-          </Text>
-          {sortedBuiltinTools.map((tool) => (
-            <DetailRow key={tool.name} name={tool.name} tokens={tool.tokens} />
-          ))}
-        </Box>
-      )}
+      {showDetails ? (
+        <>
+          {/* Built-in tools detail */}
+          {sortedBuiltinTools.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('Built-in tools')}
+              </Text>
+              {sortedBuiltinTools.map((tool) => (
+                <DetailRow
+                  key={tool.name}
+                  name={tool.name}
+                  tokens={tool.tokens}
+                />
+              ))}
+            </Box>
+          )}
 
-      {/* MCP Tools detail */}
-      {sortedMcpTools.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color={theme.text.primary}>
-            {t('MCP tools')}
-          </Text>
-          {sortedMcpTools.map((tool) => (
-            <DetailRow key={tool.name} name={tool.name} tokens={tool.tokens} />
-          ))}
-        </Box>
-      )}
+          {/* MCP Tools detail */}
+          {sortedMcpTools.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('MCP tools')}
+              </Text>
+              {sortedMcpTools.map((tool) => (
+                <DetailRow
+                  key={tool.name}
+                  name={tool.name}
+                  tokens={tool.tokens}
+                />
+              ))}
+            </Box>
+          )}
 
-      {/* Memory files detail */}
-      {sortedMemoryFiles.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color={theme.text.primary}>
-            {t('Memory files')}
-          </Text>
-          {sortedMemoryFiles.map((file) => (
-            <DetailRow key={file.path} name={file.path} tokens={file.tokens} />
-          ))}
-        </Box>
-      )}
+          {/* Memory files detail */}
+          {sortedMemoryFiles.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('Memory files')}
+              </Text>
+              {sortedMemoryFiles.map((file) => (
+                <DetailRow
+                  key={file.path}
+                  name={file.path}
+                  tokens={file.tokens}
+                />
+              ))}
+            </Box>
+          )}
 
-      {/* Skills detail */}
-      {sortedSkills.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color={theme.text.primary}>
-            {t('Skills')}
+          {/* Skills detail */}
+          {sortedSkills.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('Skills')}
+              </Text>
+              {sortedSkills.map((skill) => (
+                <Box key={skill.name} flexDirection="column">
+                  <Box width={CONTENT_WIDTH} paddingLeft={2}>
+                    <Text color={theme.text.secondary}>{'\u2514'} </Text>
+                    <Box width={32}>
+                      <Text color={theme.text.link}>
+                        {truncateName(skill.name, DETAIL_NAME_MAX_LEN)}
+                      </Text>
+                      {skill.loaded && (
+                        <Text color={theme.status.success}> {t('active')}</Text>
+                      )}
+                    </Box>
+                    <Box flexGrow={1} justifyContent="flex-end">
+                      <Text color={theme.text.secondary}>
+                        {formatTokens(skill.tokens)} {t('tokens')}
+                      </Text>
+                    </Box>
+                  </Box>
+                  {skill.loaded &&
+                    skill.bodyTokens != null &&
+                    skill.bodyTokens > 0 && (
+                      <Box width={CONTENT_WIDTH} paddingLeft={4}>
+                        <Text color={theme.text.secondary}>{'  \u2514'} </Text>
+                        <Box width={30}>
+                          <Text color={theme.text.secondary} italic>
+                            {t('body loaded')}
+                          </Text>
+                        </Box>
+                        <Box flexGrow={1} justifyContent="flex-end">
+                          <Text color={theme.status.success}>
+                            +{formatTokens(skill.bodyTokens)} {t('tokens')}
+                          </Text>
+                        </Box>
+                      </Box>
+                    )}
+                </Box>
+              ))}
+            </Box>
+          )}
+        </>
+      ) : (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} italic>
+            {t('Run /context detail for per-item breakdown.')}
           </Text>
-          {sortedSkills.map((skill) => (
-            <DetailRow
-              key={skill.name}
-              name={skill.name}
-              tokens={skill.tokens}
-            />
-          ))}
         </Box>
       )}
     </Box>

@@ -193,6 +193,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryFiles={itemForDisplay.memoryFiles}
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
+          showDetails={itemForDisplay.showDetails}
         />
       )}
       {itemForDisplay.type === 'insight_progress' && (

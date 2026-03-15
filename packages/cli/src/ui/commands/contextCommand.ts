@@ -23,6 +23,8 @@ import {
   getCoreSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
+  SkillTool,
+  buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -88,10 +90,15 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
 export const contextCommand: SlashCommand = {
   name: 'context',
   get description() {
-    return t('Show context window usage breakdown.');
+    return t(
+      'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+    );
   },
   kind: CommandKind.BUILT_IN,
-  action: async (context: CommandContext) => {
+  action: async (context: CommandContext, args?: string) => {
+    const showDetails =
+      args?.trim().toLowerCase() === 'detail' ||
+      args?.trim().toLowerCase() === '-d';
     const { config } = context.services;
     if (!config) {
       context.ui.addItem(
@@ -153,30 +160,51 @@ export const contextCommand: SlashCommand = {
     const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
     // 5. Skills (progressive disclosure)
-    //    The SkillTool's description embeds all skill name+description listings
-    //    plus ~600 chars of instruction text. This is the "always in context"
-    //    cost. The full SKILL.md body is only loaded on-demand when the model
-    //    invokes the skill tool (and that cost appears in Messages).
-    //
-    //    To get an accurate total, we read the SkillTool's actual schema from
-    //    the registry rather than reconstructing from a template.
+    //    Two cost components:
+    //    a) Tool definition: SkillTool's description embeds all skill
+    //       name+description listings plus instruction text — always in context.
+    //    b) Loaded bodies: When the model invokes a skill, the full SKILL.md
+    //       body is injected into the conversation as a tool result. We track
+    //       which skills have been loaded and attribute their body tokens here
+    //       so the "Skills" category accurately reflects the total cost.
     const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
-    const skillToolTotalTokens = skillTool
+    const skillToolDefinitionTokens = skillTool
       ? estimateTokens(JSON.stringify(skillTool.schema))
       : 0;
 
-    // Per-skill breakdown for detail display (proportional to description length)
+    // Determine which skills have been loaded in this session
+    const loadedSkillNames: ReadonlySet<string> =
+      skillTool instanceof SkillTool
+        ? skillTool.getLoadedSkillNames()
+        : new Set();
+
+    // Per-skill breakdown: listing cost + body cost for loaded skills
     const skillManager = config.getSkillManager();
     const skillConfigs = skillManager ? await skillManager.listSkills() : [];
-    const skills: ContextSkillDetail[] = skillConfigs.map((skill) => ({
-      name: skill.name,
-      tokens: estimateTokens(
+    let loadedBodiesTokens = 0;
+    const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
+      const listingTokens = estimateTokens(
         `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
-      ),
-    }));
-    // Use the SkillTool's actual schema tokens as the total, not the sum of
-    // individual estimates (which would miss the instruction wrapper text).
-    const skillsTokens = skillToolTotalTokens;
+      );
+      const isLoaded = loadedSkillNames.has(skill.name);
+      let bodyTokens: number | undefined;
+      if (isLoaded && skill.body) {
+        const baseDir = skill.filePath
+          ? skill.filePath.replace(/\/[^/]+$/, '')
+          : '';
+        bodyTokens = estimateTokens(buildSkillLlmContent(baseDir, skill.body));
+        loadedBodiesTokens += bodyTokens;
+      }
+      return {
+        name: skill.name,
+        tokens: listingTokens,
+        loaded: isLoaded,
+        bodyTokens,
+      };
+    });
+
+    // Total skills cost = tool definition + loaded bodies
+    const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
     // 6. Autocompact buffer
     const compressionThreshold =
@@ -187,8 +215,14 @@ export const contextCommand: SlashCommand = {
         ? Math.round((1 - compressionThreshold) * contextWindowSize)
         : 0;
 
-    // 7. Calculate raw overhead (allToolsTokens already includes skills)
-    const rawOverhead = systemPromptTokens + allToolsTokens + memoryFilesTokens;
+    // 7. Calculate raw overhead
+    //    allToolsTokens includes the skill tool definition; loadedBodiesTokens
+    //    covers the on-demand skill bodies now attributed to Skills.
+    const rawOverhead =
+      systemPromptTokens +
+      allToolsTokens +
+      memoryFilesTokens +
+      loadedBodiesTokens;
 
     // 8. Determine total tokens and build breakdown
     const isEstimated = apiTotalTokens === 0;
@@ -219,14 +253,15 @@ export const contextCommand: SlashCommand = {
       // once real API data arrives.
       totalTokens = 0;
       displaySystemPrompt = systemPromptTokens;
-      // builtinTools category = allTools - skills - mcpTools
+      // Skills = tool definition + loaded bodies
+      displaySkills = skillsTokens;
+      // builtinTools = allTools minus skills-definition minus mcpTools
       displayBuiltinTools = Math.max(
         0,
-        allToolsTokens - skillsTokens - mcpToolsTotalTokens,
+        allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
       );
       displayMcpTools = mcpToolsTotalTokens;
       displayMemoryFiles = memoryFilesTokens;
-      displaySkills = skillsTokens;
       messagesTokens = 0;
       // Free space accounts for the estimated overhead
       freeSpace = Math.max(
@@ -249,16 +284,24 @@ export const contextCommand: SlashCommand = {
       displaySystemPrompt = Math.round(systemPromptTokens * overheadScale);
       const scaledAllTools = Math.round(allToolsTokens * overheadScale);
       displayMemoryFiles = Math.round(memoryFilesTokens * overheadScale);
+      // Skills = tool definition + loaded bodies (scaled together)
       displaySkills = Math.round(skillsTokens * overheadScale);
       const scaledMcpTotal = Math.round(mcpToolsTotalTokens * overheadScale);
       displayMcpTools = scaledMcpTotal;
+      // builtinTools = allTools minus skill-definition minus mcpTools
+      const scaledSkillDefinition = Math.round(
+        skillToolDefinitionTokens * overheadScale,
+      );
       displayBuiltinTools = Math.max(
         0,
-        scaledAllTools - displaySkills - scaledMcpTotal,
+        scaledAllTools - scaledSkillDefinition - scaledMcpTotal,
       );
 
       const scaledOverhead =
-        displaySystemPrompt + scaledAllTools + displayMemoryFiles;
+        displaySystemPrompt +
+        scaledAllTools +
+        displayMemoryFiles +
+        Math.round(loadedBodiesTokens * overheadScale);
       messagesTokens = Math.max(0, totalTokens - scaledOverhead);
 
       freeSpace = Math.max(
@@ -278,7 +321,16 @@ export const contextCommand: SlashCommand = {
       detailBuiltinTools = scaleDetail(builtinTools);
       detailMcpTools = scaleDetail(mcpTools);
       detailMemoryFiles = scaleDetail(memoryFiles);
-      detailSkills = scaleDetail(skills);
+      detailSkills =
+        overheadScale < 1
+          ? skills.map((item) => ({
+              ...item,
+              tokens: Math.round(item.tokens * overheadScale),
+              bodyTokens: item.bodyTokens
+                ? Math.round(item.bodyTokens * overheadScale)
+                : undefined,
+            }))
+          : skills;
     }
 
     const breakdown: ContextCategoryBreakdown = {
@@ -303,6 +355,7 @@ export const contextCommand: SlashCommand = {
       memoryFiles: detailMemoryFiles,
       skills: detailSkills,
       isEstimated,
+      showDetails,
     };
 
     context.ui.addItem(contextUsageItem, Date.now());
