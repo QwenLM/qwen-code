@@ -160,6 +160,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       let completedSuccessfully = false;
 
       try {
+        let hasTextContent = false;
         for await (const message of q) {
           if (isSDKAssistantMessage(message)) {
             const textBlocks = message.message.content.filter(
@@ -169,10 +170,15 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
               .map((b) => b.text)
               .join('')
               .slice(0, 100);
-            expect(text.length).toBeGreaterThan(0);
+            // Thinking models may emit assistant messages with only thinking
+            // blocks before the text content arrives, so skip those.
+            if (text.length > 0) {
+              hasTextContent = true;
+            }
           }
         }
 
+        expect(hasTextContent).toBe(true);
         completedSuccessfully = true;
       } catch (error) {
         // Should not throw for normal completion
@@ -239,10 +245,14 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
             );
             const text = textBlocks.map((b: TextBlock) => b.text).join('');
 
-            expect(text.length).toBeGreaterThan(0);
+            // Thinking models may emit assistant messages with only thinking
+            // blocks before the text content arrives, so skip those.
+            if (text.length === 0) {
+              continue;
+            }
             receivedResponse = true;
 
-            // End input after receiving first response
+            // End input after receiving first response with text
             q.endInput();
             endInputCalled = true;
           }
@@ -496,6 +506,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         },
       });
 
+      let hasTextContent = false;
       try {
         for await (const message of q) {
           if (isSDKAssistantMessage(message)) {
@@ -506,11 +517,16 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
               .map((b) => b.text)
               .join('')
               .slice(0, 50);
-            expect(text.length).toBeGreaterThan(0);
+            // Thinking models may emit assistant messages with only thinking
+            // blocks before the text content arrives, so skip those.
+            if (text.length > 0) {
+              hasTextContent = true;
+            }
           }
         }
       } finally {
         await q.close();
+        expect(hasTextContent).toBe(true);
         expect(stderrMessages.length).toBeGreaterThan(0);
       }
     });
