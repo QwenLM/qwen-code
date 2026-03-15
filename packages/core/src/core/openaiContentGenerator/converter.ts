@@ -824,64 +824,63 @@ export class OpenAIContentConverter {
     const choice = openaiResponse.choices?.[0];
     const response = new GenerateContentResponse();
 
-    if (!choice) {
-      response.candidates = [];
-      return response;
-    }
+    if (choice) {
+      const parts: Part[] = [];
 
-    const parts: Part[] = [];
+      // Handle reasoning content (thoughts)
+      const reasoningText =
+        (choice.message as ExtendedCompletionMessage).reasoning_content ??
+        (choice.message as ExtendedCompletionMessage).reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
 
-    // Handle reasoning content (thoughts)
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
-    }
+      // Handle text content
+      if (choice.message.content) {
+        parts.push({ text: choice.message.content });
+      }
 
-    // Handle text content
-    if (choice.message.content) {
-      parts.push({ text: choice.message.content });
-    }
+      // Handle tool calls
+      if (choice.message.tool_calls) {
+        for (const toolCall of choice.message.tool_calls) {
+          if (toolCall.function) {
+            let args: Record<string, unknown> = {};
+            if (toolCall.function.arguments) {
+              args = safeJsonParse(toolCall.function.arguments, {});
+            }
 
-    // Handle tool calls
-    if (choice.message.tool_calls) {
-      for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.function) {
-          let args: Record<string, unknown> = {};
-          if (toolCall.function.arguments) {
-            args = safeJsonParse(toolCall.function.arguments, {});
+            parts.push({
+              functionCall: {
+                id: toolCall.id,
+                name: toolCall.function.name,
+                args,
+              },
+            });
           }
-
-          parts.push({
-            functionCall: {
-              id: toolCall.id,
-              name: toolCall.function.name,
-              args,
-            },
-          });
         }
       }
+
+      response.candidates = [
+        {
+          content: {
+            parts,
+            role: 'model' as const,
+          },
+          finishReason: this.mapOpenAIFinishReasonToGemini(
+            choice.finish_reason || 'stop',
+          ),
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+    } else {
+      response.candidates = [];
     }
 
     response.responseId = openaiResponse.id;
     response.createTime = openaiResponse.created
       ? openaiResponse.created.toString()
       : new Date().getTime().toString();
-
-    response.candidates = [
-      {
-        content: {
-          parts,
-          role: 'model' as const,
-        },
-        finishReason: this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason || 'stop',
-        ),
-        index: 0,
-        safetyRatings: [],
-      },
-    ];
 
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };
