@@ -9,6 +9,7 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
+import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -256,6 +257,17 @@ export class ContentGenerationPipeline {
 
     if (isFinishChunk) {
       // This is a finish reason chunk
+      // Don't overwrite a pending finish that already has tool calls
+      const lastCollected =
+        collectedGeminiResponses[collectedGeminiResponses.length - 1];
+      const pendingToolCallCount =
+        lastCollected?.candidates?.[0]?.content?.parts?.filter(
+          (p: Part) => 'functionCall' in p,
+        ).length || 0;
+      if (hasPendingFinish && pendingToolCallCount > 0) {
+        // Skip this finish chunk - preserve the one with tool calls
+        return false;
+      }
       collectedGeminiResponses.push(response);
       setPendingFinish(response);
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
