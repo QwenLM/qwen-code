@@ -311,6 +311,18 @@ describe('ShellExecutionService', () => {
         vi.useRealTimers();
       }
     });
+
+    it('should collapse carriage-return progress updates in final output', async () => {
+      const { result } = await simulateExecution('progress-output', (pty) => {
+        pty.onData.mock.calls[0][0]('Compressing objects: 14% (1/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 28% (2/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 42% (3/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 100% (7/7), done.\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.output).toBe('Compressing objects: 100% (7/7), done.');
+    });
   });
 
   describe('pty interaction', () => {

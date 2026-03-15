@@ -88,15 +88,35 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
+const REPLAY_TERMINAL_COLS = 1024;
+const REPLAY_TERMINAL_ROWS = 24;
+const REPLAY_TERMINAL_SCROLLBACK = 2000;
+
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
   for (let i = 0; i < buffer.length; i++) {
     const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString() : '';
+    const lineContent = line ? line.translateToString(true) : '';
     lines.push(lineContent);
   }
   return lines.join('\n').trimEnd();
+};
+
+const replayTerminalOutput = async (output: string): Promise<string> => {
+  const replayTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: REPLAY_TERMINAL_COLS,
+    rows: REPLAY_TERMINAL_ROWS,
+    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    convertEol: true,
+  });
+
+  await new Promise<void>((resolve) => {
+    replayTerminal.write(output, () => resolve());
+  });
+
+  return getFullBufferText(replayTerminal);
 };
 
 interface ProcessCleanupStrategy {
@@ -657,24 +677,27 @@ export class ShellExecutionService {
             abortSignal.removeEventListener('abort', abortHandler);
             this.activePtys.delete(ptyProcess.pid);
 
-            const finalize = () => {
+            const finalize = async () => {
               render(true);
               const finalBuffer = Buffer.concat(outputChunks);
+              let fullOutput = '';
 
-              // Build output from the raw accumulated chunks instead of
-              // the xterm buffer. The xterm terminal wraps long lines
-              // into multiple buffer rows, so its scrollback limit
-              // (measured in rows) can silently discard content when
-              // logical lines are wider than the terminal columns.
-              // The raw chunks are complete and not subject to this.
-              const decodedOutput = new TextDecoder(outputEncoding).decode(
-                finalBuffer,
-              );
-              // Strip ANSI escapes and normalize pty CRLF line endings.
-              const fullOutput = stripAnsi(decodedOutput)
-                .replace(/\r\n/g, '\n')
-                .replace(/\r/g, '\n')
-                .trim();
+              try {
+                if (isStreamingRawContent) {
+                  const decodedOutput = new TextDecoder(outputEncoding).decode(
+                    finalBuffer,
+                  );
+                  fullOutput = await replayTerminalOutput(decodedOutput);
+                } else {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                }
+              } catch {
+                try {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                } catch {
+                  // Ignore fallback rendering errors and resolve with empty text.
+                }
+              }
 
               resolve({
                 rawOutput: finalBuffer,
@@ -690,19 +713,8 @@ export class ShellExecutionService {
               });
             };
 
-            // Flush pending processing, then drain any late pty data.
-            //
-            // node-pty can fire onExit before all onData events have
-            // been delivered — the kernel pty read buffer may still
-            // have data in flight. Each onData appends to
-            // processingChain, so we:
-            //   1. Wait for the current processingChain to settle.
-            //   2. Yield to the event loop (setImmediate) so any
-            //      pending I/O callbacks — including late onData
-            //      events — get a chance to fire and append to
-            //      processingChain.
-            //   3. Wait for processingChain again to flush those.
-            //   4. Repeat once more for safety, then finalize.
+            // Give any last onData callbacks a chance to run before finalizing.
+            // onExit can arrive slightly before late PTY data is processed.
             const flushChain = () => processingChain.then(() => {});
             const deadline = new Promise<void>((res) =>
               setTimeout(res, SIGKILL_TIMEOUT_MS),
@@ -714,7 +726,7 @@ export class ShellExecutionService {
               flushChain().then(drain).then(drain),
               deadline,
             ]).then(() => {
-              finalize();
+              void finalize();
             });
           },
         );
