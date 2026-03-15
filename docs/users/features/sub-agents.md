@@ -505,7 +505,7 @@ Always follow these standards:
 
 ## Limits
 
-The following limits apply to Subagent configurations:
+The following soft warnings apply to Subagent configurations (no hard limits are enforced):
 
-- **Description Field**: Limited to 300 characters
-- **System Prompt**: Limited to 10,000 characters
+- **Description Field**: A warning is shown for descriptions exceeding 1,000 characters
+- **System Prompt**: A warning is shown for system prompts exceeding 10,000 characters
