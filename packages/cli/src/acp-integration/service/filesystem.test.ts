@@ -13,12 +13,10 @@ const RESOURCE_NOT_FOUND_CODE = -32002;
 const INTERNAL_ERROR_CODE = -32603;
 
 const createFallback = (): FileSystemService => ({
-  readTextFile: vi
-    .fn()
-    .mockResolvedValue({
-      content: '',
-      _meta: { bom: false, encoding: 'utf-8' },
-    }),
+  readTextFile: vi.fn().mockResolvedValue({
+    content: '',
+    _meta: { bom: false, encoding: 'utf-8' },
+  }),
   writeTextFile: vi.fn().mockResolvedValue({ _meta: undefined }),
   findFiles: vi.fn().mockReturnValue([]),
 });
