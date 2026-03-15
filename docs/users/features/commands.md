@@ -1,98 +1,164 @@
 # Commands
 
-This document details all commands supported by Qwen Code, helping you efficiently manage sessions, customize the interface, and control its behavior.
+This page documents Qwen Code's built-in command surface and the other command
+prefixes available in the CLI.
 
-Qwen Code commands are triggered through specific prefixes and fall into three categories:
+Qwen Code supports three command styles:
 
-| Prefix Type                | Function Description                                | Typical Use Case                                                 |
-| -------------------------- | --------------------------------------------------- | ---------------------------------------------------------------- |
-| Slash Commands (`/`)       | Meta-level control of Qwen Code itself              | Managing sessions, modifying settings, getting help              |
-| At Commands (`@`)          | Quickly inject local file content into conversation | Allowing AI to analyze specified files or code under directories |
-| Exclamation Commands (`!`) | Direct interaction with system Shell                | Executing system commands like `git status`, `ls`, etc.          |
+| Prefix Type                | Purpose                                           | Typical Use Case                                                 |
+| -------------------------- | ------------------------------------------------- | ---------------------------------------------------------------- |
+| Slash Commands (`/`)       | Control Qwen Code itself                          | Managing sessions, settings, integrations, and built-in features |
+| At Commands (`@`)          | Inject local files or directories into the prompt | Asking Qwen Code to inspect specific files or folders            |
+| Exclamation Commands (`!`) | Run shell commands                                | Executing `git status`, `ls`, test commands, and other shell ops |
+
+> [!note]
+>
+> The exact slash-command list shown by `/help` can include more than the
+> built-ins on this page. Qwen Code also loads custom commands, extension
+> commands, MCP prompt commands, and bundled skill commands.
 
 ## 1. Slash Commands (`/`)
 
-Slash commands are used to manage Qwen Code sessions, interface, and basic behavior.
+### 1.1 Session, History, and Exports
 
-### 1.1 Session and Project Management
+| Command     | Description                                                        | Usage Examples                |
+| ----------- | ------------------------------------------------------------------ | ----------------------------- |
+| `/init`     | Analyze the current directory and create an initial context file   | `/init`                       |
+| `/summary`  | Generate a project summary from the current conversation           | `/summary`                    |
+| `/compress` | Summarize chat history to free context window space                | `/compress`                   |
+| `/resume`   | Open the session picker and resume a previous session              | `/resume`                     |
+| `/restore`  | List or restore checkpointed file states from earlier tool actions | `/restore`, `/restore <id>`   |
+| `/export`   | Export the current session to a file                               | `/export md`, `/export jsonl` |
 
-These commands help you save, restore, and summarize work progress.
+`/export` supports these built-in subcommands:
 
-| Command     | Description                                               | Usage Examples                       |
-| ----------- | --------------------------------------------------------- | ------------------------------------ |
-| `/init`     | Analyze current directory and create initial context file | `/init`                              |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+- `html`
+- `md`
+- `json`
+- `jsonl`
 
-### 1.2 Interface and Workspace Control
+### 1.2 Workspace, UI, and Language
 
-Commands for adjusting interface appearance and work environment.
+| Command      | Description                                             | Usage Examples                        |
+| ------------ | ------------------------------------------------------- | ------------------------------------- |
+| `/clear`     | Clear the screen (`/reset` and `/new` are aliases)      | `/clear`                              |
+| `/directory` | Manage extra workspace directories (`/dir` is an alias) | `/dir add ./src,./tests`, `/dir show` |
+| `/docs`      | Open the full Qwen Code documentation in your browser   | `/docs`                               |
+| `/editor`    | Open the preferred-editor picker                        | `/editor`                             |
+| `/language`  | Show current UI/output language or change it            | `/language`, `/language ui zh-CN`     |
+| `/settings`  | Open the settings editor                                | `/settings`                           |
+| `/theme`     | Change the active CLI theme                             | `/theme`                              |
+| `/vim`       | Toggle Vim editing mode for the input prompt            | `/vim`                                |
 
-| Command      | Description                              | Usage Examples                |
-| ------------ | ---------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
-| `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor   | `/editor`                     |
+`/language` supports:
 
-### 1.3 Language Settings
+- `ui <language>` to change the CLI language
+- `output <language>` to change the model output language
 
-Commands specifically for controlling interface and output language.
+### 1.3 Tools, Skills, Models, and Automation
 
-| Command               | Description                      | Usage Examples             |
-| --------------------- | -------------------------------- | -------------------------- |
-| `/language`           | View or change language settings | `/language`                |
-| → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
-| → `output [language]` | Set LLM output language          | `/language output Chinese` |
+| Command          | Description                                                            | Usage Examples                                   |
+| ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
+| `/approval-mode` | Show the approval dialog or set the current session's approval mode    | `/approval-mode`, `/approval-mode auto-edit`     |
+| `/agents`        | Manage subagents for specialized task delegation                       | `/agents create`, `/agents manage`               |
+| `/extensions`    | Manage extensions in the current session                               | `/extensions`, `/extensions install owner/repo`  |
+| `/hooks`         | List hooks or enable/disable a configured hook for the current session | `/hooks`, `/hooks enable my-hook`                |
+| `/mcp`           | Open the MCP management dialog                                         | `/mcp`                                           |
+| `/memory`        | Show or add memory entries                                             | `/memory show`, `/memory add --project Use pnpm` |
+| `/model`         | Switch the current model                                               | `/model`                                         |
+| `/skills`        | List available skills or explicitly invoke one by name                 | `/skills`, `/skills docs-audit-and-refresh`      |
+| `/review`        | Run the bundled `review` skill directly as a slash command             | `/review`, `/review 123`                         |
+| `/tools`         | List available built-in tools, optionally with descriptions            | `/tools`, `/tools desc`                          |
 
-- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German)
-- Output language examples: `Chinese`, `English`, `Japanese`, etc.
+`/approval-mode` accepts these modes:
 
-### 1.4 Tool and Model Management
+- `plan`
+- `default`
+- `auto-edit`
+- `yolo`
 
-Commands for managing AI tools and models.
+`/extensions` supports:
 
-| Command          | Description                                   | Usage Examples                                |
-| ---------------- | --------------------------------------------- | --------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
-| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
-| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
-| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
-| →`plan`          | Analysis only, no execution                   | Secure review                                 |
-| →`default`       | Require approval for edits                    | Daily use                                     |
-| →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
-| →`yolo`          | Automatically approve all                     | Quick prototyping                             |
-| `/model`         | Switch model used in current session          | `/model`                                      |
-| `/extensions`    | List all active extensions in current session | `/extensions`                                 |
-| `/memory`        | Manage AI's instruction context               | `/memory add Important Info`                  |
+- `manage`
+- `install <source>`
+- `explore <Gemini|ClaudeCode>`
 
-### 1.5 Information, Settings, and Help
+`/hooks` supports:
 
-Commands for obtaining information and performing system settings.
+- `list`
+- `enable <hook-name>`
+- `disable <hook-name>`
 
-| Command     | Description                                     | Usage Examples                   |
-| ----------- | ----------------------------------------------- | -------------------------------- |
-| `/help`     | Display help information for available commands | `/help` or `/?`                  |
-| `/about`    | Display version information                     | `/about`                         |
-| `/stats`    | Display detailed statistics for current session | `/stats`                         |
-| `/settings` | Open settings editor                            | `/settings`                      |
-| `/auth`     | Change authentication method                    | `/auth`                          |
-| `/bug`      | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`     | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+`/memory` supports:
+
+- `show`
+- `show --project`
+- `show --global`
+- `add [--project|--global] <text>`
+
+> [!note]
+>
+> `/review` is a bundled skill shipped with Qwen Code. For other skills, use
+> `/skills <skill-name>` or let the model invoke a skill automatically when it
+> matches your request. See [Skills](./skills).
+
+### 1.4 Integrations and Setup
+
+| Command           | Description                                                                           | Usage Examples    |
+| ----------------- | ------------------------------------------------------------------------------------- | ----------------- |
+| `/auth`           | Configure authentication (`/login` is an alias)                                       | `/auth`           |
+| `/ide`            | Manage IDE integration; available subcommands depend on connection state and platform | `/ide status`     |
+| `/permissions`    | Open the folder-trust dialog for the current folder                                   | `/permissions`    |
+| `/setup-github`   | Download and configure GitHub Action workflow files for Qwen Code automation          | `/setup-github`   |
+| `/terminal-setup` | Configure multiline terminal keybindings for supported editors                        | `/terminal-setup` |
+
+`/ide` can expose:
+
+- `status`
+- `install`
+- `enable`
+- `disable`
+
+> [!note]
+>
+> `/permissions` is only available when folder trust is enabled for the current
+> session. See [Trusted Folders](../configuration/trusted-folders).
+
+> [!note]
+>
+> `/ide` is environment-dependent. In unsupported environments it reports that
+> IDE integration is unavailable instead of opening the normal management flow.
+> See [IDE Integration](../ide-integration/ide-integration).
+
+### 1.5 Information and Diagnostics
+
+| Command    | Description                                                     | Usage Examples           |
+| ---------- | --------------------------------------------------------------- | ------------------------ |
+| `/bug`     | Open the bug-report flow                                        | `/bug Terminal froze`    |
+| `/copy`    | Copy the last output to the clipboard                           | `/copy`                  |
+| `/help`    | Show help and available slash commands (`/?` is an alias)       | `/help`, `/?`            |
+| `/insight` | Generate a personalized insight report from your chat history   | `/insight`               |
+| `/quit`    | Exit Qwen Code (`/exit` is an alias)                            | `/quit`, `/exit`         |
+| `/stats`   | Show session statistics, model usage, or tool usage             | `/stats`, `/stats tools` |
+| `/status`  | Show version and environment information (`/about` is an alias) | `/status`, `/about`      |
+
+`/stats` supports:
+
+- `model`
+- `tools`
 
 ### 1.6 Common Shortcuts
 
-| Shortcut           | Function                | Note                   |
-| ------------------ | ----------------------- | ---------------------- |
-| `Ctrl/cmd+L`       | Clear screen            | Equivalent to `/clear` |
-| `Ctrl/cmd+T`       | Toggle tool description | MCP tool management    |
-| `Ctrl/cmd+C`×2     | Exit confirmation       | Secure exit mechanism  |
-| `Ctrl/cmd+Z`       | Undo input              | Text editing           |
-| `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
+For the full list, see [Keyboard Shortcuts](../reference/keyboard-shortcuts).
+
+| Shortcut | Function                   | Note                                |
+| -------- | -------------------------- | ----------------------------------- |
+| `Ctrl+C` | Cancel the current request | Press twice to exit the application |
+| `Ctrl+D` | Exit if the input is empty | Press twice to confirm              |
+| `Ctrl+L` | Clear the screen           | Equivalent to `/clear`              |
+| `Ctrl+T` | Toggle tool descriptions   | Useful when browsing tool lists     |
+| `?`      | Open keyboard shortcuts    | Only when the input is empty        |
+| `!`      | Toggle shell mode          | Only when the input is empty        |
 
 ## 2. @ Commands (Introducing Files)
 

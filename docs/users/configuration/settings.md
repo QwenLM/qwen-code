@@ -269,6 +269,135 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 >
 > **Note about advanced.tavilyApiKey:** This is a legacy configuration format. For Qwen OAuth users, DashScope provider is automatically available without any configuration. For other authentication types, configure Tavily or Google providers using the new `webSearch` configuration format.
 
+#### webSearch
+
+Configure providers for the `web_search` tool. This section replaces the older
+single-key Tavily setup and is the recommended way to configure search.
+
+| Setting              | Type             | Description                                                                                                                                  | Default     |
+| -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `webSearch.provider` | array of objects | List of configured web search providers. Each provider entry uses `type` plus provider-specific fields such as `apiKey` or `searchEngineId`. | `undefined` |
+| `webSearch.default`  | string           | The provider type to use by default when Qwen Code performs a web search and no provider is specified explicitly.                            | `undefined` |
+
+Supported provider types:
+
+- `dashscope`
+- `tavily`
+- `google`
+
+Provider-specific fields:
+
+- `tavily`: `apiKey`
+- `google`: `apiKey`, `searchEngineId`
+- `dashscope`: no extra fields required
+
+Example:
+
+```json
+{
+  "webSearch": {
+    "provider": [
+      { "type": "dashscope" },
+      { "type": "tavily", "apiKey": "$TAVILY_API_KEY" },
+      {
+        "type": "google",
+        "apiKey": "$GOOGLE_SEARCH_API_KEY",
+        "searchEngineId": "$GOOGLE_SEARCH_ENGINE_ID"
+      }
+    ],
+    "default": "dashscope"
+  }
+}
+```
+
+#### hooksConfig
+
+Controls whether hooks are enabled and which named hooks are disabled for the
+current configuration. Use the [`/hooks`](../features/commands) command to list,
+enable, or disable configured hooks during a session.
+
+| Setting                | Type             | Description                                                                              | Default |
+| ---------------------- | ---------------- | ---------------------------------------------------------------------------------------- | ------- |
+| `hooksConfig.enabled`  | boolean          | Canonical on/off switch for the hooks system. When `false`, configured hooks do not run. | `true`  |
+| `hooksConfig.disabled` | array of strings | List of hook names that should be disabled even if they are configured in `hooks`.       | `[]`    |
+
+Example:
+
+```json
+{
+  "hooksConfig": {
+    "enabled": true,
+    "disabled": ["log-stop-output"]
+  }
+}
+```
+
+#### hooks
+
+Defines hook events and the commands that should run when those events fire. At
+the settings level, Qwen Code currently documents these event keys:
+
+| Setting                  | Type             | Description                                                                                        | Default |
+| ------------------------ | ---------------- | -------------------------------------------------------------------------------------------------- | ------- |
+| `hooks.UserPromptSubmit` | array of objects | Hooks that run before Qwen Code processes a user prompt. Useful for prompt augmentation or checks. | `[]`    |
+| `hooks.Stop`             | array of objects | Hooks that run right before Qwen Code finishes a response. Useful for logging or post-processing.  | `[]`    |
+
+Each event array contains one or more hook definitions:
+
+| Field        | Type             | Description                                                           |
+| ------------ | ---------------- | --------------------------------------------------------------------- |
+| `matcher`    | string           | Optional matcher that limits when this hook definition applies.       |
+| `sequential` | boolean          | Run the hooks in this definition sequentially instead of in parallel. |
+| `hooks`      | array of objects | The commands to execute when the event matches.                       |
+
+Each `hooks[]` entry supports:
+
+| Field         | Type   | Required | Description                                                   |
+| ------------- | ------ | -------- | ------------------------------------------------------------- |
+| `type`        | string | Yes      | Hook type. Currently `command`.                               |
+| `command`     | string | Yes      | Shell command to run when the hook fires.                     |
+| `name`        | string | No       | Stable hook name used by `hooksConfig.disabled` and `/hooks`. |
+| `description` | string | No       | Human-readable description of the hook.                       |
+| `timeout`     | number | No       | Timeout in milliseconds for the hook command.                 |
+| `env`         | object | No       | Extra environment variables passed to the hook command.       |
+
+Example:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "inject-project-context",
+            "command": "python .qwen/hooks/inject_context.py",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "log-stop-output",
+            "command": "node .qwen/hooks/log-stop.js",
+            "env": {
+              "LOG_LEVEL": "info"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 #### mcpServers
 
 Configures connections to one or more Model-Context Protocol (MCP) servers for discovering and using custom tools. Qwen Code attempts to connect to each configured MCP server to discover available tools. If multiple MCP servers expose a tool with the same name, the tool names will be prefixed with the server alias you defined in the configuration (e.g., `serverAlias__actualToolName`) to avoid conflicts. Note that the system might strip certain schema properties from MCP tool definitions for compatibility. At least one of `command`, `url`, or `httpUrl` must be provided. If multiple are specified, the order of precedence is `httpUrl`, then `url`, then `command`.

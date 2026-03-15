@@ -2,120 +2,144 @@
 
 > Create, manage, and share Skills to extend Qwen Code's capabilities.
 
-This guide shows you how to create, use, and manage Agent Skills in **Qwen Code**. Skills are modular capabilities that extend the model's effectiveness through organized folders containing instructions (and optionally scripts/resources).
+Skills are reusable instruction bundles that help Qwen Code handle specific
+workflows more effectively. Each skill lives in its own directory and must
+include a `SKILL.md` file with YAML frontmatter plus Markdown instructions.
 
-## Prerequisites
+## What are Skills?
 
-- Qwen Code (recent version)
-- Basic familiarity with Qwen Code ([Quickstart](../quickstart.md))
+Skills package domain knowledge, workflow instructions, and optional helper
+files into a discoverable unit that the model can load when it is relevant.
 
-## What are Agent Skills?
+A skill directory can include:
 
-Agent Skills package expertise into discoverable capabilities. Each Skill consists of a `SKILL.md` file with instructions that the model can load when relevant, plus optional supporting files like scripts and templates.
+```text
+my-skill/
+├── SKILL.md
+├── reference.md
+├── examples.md
+├── scripts/
+│   └── helper.py
+└── templates/
+    └── template.txt
+```
 
-### How Skills are invoked
+Use skills when you want Qwen Code to consistently follow a reusable procedure
+for tasks like code review, docs updates, release prep, or environment-specific
+workflows.
 
-Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill's description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
+## How Skills are invoked
 
-If you want to invoke a Skill explicitly, use the `/skills` slash command:
+Skills are usually **model-invoked**. If your request matches a skill's
+description, Qwen Code can load it automatically as its first step.
+
+You can also invoke a skill explicitly:
 
 ```bash
 /skills <skill-name>
 ```
 
-Use autocomplete to browse available Skills and descriptions.
+Use `/skills` by itself to browse currently available skills.
 
-### Benefits
+### Bundled direct commands
 
-- Extend Qwen Code for your workflows
-- Share expertise across your team via git
-- Reduce repetitive prompting
-- Compose multiple Skills for complex tasks
+Bundled skills can also expose direct slash commands. Qwen Code currently ships
+one bundled skill:
+
+| Skill    | How to invoke it              | What it does                                                               |
+| -------- | ----------------------------- | -------------------------------------------------------------------------- |
+| `review` | `/review` or `/skills review` | Reviews changed code, a PR, or a specific file for correctness and quality |
+
+## Skill discovery and precedence
+
+Qwen Code discovers skills from four levels:
+
+| Level       | Location / Source                         | Notes                                               |
+| ----------- | ----------------------------------------- | --------------------------------------------------- |
+| `project`   | `.qwen/skills/`                           | Best for repository-specific and team-shared skills |
+| `user`      | `~/.qwen/skills/`                         | Best for personal reusable workflows                |
+| `extension` | Installed extension `skills/` directories | Shipped by an enabled extension                     |
+| `bundled`   | Built into Qwen Code                      | Read-only skills shipped with the CLI               |
+
+If multiple levels define the same skill name, Qwen Code uses this precedence:
+
+```text
+project > user > extension > bundled
+```
+
+That means a project skill named `review` overrides a user, extension, or
+bundled skill with the same name.
 
 ## Create a Skill
 
-Skills are stored as directories containing a `SKILL.md` file.
+Skills are directories containing a `SKILL.md` file.
 
 ### Personal Skills
 
-Personal Skills are available across all your projects. Store them in `~/.qwen/skills/`:
+Personal skills are available across all your projects:
 
 ```bash
 mkdir -p ~/.qwen/skills/my-skill-name
 ```
 
-Use personal Skills for:
+Use personal skills for:
 
-- Your individual workflows and preferences
-- Skills you're developing
-- Personal productivity helpers
+- Your own preferred workflows
+- Skills you are still iterating on
+- Cross-project helpers
 
 ### Project Skills
 
-Project Skills are shared with your team. Store them in `.qwen/skills/` within your project:
+Project skills are shared with the repository:
 
 ```bash
 mkdir -p .qwen/skills/my-skill-name
 ```
 
-Use project Skills for:
+Use project skills for:
 
-- Team workflows and conventions
-- Project-specific expertise
-- Shared utilities and scripts
-
-Project Skills can be checked into git and automatically become available to teammates.
+- Team conventions
+- Repository-specific procedures
+- Shared scripts and templates
 
 ## Write `SKILL.md`
 
-Create a `SKILL.md` file with YAML frontmatter and Markdown content:
+Each skill must define `name` and `description` in YAML frontmatter, followed by
+Markdown instructions.
 
 ```yaml
 ---
 name: your-skill-name
-description: Brief description of what this Skill does and when to use it
+description: Briefly explain what this skill does and when Qwen Code should use it
 ---
 
 # Your Skill Name
 
 ## Instructions
-Provide clear, step-by-step guidance for Qwen Code.
+Provide clear, concrete guidance for Qwen Code.
 
 ## Examples
-Show concrete examples of using this Skill.
+Show realistic examples or workflows when helpful.
 ```
 
-### Field requirements
+### Required fields
 
-Qwen Code currently validates that:
+- `name`: non-empty string
+- `description`: non-empty string
 
-- `name` is a non-empty string
-- `description` is a non-empty string
-
-Recommended conventions (not strictly enforced yet):
+### Recommended conventions
 
 - Use lowercase letters, numbers, and hyphens in `name`
-- Make `description` specific: include both **what** the Skill does and **when** to use it (key words users will naturally mention)
+- Make `description` specific about both:
+  - what the skill does
+  - when it should be used
 
 ## Add supporting files
 
-Create additional files alongside `SKILL.md`:
-
-```text
-my-skill/
-├── SKILL.md (required)
-├── reference.md (optional documentation)
-├── examples.md (optional examples)
-├── scripts/
-│   └── helper.py (optional utility)
-└── templates/
-    └── template.txt (optional template)
-```
-
-Reference these files from `SKILL.md`:
+Supporting files can live next to `SKILL.md` and be referenced from it:
 
 ````markdown
-For advanced usage, see [reference.md](reference.md).
+See [reference.md](reference.md) for detailed rules.
 
 Run the helper script:
 
@@ -124,58 +148,44 @@ python scripts/helper.py input.txt
 ```
 ````
 
+When a skill references relative paths, Qwen Code resolves them from the skill
+directory.
+
 ## View available Skills
 
-Qwen Code discovers Skills from:
-
-- Personal Skills: `~/.qwen/skills/`
-- Project Skills: `.qwen/skills/`
-- Extension Skills: Skills provided by installed extensions
-
-### Extension Skills
-
-Extensions can provide custom skills that become available when the extension is enabled. These skills are stored in the extension's `skills/` directory and follow the same format as personal and project skills.
-
-Extension skills are automatically discovered and loaded when the extension is installed and enabled.
-
-To see which extensions provide skills, check the extension's `qwen-extension.json` file for a `skills` field.
-
-To view available Skills, ask Qwen Code directly:
-
-```text
-What Skills are available?
-```
-
-Or inspect the filesystem:
+To list everything Qwen Code can currently use:
 
 ```bash
-# List personal Skills
+/skills
+```
+
+You can also inspect the filesystem directly:
+
+```bash
+# Personal skills
 ls ~/.qwen/skills/
 
-# List project Skills (if in a project directory)
+# Project skills
 ls .qwen/skills/
 
-# View a specific Skill's content
+# A specific skill manifest
 cat ~/.qwen/skills/my-skill/SKILL.md
 ```
 
-## Test a Skill
+## Test and debug a Skill
 
-After creating a Skill, test it by asking questions that match your description.
+After creating a skill, test it with requests that clearly match its
+description.
 
-Example: if your description mentions "PDF files":
+Example:
 
 ```text
 Can you help me extract text from this PDF?
 ```
 
-The model autonomously decides to use your Skill if it matches the request — you don't need to explicitly invoke it.
+### Common debugging checks
 
-## Debug a Skill
-
-If Qwen Code doesn't use your Skill, check these common issues:
-
-### Make the description specific
+#### Make the description more specific
 
 Too vague:
 
@@ -183,107 +193,88 @@ Too vague:
 description: Helps with documents
 ```
 
-Specific:
+Better:
 
 ```yaml
-description: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDFs, forms, or document extraction.
+description: Extract text and tables from PDF files, fill forms, and merge documents. Use when working with PDFs, forms, or document extraction.
 ```
 
-### Verify file path
+#### Verify the file path
 
-- Personal Skills: `~/.qwen/skills/<skill-name>/SKILL.md`
-- Project Skills: `.qwen/skills/<skill-name>/SKILL.md`
+- Personal: `~/.qwen/skills/<skill-name>/SKILL.md`
+- Project: `.qwen/skills/<skill-name>/SKILL.md`
 
 ```bash
-# Personal
 ls ~/.qwen/skills/my-skill/SKILL.md
-
-# Project
 ls .qwen/skills/my-skill/SKILL.md
 ```
 
-### Check YAML syntax
-
-Invalid YAML prevents the Skill metadata from loading correctly.
+#### Check the YAML frontmatter
 
 ```bash
-cat SKILL.md | head -n 15
+head -n 15 .qwen/skills/my-skill/SKILL.md
 ```
 
-Ensure:
+Make sure:
 
-- Opening `---` on line 1
-- Closing `---` before Markdown content
-- Valid YAML syntax (no tabs, correct indentation)
+- line 1 starts with `---`
+- the frontmatter closes with `---`
+- the YAML is valid
 
-### View errors
-
-Run Qwen Code with debug mode to see Skill loading errors:
+#### View loader errors
 
 ```bash
 qwen --debug
 ```
 
-## Share Skills with your team
+## Update or remove a Skill
 
-You can share Skills through project repositories:
-
-1. Add the Skill under `.qwen/skills/`
-2. Commit and push
-3. Teammates pull the changes
+Edit the manifest directly:
 
 ```bash
-git add .qwen/skills/
-git commit -m "Add team Skill for PDF processing"
-git push
-```
-
-## Update a Skill
-
-Edit `SKILL.md` directly:
-
-```bash
-# Personal Skill
 code ~/.qwen/skills/my-skill/SKILL.md
-
-# Project Skill
 code .qwen/skills/my-skill/SKILL.md
 ```
 
-Changes take effect the next time you start Qwen Code. If Qwen Code is already running, restart it to load the updates.
+Qwen Code watches skill directories, so updates are usually picked up
+automatically. If you do not see the change reflected in `/skills` or model
+behavior, restart the CLI.
 
-## Remove a Skill
-
-Delete the Skill directory:
+Remove a skill by deleting its directory:
 
 ```bash
-# Personal
 rm -rf ~/.qwen/skills/my-skill
-
-# Project
 rm -rf .qwen/skills/my-skill
-git commit -m "Remove unused Skill"
+```
+
+## Share Skills with your team
+
+Project skills can be committed like any other repository content:
+
+```bash
+git add .qwen/skills/
+git commit -m "Add project skill for release prep"
+git push
 ```
 
 ## Best practices
 
-### Keep Skills focused
+### Keep skills focused
 
-One Skill should address one capability:
+Prefer one skill per capability:
 
-- Focused: "PDF form filling", "Excel analysis", "Git commit messages"
-- Too broad: "Document processing" (split into smaller Skills)
+- Good: "git commit messages", "PDF extraction", "docs audit"
+- Too broad: "document processing"
 
-### Write clear descriptions
+### Write discoverable descriptions
 
-Help the model discover when to use Skills by including specific triggers:
+Include the words users are likely to say:
 
 ```yaml
 description: Analyze Excel spreadsheets, create pivot tables, and generate charts. Use when working with Excel files, spreadsheets, or .xlsx data.
 ```
 
-### Test with your team
+### Use project skills for team policy
 
-- Does the Skill activate when expected?
-- Are the instructions clear?
-- Are there missing examples or edge cases?
+If a workflow depends on repo-specific tools, conventions, or scripts, store it
+under `.qwen/skills/` so the whole team gets the same behavior.
