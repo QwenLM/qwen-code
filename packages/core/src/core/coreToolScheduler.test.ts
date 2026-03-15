@@ -39,6 +39,10 @@ import {
 } from '../test-utils/mock-tool.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { MessageBusType } from '../confirmation-bus/types.js';
+import type { HookExecutionResponse } from '../confirmation-bus/types.js';
+import { type NotificationType } from '../hooks/types.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -257,6 +261,8 @@ describe('CoreToolScheduler', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -334,6 +340,8 @@ describe('CoreToolScheduler', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -377,6 +385,8 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null, // No client needed for these tests
         getExcludeTools: () => undefined,
         isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       // Create scheduler
@@ -418,6 +428,8 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
         isInteractive: () => false, // Value doesn't matter, but included for completeness
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       // Create scheduler
@@ -448,6 +460,8 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit'],
         isInteractive: () => false, // Value doesn't matter
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       // Create scheduler
@@ -489,6 +503,8 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getExcludeTools: () => undefined,
         isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       // Create scheduler
@@ -567,6 +583,8 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -653,6 +671,8 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -745,6 +765,8 @@ describe('CoreToolScheduler with payload', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1081,6 +1103,8 @@ describe('CoreToolScheduler edit cancellation', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1187,6 +1211,8 @@ describe('CoreToolScheduler YOLO mode', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1328,6 +1354,8 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalHeight: 30,
       }),
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1428,6 +1456,8 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1560,6 +1590,8 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1662,6 +1694,8 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1737,6 +1771,8 @@ describe('CoreToolScheduler request queueing', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1900,6 +1936,8 @@ describe('CoreToolScheduler truncated output protection', () => {
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
       isInteractive: () => true,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2097,6 +2135,8 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2217,6 +2257,8 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -2611,6 +2653,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     return new CoreToolScheduler({
@@ -2810,5 +2854,400 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+  });
+});
+
+// Integration tests for the fire* functions
+describe('Fire hook functions integration', () => {
+  let mockMessageBus: { request: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    mockMessageBus = {
+      request: vi.fn(),
+    };
+  });
+
+  describe('firePreToolUseHook', () => {
+    it('should allow tool execution when hook permits', async () => {
+      const { firePreToolUseHook } = await import('./toolHookTriggers.js');
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          decision: 'allow',
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePreToolUseHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldProceed).toBe(true);
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'PreToolUse',
+          input: {
+            permission_mode: 'full',
+            tool_name: 'testTool',
+            tool_input: { param: 'value' },
+            tool_use_id: 'toolu_test',
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should block tool execution when hook denies', async () => {
+      const { firePreToolUseHook } = await import('./toolHookTriggers.js');
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          decision: 'deny',
+          reason: 'Not allowed',
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePreToolUseHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldProceed).toBe(false);
+      expect(result.blockReason).toBe('Not allowed');
+    });
+
+    it('should return shouldProceed: true when no message bus is provided', async () => {
+      const { firePreToolUseHook } = await import('./toolHookTriggers.js');
+
+      const result = await firePreToolUseHook(
+        undefined,
+        'testTool',
+        { param: 'value' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldProceed).toBe(true);
+    });
+
+    it('should return shouldProceed: true when hook request fails', async () => {
+      const { firePreToolUseHook } = await import('./toolHookTriggers.js');
+
+      mockMessageBus.request.mockRejectedValue(new Error('Network error'));
+
+      const result = await firePreToolUseHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldProceed).toBe(true);
+    });
+  });
+
+  describe('firePostToolUseHook', () => {
+    it('should return shouldStop: false when hook permits', async () => {
+      const { firePostToolUseHook } = await import('./toolHookTriggers.js');
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          permission_decision: 'proceed',
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePostToolUseHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        { response: 'result' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldStop).toBe(false);
+    });
+
+    it('should return shouldStop: true when hook indicates stop', async () => {
+      const { firePostToolUseHook } = await import('./toolHookTriggers.js');
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          decision: 'allow',
+          continue: false,
+          stopReason: 'Completed',
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePostToolUseHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        { response: 'result' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldStop).toBe(true);
+      expect(result.stopReason).toBe('Completed');
+    });
+
+    it('should return shouldStop: false when no message bus is provided', async () => {
+      const { firePostToolUseHook } = await import('./toolHookTriggers.js');
+
+      const result = await firePostToolUseHook(
+        undefined,
+        'testTool',
+        { param: 'value' },
+        { response: 'result' },
+        'toolu_test',
+        'full',
+      );
+
+      expect(result.shouldStop).toBe(false);
+    });
+  });
+
+  describe('firePostToolUseFailureHook', () => {
+    it('should return additional context when hook provides it', async () => {
+      const { firePostToolUseFailureHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            additionalContext: 'Additional error context',
+          },
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePostToolUseFailureHook(
+        mockMessageBus as unknown as MessageBus,
+        'toolu_test',
+        'testTool',
+        { param: 'value' },
+        'Error occurred',
+        false,
+        'full',
+      );
+
+      expect(result.additionalContext).toBe('Additional error context');
+    });
+
+    it('should return empty object when no message bus is provided', async () => {
+      const { firePostToolUseFailureHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const result = await firePostToolUseFailureHook(
+        undefined,
+        'toolu_test',
+        'testTool',
+        { param: 'value' },
+        'Error occurred',
+        false,
+        'full',
+      );
+
+      expect(result).toEqual({});
+    });
+  });
+
+  describe('fireNotificationHook', () => {
+    it('should send notification to message bus', async () => {
+      const { fireNotificationHook } = await import('./toolHookTriggers.js');
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            additionalContext: 'Notification processed',
+          },
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await fireNotificationHook(
+        mockMessageBus as unknown as MessageBus,
+        'Test message',
+        'info' as NotificationType,
+        'Test Title',
+      );
+
+      expect(result.additionalContext).toBe('Notification processed');
+      expect(mockMessageBus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: {
+            message: 'Test message',
+            notification_type: 'info',
+            title: 'Test Title',
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    });
+
+    it('should return empty object when no message bus is provided', async () => {
+      const { fireNotificationHook } = await import('./toolHookTriggers.js');
+
+      const result = await fireNotificationHook(
+        undefined,
+        'Test message',
+        'info' as NotificationType,
+        'Test Title',
+      );
+
+      expect(result).toEqual({});
+    });
+  });
+
+  describe('firePermissionRequestHook', () => {
+    it('should return hasDecision: false when hook makes no decision', async () => {
+      const { firePermissionRequestHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          decision: null,
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'full',
+      );
+
+      expect(result.hasDecision).toBe(false);
+    });
+
+    it('should return hasDecision: true with allow decision when hook allows', async () => {
+      const { firePermissionRequestHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'allow',
+              updatedInput: { param: 'modified_value' },
+            },
+          },
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'full',
+      );
+
+      expect(result.hasDecision).toBe(true);
+      expect(result.shouldAllow).toBe(true);
+      expect(result.updatedInput).toEqual({ param: 'modified_value' });
+    });
+
+    it('should return hasDecision: true with deny decision when hook denies', async () => {
+      const { firePermissionRequestHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const mockResponse: HookExecutionResponse = {
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'test-correlation-id',
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            decision: {
+              behavior: 'deny',
+              message: 'Access denied',
+              interrupt: true,
+            },
+          },
+        },
+      };
+
+      mockMessageBus.request.mockResolvedValue(mockResponse);
+
+      const result = await firePermissionRequestHook(
+        mockMessageBus as unknown as MessageBus,
+        'testTool',
+        { param: 'value' },
+        'full',
+      );
+
+      expect(result.hasDecision).toBe(true);
+      expect(result.shouldAllow).toBe(false);
+      expect(result.denyMessage).toBe('Access denied');
+      expect(result.shouldInterrupt).toBe(true);
+    });
+
+    it('should return hasDecision: false when no message bus is provided', async () => {
+      const { firePermissionRequestHook } = await import(
+        './toolHookTriggers.js'
+      );
+
+      const result = await firePermissionRequestHook(
+        undefined,
+        'testTool',
+        { param: 'value' },
+        'full',
+      );
+
+      expect(result.hasDecision).toBe(false);
+    });
   });
 });

@@ -39,6 +39,8 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  SessionEndReason,
+  SessionStartSource,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -289,7 +291,42 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         historyManager.loadHistory(historyItems);
       }
+
+      // Fire SessionStart event after config is initialized
+      const sessionStartSource = resumedSessionData
+        ? SessionStartSource.Resume
+        : SessionStartSource.Startup;
+
+      const hookSystem = config.getHookSystem();
+
+      if (hookSystem) {
+        hookSystem
+          .fireSessionStartEvent(sessionStartSource, config.getModel() ?? '')
+          .then(() => {
+            debugLogger.debug('SessionStart event completed successfully');
+          })
+          .catch((err) => {
+            debugLogger.warn(`SessionStart hook failed: ${err}`);
+          });
+      } else {
+        debugLogger.debug(
+          'SessionStart: HookSystem not available, skipping event',
+        );
+      }
     })();
+
+    // Register SessionEnd cleanup for process exit
+    registerCleanup(async () => {
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionEndEvent(SessionEndReason.PromptInputExit);
+        debugLogger.debug('SessionEnd event completed successfully!!!');
+      } catch (err) {
+        debugLogger.error(`SessionEnd hook failed: ${err}`);
+      }
+    });
+
     registerCleanup(async () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
@@ -1032,6 +1069,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     elapsedTime,
     settings,
+    config,
   });
 
   // Dialog close functionality

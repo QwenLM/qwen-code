@@ -73,7 +73,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
-      hooksCommand,
+      ...(this.config?.getEnableHooks() ? [hooksCommand] : []),
       await ideCommand(),
       initCommand,
       languageCommand,

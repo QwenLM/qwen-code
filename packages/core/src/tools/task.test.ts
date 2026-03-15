@@ -16,6 +16,8 @@ import {
 } from '../subagents/types.js';
 import { type SubAgentScope, ContextState } from '../subagents/subagent.js';
 import { partToString } from '../utils/partUtils.js';
+import type { HookSystem } from '../hooks/hookSystem.js';
+import { PermissionMode } from '../hooks/types.js';
 
 // Type for accessing protected methods in tests
 type TaskToolWithProtectedMethods = TaskTool & {
@@ -72,6 +74,8 @@ describe('TaskTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
     } as unknown as Config;
 
     changeListeners = [];
@@ -533,6 +537,469 @@ describe('TaskTool', () => {
       const description = invocation.getDescription();
 
       expect(description).toBe('file-search subagent: "Search files"');
+    });
+  });
+
+  describe('SubagentStart hook integration', () => {
+    let mockSubagentScope: SubAgentScope;
+    let mockContextState: ContextState;
+    let mockHookSystem: HookSystem;
+
+    beforeEach(() => {
+      mockSubagentScope = {
+        runNonInteractive: vi.fn().mockResolvedValue(undefined),
+        result: 'Task completed successfully',
+        terminateMode: SubagentTerminateMode.GOAL,
+        getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
+        formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 500,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+          successRate: 100,
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+          estimatedCost: 0.01,
+          toolUsage: [],
+        }),
+        getStatistics: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 500,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
+      } as unknown as SubAgentScope;
+
+      mockContextState = {
+        set: vi.fn(),
+      } as unknown as ContextState;
+
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      vi.mocked(mockSubagentManager.createSubagentScope).mockResolvedValue(
+        mockSubagentScope,
+      );
+
+      mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+
+      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+      (config as unknown as Record<string, unknown>)['getTranscriptPath'] = vi
+        .fn()
+        .mockReturnValue('/test/transcript');
+    });
+
+    it('should call fireSubagentStartEvent before execution', async () => {
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
+        expect.stringContaining('file-search-'),
+        'file-search',
+        PermissionMode.Default,
+      );
+    });
+
+    it('should inject additionalContext from SubagentStart hook into context', async () => {
+      const mockStartOutput = {
+        getAdditionalContext: vi
+          .fn()
+          .mockReturnValue('Extra context from hook'),
+      };
+      vi.mocked(mockHookSystem.fireSubagentStartEvent).mockResolvedValue(
+        mockStartOutput as never,
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'hook_context',
+        'Extra context from hook',
+      );
+    });
+
+    it('should not inject hook_context when additionalContext is undefined', async () => {
+      const mockStartOutput = {
+        getAdditionalContext: vi.fn().mockReturnValue(undefined),
+      };
+      vi.mocked(mockHookSystem.fireSubagentStartEvent).mockResolvedValue(
+        mockStartOutput as never,
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockContextState.set).not.toHaveBeenCalledWith(
+        'hook_context',
+        expect.anything(),
+      );
+    });
+
+    it('should continue execution when SubagentStart hook fails', async () => {
+      vi.mocked(mockHookSystem.fireSubagentStartEvent).mockRejectedValue(
+        new Error('Hook failed'),
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      // Should still complete successfully despite hook failure
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('Task completed successfully');
+      const display = result.returnDisplay as TaskResultDisplay;
+      expect(display.status).toBe('completed');
+    });
+
+    it('should skip hooks when hookSystem is not available', async () => {
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(undefined);
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('Task completed successfully');
+    });
+  });
+
+  describe('SubagentStop hook integration', () => {
+    let mockSubagentScope: SubAgentScope;
+    let mockContextState: ContextState;
+    let mockHookSystem: HookSystem;
+
+    beforeEach(() => {
+      mockSubagentScope = {
+        runNonInteractive: vi.fn().mockResolvedValue(undefined),
+        result: 'Task completed successfully',
+        terminateMode: SubagentTerminateMode.GOAL,
+        getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
+        formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 500,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+          successRate: 100,
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+          estimatedCost: 0.01,
+          toolUsage: [],
+        }),
+        getStatistics: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 500,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
+      } as unknown as SubAgentScope;
+
+      mockContextState = {
+        set: vi.fn(),
+      } as unknown as ContextState;
+
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      vi.mocked(mockSubagentManager.createSubagentScope).mockResolvedValue(
+        mockSubagentScope,
+      );
+
+      mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+
+      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+      (config as unknown as Record<string, unknown>)['getTranscriptPath'] = vi
+        .fn()
+        .mockReturnValue('/test/transcript');
+    });
+
+    it('should call fireSubagentStopEvent after execution', async () => {
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        expect.stringContaining('file-search-'),
+        'file-search',
+        '/test/transcript',
+        'Task completed successfully',
+        false,
+        PermissionMode.Default,
+      );
+    });
+
+    it('should re-execute subagent when stop hook returns blocking decision', async () => {
+      const mockBlockOutput = {
+        isBlockingDecision: vi
+          .fn()
+          .mockReturnValueOnce(true)
+          .mockReturnValueOnce(false),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi
+          .fn()
+          .mockReturnValue('Continue working on the task'),
+      };
+
+      // First call returns block, second call returns allow (no output)
+      vi.mocked(mockHookSystem.fireSubagentStopEvent)
+        .mockResolvedValueOnce(mockBlockOutput as never)
+        .mockResolvedValueOnce(undefined as never);
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Should have called runNonInteractive twice (initial + re-execution)
+      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+      // Stop hook should have been called twice
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      // Second call should have stopHookActive=true
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('file-search-'),
+        'file-search',
+        '/test/transcript',
+        'Task completed successfully',
+        true,
+        PermissionMode.Default,
+      );
+    });
+
+    it('should re-execute subagent when stop hook returns shouldStopExecution', async () => {
+      const mockStopOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(false),
+        shouldStopExecution: vi.fn().mockReturnValueOnce(true),
+        getEffectiveReason: vi.fn().mockReturnValue('Output is incomplete'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent)
+        .mockResolvedValueOnce(mockStopOutput as never)
+        .mockResolvedValueOnce(undefined as never);
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+    });
+
+    it('should allow stop when SubagentStop hook fails', async () => {
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockRejectedValue(
+        new Error('Stop hook failed'),
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      // Should still complete successfully despite hook failure
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('Task completed successfully');
+      const display = result.returnDisplay as TaskResultDisplay;
+      expect(display.status).toBe('completed');
+    });
+
+    it('should skip SubagentStop hook when signal is aborted', async () => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute(abortController.signal);
+
+      expect(mockHookSystem.fireSubagentStopEvent).not.toHaveBeenCalled();
+    });
+
+    it('should stop re-execution loop when signal is aborted during block handling', async () => {
+      const abortController = new AbortController();
+
+      const mockBlockOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(true),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi.fn().mockReturnValue('Keep working'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        mockBlockOutput as never,
+      );
+
+      // Abort after first re-execution
+      vi.mocked(mockSubagentScope.runNonInteractive).mockImplementation(
+        async () => {
+          const callCount = vi.mocked(mockSubagentScope.runNonInteractive).mock
+            .calls.length;
+          if (callCount >= 2) {
+            abortController.abort();
+          }
+        },
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute(abortController.signal);
+
+      // Should have stopped the loop after abort
+      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+    });
+
+    it('should call both start and stop hooks in correct order', async () => {
+      const callOrder: string[] = [];
+
+      vi.mocked(mockHookSystem.fireSubagentStartEvent).mockImplementation(
+        async () => {
+          callOrder.push('start');
+          return undefined;
+        },
+      );
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockImplementation(
+        async () => {
+          callOrder.push('stop');
+          return undefined;
+        },
+      );
+
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(callOrder).toEqual(['start', 'stop']);
+    });
+
+    it('should pass consistent agentId to both start and stop hooks', async () => {
+      const params: TaskParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      const startAgentId = vi.mocked(mockHookSystem.fireSubagentStartEvent).mock
+        .calls[0]?.[0] as string;
+      const stopAgentId = vi.mocked(mockHookSystem.fireSubagentStopEvent).mock
+        .calls[0]?.[0] as string;
+
+      expect(startAgentId).toBe(stopAgentId);
+      expect(startAgentId).toMatch(/^file-search-\d+$/);
     });
   });
 });

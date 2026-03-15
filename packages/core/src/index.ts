@@ -247,3 +247,9 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry } from './hooks/index.js';
+
+// Export hook triggers for notification hooks
+export {
+  fireNotificationHook,
+  type NotificationHookResult,
+} from './core/toolHookTriggers.js';
