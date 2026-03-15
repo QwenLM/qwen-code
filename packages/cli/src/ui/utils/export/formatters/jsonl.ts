@@ -14,13 +14,18 @@ export function toJsonl(sessionData: ExportSessionData): string {
   const lines: string[] = [];
 
   // Add session metadata as the first line
-  lines.push(
-    JSON.stringify({
-      type: 'session_metadata',
-      sessionId: sessionData.sessionId,
-      startTime: sessionData.startTime,
-    }),
-  );
+  const metadata: Record<string, unknown> = {
+    type: 'session_metadata',
+    sessionId: sessionData.sessionId,
+    startTime: sessionData.startTime,
+  };
+
+  // Add requestId if available
+  if (sessionData.metadata?.requestId) {
+    metadata['requestId'] = sessionData.metadata.requestId;
+  }
+
+  lines.push(JSON.stringify(metadata));
 
   // Add each message as a separate line
   for (const message of sessionData.messages) {

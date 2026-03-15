@@ -16,6 +16,14 @@ export function toMarkdown(sessionData: ExportSessionData): string {
   lines.push('# Chat Session Export\n');
   lines.push(`- **Session ID**: \`${sanitizeText(sessionData.sessionId)}\``);
   lines.push(`- **Start Time**: ${sanitizeText(sessionData.startTime)}`);
+
+  // Add requestId if available
+  if (sessionData.metadata?.requestId) {
+    lines.push(
+      `- **Request ID**: \`${sanitizeText(sessionData.metadata.requestId)}\``,
+    );
+  }
+
   lines.push(`- **Exported**: ${new Date().toISOString()}`);
   lines.push('\n---\n');
 
@@ -26,6 +34,9 @@ export function toMarkdown(sessionData: ExportSessionData): string {
       lines.push(formatMessageContent(message));
     } else if (message.type === 'assistant') {
       lines.push('## Assistant\n');
+      if (message.response_id) {
+        lines.push(`*Response ID: \`${sanitizeText(message.response_id)}\`*\n`);
+      }
       lines.push(formatMessageContent(message));
     } else if (message.type === 'tool_call') {
       lines.push(formatToolCall(message));
