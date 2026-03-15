@@ -130,11 +130,11 @@ describe('git extension helpers', () => {
           releaseTag: 'v1.0.0',
         },
       });
-      mockProvider.getRepoInfo.mockReturnValue({
+      vi.mocked(mockProvider.getRepoInfo!).mockReturnValue({
         owner: 'owner',
         repo: 'repo',
       });
-      mockProvider.getLatestRelease.mockResolvedValue('v1.0.0');
+      vi.mocked(mockProvider.getLatestRelease!).mockResolvedValue('v1.0.0');
 
       const result = await checkForExtensionUpdate(
         extension,
@@ -151,11 +151,11 @@ describe('git extension helpers', () => {
           releaseTag: 'v1.0.0',
         },
       });
-      mockProvider.getRepoInfo.mockReturnValue({
+      vi.mocked(mockProvider.getRepoInfo!).mockReturnValue({
         owner: 'owner',
         repo: 'repo',
       });
-      mockProvider.getLatestRelease.mockResolvedValue('v1.1.0');
+      vi.mocked(mockProvider.getLatestRelease!).mockResolvedValue('v1.1.0');
 
       const result = await checkForExtensionUpdate(
         extension,
@@ -168,7 +168,7 @@ describe('git extension helpers', () => {
   describe('getRepoInfoFromSource', () => {
     it('should call provider getRepoInfo', () => {
       const source = 'owner/repo';
-      mockProvider.getRepoInfo.mockReturnValue({
+      vi.mocked(mockProvider.getRepoInfo!).mockReturnValue({
         owner: 'owner',
         repo: 'repo',
       });

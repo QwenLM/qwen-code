@@ -17,7 +17,7 @@ export interface GitAuth {
 
 export interface ReleaseDownloadResult {
   tagName: string;
-  type: 'git' | 'github-release' | string;
+  type: 'git' | 'github-release' | 'gitlab-release';
 }
 
 export interface GitProvider {

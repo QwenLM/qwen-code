@@ -23,7 +23,7 @@ const debugLogger = createDebugLogger('EXT_GITHUB');
 
 export interface GitReleaseDownloadResult {
   tagName: string;
-  type: 'git' | 'github-release' | 'gitlab-release' | string;
+  type: 'git' | 'github-release' | 'gitlab-release';
 }
 
 /**
