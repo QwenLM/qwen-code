@@ -31,7 +31,7 @@ import {
   Turn,
   type ChatCompressionInfo,
 } from './turn.js';
-import { getCoreSystemPrompt } from './prompts.js';
+import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { setSimulate429 } from '../utils/testUtils.js';
@@ -314,6 +314,8 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -2358,6 +2360,104 @@ Other open files:
           config: expect.any(Object),
           contents,
         },
+        'test-session-id',
+      );
+    });
+
+    it('should use config system prompt override when provided', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.spyOn(client['config'], 'getSystemPrompt').mockReturnValue(
+        'Override prompt',
+      );
+      vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
+        'Saved memory',
+      );
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Override prompt with memory',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
+        'Override prompt',
+        'Saved memory',
+        undefined,
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Override prompt with memory',
+          }),
+        }),
+        'test-session-id',
+      );
+    });
+
+    it('should append config appendSystemPrompt to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
+        'Be extra concise.',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        '',
+        'test-model',
+        'Be extra concise.',
+      );
+    });
+
+    it('should append config appendSystemPrompt after a config system prompt override', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.spyOn(client['config'], 'getSystemPrompt').mockReturnValue(
+        'Override prompt',
+      );
+      vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
+        'Focus on findings only.',
+      );
+      vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
+        'Saved memory',
+      );
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Override prompt with memory and append',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
+        'Override prompt',
+        'Saved memory',
+        'Focus on findings only.',
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Override prompt with memory and append',
+          }),
+        }),
         'test-session-id',
       );
     });
