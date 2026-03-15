@@ -16,6 +16,26 @@
 
 ### Installation
 
+#### Install from ACP Registry (Recommend)
+1. Install Qwen Code CLI:
+
+   ```bash
+   npm install -g @qwen-code/qwen-code
+   ```
+
+2. Open your JetBrains IDE and navigate to AI Chat tool window.
+
+3. Click **Add ACP Agent**, then click **Install**.
+![Install](assets/integration-jetbrains/install.png)
+
+For users using JetBrains AI Assistant and/or other ACP agents, Click **Install From ACP Registry** in Agents List, then install Qwen Code ACP.
+![Add from Agents List](assets/integration-jetbrains/agents-list.png)
+
+4. The Qwen Code agent should now be available in the AI Assistant panel
+![Qwen Code in JetBrains AI Chat](assets/integration-jetbrains/final.png)
+
+#### Manual Install (for older version of JetBrains IDEs)
+
 1. Install Qwen Code CLI:
 
    ```bash
