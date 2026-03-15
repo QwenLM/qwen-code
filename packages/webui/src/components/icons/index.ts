@@ -58,3 +58,6 @@ export { ThinkingIcon, TerminalIcon } from './SpecialIcons.js';
 
 // Stop icon
 export { StopIcon } from './StopIcon.js';
+
+// Microphone icon (for voice input)
+export { MicrophoneIcon } from './MicrophoneIcon.js';
