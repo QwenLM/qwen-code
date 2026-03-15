@@ -975,6 +975,8 @@ export async function loadCliConfig(
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)
       : undefined,
+    allowedSkills: settings.skills?.allowed,
+    excludedSkills: settings.skills?.excluded,
     approvalMode,
     accessibility: {
       ...settings.ui?.accessibility,

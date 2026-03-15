@@ -534,6 +534,26 @@
         }
       }
     },
+    "skills": {
+      "description": "Settings for skill filtering and availability.",
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "description": "A list of skill names that are allowed to be invoked. If empty or undefined, all skills are allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded": {
+          "description": "A list of skill names to exclude from availability.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "advanced": {
       "description": "Advanced settings for power users.",
       "type": "object",

@@ -133,8 +133,43 @@ export class SkillManager {
     // Sort by name for consistent ordering
     skills.sort((a, b) => a.name.localeCompare(b.name));
 
-    debugLogger.info(`Listed ${skills.length} unique skills`);
-    return skills;
+    const filteredSkills = this.filterSkills(skills);
+
+    debugLogger.info(`Listed ${filteredSkills.length} unique skills`);
+    return filteredSkills;
+  }
+
+  /**
+   * Filters skills based on allowed and excluded lists from config.
+   *
+   * @param skills - Skills to filter
+   * @returns Filtered skills
+   */
+  private filterSkills(skills: SkillConfig[]): SkillConfig[] {
+    const filter = this.config.getSkillsFilter();
+    const allowed = filter.allowed;
+    const excluded = filter.excluded || [];
+
+    if (!allowed || allowed.length === 0) {
+      if (excluded.length === 0) {
+        return skills;
+      }
+      const result = skills.filter((skill) => !excluded.includes(skill.name));
+      if (result.length < skills.length) {
+        debugLogger.debug(
+          `Filtered out ${skills.length - result.length} excluded skills`,
+        );
+      }
+      return result;
+    }
+
+    const result = skills.filter(
+      (skill) => allowed.includes(skill.name) && !excluded.includes(skill.name),
+    );
+    debugLogger.debug(
+      `Filtered skills by allowed list: ${result.length}/${skills.length}`,
+    );
+    return result;
   }
 
   /**

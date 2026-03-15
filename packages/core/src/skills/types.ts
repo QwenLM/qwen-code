@@ -83,6 +83,14 @@ export interface ListSkillsOptions {
   force?: boolean;
 }
 
+export interface SkillFilterConfig {
+  /** Whitelist of skill names that can be invoked. If empty, all skills are candidates. */
+  allowed?: string[];
+
+  /** Blacklist of skill names that should be disabled. */
+  excluded?: string[];
+}
+
 /**
  * Error thrown when a skill operation fails.
  */
