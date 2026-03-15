@@ -509,6 +509,7 @@ export class CoreToolScheduler {
             : undefined;
 
           // Preserve diff for cancelled edit operations
+          // Preserve plan content for cancelled plan operations
           let resultDisplay: ToolResultDisplay | undefined = undefined;
           if (currentCall.status === 'awaiting_approval') {
             const waitingCall = currentCall as WaitingToolCall;
@@ -519,6 +520,13 @@ export class CoreToolScheduler {
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
+              };
+            } else if (waitingCall.confirmationDetails.type === 'plan') {
+              resultDisplay = {
+                type: 'plan_summary',
+                message: 'Plan was rejected. Remaining in plan mode.',
+                plan: waitingCall.confirmationDetails.plan,
+                rejected: true,
               };
             }
           } else if (currentCall.status === 'executing') {
