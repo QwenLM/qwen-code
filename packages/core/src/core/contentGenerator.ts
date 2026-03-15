@@ -55,6 +55,7 @@ export interface ContentGenerator {
 export enum AuthType {
   USE_OPENAI = 'openai',
   USE_LM_STUDIO = 'lm-studio',
+  USE_OLLAMA = 'ollama',
   QWEN_OAUTH = 'qwen-oauth',
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
@@ -307,7 +308,11 @@ export async function createContentGenerator(
 
   let baseGenerator: ContentGenerator;
 
-  if (authType === AuthType.USE_OPENAI || authType === AuthType.USE_LM_STUDIO) {
+  if (
+    authType === AuthType.USE_OPENAI ||
+    authType === AuthType.USE_LM_STUDIO ||
+    authType === AuthType.USE_OLLAMA
+  ) {
     const { createOpenAIContentGenerator } = await import(
       './openaiContentGenerator/index.js'
     );

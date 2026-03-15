@@ -29,6 +29,16 @@ export function buildAuthMethods(): AuthMethod[] {
       },
     },
     {
+      id: AuthType.USE_OLLAMA,
+      name: 'Ollama',
+      description:
+        'Connect to Ollama local models (defaults to http://localhost:11434/v1)',
+      _meta: {
+        type: 'terminal',
+        args: ['--auth-type=ollama'],
+      },
+    },
+    {
       id: AuthType.QWEN_OAUTH,
       name: 'Qwen OAuth',
       description:

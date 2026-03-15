@@ -72,6 +72,11 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: ['LMSTUDIO_BASE_URL'],
     model: ['LMSTUDIO_MODEL'],
   },
+  ollama: {
+    apiKey: ['OLLAMA_API_KEY'],
+    baseUrl: ['OLLAMA_BASE_URL'],
+    model: ['OLLAMA_MODEL'],
+  },
   anthropic: {
     apiKey: ['ANTHROPIC_API_KEY'],
     baseUrl: ['ANTHROPIC_BASE_URL'],

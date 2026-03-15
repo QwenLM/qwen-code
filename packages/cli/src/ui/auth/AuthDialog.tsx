@@ -47,7 +47,8 @@ type ViewLevel =
   | 'region-select'
   | 'api-key-input'
   | 'custom-info'
-  | 'lm-studio-input';
+  | 'lm-studio-input'
+  | 'ollama-input';
 
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
@@ -71,6 +72,11 @@ export function AuthDialog(): React.JSX.Element {
   const [lmStudioStep, setLmStudioStep] = useState<'baseUrl' | 'apiKey'>(
     'baseUrl',
   );
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState<string>(
+    'http://localhost:11434/v1',
+  );
+  const [ollamaApiKey, setOllamaApiKey] = useState<string>('');
+  const [ollamaStep, setOllamaStep] = useState<'baseUrl' | 'apiKey'>('baseUrl');
 
   // Main authentication entries (flat three-option layout)
   const mainItems: Array<{
@@ -113,6 +119,15 @@ export function AuthDialog(): React.JSX.Element {
         'Local \u00B7 No API key required \u00B7 Run models on your machine',
       ),
       value: AuthType.USE_LM_STUDIO,
+    },
+    {
+      key: AuthType.USE_OLLAMA,
+      title: t('Ollama'),
+      label: t('Ollama'),
+      description: t(
+        'Local \u00B7 No API key required \u00B7 Run models on your machine',
+      ),
+      value: AuthType.USE_OLLAMA,
     },
     {
       key: 'LOGOUT',
@@ -173,6 +188,7 @@ export function AuthDialog(): React.JSX.Element {
   const authTypeToMainOption = (authType: AuthType): MainOption => {
     if (authType === AuthType.QWEN_OAUTH) return AuthType.QWEN_OAUTH;
     if (authType === AuthType.USE_LM_STUDIO) return AuthType.USE_LM_STUDIO;
+    if (authType === AuthType.USE_OLLAMA) return AuthType.USE_OLLAMA;
     if (authType === AuthType.USE_OPENAI && isCurrentlyCodingPlan)
       return 'CODING_PLAN';
     return 'API_KEY';
@@ -226,6 +242,11 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
+    if (value === AuthType.USE_OLLAMA) {
+      setViewLevel('ollama-input');
+      return;
+    }
+
     if (value === 'LOGOUT') {
       await onAuthSelect(undefined);
       return;
@@ -262,10 +283,23 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // Submit LM Studio credentials - pass baseUrl and apiKey to onAuthSelect
     await onAuthSelect(AuthType.USE_LM_STUDIO, {
       apiKey: lmStudioApiKey,
       baseUrl: lmStudioBaseUrl,
+    });
+  };
+
+  const handleOllamaSubmit = async () => {
+    setErrorMessage(null);
+
+    if (!ollamaApiKey.trim()) {
+      setErrorMessage(t('API key cannot be empty.'));
+      return;
+    }
+
+    await onAuthSelect(AuthType.USE_OLLAMA, {
+      apiKey: ollamaApiKey,
+      baseUrl: ollamaBaseUrl,
     });
   };
 
@@ -276,10 +310,12 @@ export function AuthDialog(): React.JSX.Element {
     if (
       viewLevel === 'region-select' ||
       viewLevel === 'custom-info' ||
-      viewLevel === 'lm-studio-input'
+      viewLevel === 'lm-studio-input' ||
+      viewLevel === 'ollama-input'
     ) {
       setViewLevel('main');
       setLmStudioStep('baseUrl');
+      setOllamaStep('baseUrl');
     } else if (viewLevel === 'api-key-input') {
       setViewLevel('region-select');
     }
@@ -302,6 +338,15 @@ export function AuthDialog(): React.JSX.Element {
         if (viewLevel === 'lm-studio-input') {
           if (lmStudioStep === 'apiKey') {
             setLmStudioStep('baseUrl');
+          } else {
+            handleGoBack();
+          }
+          return;
+        }
+
+        if (viewLevel === 'ollama-input') {
+          if (ollamaStep === 'apiKey') {
+            setOllamaStep('baseUrl');
           } else {
             handleGoBack();
           }
@@ -472,6 +517,74 @@ export function AuthDialog(): React.JSX.Element {
     </>
   );
 
+  const renderOllamaInputView = () => (
+    <>
+      <Box marginTop={1}>
+        <Text bold color={theme.text.primary}>
+          {t('Ollama')}
+        </Text>
+      </Box>
+      <Box marginTop={0}>
+        <Text color={theme.text.secondary}>
+          {t('Connect to local models via Ollama')}
+        </Text>
+      </Box>
+
+      {ollamaStep === 'baseUrl' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Server URL:')}</Text>
+          </Box>
+          <Box marginTop={0}>
+            <TextInput
+              value={ollamaBaseUrl}
+              onChange={setOllamaBaseUrl}
+              onSubmit={() => setOllamaStep('apiKey')}
+              placeholder={t('http://localhost:11434/v1')}
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('↑↓ to navigate, Enter to continue, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {ollamaStep === 'apiKey' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Server')}:{' '}
+              <Text color={theme.text.primary}>{ollamaBaseUrl}</Text>
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('API Key:')}</Text>
+          </Box>
+          <Box marginTop={0}>
+            <TextInput
+              value={ollamaApiKey}
+              onChange={setOllamaApiKey}
+              onSubmit={handleOllamaSubmit}
+              placeholder={t('Enter your API key (optional for local models)')}
+            />
+          </Box>
+          {errorMessage && (
+            <Box marginTop={1}>
+              <Text color={theme.status.error}>{errorMessage}</Text>
+            </Box>
+          )}
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('↑↓ to navigate, Enter to submit, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+    </>
+  );
+
   const getViewTitle = () => {
     switch (viewLevel) {
       case 'main':
@@ -484,6 +597,8 @@ export function AuthDialog(): React.JSX.Element {
         return t('Custom Configuration');
       case 'lm-studio-input':
         return t('LM Studio');
+      case 'ollama-input':
+        return t('Ollama');
       default:
         return t('Select Authentication Method');
     }
@@ -504,6 +619,7 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'api-key-input' && renderApiKeyInputView()}
       {viewLevel === 'custom-info' && renderCustomInfoView()}
       {viewLevel === 'lm-studio-input' && renderLmStudioInputView()}
+      {viewLevel === 'ollama-input' && renderOllamaInputView()}
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>

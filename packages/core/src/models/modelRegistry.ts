@@ -7,7 +7,10 @@
 import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import {
+  DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+} from '../core/openaiContentGenerator/constants.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -50,6 +53,8 @@ export class ModelRegistry {
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
       case AuthType.USE_OPENAI:
         return DEFAULT_OPENAI_BASE_URL;
+      case AuthType.USE_OLLAMA:
+        return DEFAULT_OLLAMA_BASE_URL;
       default:
         return '';
     }
