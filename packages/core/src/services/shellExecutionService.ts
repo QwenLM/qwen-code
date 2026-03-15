@@ -466,6 +466,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
+        let outputEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -474,6 +475,7 @@ export class ShellExecutionService {
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
+        let totalBytesReceived = 0;
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
@@ -588,21 +590,33 @@ export class ShellExecutionService {
           }
         });
 
+        const ensureDecoder = (data: Buffer) => {
+          if (decoder) {
+            return;
+          }
+
+          const encoding = getCachedEncodingForBuffer(data);
+          try {
+            decoder = new TextDecoder(encoding);
+            outputEncoding = encoding;
+          } catch {
+            decoder = new TextDecoder('utf-8');
+            outputEncoding = 'utf-8';
+          }
+        };
+
         const handleOutput = (data: Buffer) => {
+          // Capture raw output immediately. Rendering the headless terminal is
+          // slower than appending a Buffer, and rapid PTY output can otherwise
+          // overrun the render queue before finalize() races on exit.
+          ensureDecoder(data);
+          outputChunks.push(data);
+          totalBytesReceived += data.length;
+          const bytesReceived = totalBytesReceived;
+
           processingChain = processingChain.then(
             () =>
               new Promise<void>((resolve) => {
-                if (!decoder) {
-                  const encoding = getCachedEncodingForBuffer(data);
-                  try {
-                    decoder = new TextDecoder(encoding);
-                  } catch {
-                    decoder = new TextDecoder('utf-8');
-                  }
-                }
-
-                outputChunks.push(data);
-
                 if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
                   const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
                   sniffedBytes = sniffBuffer.length;
@@ -614,7 +628,7 @@ export class ShellExecutionService {
                 }
 
                 if (isStreamingRawContent) {
-                  const decodedChunk = decoder.decode(data, { stream: true });
+                  const decodedChunk = decoder!.decode(data, { stream: true });
                   isWriting = true;
                   headlessTerminal.write(decodedChunk, () => {
                     render();
@@ -622,13 +636,9 @@ export class ShellExecutionService {
                     resolve();
                   });
                 } else {
-                  const totalBytes = outputChunks.reduce(
-                    (sum, chunk) => sum + chunk.length,
-                    0,
-                  );
                   onOutputEvent({
                     type: 'binary_progress',
-                    bytesReceived: totalBytes,
+                    bytesReceived,
                   });
                   resolve();
                 }
@@ -651,9 +661,24 @@ export class ShellExecutionService {
               render(true);
               const finalBuffer = Buffer.concat(outputChunks);
 
+              // Build output from the raw accumulated chunks instead of
+              // the xterm buffer. The xterm terminal wraps long lines
+              // into multiple buffer rows, so its scrollback limit
+              // (measured in rows) can silently discard content when
+              // logical lines are wider than the terminal columns.
+              // The raw chunks are complete and not subject to this.
+              const decodedOutput = new TextDecoder(outputEncoding).decode(
+                finalBuffer,
+              );
+              // Strip ANSI escapes and normalize pty CRLF line endings.
+              const fullOutput = stripAnsi(decodedOutput)
+                .replace(/\r\n/g, '\n')
+                .replace(/\r/g, '\n')
+                .trim();
+
               resolve({
                 rawOutput: finalBuffer,
-                output: getFullBufferText(headlessTerminal),
+                output: fullOutput,
                 exitCode,
                 signal: signal ?? null,
                 error,
@@ -665,15 +690,30 @@ export class ShellExecutionService {
               });
             };
 
-            // Always try to flush pending terminal writes before
-            // finalizing so result.output is as complete as possible.
-            // Race against abort or a short timeout to avoid hanging.
-            const processingComplete = processingChain.then(() => 'processed');
-            const deadline = new Promise<'timeout'>((res) =>
-              setTimeout(() => res('timeout'), SIGKILL_TIMEOUT_MS),
+            // Flush pending processing, then drain any late pty data.
+            //
+            // node-pty can fire onExit before all onData events have
+            // been delivered — the kernel pty read buffer may still
+            // have data in flight. Each onData appends to
+            // processingChain, so we:
+            //   1. Wait for the current processingChain to settle.
+            //   2. Yield to the event loop (setImmediate) so any
+            //      pending I/O callbacks — including late onData
+            //      events — get a chance to fire and append to
+            //      processingChain.
+            //   3. Wait for processingChain again to flush those.
+            //   4. Repeat once more for safety, then finalize.
+            const flushChain = () => processingChain.then(() => {});
+            const deadline = new Promise<void>((res) =>
+              setTimeout(res, SIGKILL_TIMEOUT_MS),
             );
+            const drain = () =>
+              new Promise<void>((res) => setImmediate(res)).then(flushChain);
 
-            void Promise.race([processingComplete, deadline]).then(() => {
+            void Promise.race([
+              flushChain().then(drain).then(drain),
+              deadline,
+            ]).then(() => {
               finalize();
             });
           },
