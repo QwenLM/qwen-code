@@ -6,6 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
   getSettingsSchema,
@@ -13,6 +14,8 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+
+const testFileDir = path.dirname(fileURLToPath(import.meta.url));
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
@@ -337,8 +340,8 @@ describe('SettingsSchema', () => {
       const jsonSchema = JSON.parse(
         readFileSync(
           path.resolve(
-            process.cwd(),
-            '../vscode-ide-companion/schemas/settings.schema.json',
+            testFileDir,
+            '../../../vscode-ide-companion/schemas/settings.schema.json',
           ),
           'utf8',
         ),
