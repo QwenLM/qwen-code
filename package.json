@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "@jaydennleemc/qwen-code-local",
   "version": "0.12.3",
   "engines": {
     "node": ">=20.0.0"
@@ -10,7 +10,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QwenLM/qwen-code.git"
+    "url": "git+https://github.com/jaydennleemc/qwen-code.git"
   },
   "config": {
     "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.12.3"
@@ -68,7 +68,7 @@
     "baseline-browser-mapping": "^2.9.19"
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen-local": "dist/cli.js"
   },
   "files": [
     "dist/",

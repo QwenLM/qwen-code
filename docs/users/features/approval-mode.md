@@ -245,7 +245,7 @@ Default Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Default Mode
 
 ```
 // Project-level: ./.qwen/settings.json
-// User-level: ~/.qwen/settings.json
+// User-level: ~/.qwen_local/settings.json
 {
   "permissions": {
 "defaultMode": "auto-edit",  // or "plan" or "yolo"

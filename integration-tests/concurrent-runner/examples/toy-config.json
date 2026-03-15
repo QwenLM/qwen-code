@@ -2,7 +2,7 @@
   "concurrency": 2,
   "yolo": true,
   "source_repo": "/Users/andy/workspace/projects/qwen-code/integration-tests/concurrent-runner/examples/toy-project",
-  "worktree_base": "~/.qwen/worktrees",
+  "worktree_base": "~/.qwen_local/worktrees",
   "outputs_dir": "./examples/test-run",
   "results_file": "./examples/test-run/results.json",
   "keep_worktree": false,

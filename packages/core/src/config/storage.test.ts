@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { Storage } from './storage.js';
 
 describe('Storage – getGlobalSettingsPath', () => {
-  it('returns path to ~/.qwen/settings.json', () => {
+  it('returns path to ~/.qwen_local/settings.json', () => {
     const expected = path.join(os.homedir(), '.qwen', 'settings.json');
     expect(Storage.getGlobalSettingsPath()).toBe(expected);
   });
@@ -25,7 +25,7 @@ describe('Storage – additional helpers', () => {
     expect(storage.getWorkspaceSettingsPath()).toBe(expected);
   });
 
-  it('getUserCommandsDir returns ~/.qwen/commands', () => {
+  it('getUserCommandsDir returns ~/.qwen_local/commands', () => {
     const expected = path.join(os.homedir(), '.qwen', 'commands');
     expect(Storage.getUserCommandsDir()).toBe(expected);
   });
@@ -35,7 +35,7 @@ describe('Storage – additional helpers', () => {
     expect(storage.getProjectCommandsDir()).toBe(expected);
   });
 
-  it('getMcpOAuthTokensPath returns ~/.qwen/mcp-oauth-tokens.json', () => {
+  it('getMcpOAuthTokensPath returns ~/.qwen_local/mcp-oauth-tokens.json', () => {
     const expected = path.join(os.homedir(), '.qwen', 'mcp-oauth-tokens.json');
     expect(Storage.getMcpOAuthTokensPath()).toBe(expected);
   });

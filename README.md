@@ -125,11 +125,11 @@ Use this if you want more flexibility over which provider and model to use. Supp
 - **Anthropic**: Claude models
 - **Google GenAI**: Gemini models
 
-The **recommended** way to configure models and providers is by editing `~/.qwen/settings.json` (create it if it doesn't exist). This file lets you define all available models, API keys, and default settings in one place.
+The **recommended** way to configure models and providers is by editing `~/.qwen_local/settings.json` (create it if it doesn't exist). This file lets you define all available models, API keys, and default settings in one place.
 
 ##### Quick Setup in 3 Steps
 
-**Step 1:** Create or edit `~/.qwen/settings.json`
+**Step 1:** Create or edit `~/.qwen_local/settings.json`
 
 Here is a complete example:
 
@@ -349,7 +349,7 @@ Use the `/model` command at any time to switch between all configured models.
 
 > **Tip:** You can also set API keys via `export` in your shell or `.env` files, which take higher priority than `settings.json` → `env`. See the [authentication guide](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/) for full details.
 
-> **Security note:** Never commit API keys to version control. The `~/.qwen/settings.json` file is in your home directory and should stay private.
+> **Security note:** Never commit API keys to version control. The `~/.qwen_local/settings.json` file is in your home directory and should stay private.
 
 ## Usage
 
@@ -417,10 +417,10 @@ Build on top of Qwen Code with the TypeScript SDK:
 
 Qwen Code can be configured via `settings.json`, environment variables, and CLI flags.
 
-| File                    | Scope         | Description                                                                             |
-| ----------------------- | ------------- | --------------------------------------------------------------------------------------- |
-| `~/.qwen/settings.json` | User (global) | Applies to all your Qwen Code sessions. **Recommended for `modelProviders` and `env`.** |
-| `.qwen/settings.json`   | Project       | Applies only when running Qwen Code in this project. Overrides user settings.           |
+| File                          | Scope         | Description                                                                             |
+| ----------------------------- | ------------- | --------------------------------------------------------------------------------------- |
+| `~/.qwen_local/settings.json` | User (global) | Applies to all your Qwen Code sessions. **Recommended for `modelProviders` and `env`.** |
+| `.qwen/settings.json`         | Project       | Applies only when running Qwen Code in this project. Overrides user settings.           |
 
 The most commonly used top-level fields in `settings.json`:
 

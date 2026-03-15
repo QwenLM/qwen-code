@@ -266,7 +266,7 @@ class GitWorktreeManager:
         """Collect the session log file from the worktree's chat recording.
 
         Session logs are stored at:
-        ~/.qwen/projects/{projectId}/chats/{sessionId}.jsonl
+        ~/.qwen_local/projects/{projectId}/chats/{sessionId}.jsonl
 
         Where projectId is the sanitized worktree path.
 
@@ -881,7 +881,7 @@ def load_config(config_path: Path) -> RunConfig:
         concurrency=data.get("concurrency", 4),
         yolo=data.get("yolo", True),
         source_repo=Path(data.get("source_repo", ".")).resolve(),
-        worktree_base=Path(data.get("worktree_base", "~/.qwen/worktrees")).expanduser(),
+        worktree_base=Path(data.get("worktree_base", "~/.qwen_local/worktrees")).expanduser(),
         outputs_dir=Path(data.get("outputs_dir", "./outputs")),
         results_file=Path(data.get("results_file", "./results.json")),
         branch=data.get("branch"),

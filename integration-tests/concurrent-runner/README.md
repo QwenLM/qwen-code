@@ -34,7 +34,7 @@ Create a JSON configuration file (see `config.example.json`):
   "concurrency": 3,
   "yolo": true,
   "source_repo": ".",
-  "worktree_base": "~/.qwen/worktrees",
+  "worktree_base": "~/.qwen_local/worktrees",
   "outputs_dir": "./outputs",
   "results_file": "./results.json",
   "tasks": [
@@ -50,17 +50,17 @@ Create a JSON configuration file (see `config.example.json`):
 
 ### Configuration Options
 
-| Option          | Type   | Default           | Description                                   |
-| --------------- | ------ | ----------------- | --------------------------------------------- |
-| `concurrency`   | int    | 4                 | Maximum parallel executions                   |
-| `yolo`          | bool   | true              | Auto-approve all actions                      |
-| `source_repo`   | string | .                 | Source git repository path                    |
-| `branch`        | string | null              | Git branch to checkout (uses default if null) |
-| `worktree_base` | string | ~/.qwen/worktrees | Base directory for git worktrees              |
-| `outputs_dir`   | string | ./outputs         | Directory for captured output                 |
-| `results_file`  | string | ./results.json    | JSON file for run tracking                    |
-| `tasks`         | array  | []                | List of task definitions                      |
-| `models`        | array  | []                | List of model identifiers                     |
+| Option          | Type   | Default                 | Description                                   |
+| --------------- | ------ | ----------------------- | --------------------------------------------- |
+| `concurrency`   | int    | 4                       | Maximum parallel executions                   |
+| `yolo`          | bool   | true                    | Auto-approve all actions                      |
+| `source_repo`   | string | .                       | Source git repository path                    |
+| `branch`        | string | null                    | Git branch to checkout (uses default if null) |
+| `worktree_base` | string | ~/.qwen_local/worktrees | Base directory for git worktrees              |
+| `outputs_dir`   | string | ./outputs               | Directory for captured output                 |
+| `results_file`  | string | ./results.json          | JSON file for run tracking                    |
+| `tasks`         | array  | []                      | List of task definitions                      |
+| `models`        | array  | []                      | List of model identifiers                     |
 
 ### Task Definition
 
@@ -95,7 +95,7 @@ outputs/
       "task_name": "Security Code Review",
       "model": "qwen3-coder-plus",
       "status": "succeeded",
-      "worktree_path": "~/.qwen/worktrees/run-abc123",
+      "worktree_path": "~/.qwen_local/worktrees/run-abc123",
       "output_dir": "outputs/abc123",
       "logs_dir": "outputs/abc123/logs",
       "started_at": "2026-01-28T10:00:00",

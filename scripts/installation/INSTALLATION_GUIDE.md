@@ -22,7 +22,7 @@ We provide platform-specific installation scripts:
 - Checks for existing Node.js installation and version
 - Installs Node.js 20+ if needed using NVM
 - Installs Qwen Code globally with source information
-- Stores the source information in `~/.qwen/source.json`
+- Stores the source information in `~/.qwen_local/source.json`
 
 #### Usage:
 
@@ -49,7 +49,7 @@ sh install-qwen-with-source.sh --help
 1. The script accepts a `--source` parameter to specify where Qwen Code is being installed from
 2. It installs Node.js if needed
 3. It installs Qwen Code globally
-4. It creates `~/.qwen/source.json` with the specified source information
+4. It creates `~/.qwen_local/source.json` with the specified source information
 
 #### Important Notes:
 
@@ -137,7 +137,7 @@ This feature implements the ability to capture and store the installation source
 
 The installation source is stored in a separate file at:
 
-- **Unix/Linux/macOS**: `~/.qwen/source.json`
+- **Unix/Linux/macOS**: `~/.qwen_local/source.json`
 - **Windows**: `%USERPROFILE%\.qwen\source.json` (equivalent to `C:\Users\{username}\.qwen\source.json`)
 
 ### File Format
@@ -170,7 +170,7 @@ After installation and restarting your terminal (or sourcing your shell configur
 **Linux/macOS:**
 
 ```bash
-cat ~/.qwen/source.json
+cat ~/.qwen_local/source.json
 ```
 
 **Windows:**

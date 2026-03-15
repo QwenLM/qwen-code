@@ -496,7 +496,7 @@ create_source_json() {
 }
 EOF
 
-    log_success "Installation source saved to ~/.qwen/source.json"
+    log_success "Installation source saved to ~/.qwen_local/source.json"
 }
 
 # ============================================

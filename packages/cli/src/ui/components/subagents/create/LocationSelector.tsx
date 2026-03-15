@@ -23,7 +23,7 @@ const locationOptions: LocationOption[] = [
   },
   {
     get label() {
-      return t('User Level (~/.qwen/agents/)');
+      return t('User Level (~/.qwen_local/agents/)');
     },
     value: 'user',
   },

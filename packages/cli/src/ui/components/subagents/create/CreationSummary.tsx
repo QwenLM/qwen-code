@@ -264,7 +264,7 @@ export function CreationSummary({
           <Text>
             {state.location === 'project'
               ? t('Project Level (.qwen/agents/)')
-              : t('User Level (~/.qwen/agents/)')}
+              : t('User Level (~/.qwen_local/agents/)')}
           </Text>
         </Box>
 

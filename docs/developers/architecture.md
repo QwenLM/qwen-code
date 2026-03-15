@@ -72,7 +72,7 @@ Qwen Code offers multiple ways to configure its behavior:
 1. Command-line arguments
 2. Environment variables
 3. Project settings file (`.qwen/settings.json`)
-4. User settings file (`~/.qwen/settings.json`)
+4. User settings file (`~/.qwen_local/settings.json`)
 5. System settings files
 6. Default values
 

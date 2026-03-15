@@ -6,11 +6,11 @@ Qwen Code is built for multilingual workflows: it supports UI localization (i18n
 
 From a user point of view, Qwen Code’s “internationalization” spans multiple layers:
 
-| Capability / Setting     | What it controls                                                       | Where stored                 |
-| ------------------------ | ---------------------------------------------------------------------- | ---------------------------- |
-| `/language ui`           | Terminal UI text (menus, system messages, prompts)                     | `~/.qwen/settings.json`      |
-| `/language output`       | Language the AI responds in (an output preference, not UI translation) | `~/.qwen/output-language.md` |
-| Custom UI language packs | Overrides/extends built-in UI translations                             | `~/.qwen/locales/*.js`       |
+| Capability / Setting     | What it controls                                                       | Where stored                       |
+| ------------------------ | ---------------------------------------------------------------------- | ---------------------------------- |
+| `/language ui`           | Terminal UI text (menus, system messages, prompts)                     | `~/.qwen_local/settings.json`      |
+| `/language output`       | Language the AI responds in (an output preference, not UI translation) | `~/.qwen_local/output-language.md` |
+| Custom UI language packs | Overrides/extends built-in UI translations                             | `~/.qwen_local/locales/*.js`       |
 
 ## UI Language
 
@@ -55,7 +55,7 @@ The LLM output language controls what language the AI assistant responds in, reg
 
 ### How It Works
 
-The LLM output language is controlled by a rule file at `~/.qwen/output-language.md`. This file is automatically included in the LLM's context during startup, instructing it to respond in the specified language.
+The LLM output language is controlled by a rule file at `~/.qwen_local/output-language.md`. This file is automatically included in the LLM's context during startup, instructing it to respond in the specified language.
 
 ### Auto-detection
 
@@ -87,7 +87,7 @@ Any language name works. The LLM will be instructed to respond in that language.
 ### File Location
 
 ```
-~/.qwen/output-language.md
+~/.qwen_local/output-language.md
 ```
 
 ## Configuration
@@ -108,10 +108,10 @@ This influences auto-detection on first startup (if you haven’t set a UI langu
 
 ## Custom Language Packs
 
-For UI translations, you can create custom language packs in `~/.qwen/locales/`:
+For UI translations, you can create custom language packs in `~/.qwen_local/locales/`:
 
-- Example: `~/.qwen/locales/es.js` for Spanish
-- Example: `~/.qwen/locales/fr.js` for French
+- Example: `~/.qwen_local/locales/es.js` for Spanish
+- Example: `~/.qwen_local/locales/fr.js` for French
 
 User directory takes precedence over built-in translations.
 
@@ -123,7 +123,7 @@ User directory takes precedence over built-in translations.
 ### Language Pack Format
 
 ```javascript
-// ~/.qwen/locales/es.js
+// ~/.qwen_local/locales/es.js
 export default {
   Hello: 'Hola',
   Settings: 'Configuracion',

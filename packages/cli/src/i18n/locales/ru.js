@@ -214,7 +214,8 @@ export default {
   // Агенты - Мастер создания
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Уровень проекта (.qwen/agents/)',
-  'User Level (~/.qwen/agents/)': 'Уровень пользователя (~/.qwen/agents/)',
+  'User Level (~/.qwen_local/agents/)':
+    'Уровень пользователя (~/.qwen_local/agents/)',
   '✅ Subagent Created Successfully!': '✅ Подагент успешно создан!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Подагент "{{name}}" сохранен на уровне {{level}}.',

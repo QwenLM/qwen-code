@@ -205,7 +205,7 @@ export default {
   // Agents - Creation Wizard
   // ============================================================================
   'Project Level (.qwen/agents/)': '项目级 (.qwen/agents/)',
-  'User Level (~/.qwen/agents/)': '用户级 (~/.qwen/agents/)',
+  'User Level (~/.qwen_local/agents/)': '用户级 (~/.qwen_local/agents/)',
   '✅ Subagent Created Successfully!': '✅ 子智能体创建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     '子智能体 "{{name}}" 已保存到 {{level}} 级别。',
