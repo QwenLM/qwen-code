@@ -375,7 +375,6 @@ export interface ConfigParameters {
   skipLoopDetection?: boolean;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
-  enableToolOutputTruncation?: boolean;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -530,7 +529,6 @@ export class Config {
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
-  private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType;
@@ -651,7 +649,6 @@ export class Config {
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
-    this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.channel = params.channel;
     this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
     this.storage = new Storage(this.targetDir);
@@ -1733,15 +1730,8 @@ export class Config {
     return this.skipStartupContext;
   }
 
-  getEnableToolOutputTruncation(): boolean {
-    return this.enableToolOutputTruncation;
-  }
-
   getTruncateToolOutputThreshold(): number {
-    if (
-      !this.enableToolOutputTruncation ||
-      this.truncateToolOutputThreshold <= 0
-    ) {
+    if (this.truncateToolOutputThreshold <= 0) {
       return Number.POSITIVE_INFINITY;
     }
 
@@ -1749,7 +1739,7 @@ export class Config {
   }
 
   getTruncateToolOutputLines(): number {
-    if (!this.enableToolOutputTruncation || this.truncateToolOutputLines <= 0) {
+    if (this.truncateToolOutputLines <= 0) {
       return Number.POSITIVE_INFINITY;
     }
 

@@ -941,15 +941,6 @@ const SETTINGS_SCHEMA = {
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
       },
-      enableToolOutputTruncation: {
-        type: 'boolean',
-        label: 'Enable Tool Output Truncation',
-        category: 'General',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable truncation of large tool outputs.',
-        showInDialog: false,
-      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',

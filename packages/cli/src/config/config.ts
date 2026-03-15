@@ -1027,7 +1027,6 @@ export async function loadCliConfig(
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
-    enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {

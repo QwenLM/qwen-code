@@ -1220,7 +1220,6 @@ export class CoreToolScheduler {
         if (
           typeof content === 'string' &&
           toolName === ShellTool.Name &&
-          this.config.getEnableToolOutputTruncation() &&
           this.config.getTruncateToolOutputThreshold() > 0 &&
           this.config.getTruncateToolOutputLines() > 0
         ) {

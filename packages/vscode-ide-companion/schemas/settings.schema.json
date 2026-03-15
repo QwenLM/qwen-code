@@ -450,11 +450,6 @@
           "type": "boolean",
           "default": true
         },
-        "enableToolOutputTruncation": {
-          "description": "Enable truncation of large tool outputs.",
-          "type": "boolean",
-          "default": true
-        },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
