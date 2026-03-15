@@ -116,6 +116,7 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
+  'List available skills.': '列出可用技能。',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
@@ -437,6 +438,7 @@ export default {
     '当前支持以下编辑器。请注意，某些编辑器无法在沙箱模式下使用。',
   'Your preferred editor is:': '您的首选编辑器是：',
   'Manage extensions': '管理扩展',
+  'Manage installed extensions': '管理已安装的扩展',
   'List active extensions': '列出活动扩展',
   'Update extensions. Usage: update <extension-names>|--all':
     '更新扩展。用法：update <extension-names>|--all',
@@ -623,6 +625,37 @@ export default {
   'Failed to configure {{terminalName}}.': '配置 {{terminalName}} 失败。',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     '您的终端已配置为支持多行输入（Shift+Enter 和 Ctrl+Enter）的最佳体验。',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': '管理 Qwen Code Hook',
+  'List all configured hooks': '列出所有已配置的 Hook',
+  'Enable a disabled hook': '启用已禁用的 Hook',
+  'Disable an active hook': '禁用已启用的 Hook',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    '将当前会话的消息记录导出到文件',
+  'Export session to HTML format': '将会话导出为 HTML 文件',
+  'Export session to JSON format': '将会话导出为 JSON 文件',
+  'Export session to JSONL format (one message per line)':
+    '将会话导出为 JSONL 文件（每行一条消息）',
+  'Export session to markdown format': '将会话导出为 Markdown 文件',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    '根据你的聊天记录生成个性化编程洞察',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': '恢复先前会话',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    '恢复某次工具调用。这将把对话与文件历史重置到提出该工具调用建议时的状态',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     '无法检测终端类型。支持的终端：VS Code、Cursor、Windsurf 和 Trae。',
   'Terminal "{{terminal}}" is not supported yet.':
