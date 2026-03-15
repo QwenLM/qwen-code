@@ -21,6 +21,7 @@ import type { SubagentManager } from '../subagents/subagent-manager.js';
 import {
   type SubagentConfig,
   SubagentTerminateMode,
+  type RunConfig,
 } from '../subagents/types.js';
 import { ContextState } from '../subagents/subagent.js';
 import {
@@ -40,6 +41,11 @@ export interface TaskParams {
   description: string;
   prompt: string;
   subagent_type: string;
+  /**
+   * Optional runtime configuration overrides for the subagent.
+   * Allows customizing context behavior like useCleanContext, maxContextTokens, etc.
+   */
+  runConfig?: Partial<RunConfig>;
 }
 
 const debugLogger = createDebugLogger('TASK');
@@ -71,6 +77,34 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         subagent_type: {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
+        },
+        runConfig: {
+          type: 'object',
+          description:
+            'Optional runtime configuration overrides for the subagent',
+          properties: {
+            useCleanContext: {
+              type: 'boolean',
+              description: 'Start with clean context, omitting session history',
+            },
+            maxContextTokens: {
+              type: 'number',
+              description: 'Maximum token budget for context',
+            },
+            useStructuredOutput: {
+              type: 'boolean',
+              description: 'Format output using structured summary schema',
+            },
+            max_time_minutes: {
+              type: 'number',
+              description: 'Maximum execution time in minutes',
+            },
+            max_turns: {
+              type: 'number',
+              description: 'Maximum number of conversational turns',
+            },
+          },
+          additionalProperties: false,
         },
       },
       required: ['description', 'prompt', 'subagent_type'],
@@ -510,6 +544,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
         subagentConfig,
         this.config,
         { eventEmitter: this.eventEmitter },
+        this.params.runConfig, // Pass runtime config overrides
       );
 
       // Create context state with the task prompt

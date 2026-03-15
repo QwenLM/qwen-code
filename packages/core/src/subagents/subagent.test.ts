@@ -79,17 +79,24 @@ vi.mock('../core/contentGenerator.js', async (importOriginal) => {
 });
 vi.mock('../utils/environmentContext.js', () => ({
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
-  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: 'Env Context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
-    },
-    ...(extraHistory ?? []),
-  ]),
+  getInitialChatHistory: vi.fn(
+    async (
+      _config,
+      _useCleanContext = false,
+      _maxContextTokens,
+      extraHistory,
+    ) => [
+      {
+        role: 'user',
+        parts: [{ text: 'Env Context' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      },
+      ...(extraHistory ?? []),
+    ],
+  ),
 }));
 vi.mock('../core/nonInteractiveToolExecutor.js');
 vi.mock('../ide/ide-client.js');

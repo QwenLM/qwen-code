@@ -870,7 +870,12 @@ export class SubAgentScope {
       );
     }
 
-    const envHistory = await getInitialChatHistory(this.runtimeContext);
+    const useCleanContext = this.runConfig.useCleanContext ?? false;
+    const maxContextTokens = this.runConfig.maxContextTokens;
+    const envHistory = await getInitialChatHistory(this.runtimeContext, {
+      useCleanContext,
+      maxContextTokens,
+    });
 
     const start_history = [
       ...envHistory,
@@ -998,6 +1003,30 @@ Important Rules:
  - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
  - Use tools only when necessary to obtain facts or make changes.
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
+
+    // Add structured output instructions if enabled
+    if (this.runConfig.useStructuredOutput) {
+      finalPrompt += `
+
+Output Format:
+When you complete the task, you MUST format your response using the following structured schema:
+
+## Findings
+- List key discoveries, insights, or results here
+- One finding per bullet point
+
+## Files Changed
+- List any files you created or modified (full paths)
+- If no files were changed, write "None"
+
+## Conclusion
+Provide a concise summary of what was accomplished and the final result.
+
+## Recommendations (Optional)
+- Suggest next steps or follow-up actions if applicable
+
+This structured format ensures your results can be efficiently summarized and injected back into the main conversation context.`;
+    }
 
     // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
     const userMemory = this.runtimeContext.getUserMemory();
