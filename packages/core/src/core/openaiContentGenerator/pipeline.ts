@@ -9,6 +9,7 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
+import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -254,23 +255,20 @@ export class ContentGenerationPipeline {
         .candidates?.[0]?.finishReason;
 
     if (isFinishChunk) {
-      if (hasPendingFinish) {
-        // Duplicate finish chunk (e.g. from OpenRouter providers that send two
-        // finish_reason chunks for tool calls). The streaming tool call parser
-        // was already reset after the first finish chunk, so the second one
-        // carries no functionCall parts. Merge only usageMetadata and keep the
-        // candidates (including functionCall parts) from the first finish chunk.
-        const lastResponse =
-          collectedGeminiResponses[collectedGeminiResponses.length - 1];
-        if (response.usageMetadata) {
-          lastResponse.usageMetadata = response.usageMetadata;
-        }
-        setPendingFinish(lastResponse);
-      } else {
-        // This is a finish reason chunk
-        collectedGeminiResponses.push(response);
-        setPendingFinish(response);
+      // This is a finish reason chunk
+      // Don't overwrite a pending finish that already has tool calls
+      const lastCollected =
+        collectedGeminiResponses[collectedGeminiResponses.length - 1];
+      const pendingToolCallCount =
+        lastCollected?.candidates?.[0]?.content?.parts?.filter(
+          (p: Part) => 'functionCall' in p,
+        ).length || 0;
+      if (hasPendingFinish && pendingToolCallCount > 0) {
+        // Skip this finish chunk - preserve the one with tool calls
+        return false;
       }
+      collectedGeminiResponses.push(response);
+      setPendingFinish(response);
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
     } else if (hasPendingFinish) {
       // We have a pending finish chunk, merge this chunk's data into it
