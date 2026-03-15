@@ -16,6 +16,8 @@ export type TransportOptions = {
   model?: string;
   permissionMode?: PermissionMode;
   env?: Record<string, string>;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   abortController?: AbortController;
   debug?: boolean;
   stderr?: (message: string) => void;
@@ -45,6 +47,14 @@ export type TransportOptions = {
    */
   sessionId?: string;
 };
+
+export interface QuerySystemPromptPreset {
+  type: 'preset';
+  preset: 'qwen_code';
+  append?: string;
+}
+
+export type QuerySystemPrompt = string | QuerySystemPromptPreset;
 
 type ToolInput = Record<string, unknown>;
 
@@ -225,6 +235,16 @@ export interface QueryOptions {
    * These variables will be merged with the current process environment.
    */
   env?: Record<string, string>;
+
+  /**
+   * System prompt configuration for the Qwen CLI session.
+   *
+   * - `string`: fully overrides the main session system prompt
+   * - `{ type: 'preset', preset: 'qwen_code', append?: string }`:
+   *   uses Qwen Code's built-in prompt as the base and optionally appends extra
+   *   instructions for the main session
+   */
+  systemPrompt?: QuerySystemPrompt;
 
   /**
    * Permission mode controlling how the SDK handles tool execution approval.
