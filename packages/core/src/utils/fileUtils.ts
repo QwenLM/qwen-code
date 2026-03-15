@@ -614,7 +614,6 @@ export async function processSingleFileContent(
         return {
           llmContent: message,
           returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
-          error: message,
         };
       }
     }
