@@ -58,6 +58,10 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
     return AuthType.USE_OPENAI;
   }
 
+  if (process.env['LMSTUDIO_API_KEY']) {
+    return AuthType.USE_LM_STUDIO;
+  }
+
   if (process.env['GEMINI_API_KEY'] && process.env['GEMINI_MODEL']) {
     return AuthType.USE_GEMINI;
   }

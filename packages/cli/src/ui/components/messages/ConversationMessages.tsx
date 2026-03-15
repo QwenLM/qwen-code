@@ -85,6 +85,41 @@ function getPrefixWidth(prefix: string): number {
   return stringWidth(prefix) + 1;
 }
 
+function parseThinkingContent(text: string): {
+  thinkingContent: string;
+  mainContent: string;
+  hasThinking: boolean;
+} {
+  const thinkPattern = /<think(ing)?>([\s\S]*?)<\/think(ing)?>/g;
+
+  const matches = [...text.matchAll(thinkPattern)];
+
+  if (matches.length === 0) {
+    return { thinkingContent: '', mainContent: text, hasThinking: false };
+  }
+
+  const thinkingParts: string[] = [];
+  for (const match of matches) {
+    const content = match[2]?.trim();
+    if (content) {
+      thinkingParts.push(content);
+    }
+  }
+
+  const hasThinking = thinkingParts.length > 0;
+  if (!hasThinking) {
+    return { thinkingContent: '', mainContent: text, hasThinking: false };
+  }
+
+  const lastMatch = matches[matches.length - 1];
+  const lastIndex = lastMatch.index! + lastMatch[0].length;
+
+  const thinkingContent = thinkingParts.join('\n') + '\n';
+  const mainContent = text.slice(lastIndex).trim();
+
+  return { thinkingContent, mainContent, hasThinking };
+}
+
 const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
   text,
   prefix,
@@ -129,6 +164,9 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
 
+  const { thinkingContent, mainContent, hasThinking } =
+    parseThinkingContent(text);
+
   return (
     <Box flexDirection="row">
       <Box width={prefixWidth}>
@@ -136,14 +174,26 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
           {prefix}
         </Text>
       </Box>
+
       <Box flexGrow={1} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={isPending}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - prefixWidth}
-          textColor={textColor}
-        />
+        {hasThinking && (
+          <MarkdownDisplay
+            text={thinkingContent}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth - prefixWidth}
+            textColor="gray"
+          />
+        )}
+        {mainContent && (
+          <MarkdownDisplay
+            text={mainContent}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth - prefixWidth}
+            textColor={textColor}
+          />
+        )}
       </Box>
     </Box>
   );
@@ -161,15 +211,29 @@ const ContinuationMarkdownMessage: React.FC<
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
 
+  const { thinkingContent, mainContent, hasThinking } =
+    parseThinkingContent(text);
+
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - prefixWidth}
-        textColor={textColor}
-      />
+      {hasThinking && (
+        <MarkdownDisplay
+          text={thinkingContent}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - prefixWidth}
+          textColor="gray"
+        />
+      )}
+      {mainContent && (
+        <MarkdownDisplay
+          text={mainContent}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - prefixWidth}
+          textColor={textColor}
+        />
+      )}
     </Box>
   );
 };

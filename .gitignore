@@ -83,3 +83,7 @@ integration-tests/terminal-capture/scenarios/screenshots/
 # storybook
 *storybook.log
 storybook-static
+
+# Worktrees
+.worktrees
+worktrees
