@@ -52,7 +52,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'custom-model' },
         modelProviders: {
-          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+          customOpenAI: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'CUSTOM_API_KEY',
+            models: [{ id: 'custom-model' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -66,7 +70,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'custom-model' },
         modelProviders: {
-          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+          customOpenAI: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'CUSTOM_API_KEY',
+            models: [{ id: 'custom-model' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -80,9 +88,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'gemini-1.5-flash' },
         modelProviders: {
-          gemini: [
-            { id: 'gemini-1.5-flash', envKey: 'GEMINI_API_KEY_ALTERED' },
-          ],
+          customGemini: {
+            authType: AuthType.USE_GEMINI,
+            envKey: 'GEMINI_API_KEY_ALTERED',
+            models: [{ id: 'gemini-1.5-flash' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -96,9 +106,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'gemini-1.5-flash' },
         modelProviders: {
-          gemini: [
-            { id: 'gemini-1.5-flash', envKey: 'GEMINI_API_KEY_ALTERED' },
-          ],
+          customGemini: {
+            authType: AuthType.USE_GEMINI,
+            envKey: 'GEMINI_API_KEY_ALTERED',
+            models: [{ id: 'gemini-1.5-flash' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -122,13 +134,12 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'claude-3' },
         modelProviders: {
-          anthropic: [
-            {
-              id: 'claude-3',
-              envKey: 'CUSTOM_ANTHROPIC_KEY',
-              baseUrl: 'https://api.anthropic.com',
-            },
-          ],
+          customAnthropic: {
+            authType: AuthType.USE_ANTHROPIC,
+            envKey: 'CUSTOM_ANTHROPIC_KEY',
+            baseUrl: 'https://api.anthropic.com',
+            models: [{ id: 'claude-3' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -142,7 +153,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'claude-3' },
         modelProviders: {
-          anthropic: [{ id: 'claude-3', envKey: 'CUSTOM_ANTHROPIC_KEY' }],
+          customAnthropic: {
+            authType: AuthType.USE_ANTHROPIC,
+            envKey: 'CUSTOM_ANTHROPIC_KEY',
+            models: [{ id: 'claude-3' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -157,9 +172,11 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'vertex-model' },
         modelProviders: {
-          'vertex-ai': [
-            { id: 'vertex-model', envKey: 'GOOGLE_API_KEY_VERTEX' },
-          ],
+          customVertex: {
+            authType: AuthType.USE_VERTEX_AI,
+            envKey: 'GOOGLE_API_KEY_VERTEX',
+            models: [{ id: 'vertex-model' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -174,10 +191,16 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'settings-model' },
         modelProviders: {
-          openai: [
-            { id: 'settings-model', envKey: 'SETTINGS_API_KEY' },
-            { id: 'cli-model', envKey: 'CLI_API_KEY' },
-          ],
+          settingsProvider: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'SETTINGS_API_KEY',
+            models: [{ id: 'settings-model' }],
+          },
+          cliProvider: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'CLI_API_KEY',
+            models: [{ id: 'cli-model' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);
@@ -208,10 +231,16 @@ describe('validateAuthMethod', () => {
       merged: {
         model: { name: 'settings-model' },
         modelProviders: {
-          openai: [
-            { id: 'settings-model', envKey: 'SETTINGS_API_KEY' },
-            { id: 'cli-model', envKey: 'CLI_API_KEY' },
-          ],
+          settingsProvider: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'SETTINGS_API_KEY',
+            models: [{ id: 'settings-model' }],
+          },
+          cliProvider: {
+            authType: AuthType.USE_OPENAI,
+            envKey: 'CLI_API_KEY',
+            models: [{ id: 'cli-model' }],
+          },
         },
       },
     } as unknown as ReturnType<typeof settings.loadSettings>);

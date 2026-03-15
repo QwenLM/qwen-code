@@ -17,6 +17,7 @@ import type { Settings } from '../config/settings.js';
 export interface CliGenerationConfigInputs {
   argv: {
     model?: string | undefined;
+    providerId?: string | undefined;
     openaiApiKey?: string | undefined;
     openaiBaseUrl?: string | undefined;
     openaiLogging?: boolean | undefined;
@@ -95,23 +96,65 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
-  // Find modelProvider from settings.modelProviders based on authType and model
+  // Find modelProvider from settings.modelProviders (providerId -> ProviderConfig)
   let modelProvider: ProviderModelConfig | undefined;
+  let resolvedProviderId: string | undefined;
   if (authType && settings.modelProviders) {
-    const providers = settings.modelProviders[authType];
-    if (providers && Array.isArray(providers)) {
-      // Try to find by requested model (from CLI or settings)
-      const requestedModel = argv.model || settings.model?.name;
-      if (requestedModel) {
-        modelProvider = providers.find((p) => p.id === requestedModel) as
-          | ProviderModelConfig
-          | undefined;
+    const requestedModel = argv.model || settings.model?.name;
+    const requestedProviderId = (argv.providerId ||
+      settings.model?.providerId) as string | undefined;
+
+    const providers = settings.modelProviders as Record<string, unknown>;
+
+    // Exact providerId-based lookup
+    if (requestedProviderId && requestedModel) {
+      const providerEntry = providers[requestedProviderId] as
+        | {
+            models: Array<{ id: string; [k: string]: unknown }>;
+            baseUrl?: string;
+            envKey?: string;
+          }
+        | undefined;
+      if (providerEntry?.models) {
+        const found = providerEntry.models.find((m) => m.id === requestedModel);
+        if (found) {
+          modelProvider = {
+            ...found,
+            baseUrl: providerEntry.baseUrl,
+            envKey: providerEntry.envKey,
+          } as ProviderModelConfig;
+          resolvedProviderId = requestedProviderId;
+        }
+      }
+    }
+
+    // Fallback: scan all providers matching authType
+    if (!modelProvider && requestedModel) {
+      for (const [pid, entry] of Object.entries(providers)) {
+        const provider = entry as {
+          authType?: string;
+          models?: Array<{ id: string; [k: string]: unknown }>;
+          baseUrl?: string;
+          envKey?: string;
+        };
+        if (!provider.models || provider.authType !== authType) continue;
+        const found = provider.models.find((m) => m.id === requestedModel);
+        if (found) {
+          modelProvider = {
+            ...found,
+            baseUrl: provider.baseUrl,
+            envKey: provider.envKey,
+          } as ProviderModelConfig;
+          resolvedProviderId = pid;
+          break;
+        }
       }
     }
   }
 
   const configSources: ModelConfigSourcesInput = {
     authType,
+    providerId: argv.providerId || resolvedProviderId,
     cli: {
       model: argv.model,
       apiKey: argv.openaiApiKey,

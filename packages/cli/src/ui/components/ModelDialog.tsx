@@ -53,9 +53,63 @@ function maskApiKey(apiKey: string | undefined): string {
 function persistModelSelection(
   settings: ReturnType<typeof useSettings>,
   modelId: string,
+  providerId?: string,
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'model.name', modelId);
+  settings.setValue(scope, 'model.providerId', providerId);
+}
+
+// ── Model option ID encoding/decoding ────────────────────────────────
+//
+// Each selectable entry in the model list is encoded as a single string
+// value so that the radio-button component can round-trip it.
+//
+// Format:
+//   registry model   → "<authType>\0<providerId>\0<modelId>"
+//   builtin (no pid) → "<authType>\0\0<modelId>"
+//   runtime model    → "$runtime|<authType>|<modelId>"  (unchanged)
+//
+// Using NUL (\0) as separator avoids collisions with any realistic
+// authType / providerId / modelId values.
+
+const MODEL_ID_SEP = '\0';
+
+interface DecodedModelOptionId {
+  authType: AuthType;
+  providerId: string | undefined;
+  modelId: string;
+}
+
+function encodeModelOptionId(
+  authType: AuthType,
+  modelId: string,
+  providerId?: string,
+): string {
+  return `${authType}${MODEL_ID_SEP}${providerId ?? ''}${MODEL_ID_SEP}${modelId}`;
+}
+
+function decodeModelOptionId(value: string): DecodedModelOptionId {
+  const first = value.indexOf(MODEL_ID_SEP);
+  if (first === -1) {
+    return {
+      authType: value as AuthType,
+      providerId: undefined,
+      modelId: value,
+    };
+  }
+  const second = value.indexOf(MODEL_ID_SEP, first + 1);
+  if (second === -1) {
+    return {
+      authType: value.slice(0, first) as AuthType,
+      providerId: undefined,
+      modelId: value.slice(first + 1),
+    };
+  }
+  const at = value.slice(0, first) as AuthType;
+  const pid = value.slice(first + 1, second) || undefined;
+  const mid = value.slice(second + 1);
+  return { authType: at, providerId: pid, modelId: mid };
 }
 
 function persistAuthTypeSelection(
@@ -72,6 +126,7 @@ interface HandleModelSwitchSuccessParams {
   after: ContentGeneratorConfig | undefined;
   effectiveAuthType: AuthType | undefined;
   effectiveModelId: string;
+  effectiveProviderId: string | undefined;
   isRuntime: boolean;
 }
 
@@ -81,9 +136,10 @@ function handleModelSwitchSuccess({
   after,
   effectiveAuthType,
   effectiveModelId,
+  effectiveProviderId,
   isRuntime,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(settings, effectiveModelId);
+  persistModelSelection(settings, effectiveModelId, effectiveProviderId);
   if (effectiveAuthType) {
     persistAuthTypeSelection(settings, effectiveAuthType);
   }
@@ -205,9 +261,10 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     () =>
       availableModelEntries.map(
         ({ authType: t2, model, isRuntime, snapshotId }) => {
-          // Runtime models use snapshotId directly (format: $runtime|${authType}|${modelId})
           const value =
-            isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+            isRuntime && snapshotId
+              ? snapshotId
+              : encodeModelOptionId(t2, model.id, model.providerId);
 
           const title = (
             <Text>
@@ -244,13 +301,12 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   );
 
   const preferredModelId = config?.getModel() || MAINLINE_CODER_MODEL;
-  // Check if current model is a runtime model
-  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot = config?.getActiveRuntimeModelSnapshot?.();
+  const currentProviderId = config?.getModelsConfig().getCurrentProviderId();
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : authType
-      ? `${authType}::${preferredModelId}`
+      ? encodeModelOptionId(authType, preferredModelId, currentProviderId)
       : '';
 
   useKeypress(
@@ -277,7 +333,10 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     const key = highlightedValue ?? preferredKey;
     return availableModelEntries.find(
       ({ authType: t2, model, isRuntime, snapshotId }) => {
-        const v = isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+        const v =
+          isRuntime && snapshotId
+            ? snapshotId
+            : encodeModelOptionId(t2, model.id, model.providerId);
         return v === key;
       },
     );
@@ -289,7 +348,8 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
       let after: ContentGeneratorConfig | undefined;
       let effectiveAuthType: AuthType | undefined;
-      let effectiveModelId = selected;
+      let effectiveModelId: string | undefined;
+      let selectedProviderId: string | undefined;
       let isRuntime = false;
 
       if (!config) {
@@ -298,39 +358,46 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       }
 
       try {
-        // Determine if this is a runtime model selection
-        // Runtime model format: $runtime|${authType}|${modelId}
         isRuntime = selected.startsWith('$runtime|');
 
         let selectedAuthType: AuthType;
         let modelId: string;
 
         if (isRuntime) {
-          // For runtime models, extract authType from the snapshot ID
-          // Format: $runtime|${authType}|${modelId}
           const parts = selected.split('|');
           if (parts.length >= 2 && parts[0] === '$runtime') {
             selectedAuthType = parts[1] as AuthType;
           } else {
             selectedAuthType = authType as AuthType;
           }
-          modelId = selected; // Pass the full snapshot ID to switchModel
+          modelId = selected;
         } else {
-          const sep = '::';
-          const idx = selected.indexOf(sep);
-          selectedAuthType = (
-            idx >= 0 ? selected.slice(0, idx) : authType
-          ) as AuthType;
-          modelId = idx >= 0 ? selected.slice(idx + sep.length) : selected;
+          const decoded = decodeModelOptionId(selected);
+          selectedAuthType = decoded.authType;
+          selectedProviderId = decoded.providerId;
+          modelId = decoded.modelId;
+        }
+
+        effectiveModelId = modelId;
+
+        const switchOptions: {
+          requireCachedCredentials?: boolean;
+          providerId?: string;
+        } = {};
+        if (
+          selectedAuthType !== authType &&
+          selectedAuthType === AuthType.QWEN_OAUTH
+        ) {
+          switchOptions.requireCachedCredentials = true;
+        }
+        if (selectedProviderId) {
+          switchOptions.providerId = selectedProviderId;
         }
 
         await config.switchModel(
           selectedAuthType,
           modelId,
-          selectedAuthType !== authType &&
-            selectedAuthType === AuthType.QWEN_OAUTH
-            ? { requireCachedCredentials: true }
-            : undefined,
+          Object.keys(switchOptions).length > 0 ? switchOptions : undefined,
         );
 
         if (!isRuntime) {
@@ -345,9 +412,13 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        const displayId = effectiveModelId ?? '(unknown)';
+        const providerHint = selectedProviderId
+          ? ` (provider: ${selectedProviderId})`
+          : '';
         const errorPrefix = isRuntime
           ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+          : `Failed to switch model to '${displayId}'${providerHint}.`;
         setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
         return;
       }
@@ -357,7 +428,8 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
         uiState,
         after,
         effectiveAuthType,
-        effectiveModelId,
+        effectiveModelId: effectiveModelId!,
+        effectiveProviderId: selectedProviderId,
         isRuntime,
       });
       onClose();
@@ -366,6 +438,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   );
 
   const hasModels = MODEL_OPTIONS.length > 0;
+
+  // Fixed max items for testing scroll indicators
+  const maxItemsToShow = 6;
 
   return (
     <Box
@@ -403,6 +478,9 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             onHighlight={handleHighlight}
             initialIndex={initialIndex}
             showNumbers={true}
+            showScrollArrows={true}
+            centerSelection={true}
+            maxItemsToShow={maxItemsToShow}
           />
         </Box>
       )}

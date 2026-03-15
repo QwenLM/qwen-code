@@ -132,6 +132,8 @@ describe('RadioButtonSelect', () => {
       isSelected: false,
       titleColor: 'MOCK_TITLE_COLOR',
       numberColor: 'MOCK_NUMBER_COLOR',
+      prefixChar: '  ',
+      prefixColor: 'MOCK_PREFIX_COLOR',
     };
 
     beforeEach(() => {

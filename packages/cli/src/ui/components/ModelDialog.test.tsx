@@ -38,6 +38,9 @@ const createMockGetAvailableModelsForAuthType = () =>
     }
     return [];
   });
+const createMockModelsConfig = () => ({
+  getCurrentProviderId: vi.fn(() => undefined),
+});
 const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 
 const renderComponent = (
@@ -62,6 +65,7 @@ const renderComponent = (
     setModel: vi.fn().mockResolvedValue(undefined),
     switchModel: vi.fn().mockResolvedValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
+    getModelsConfig: vi.fn(() => createMockModelsConfig()),
     getAllConfiguredModels: vi.fn(() =>
       getFilteredQwenModels().map((m) => ({
         id: m.id,
@@ -127,7 +131,7 @@ describe('<ModelDialog />', () => {
     expect(props.items).toHaveLength(getFilteredQwenModels().length);
     // coder-model is the only model and it has vision capability
     expect(props.items[0].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
+      `${AuthType.QWEN_OAUTH}\0\0${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
   });
@@ -212,7 +216,8 @@ describe('<ModelDialog />', () => {
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
+    const selectedValue = mockedSelect.mock.calls[0][0].items[0].value;
+    await childOnSelect(selectedValue);
 
     expect(mockConfig?.switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
@@ -223,6 +228,11 @@ describe('<ModelDialog />', () => {
       SettingScope.User,
       'model.name',
       DEFAULT_QWEN_MODEL,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.providerId',
+      undefined,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -252,6 +262,7 @@ describe('<ModelDialog />', () => {
     const mockConfigWithSwitchAuthType = {
       getAuthType,
       getModel: vi.fn(() => 'gpt-4'),
+      getModelsConfig: vi.fn(() => createMockModelsConfig()),
       getContentGeneratorConfig: vi.fn(() => ({
         authType: AuthType.QWEN_OAUTH,
         model: DEFAULT_QWEN_MODEL,
@@ -268,7 +279,11 @@ describe('<ModelDialog />', () => {
     );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
+    const targetItem = mockedSelect.mock.calls[0][0].items.find((item) =>
+      String(item.value).includes(DEFAULT_QWEN_MODEL),
+    );
+    expect(targetItem).toBeDefined();
+    await childOnSelect(targetItem!.value);
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
@@ -279,6 +294,11 @@ describe('<ModelDialog />', () => {
       SettingScope.User,
       'model.name',
       DEFAULT_QWEN_MODEL,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.providerId',
+      undefined,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -343,6 +363,7 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getModelsConfig: vi.fn(() => createMockModelsConfig()),
               getAvailableModelsForAuthType:
                 createMockGetAvailableModelsForAuthType(),
               getAllConfiguredModels: vi.fn(() =>
@@ -368,6 +389,7 @@ describe('<ModelDialog />', () => {
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getModelsConfig: vi.fn(() => createMockModelsConfig()),
       getAvailableModelsForAuthType: createMockGetAvailableModelsForAuthType(),
       getAllConfiguredModels: vi.fn(() =>
         getFilteredQwenModels().map((m) => ({

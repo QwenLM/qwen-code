@@ -30,6 +30,8 @@ export interface DescriptiveRadioButtonSelectProps<T> {
   showNumbers?: boolean;
   /** Whether to show the scroll arrows. */
   showScrollArrows?: boolean;
+  /** When true, keeps the selected item centered in the visible window */
+  centerSelection?: boolean;
   /** The maximum number of items to show at once. */
   maxItemsToShow?: number;
   /** Gap (in rows) between each item. */
@@ -49,6 +51,7 @@ export function DescriptiveRadioButtonSelect<T>({
   isFocused = true,
   showNumbers = false,
   showScrollArrows = false,
+  centerSelection = false,
   maxItemsToShow = 10,
   itemGap = 0,
 }: DescriptiveRadioButtonSelectProps<T>): React.JSX.Element {
@@ -61,12 +64,13 @@ export function DescriptiveRadioButtonSelect<T>({
       isFocused={isFocused}
       showNumbers={showNumbers}
       showScrollArrows={showScrollArrows}
+      centerSelection={centerSelection}
       maxItemsToShow={maxItemsToShow}
       itemGap={itemGap}
       renderItem={(item, { titleColor }) => (
-        <Box flexDirection="column" key={item.key}>
+        <Box flexDirection="column" height={2}>
           <Text color={titleColor}>{item.title}</Text>
-          <Text color={theme.text.secondary}>{item.description}</Text>
+          <Text color={theme.text.secondary}>{item.description || ' '}</Text>
         </Box>
       )}
     />
