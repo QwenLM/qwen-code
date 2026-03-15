@@ -242,11 +242,6 @@
           "type": "number",
           "default": -1
         },
-        "summarizeToolOutput": {
-          "description": "Settings for summarizing tool output.",
-          "type": "object",
-          "additionalProperties": true
-        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",

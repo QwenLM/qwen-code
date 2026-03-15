@@ -26,7 +26,6 @@ import {
   Kind,
 } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { summarizeToolOutput } from '../utils/summarizer.js';
 import { truncateAndSaveToFile } from '../utils/truncation.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
 import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
@@ -418,7 +417,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const summarizeConfig = this.config.getSummarizeToolOutputConfig();
       const executionError = result.error
         ? {
             error: {
@@ -427,20 +425,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
             },
           }
         : {};
-
-      if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
-        const summary = await summarizeToolOutput(
-          llmContent,
-          this.config.getGeminiClient(),
-          signal,
-          summarizeConfig[ShellTool.Name].tokenBudget,
-        );
-        return {
-          llmContent: summary,
-          returnDisplay: returnDisplayMessage,
-          ...executionError,
-        };
-      }
 
       return {
         llmContent,

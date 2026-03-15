@@ -195,10 +195,6 @@ export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
 }
 
-export interface SummarizeToolOutputSettings {
-  tokenBudget?: number;
-}
-
 export interface TelemetrySettings {
   enabled?: boolean;
   target?: TelemetryTarget;
@@ -339,7 +335,6 @@ export interface ConfigParameters {
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
   noBrowser?: boolean;
-  summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
@@ -497,9 +492,6 @@ export class Config {
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
 
-  private readonly summarizeToolOutput:
-    | Record<string, SummarizeToolOutputSettings>
-    | undefined;
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly chatRecordingEnabled: boolean;
@@ -612,7 +604,6 @@ export class Config {
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
-    this.summarizeToolOutput = params.summarizeToolOutput;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
@@ -1594,12 +1585,6 @@ export class Config {
 
   isBrowserLaunchSuppressed(): boolean {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
-  }
-
-  getSummarizeToolOutputConfig():
-    | Record<string, SummarizeToolOutputSettings>
-    | undefined {
-    return this.summarizeToolOutput;
   }
 
   // Web search provider configuration

@@ -1013,7 +1013,6 @@ export async function loadCliConfig(
     warnings: resolvedCliConfig.warnings,
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
-    summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
