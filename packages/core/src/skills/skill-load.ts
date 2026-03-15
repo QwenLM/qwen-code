@@ -9,6 +9,26 @@ const debugLogger = createDebugLogger('SKILL_LOAD');
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+/**
+ * Parses the `extends` field from skill frontmatter.
+ * Currently only 'bundled' is supported.
+ */
+export function parseExtendsField(
+  frontmatter: Record<string, unknown>,
+): SkillConfig['extends'] {
+  const extendsRaw = frontmatter['extends'];
+  if (extendsRaw === undefined) {
+    return undefined;
+  }
+  const extendsStr = String(extendsRaw);
+  if (extendsStr !== 'bundled') {
+    throw new Error(
+      `Unsupported "extends" value: "${extendsStr}". Only "bundled" is supported.`,
+    );
+  }
+  return extendsStr;
+}
+
 export async function loadSkillsFromDir(
   baseDir: string,
 ): Promise<SkillConfig[]> {
@@ -108,6 +128,8 @@ export function parseSkillContent(
     }
   }
 
+  const extendsLevel = parseExtendsField(frontmatter);
+
   const config: SkillConfig = {
     name,
     description,
@@ -115,6 +137,7 @@ export function parseSkillContent(
     filePath,
     body: body.trim(),
     level: 'extension',
+    extends: extendsLevel,
   };
 
   // Validate the parsed configuration
@@ -160,9 +183,27 @@ export function validateConfig(
     }
   }
 
+  // Validate extends if present
+  if (config.extends !== undefined) {
+    if (config.extends !== 'bundled') {
+      errors.push(
+        `"extends" must be "bundled" if specified, got "${String(config.extends)}"`,
+      );
+    }
+    if (config.level === 'bundled') {
+      errors.push('"extends" is not allowed on bundled-level skills');
+    }
+  }
+
   // Warn if body is empty
   if (!config.body || config.body.trim() === '') {
-    warnings.push('Skill body is empty');
+    if (config.extends) {
+      warnings.push(
+        'Skill body is empty — the skill will use only the base content',
+      );
+    } else {
+      warnings.push('Skill body is empty');
+    }
   }
 
   return {

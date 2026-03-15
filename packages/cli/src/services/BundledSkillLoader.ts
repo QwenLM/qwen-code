@@ -43,12 +43,25 @@ export class BundledSkillLoader implements ICommandLoader {
         description: skill.description,
         kind: CommandKind.SKILL,
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          // listSkills({ level: 'bundled' }) returns only the bundled version.
+          // loadSkill() re-discovers via precedence (project > user > extension > bundled),
+          // so a project-level skill with `extends: bundled` gets resolved here.
+          let resolvedSkill = skill;
+          try {
+            resolvedSkill = (await skillManager.loadSkill(skill.name)) ?? skill;
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to resolve skill "${skill.name}", using bundled version:`,
+              error,
+            );
+          }
+
           const content = context.invocation?.args
             ? appendToLastTextPart(
-                [{ text: skill.body }],
+                [{ text: resolvedSkill.body }],
                 context.invocation.raw,
               )
-            : [{ text: skill.body }];
+            : [{ text: resolvedSkill.body }];
 
           return {
             type: 'submit_prompt',
