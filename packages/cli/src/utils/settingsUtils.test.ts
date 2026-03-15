@@ -165,6 +165,37 @@ describe('SettingsUtils', () => {
           },
         },
       },
+      hooks: {
+        type: 'object',
+        label: 'Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description: 'Hook settings.',
+        showInDialog: false,
+        properties: {
+          UserPromptSubmit: {
+            type: 'array',
+            label: 'Before Agent Hooks',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: [],
+            description: 'Hook definitions.',
+            showInDialog: false,
+            itemProperties: {
+              matcher: {
+                type: 'string',
+                label: 'Matcher',
+                category: 'Advanced',
+                requiresRestart: false,
+                default: undefined as string | undefined,
+                description: 'Hook matcher.',
+                showInDialog: false,
+              },
+            },
+          },
+        },
+      },
     } as const satisfies SettingsSchema;
 
     vi.mocked(getSettingsSchema).mockReturnValue(
@@ -318,6 +349,12 @@ describe('SettingsUtils', () => {
         expect(keys).toContain('test');
         expect(keys).toContain('ui.accessibility.enableLoadingPhrases');
       });
+
+      it('should not flatten array item metadata into setting keys', () => {
+        const keys = getAllSettingKeys();
+        expect(keys).toContain('hooks.UserPromptSubmit');
+        expect(keys).not.toContain('hooks.UserPromptSubmit.matcher');
+      });
     });
 
     describe('getSettingsByType', () => {
@@ -351,6 +388,7 @@ describe('SettingsUtils', () => {
       it('should return false for invalid setting keys', () => {
         expect(isValidSettingKey('invalidSetting')).toBe(false);
         expect(isValidSettingKey('')).toBe(false);
+        expect(isValidSettingKey('hooks.UserPromptSubmit.matcher')).toBe(false);
       });
     });
 
@@ -784,10 +822,25 @@ describe('SettingsUtils', () => {
           description: 'The color theme for the UI.',
           showInDialog: false,
         };
+        const UI_SETTING: SettingDefinition = {
+          type: 'object',
+          label: 'UI',
+          category: 'UI',
+          requiresRestart: false,
+          default: {},
+          description: 'User interface settings.',
+          showInDialog: false,
+          properties: {},
+        };
+
+        beforeEach(() => {
+          TEST_ONLY.clearFlattenedSchema();
+        });
 
         it('handles display of number-based enums', () => {
           vi.mocked(getSettingsSchema).mockReturnValue({
             ui: {
+              ...UI_SETTING,
               properties: {
                 theme: {
                   ...SETTING,
@@ -831,6 +884,7 @@ describe('SettingsUtils', () => {
         it('handles default values for number-based enums', () => {
           vi.mocked(getSettingsSchema).mockReturnValue({
             ui: {
+              ...UI_SETTING,
               properties: {
                 theme: {
                   ...SETTING,
@@ -866,7 +920,10 @@ describe('SettingsUtils', () => {
 
         it('shows the enum display value', () => {
           vi.mocked(getSettingsSchema).mockReturnValue({
-            ui: { properties: { theme: { ...SETTING } } },
+            ui: {
+              ...UI_SETTING,
+              properties: { theme: { ...SETTING } },
+            },
           } as unknown as SettingsSchemaType);
           const settings = makeMockSettings({ ui: { theme: StringEnum.BAR } });
           const mergedSettings = makeMockSettings({
@@ -886,6 +943,7 @@ describe('SettingsUtils', () => {
         it('passes through unknown values verbatim', () => {
           vi.mocked(getSettingsSchema).mockReturnValue({
             ui: {
+              ...UI_SETTING,
               properties: {
                 theme: { ...SETTING },
               },
@@ -907,6 +965,7 @@ describe('SettingsUtils', () => {
         it('shows the default value for string enums', () => {
           vi.mocked(getSettingsSchema).mockReturnValue({
             ui: {
+              ...UI_SETTING,
               properties: {
                 theme: { ...SETTING, default: StringEnum.BAR },
               },

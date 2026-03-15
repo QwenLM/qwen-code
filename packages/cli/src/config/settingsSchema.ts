@@ -72,6 +72,7 @@ export interface SettingDefinition {
   parentKey?: string;
   key?: string;
   properties?: SettingsSchema;
+  itemProperties?: SettingsSchema;
   showInDialog?: boolean;
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
@@ -179,7 +180,7 @@ const HOOK_EVENT_PROPERTIES: SettingsSchema = {
     default: [] as HookCommandSetting[],
     description: 'Hook implementations to execute for this definition.',
     showInDialog: false,
-    properties: HOOK_COMMAND_PROPERTIES,
+    itemProperties: HOOK_COMMAND_PROPERTIES,
   },
 };
 
@@ -1330,7 +1331,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Hooks that execute before agent processing. Can modify prompts or inject context.',
         showInDialog: false,
-        properties: HOOK_EVENT_PROPERTIES,
+        itemProperties: HOOK_EVENT_PROPERTIES,
         mergeStrategy: MergeStrategy.CONCAT,
       },
       Stop: {
@@ -1342,7 +1343,7 @@ const SETTINGS_SCHEMA = {
         description:
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
         showInDialog: false,
-        properties: HOOK_EVENT_PROPERTIES,
+        itemProperties: HOOK_EVENT_PROPERTIES,
         mergeStrategy: MergeStrategy.CONCAT,
       },
     },
@@ -1367,13 +1368,15 @@ export function getSettingsSchema(): SettingsSchemaType {
 type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
-    : T[K]['type'] extends 'enum'
-      ? T[K]['options'] extends readonly SettingEnumOption[]
-        ? T[K]['options'][number]['value']
-        : T[K]['default']
-      : T[K]['default'] extends boolean
-        ? boolean
-        : T[K]['default'];
+    : T[K] extends { itemProperties: SettingsSchema }
+      ? Array<Record<string, unknown>>
+      : T[K]['type'] extends 'enum'
+        ? T[K]['options'] extends readonly SettingEnumOption[]
+          ? T[K]['options'][number]['value']
+          : T[K]['default']
+        : T[K]['default'] extends boolean
+          ? boolean
+          : T[K]['default'];
 };
 
 export type Settings = InferSettings<SettingsSchemaType>;

@@ -52,7 +52,7 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
       return undefined;
     }
     current = currentSchema[key];
-    currentSchema = current.properties;
+    currentSchema = current.type === 'object' ? current.properties : undefined;
   }
 
   return current?.mergeStrategy;

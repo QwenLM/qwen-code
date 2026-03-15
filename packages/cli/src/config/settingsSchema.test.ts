@@ -319,20 +319,24 @@ describe('SettingsSchema', () => {
         getSettingsSchema().hooks.properties.UserPromptSubmit;
 
       expect(hookDefinition.type).toBe('array');
-      expect(hookDefinition.properties?.['matcher'].type).toBe('string');
-      expect(hookDefinition.properties?.['sequential'].type).toBe('boolean');
-      expect(hookDefinition.properties?.['hooks'].type).toBe('array');
+      expect(hookDefinition.itemProperties?.['matcher'].type).toBe('string');
+      expect(hookDefinition.itemProperties?.['sequential'].type).toBe(
+        'boolean',
+      );
+      expect(hookDefinition.itemProperties?.['hooks'].type).toBe('array');
       expect(
-        hookDefinition.properties?.['hooks'].properties?.['command'].type,
+        hookDefinition.itemProperties?.['hooks'].itemProperties?.['command']
+          .type,
       ).toBe('string');
       expect(
-        hookDefinition.properties?.['hooks'].properties?.['type'].type,
+        hookDefinition.itemProperties?.['hooks'].itemProperties?.['type'].type,
       ).toBe('enum');
       expect(
-        hookDefinition.properties?.['hooks'].properties?.['timeout'].type,
+        hookDefinition.itemProperties?.['hooks'].itemProperties?.['timeout']
+          .type,
       ).toBe('number');
       expect(
-        hookDefinition.properties?.['hooks'].properties?.['env'].type,
+        hookDefinition.itemProperties?.['hooks'].itemProperties?.['env'].type,
       ).toBe('object');
     });
 

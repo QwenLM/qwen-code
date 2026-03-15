@@ -32,7 +32,7 @@ function flattenSchema(schema: SettingsSchema, prefix = ''): FlattenedSchema {
     const newKey = prefix ? `${prefix}.${key}` : key;
     const definition = schema[key];
     result[newKey] = { ...definition, key: newKey };
-    if (definition.properties) {
+    if (definition.type === 'object' && definition.properties) {
       result = { ...result, ...flattenSchema(definition.properties, newKey) };
     }
   }

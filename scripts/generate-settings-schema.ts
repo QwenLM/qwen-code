@@ -60,12 +60,12 @@ function convertSettingToJsonSchema(
       break;
     case 'array':
       schema.type = 'array';
-      if (setting.properties) {
+      if (setting.itemProperties) {
         schema.items = {
           type: 'object',
           properties: {},
         };
-        for (const [key, childDef] of Object.entries(setting.properties)) {
+        for (const [key, childDef] of Object.entries(setting.itemProperties)) {
           schema.items.properties![key] = convertSettingToJsonSchema(
             childDef as SettingDefinition,
           );
