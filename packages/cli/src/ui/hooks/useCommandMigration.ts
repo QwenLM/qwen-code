@@ -29,7 +29,7 @@ export function useCommandMigration(
       const workspaceFiles = await detectTomlCommands(workspaceCommandsDir);
       allFiles.push(...workspaceFiles.map((f) => `workspace: ${f}`));
 
-      // Check user commands directory (~/.qwen/commands)
+      // Check user commands directory (~/.qwen_local/commands)
       const userCommandsDir = Storage.getUserCommandsDir();
       const userFiles = await detectTomlCommands(userCommandsDir);
       allFiles.push(...userFiles.map((f) => `user: ${f}`));

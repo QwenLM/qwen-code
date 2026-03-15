@@ -55,7 +55,7 @@ qwen --resume 123e4567-e89b-12d3-a456-426614174000 -p "Apply the follow-up refac
 
 > [!note]
 >
-> - Session data is project-scoped JSONL under `~/.qwen/projects/<sanitized-cwd>/chats`.
+> - Session data is project-scoped JSONL under `~/.qwen_local/projects/<sanitized-cwd>/chats`.
 > - Restores conversation history, tool outputs, and chat-compression checkpoints before sending the new prompt.
 
 ## Output Formats

@@ -20,8 +20,8 @@ The plugin **MUST** run a local HTTP server that implements the **Model Context 
 
 For Qwen Code to connect, it needs to discover what port your server is using. The plugin **MUST** facilitate this by creating a "lock file" and setting the port environment variable.
 
-- **How the CLI Finds the File:** The CLI reads the port from `QWEN_CODE_IDE_SERVER_PORT`, then reads `~/.qwen/ide/<PORT>.lock`. (Legacy fallbacks exist for older extensions; see note below.)
-- **File Location:** The file must be created in a specific directory: `~/.qwen/ide/`. Your plugin must create this directory if it doesn't exist.
+- **How the CLI Finds the File:** The CLI reads the port from `QWEN_CODE_IDE_SERVER_PORT`, then reads `~/.qwen_local/ide/<PORT>.lock`. (Legacy fallbacks exist for older extensions; see note below.)
+- **File Location:** The file must be created in a specific directory: `~/.qwen_local/ide/`. Your plugin must create this directory if it doesn't exist.
 - **File Naming Convention:** The filename is critical and **MUST** follow the pattern:
   `<PORT>.lock`
   - `<PORT>`: The port your MCP server is listening on.

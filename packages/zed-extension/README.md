@@ -51,7 +51,7 @@ When running as an agent server, Qwen Code will:
 
 - Inherit environment variables from Zed
 - Read/create `~/.qwen` directory for runtime settings
-- Use existing model and authentication settings in `~/.qwen/settings.json` (except for initial login)
+- Use existing model and authentication settings in `~/.qwen_local/settings.json` (except for initial login)
 
 For additional environment variables, configure them in your Zed settings:
 

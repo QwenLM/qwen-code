@@ -70,7 +70,7 @@ Subagents are managed through the `/agents` slash command and its subcommands:
 Subagents are stored as Markdown files in multiple locations:
 
 - **Project-level**: `.qwen/agents/` (highest precedence)
-- **User-level**: `~/.qwen/agents/` (fallback)
+- **User-level**: `~/.qwen_local/agents/` (fallback)
 - **Extension-level**: Provided by installed extensions
 
 This allows you to have project-specific agents, personal agents that work across all projects, and extension-provided agents that add specialized capabilities.

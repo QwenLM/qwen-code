@@ -119,7 +119,7 @@ For local development and debugging, you can capture telemetry data locally:
    - Download and start Jaeger and OTEL collector
    - Configure your workspace for local telemetry
    - Provide a Jaeger UI at http://localhost:16686
-   - Save logs/metrics to `~/.qwen/tmp/<projectHash>/otel/collector.log`
+   - Save logs/metrics to `~/.qwen_local/tmp/<projectHash>/otel/collector.log`
    - Stop collector on exit (e.g. `Ctrl+C`)
 2. Run Qwen Code and send prompts.
 3. View traces at http://localhost:16686 and logs/metrics in the collector log

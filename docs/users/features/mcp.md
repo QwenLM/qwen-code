@@ -43,7 +43,7 @@ qwen mcp
 Most users only need these two scopes:
 
 - **Project scope (default)**: `.qwen/settings.json` in your project root
-- **User scope**: `~/.qwen/settings.json` across all projects on your machine
+- **User scope**: `~/.qwen_local/settings.json` across all projects on your machine
 
 Write to user scope:
 

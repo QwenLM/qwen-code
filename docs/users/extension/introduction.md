@@ -216,7 +216,7 @@ qwen extensions settings unset <extension-name> <setting-name> [--scope user|wor
 
 Settings can be configured at two levels:
 
-- **User level** (default): Settings apply across all projects (`~/.qwen/.env`)
+- **User level** (default): Settings apply across all projects (`~/.qwen_local/.env`)
 - **Workspace level**: Settings apply only to the current project (`.qwen/.env`)
 
 Workspace settings take precedence over user settings. Sensitive settings are stored securely and never displayed in plain text.

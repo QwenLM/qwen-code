@@ -39,7 +39,7 @@ const USER_GEMINI_DIR = path.join(os.homedir(), '.qwen');
 // Project-level .gemini directory in the workspace
 const WORKSPACE_QWEN_DIR = path.join(projectRoot, '.qwen');
 
-// Telemetry artifacts are stored in a hashed directory under the user's ~/.qwen/tmp
+// Telemetry artifacts are stored in a hashed directory under the user's ~/.qwen_local/tmp
 export const OTEL_DIR = path.join(USER_GEMINI_DIR, 'tmp', projectHash, 'otel');
 export const BIN_DIR = path.join(OTEL_DIR, 'bin');
 

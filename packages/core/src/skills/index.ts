@@ -15,7 +15,7 @@
  * frontmatter for metadata. They can be loaded from four levels
  * (precedence: project > user > extension > bundled):
  * - Project-level: `.qwen/skills/`
- * - User-level: `~/.qwen/skills/`
+ * - User-level: `~/.qwen_local/skills/`
  * - Extension-level: provided by installed extensions
  * - Bundled: built-in skills shipped with qwen-code
  */

@@ -38,10 +38,10 @@ Skills are stored as directories containing a `SKILL.md` file.
 
 ### Personal Skills
 
-Personal Skills are available across all your projects. Store them in `~/.qwen/skills/`:
+Personal Skills are available across all your projects. Store them in `~/.qwen_local/skills/`:
 
 ```bash
-mkdir -p ~/.qwen/skills/my-skill-name
+mkdir -p ~/.qwen_local/skills/my-skill-name
 ```
 
 Use personal Skills for:
@@ -128,7 +128,7 @@ python scripts/helper.py input.txt
 
 Qwen Code discovers Skills from:
 
-- Personal Skills: `~/.qwen/skills/`
+- Personal Skills: `~/.qwen_local/skills/`
 - Project Skills: `.qwen/skills/`
 - Extension Skills: Skills provided by installed extensions
 
@@ -150,13 +150,13 @@ Or inspect the filesystem:
 
 ```bash
 # List personal Skills
-ls ~/.qwen/skills/
+ls ~/.qwen_local/skills/
 
 # List project Skills (if in a project directory)
 ls .qwen/skills/
 
 # View a specific Skill's content
-cat ~/.qwen/skills/my-skill/SKILL.md
+cat ~/.qwen_local/skills/my-skill/SKILL.md
 ```
 
 ## Test a Skill
@@ -191,12 +191,12 @@ description: Extract text and tables from PDF files, fill forms, merge documents
 
 ### Verify file path
 
-- Personal Skills: `~/.qwen/skills/<skill-name>/SKILL.md`
+- Personal Skills: `~/.qwen_local/skills/<skill-name>/SKILL.md`
 - Project Skills: `.qwen/skills/<skill-name>/SKILL.md`
 
 ```bash
 # Personal
-ls ~/.qwen/skills/my-skill/SKILL.md
+ls ~/.qwen_local/skills/my-skill/SKILL.md
 
 # Project
 ls .qwen/skills/my-skill/SKILL.md
@@ -244,7 +244,7 @@ Edit `SKILL.md` directly:
 
 ```bash
 # Personal Skill
-code ~/.qwen/skills/my-skill/SKILL.md
+code ~/.qwen_local/skills/my-skill/SKILL.md
 
 # Project Skill
 code .qwen/skills/my-skill/SKILL.md
@@ -258,7 +258,7 @@ Delete the Skill directory:
 
 ```bash
 # Personal
-rm -rf ~/.qwen/skills/my-skill
+rm -rf ~/.qwen_local/skills/my-skill
 
 # Project
 rm -rf .qwen/skills/my-skill

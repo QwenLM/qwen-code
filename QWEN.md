@@ -207,7 +207,7 @@ Task delegation framework:
 Hierarchical configuration loading:
 
 1. Default values
-2. User settings (`~/.qwen/settings.json`)
+2. User settings (`~/.qwen_local/settings.json`)
 3. Project settings (`.qwen/settings.json`)
 4. Environment variables
 5. CLI flags
