@@ -76,6 +76,8 @@ export interface SettingDefinition {
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Custom JSON Schema for array items (overrides default `{ type: 'string' }`) */
+  items?: Record<string, unknown>;
 }
 
 export interface SettingsSchema {
@@ -1244,6 +1246,64 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+      },
+    },
+  },
+  // Multi-model code review configuration
+  review: {
+    type: 'object',
+    label: 'Code Review',
+    category: 'Tools',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Multi-model code review configuration. When review.models is configured with 2+ models, /review will use multi-model review automatically.',
+    showInDialog: false,
+    properties: {
+      models: {
+        type: 'array',
+        label: 'Review Models',
+        category: 'Tools',
+        requiresRestart: false,
+        default: [] as Array<string | Record<string, unknown>>,
+        description:
+          'Models for multi-model review. Each entry can be a model ID string (resolved from modelProviders) or a full model config object with id, authType, baseUrl, envKey.',
+        showInDialog: false,
+        items: {
+          oneOf: [
+            {
+              type: 'string',
+              description: 'Model ID resolved from modelProviders',
+            },
+            {
+              type: 'object',
+              description: 'Inline model configuration',
+              properties: {
+                id: { type: 'string', description: 'Model identifier' },
+                authType: {
+                  type: 'string',
+                  description: 'Authentication type',
+                },
+                baseUrl: { type: 'string', description: 'API base URL' },
+                envKey: {
+                  type: 'string',
+                  description: 'Environment variable for API key',
+                },
+              },
+              required: ['id'],
+            },
+          ],
+        },
+      },
+      arbitratorModel: {
+        type: 'string',
+        label: 'Arbitrator Model',
+        category: 'Tools',
+        requiresRestart: false,
+        default: undefined,
+        description:
+          'Model ID for the final arbitrator (resolved from modelProviders). Falls back to the current session model if not set. Recommended: a high-reasoning model.',
+        showInDialog: false,
       },
     },
   },

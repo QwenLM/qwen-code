@@ -231,6 +231,17 @@ export class ModelsConfig {
   }
 
   /**
+   * Find a model by ID across all authTypes.
+   * Returns the resolved config if found in exactly one authType.
+   * Throws if the model ID is ambiguous (found in multiple authTypes).
+   */
+  findModelById(
+    modelId: string,
+  ): { config: ResolvedModelConfig; authType: AuthType } | undefined {
+    return this.modelRegistry.findModelById(modelId);
+  }
+
+  /**
    * Get available models for current authType
    */
   getAvailableModels(): AvailableModel[] {

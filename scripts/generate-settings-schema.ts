@@ -34,6 +34,8 @@ interface JsonSchemaProperty {
   description?: string;
   properties?: Record<string, JsonSchemaProperty>;
   items?: JsonSchemaProperty;
+  oneOf?: JsonSchemaProperty[];
+  required?: string[];
   enum?: (string | number)[];
   default?: unknown;
   additionalProperties?: boolean | JsonSchemaProperty;
@@ -60,7 +62,9 @@ function convertSettingToJsonSchema(
       break;
     case 'array':
       schema.type = 'array';
-      schema.items = { type: 'string' };
+      schema.items = (setting.items as JsonSchemaProperty) ?? {
+        type: 'string',
+      };
       break;
     case 'enum':
       if (setting.options && setting.options.length > 0) {

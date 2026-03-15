@@ -1313,6 +1313,289 @@ describe('BaseLlmClient Lifecycle', () => {
   });
 });
 
+describe('Review Model Config Resolution', () => {
+  const MODEL = 'qwen3-coder-plus';
+  const TELEMETRY_SETTINGS = { enabled: false };
+
+  const reviewBaseParams: ConfigParameters = {
+    cwd: '/tmp',
+    targetDir: '/tmp',
+    debugMode: false,
+    question: '',
+    model: MODEL,
+    usageStatisticsEnabled: false,
+    telemetry: TELEMETRY_SETTINGS,
+    overrideExtensions: [],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(canUseRipgrep).mockResolvedValue(true);
+    vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
+      async () => undefined,
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+      (_config, authType, generationConfig) => ({
+        config: {
+          ...generationConfig,
+          authType,
+          model: generationConfig?.model || MODEL,
+          apiKey: 'test-key',
+        } as ContentGeneratorConfig,
+        sources: {},
+      }),
+    );
+  });
+
+  describe('getReviewModels', () => {
+    it('should return empty array when no reviewConfig', () => {
+      const config = new Config({ ...reviewBaseParams });
+      expect(config.getReviewModels()).toEqual([]);
+    });
+
+    it('should return empty array when models is empty', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: { models: [] },
+      });
+      expect(config.getReviewModels()).toEqual([]);
+    });
+
+    it('should resolve string model IDs from modelProviders', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+        reviewConfig: { models: ['gpt-4o'] },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(1);
+      expect(models[0].id).toBe('gpt-4o');
+      expect(models[0].authType).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('should throw for string model ID not found in modelProviders', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {},
+        reviewConfig: { models: ['non-existent'] },
+      });
+      expect(() => config.getReviewModels()).toThrow(
+        /Model 'non-existent' not found in modelProviders/,
+      );
+    });
+
+    it('should deduplicate string model IDs', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+        reviewConfig: { models: ['gpt-4o', 'gpt-4o'] },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(1);
+    });
+
+    it('should resolve inline object model configs', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [
+            {
+              id: 'custom-model',
+              authType: 'openai',
+              baseUrl: 'https://custom.api/v1',
+              envKey: 'CUSTOM_KEY',
+            },
+          ],
+        },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(1);
+      expect(models[0].id).toBe('custom-model');
+      expect(models[0].authType).toBe(AuthType.USE_OPENAI);
+      expect(models[0].baseUrl).toBe('https://custom.api/v1');
+      expect(models[0].envKey).toBe('CUSTOM_KEY');
+    });
+
+    it('should throw for inline object missing authType', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [{ id: 'no-auth' }],
+        },
+      });
+      expect(() => config.getReviewModels()).toThrow(
+        /missing required field: authType/,
+      );
+    });
+
+    it('should throw for inline object with invalid authType', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [{ id: 'bad-auth', authType: 'invalid-provider' }],
+        },
+      });
+      expect(() => config.getReviewModels()).toThrow(/invalid authType/);
+    });
+
+    it('should throw for inline object missing baseUrl when required', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [{ id: 'no-url', authType: 'openai' }],
+        },
+      });
+      expect(() => config.getReviewModels()).toThrow(/requires a baseUrl/);
+    });
+
+    it('should allow missing baseUrl for qwen-oauth authType', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [{ id: 'qwen-model', authType: 'qwen-oauth' }],
+        },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(1);
+      expect(models[0].baseUrl).toBe('');
+    });
+
+    it('should handle mixed string and object entries', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+        reviewConfig: {
+          models: [
+            'gpt-4o',
+            {
+              id: 'custom-model',
+              authType: 'openai',
+              baseUrl: 'https://custom.api/v1',
+            },
+          ],
+        },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(2);
+      expect(models[0].id).toBe('gpt-4o');
+      expect(models[1].id).toBe('custom-model');
+    });
+
+    it('should deduplicate across string and object entries', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+        reviewConfig: {
+          models: [
+            'gpt-4o',
+            {
+              id: 'gpt-4o',
+              authType: 'openai',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+      });
+      const models = config.getReviewModels();
+      expect(models).toHaveLength(1);
+    });
+
+    it('should use id as name when name is not provided in inline config', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: {
+          models: [
+            {
+              id: 'my-model',
+              authType: 'openai',
+              baseUrl: 'https://api.example.com/v1',
+            },
+          ],
+        },
+      });
+      const models = config.getReviewModels();
+      expect(models[0].name).toBe('my-model');
+    });
+  });
+
+  describe('getArbitratorModel', () => {
+    it('should return undefined when no arbitratorModel configured', () => {
+      const config = new Config({ ...reviewBaseParams });
+      expect(config.getArbitratorModel()).toBeUndefined();
+    });
+
+    it('should return undefined when arbitratorModel is empty string', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        reviewConfig: { arbitratorModel: '' },
+      });
+      expect(config.getArbitratorModel()).toBeUndefined();
+    });
+
+    it('should resolve arbitratorModel from modelProviders', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.com/v1',
+            },
+          ],
+        },
+        reviewConfig: { arbitratorModel: 'gpt-4o' },
+      });
+      const model = config.getArbitratorModel();
+      expect(model).toBeDefined();
+      expect(model?.id).toBe('gpt-4o');
+    });
+
+    it('should throw when arbitratorModel not found in modelProviders', () => {
+      const config = new Config({
+        ...reviewBaseParams,
+        modelProvidersConfig: {},
+        reviewConfig: { arbitratorModel: 'non-existent' },
+      });
+      expect(() => config.getArbitratorModel()).toThrow(
+        /Arbitrator model 'non-existent' not found/,
+      );
+    });
+  });
+});
+
 describe('Model Switching and Config Updates', () => {
   const baseParams: ConfigParameters = {
     cwd: '/tmp',

@@ -198,6 +198,32 @@ export class ModelRegistry {
   }
 
   /**
+   * Find a model by ID across all authTypes.
+   * Returns the resolved config if found in exactly one authType.
+   * Throws if the model ID is ambiguous (found in multiple authTypes).
+   */
+  findModelById(
+    modelId: string,
+  ): { config: ResolvedModelConfig; authType: AuthType } | undefined {
+    const matches: Array<{ config: ResolvedModelConfig; authType: AuthType }> =
+      [];
+    for (const [authType, modelMap] of this.modelsByAuthType.entries()) {
+      const model = modelMap.get(modelId);
+      if (model) {
+        matches.push({ config: model, authType });
+      }
+    }
+    if (matches.length === 0) return undefined;
+    if (matches.length > 1) {
+      const authTypes = matches.map((m) => m.authType).join(' and ');
+      throw new Error(
+        `Ambiguous model id '${modelId}', found in ${authTypes}. Use object form to disambiguate, e.g.: { "id": "${modelId}", "authType": "${matches[0].authType}" }`,
+      );
+    }
+    return matches[0];
+  }
+
+  /**
    * Reload models from updated configuration.
    * Clears existing user-configured models and re-registers from new config.
    * Preserves hard-coded qwen-oauth models.
