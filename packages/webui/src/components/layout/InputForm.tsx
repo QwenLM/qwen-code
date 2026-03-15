@@ -9,6 +9,7 @@
 
 import type { FC } from 'react';
 import type { ReactNode } from 'react';
+import { useState, useEffect } from 'react';
 import {
   EditPencilIcon,
   AutoEditIcon,
@@ -18,8 +19,10 @@ import { CodeBracketsIcon, HideContextIcon } from '../icons/EditIcons.js';
 import { SlashCommandIcon, LinkIcon } from '../icons/EditIcons.js';
 import { ArrowUpIcon } from '../icons/NavigationIcons.js';
 import { StopIcon } from '../icons/StopIcon.js';
+import { MicrophoneIcon } from '../icons/MicrophoneIcon.js';
 import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
+import { ImagePreviewList, type PastedImage } from './ImagePreview.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
 
@@ -117,6 +120,26 @@ export interface InputFormProps {
   onCompletionClose?: () => void;
   /** Placeholder text */
   placeholder?: string;
+  /** Voice input: whether voice is currently listening */
+  isVoiceListening?: boolean;
+  /** Voice input: whether speech recognition is supported */
+  isVoiceSupported?: boolean;
+  /** Voice input: whether voice input has an error */
+  hasVoiceError?: boolean;
+  /** Voice input: callback to start listening */
+  onStartVoiceListening?: () => void;
+  /** Voice input: callback to stop listening */
+  onStopVoiceListening?: () => void;
+  /** Image paste: list of pasted images */
+  pastedImages?: PastedImage[];
+  /** Image paste: callback to remove image */
+  onRemoveImage?: (imageId: string) => void;
+  /** Image paste: whether images are being processed */
+  isProcessingImages?: boolean;
+  /** Drag and drop handler */
+  onDrop?: (event: React.DragEvent) => void;
+  /** Drag over handler */
+  onDragOver?: (event: React.DragEvent) => void;
 }
 
 /**
@@ -172,6 +195,18 @@ export const InputForm: FC<InputFormProps> = ({
   onCompletionSelect,
   onCompletionClose,
   placeholder = 'Ask Qwen Code …',
+  // Voice input props
+  isVoiceListening = false,
+  isVoiceSupported = false,
+  hasVoiceError = false,
+  onStartVoiceListening,
+  onStopVoiceListening,
+  // Image paste props
+  pastedImages = [],
+  onRemoveImage,
+  isProcessingImages = false,
+  onDrop,
+  onDragOver,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
   const completionItemsResolved = completionItems ?? [];
@@ -230,7 +265,7 @@ export const InputForm: FC<InputFormProps> = ({
   return (
     <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
       <div className="block">
-        <form className="composer-form" onSubmit={onSubmit}>
+        <form className="composer-form" onSubmit={onSubmit} onDrop={onDrop} onDragOver={onDragOver}>
           {/* Inner background layer */}
           <div className="composer-overlay" />
 
@@ -255,8 +290,6 @@ export const InputForm: FC<InputFormProps> = ({
               aria-label="Message input"
               aria-multiline="true"
               data-placeholder={placeholder}
-              // Use a data flag so CSS can show placeholder even if the browser
-              // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={
                 inputText.replace(/\u200B/g, '').trim().length === 0
                   ? 'true'
@@ -264,7 +297,6 @@ export const InputForm: FC<InputFormProps> = ({
               }
               onInput={(e) => {
                 const target = e.target as HTMLDivElement;
-                // Filter out zero-width space that we use to maintain height
                 const text = target.textContent?.replace(/\u200B/g, '') || '';
                 onInputChange(text);
               }}
@@ -274,6 +306,15 @@ export const InputForm: FC<InputFormProps> = ({
               suppressContentEditableWarning
             />
           </div>
+
+          {/* Image previews */}
+          {pastedImages.length > 0 && onRemoveImage && (
+            <ImagePreviewList
+              images={pastedImages}
+              isProcessing={isProcessingImages}
+              onRemove={onRemoveImage}
+            />
+          )}
 
           <div className="composer-actions">
             {/* Edit mode button */}
@@ -337,6 +378,25 @@ export const InputForm: FC<InputFormProps> = ({
             >
               <LinkIcon />
             </button>
+
+            {/* Voice input button */}
+            {isVoiceSupported && onStartVoiceListening && onStopVoiceListening && (
+              <button
+                type="button"
+                className={`btn-icon-compact ${
+                  isVoiceListening
+                    ? 'text-red-500 hover:text-red-600 animate-pulse'
+                    : hasVoiceError
+                      ? 'text-orange-500 hover:text-orange-600'
+                      : 'hover:text-[var(--app-primary-foreground)]'
+                }`}
+                title={isVoiceListening ? 'Stop recording' : hasVoiceError ? 'Microphone error - click to retry' : 'Voice input'}
+                aria-label={isVoiceListening ? 'Stop recording' : 'Voice input'}
+                onClick={isVoiceListening ? onStopVoiceListening : onStartVoiceListening}
+              >
+                <MicrophoneIcon />
+              </button>
+            )}
 
             {/* Send/Stop button */}
             {isStreaming || isWaitingForResponse ? (

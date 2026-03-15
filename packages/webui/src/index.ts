@@ -53,6 +53,10 @@ export type {
   EditModeInfo,
   EditModeIconType,
 } from './components/layout/InputForm';
+export { VoiceInputButton } from './components/layout/VoiceInputButton';
+export type { VoiceInputButtonProps } from './components/layout/VoiceInputButton';
+export { ImagePreview, ImagePreviewList } from './components/layout/ImagePreview';
+export type { ImagePreviewProps, ImagePreviewListProps } from './components/layout/ImagePreview';
 export { Onboarding } from './components/layout/Onboarding';
 export type { OnboardingProps } from './components/layout/Onboarding';
 
@@ -221,6 +225,10 @@ export { StopIcon } from './components/icons/StopIcon';
 // Hooks
 export { useTheme } from './hooks/useTheme';
 export { useLocalStorage } from './hooks/useLocalStorage';
+export { useVoiceInput } from './hooks/useVoiceInput';
+export type { VoiceInputState } from './hooks/useVoiceInput';
+export { useImagePaste } from './hooks/useImagePaste';
+export type { PastedImage, ImagePasteState } from './hooks/useImagePaste';
 
 // Types
 export type { Theme } from './types/theme';
