@@ -24,62 +24,64 @@ export async function truncateAndSaveToFile(
   threshold: number,
   truncateLines: number,
 ): Promise<{ content: string; outputFile?: string }> {
-  let lines = content.split('\n');
-  let fileContent = content;
+  const lines = content.split('\n');
 
   // Check both constraints: character threshold and line limit.
-  const exceedsThreshold = content.length > threshold;
-  const exceedsLineLimit = lines.length > truncateLines;
-
-  if (!exceedsThreshold && !exceedsLineLimit) {
+  if (content.length <= threshold && lines.length <= truncateLines) {
     return { content };
   }
 
-  // If the content is long but has few lines, wrap it to enable line-based truncation.
-  if (exceedsThreshold && !exceedsLineLimit) {
-    const wrapWidth = 120; // A reasonable width for wrapping.
-    const wrappedLines: string[] = [];
-    for (const line of lines) {
-      if (line.length > wrapWidth) {
-        for (let i = 0; i < line.length; i += wrapWidth) {
-          wrappedLines.push(line.substring(i, i + wrapWidth));
-        }
-      } else {
-        wrappedLines.push(line);
-      }
+  // Build head and tail within both line and character budgets.
+  const effectiveLines = Math.min(truncateLines, lines.length);
+  const headCount = Math.max(Math.floor(effectiveLines / 5), 1);
+  const tailCount = effectiveLines - headCount;
+  const separator = '\n\n---\n... [CONTENT TRUNCATED] ...\n---\n\n';
+  const ellipsis = '...';
+
+  // Collect head lines within budget. If a single line exceeds the
+  // remaining budget, include a truncated slice of it.
+  const headBudget = Math.floor(threshold / 5);
+  const beginning: string[] = [];
+  let headChars = 0;
+  for (let i = 0; i < Math.min(headCount, lines.length); i++) {
+    const remaining = headBudget - headChars;
+    if (remaining <= 0) break;
+    if (lines[i].length + 1 > remaining) {
+      const sliceLen = Math.max(remaining - ellipsis.length, 0);
+      beginning.push(lines[i].slice(0, sliceLen) + ellipsis);
+      headChars = headBudget;
+      break;
     }
-    lines = wrappedLines;
-    fileContent = lines.join('\n');
+    beginning.push(lines[i]);
+    headChars += lines[i].length + 1; // +1 for newline
   }
 
-  // Compute effective line limit that respects both constraints.
-  // If the average line length would cause truncateLines to exceed the
-  // character threshold, reduce the number of lines to fit.
-  let effectiveLines = truncateLines;
-  if (lines.length > 0) {
-    const totalChars = lines.reduce((sum, line) => sum + line.length, 0);
-    const avgLineLength = totalChars / lines.length;
-    if (avgLineLength > 0) {
-      const linesFittingThreshold = Math.floor(threshold / avgLineLength);
-      effectiveLines = Math.min(truncateLines, linesFittingThreshold);
-      // Ensure at least a small number of lines are kept.
-      effectiveLines = Math.max(effectiveLines, 10);
+  // Collect tail lines within remaining budget. If a single line exceeds
+  // the remaining budget, include a truncated slice of it.
+  const tailBudget = Math.max(threshold - headChars - separator.length, 0);
+  const end: string[] = [];
+  let tailChars = 0;
+  const tailStart = Math.max(lines.length - tailCount, beginning.length);
+  for (let i = lines.length - 1; i >= tailStart; i--) {
+    const remaining = tailBudget - tailChars;
+    if (remaining <= 0) break;
+    if (lines[i].length + 1 > remaining) {
+      const sliceLen = Math.max(remaining - ellipsis.length, 0);
+      end.unshift(ellipsis + lines[i].slice(-sliceLen));
+      tailChars = tailBudget;
+      break;
     }
+    end.unshift(lines[i]);
+    tailChars += lines[i].length + 1;
   }
 
-  const head = Math.floor(effectiveLines / 5);
-  const beginning = lines.slice(0, head);
-  const end = lines.slice(-(effectiveLines - head));
-  const truncatedContent =
-    beginning.join('\n') +
-    '\n\n---\n... [CONTENT TRUNCATED] ...\n---\n\n' +
-    end.join('\n');
+  const truncatedContent = beginning.join('\n') + separator + end.join('\n');
 
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
   try {
-    await fs.writeFile(outputFile, fileContent);
+    await fs.writeFile(outputFile, content);
 
     return {
       content: `Tool output was too large and has been truncated.

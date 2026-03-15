@@ -154,20 +154,12 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(expectedTruncated);
   });
 
-  it('should wrap and truncate content when content has few but long lines', async () => {
+  it('should truncate content with few but very long lines', async () => {
     const content = 'a'.repeat(200_000); // A single very long line
     const fileName = 'test-file';
     const projectTempDir = '/tmp';
-    const wrapWidth = 120;
 
     mockWriteFile.mockResolvedValue(undefined);
-
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
-    }
-    const expectedFileContent = wrappedLines.join('\n');
 
     const result = await truncateAndSaveToFile(
       content,
@@ -180,31 +172,52 @@ describe('truncateAndSaveToFile', () => {
     expect(result.outputFile).toBe(
       path.join(projectTempDir, `${fileName}.output`),
     );
-    // Check that the file was written with the wrapped content
+    // Full original content is saved to file (no wrapping)
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
-      expectedFileContent,
+      content,
     );
 
-    // After wrapping, avg line length is 120 chars. Effective lines =
-    // min(1000, floor(40000/120)) = min(1000, 333) = 333.
-    const avgLineLength = 120;
-    const effectiveLines = Math.min(
-      TRUNCATE_LINES,
-      Math.floor(THRESHOLD / avgLineLength),
-    );
-    const head = Math.floor(effectiveLines / 5);
-    const beginning = wrappedLines.slice(0, head);
-    const end = wrappedLines.slice(-(effectiveLines - head));
-    const expectedTruncated =
-      beginning.join('\n') +
-      '\n\n---\n... [CONTENT TRUNCATED] ...\n---\n\n' +
-      end.join('\n');
     expect(result.content).toContain(
       'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('Truncated part of the output:');
-    expect(result.content).toContain(expectedTruncated);
+    expect(result.content).toContain('... [CONTENT TRUNCATED] ...');
+
+    // The truncated content should stay near the character threshold
+    const truncatedPart = result.content.split(
+      'Truncated part of the output:\n',
+    )[1];
+    expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
+  });
+
+  it('should stay near char threshold even when line lengths vary widely', async () => {
+    // Mix of short and very long lines — the old average-based approach
+    // would undercount because long lines in the tail blow past the budget.
+    const lines: string[] = [];
+    for (let i = 0; i < 2000; i++) {
+      lines.push(i % 10 === 0 ? 'x'.repeat(5000) : 'short');
+    }
+    const content = lines.join('\n');
+    const fileName = 'test-file';
+    const projectTempDir = '/tmp';
+
+    mockWriteFile.mockResolvedValue(undefined);
+
+    const result = await truncateAndSaveToFile(
+      content,
+      fileName,
+      projectTempDir,
+      THRESHOLD,
+      TRUNCATE_LINES,
+    );
+
+    expect(result.content).toContain('... [CONTENT TRUNCATED] ...');
+
+    const truncatedPart = result.content.split(
+      'Truncated part of the output:\n',
+    )[1];
+    // Should stay within ~1.5x the threshold even with variable line lengths
+    expect(truncatedPart.length).toBeLessThan(THRESHOLD * 1.5);
   });
 
   it('should handle file write errors gracefully', async () => {
@@ -233,16 +246,8 @@ describe('truncateAndSaveToFile', () => {
     const content = 'a'.repeat(200_000);
     const fileName = 'unique-file-123';
     const projectTempDir = '/custom/temp/dir';
-    const wrapWidth = 120;
 
     mockWriteFile.mockResolvedValue(undefined);
-
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
-    }
-    const expectedFileContent = wrappedLines.join('\n');
 
     const result = await truncateAndSaveToFile(
       content,
@@ -254,10 +259,7 @@ describe('truncateAndSaveToFile', () => {
 
     const expectedPath = path.join(projectTempDir, `${fileName}.output`);
     expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      expectedPath,
-      expectedFileContent,
-    );
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
   });
 
   it('should include helpful instructions in truncated message', async () => {
@@ -291,16 +293,8 @@ describe('truncateAndSaveToFile', () => {
     const content = 'a'.repeat(200_000);
     const fileName = '../../../../../etc/passwd';
     const projectTempDir = '/tmp/safe_dir';
-    const wrapWidth = 120;
 
     mockWriteFile.mockResolvedValue(undefined);
-
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
-    }
-    const expectedFileContent = wrappedLines.join('\n');
 
     await truncateAndSaveToFile(
       content,
@@ -311,9 +305,6 @@ describe('truncateAndSaveToFile', () => {
     );
 
     const expectedPath = path.join(projectTempDir, 'passwd.output');
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      expectedPath,
-      expectedFileContent,
-    );
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
   });
 });
