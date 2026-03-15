@@ -269,7 +269,7 @@ describe('ShellExecutionService', () => {
         .spyOn(Terminal.prototype, 'write')
         .mockImplementation(function (
           this: pkg.Terminal,
-          data: string,
+          data: string | Uint8Array,
           callback?: () => void,
         ) {
           setTimeout(() => {
