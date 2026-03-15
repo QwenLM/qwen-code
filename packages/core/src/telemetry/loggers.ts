@@ -20,6 +20,7 @@ import {
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
   EVENT_USER_PROMPT,
+  EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
   EVENT_NEXT_SPEAKER_CHECK,
   SERVICE_NAME,
@@ -66,6 +67,7 @@ import type {
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
+  UserRetryEvent,
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
@@ -164,6 +166,25 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `User prompt. Length: ${event.prompt_length}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logUserRetry(config: Config, event: UserRetryEvent): void {
+  QwenLogger.getInstance(config)?.logRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_USER_RETRY,
+    'event.timestamp': new Date().toISOString(),
+    prompt_id: event.prompt_id,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `User retry.`,
     attributes,
   };
   logger.emit(logRecord);

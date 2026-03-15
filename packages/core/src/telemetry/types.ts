@@ -148,6 +148,18 @@ export class UserPromptEvent implements BaseTelemetryEvent {
   }
 }
 
+export class UserRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'user_retry';
+  'event.timestamp': string;
+  prompt_id: string;
+
+  constructor(prompt_id: string) {
+    this['event.name'] = 'user_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = prompt_id;
+  }
+}
+
 export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
