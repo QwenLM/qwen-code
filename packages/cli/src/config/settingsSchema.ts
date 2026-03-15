@@ -546,17 +546,6 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
-      summarizeToolOutput: {
-        type: 'object',
-        label: 'Summarize Tool Output',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as
-          | Record<string, { tokenBudget?: number }>
-          | undefined,
-        description: 'Settings for summarizing tool output.',
-        showInDialog: false,
-      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -939,15 +928,6 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
-        showInDialog: false,
-      },
-      enableToolOutputTruncation: {
-        type: 'boolean',
-        label: 'Enable Tool Output Truncation',
-        category: 'General',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable truncation of large tool outputs.',
         showInDialog: false,
       },
       truncateToolOutputThreshold: {

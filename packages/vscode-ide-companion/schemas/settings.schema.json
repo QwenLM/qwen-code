@@ -242,11 +242,6 @@
           "type": "number",
           "default": -1
         },
-        "summarizeToolOutput": {
-          "description": "Settings for summarizing tool output.",
-          "type": "object",
-          "additionalProperties": true
-        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",
@@ -447,11 +442,6 @@
         },
         "useBuiltinRipgrep": {
           "description": "Use the bundled ripgrep binary. When set to false, the system-level \"rg\" command will be used instead. This setting is only effective when useRipgrep is true.",
-          "type": "boolean",
-          "default": true
-        },
-        "enableToolOutputTruncation": {
-          "description": "Enable truncation of large tool outputs.",
           "type": "boolean",
           "default": true
         },
