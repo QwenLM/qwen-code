@@ -39,6 +39,7 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
+import { BtwMessage } from './messages/BtwMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -194,6 +195,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'insight_progress' && (
         <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
+      {itemForDisplay.type === 'btw' && <BtwMessage btw={itemForDisplay.btw} />}
     </Box>
   );
 };
