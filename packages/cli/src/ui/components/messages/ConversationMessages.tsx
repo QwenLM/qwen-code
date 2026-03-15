@@ -92,22 +92,29 @@ function parseThinkingContent(text: string): {
 } {
   const thinkPattern = /<think(ing)?>([\s\S]*?)<\/think(ing)?>/g;
 
-  let match;
-  const thinkingParts: string[] = [];
-  let lastIndex = 0;
-  let hasThinking = false;
+  const matches = [...text.matchAll(thinkPattern)];
 
-  while ((match = thinkPattern.exec(text)) !== null) {
-    hasThinking = true;
-    thinkingParts.push(match[2].trim());
-    lastIndex = match.index + match[0].length;
+  if (matches.length === 0) {
+    return { thinkingContent: '', mainContent: text, hasThinking: false };
   }
 
+  const thinkingParts: string[] = [];
+  for (const match of matches) {
+    const content = match[2]?.trim();
+    if (content) {
+      thinkingParts.push(content);
+    }
+  }
+
+  const hasThinking = thinkingParts.length > 0;
   if (!hasThinking) {
     return { thinkingContent: '', mainContent: text, hasThinking: false };
   }
 
-  const thinkingContent = thinkingParts + '\n';
+  const lastMatch = matches[matches.length - 1];
+  const lastIndex = lastMatch.index! + lastMatch[0].length;
+
+  const thinkingContent = thinkingParts.join('\n') + '\n';
   const mainContent = text.slice(lastIndex).trim();
 
   return { thinkingContent, mainContent, hasThinking };
