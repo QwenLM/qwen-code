@@ -13,7 +13,6 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
-import { defaultModalities } from '../core/modalityDefaults.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
@@ -305,46 +304,39 @@ export interface ProcessedFileReadResult {
 }
 
 /**
- * Maps file type to the corresponding modality flag.
+ * For media file types, returns the corresponding modality key.
+ * Returns undefined for non-media types (text, binary, svg) which are always supported.
  */
-function fileTypeToModalityKey(
-  fileType: 'image' | 'pdf' | 'audio' | 'video',
-): keyof InputModalities {
-  switch (fileType) {
-    case 'image':
-      return 'image';
-    case 'pdf':
-      return 'pdf';
-    case 'audio':
-      return 'audio';
-    case 'video':
-      return 'video';
-    default:
-      // This should never happen due to the type constraint
-      throw new Error(`Unexpected file type: ${fileType}`);
+function mediaModalityKey(
+  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+): keyof InputModalities | undefined {
+  if (
+    fileType === 'image' ||
+    fileType === 'pdf' ||
+    fileType === 'audio' ||
+    fileType === 'video'
+  ) {
+    return fileType;
   }
+  return undefined;
 }
 
 /**
- * Checks if a file type is supported by the model's input modalities.
- * @param fileType The detected file type.
- * @param modalities The model's supported input modalities.
- * @returns True if the file type is supported, false otherwise.
+ * Build the same unsupported-modality message used by the converter,
+ * so the LLM sees a consistent hint regardless of where the check fires.
  */
-function isFileTypeSupported(
-  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
-  modalities: InputModalities,
-): boolean {
-  // Text, binary (rejected separately), and SVG (treated as text) are always supported
-  if (fileType === 'text' || fileType === 'binary' || fileType === 'svg') {
-    return true;
+function unsupportedModalityMessage(
+  modality: string,
+  displayName: string,
+): string {
+  let hint: string;
+  if (modality === 'pdf') {
+    hint =
+      'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
+  } else {
+    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   }
-
-  // Check modalities for media types
-  const modalityKey = fileTypeToModalityKey(
-    fileType as 'image' | 'pdf' | 'audio' | 'video',
-  );
-  return modalities[modalityKey] === true;
+  return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
 }
 
 /**
@@ -402,22 +394,24 @@ export async function processSingleFileContent(
 
     const displayName = path.basename(filePath);
 
-    // Get the current model's supported modalities
-    const model = config.getModel();
-    const modalities = defaultModalities(model);
-
-    // Check if the file type is supported by the current model
-    if (!isFileTypeSupported(fileType, modalities)) {
-      // At this point, fileType must be a media type (image, pdf, audio, video)
-      // because text/binary/svg are always supported
-      const modalityName = fileTypeToModalityKey(
-        fileType as 'image' | 'pdf' | 'audio' | 'video',
-      );
-      return {
-        llmContent: `The current model "${model}" does not support ${modalityName} input. ${fileType.toUpperCase()} files cannot be read directly.`,
-        returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modalityName} input)`,
-        error: `Model "${model}" does not support ${modalityName} input. Please use a model that supports ${modalityName} or convert the file to text externally.`,
-      };
+    // Check modality support for media files using the resolved config
+    // (same source of truth the converter uses at API-call time).
+    const modality = mediaModalityKey(fileType);
+    if (modality) {
+      const modalities: InputModalities =
+        config.getContentGeneratorConfig()?.modalities ?? {};
+      if (!modalities[modality]) {
+        const message = unsupportedModalityMessage(modality, displayName);
+        debugLogger.warn(
+          `Model '${config.getModel()}' does not support ${modality} input. ` +
+            `Skipping file: ${relativePathForDisplay}`,
+        );
+        return {
+          llmContent: message,
+          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+          error: message,
+        };
+      }
     }
 
     switch (fileType) {

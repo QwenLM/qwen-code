@@ -54,7 +54,10 @@ describe('fileUtils', () => {
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getTargetDir: () => tempRootDir,
-    getModel: () => 'qwen3.5-plus', // Default model with image+video support
+    getModel: () => 'qwen3.5-plus',
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, video: true },
+    }),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -744,10 +747,9 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
       mockMimeGetType.mockReturnValue('image/png');
 
-      // Use a model that doesn't support image (text-only model)
       const mockConfigNoImage = {
         ...mockConfig,
-        getModel: () => 'deepseek-chat',
+        getContentGeneratorConfig: () => ({ modalities: {} }),
       } as unknown as Config;
 
       const result = await processSingleFileContent(
@@ -755,9 +757,9 @@ describe('fileUtils', () => {
         mockConfigNoImage,
       );
       expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Unsupported image file');
       expect(result.llmContent).toContain('does not support image input');
       expect(result.returnDisplay).toContain('Skipped image file');
-      expect(result.error).toContain('does not support image input');
     });
 
     it('should reject PDF files when model does not support PDF', async () => {
@@ -765,10 +767,11 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
 
-      // Use a model that doesn't support PDF (e.g., qwen text-only model)
       const mockConfigNoPdf = {
         ...mockConfig,
-        getModel: () => 'qwen3-coder-plus',
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true },
+        }),
       } as unknown as Config;
 
       const result = await processSingleFileContent(
@@ -776,9 +779,12 @@ describe('fileUtils', () => {
         mockConfigNoPdf,
       );
       expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('does not support pdf input');
+      expect(result.llmContent).toContain('Unsupported pdf file');
+      expect(result.llmContent).toContain(
+        'does not support PDF input directly',
+      );
+      expect(result.llmContent).toContain('/extensions install');
       expect(result.returnDisplay).toContain('Skipped pdf file');
-      expect(result.error).toContain('does not support pdf input');
     });
 
     it('should accept PDF files when model supports PDF', async () => {
@@ -786,10 +792,11 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
 
-      // Use a model that supports PDF (e.g., Claude)
       const mockConfigWithPdf = {
         ...mockConfig,
-        getModel: () => 'claude-3-sonnet',
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true, pdf: true },
+        }),
       } as unknown as Config;
 
       const result = await processSingleFileContent(
