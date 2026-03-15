@@ -12,19 +12,63 @@ import {
 
 const debugLogger = createDebugLogger('GIT');
 
+const SUPPORTED_GIT_HOSTS = new Set(['github.com', 'gitlab.com']);
+
+function getGitRemoteHosts(remotesOutput: string): Set<string> {
+  const hosts = new Set<string>();
+
+  for (const line of remotesOutput.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 2) continue;
+
+    const remoteUrl = parts[1];
+    const host = getGitUrlHost(remoteUrl);
+    if (host) {
+      hosts.add(host);
+    }
+  }
+
+  return hosts;
+}
+
+function getGitUrlHost(remoteUrl: string): string | undefined {
+  // Handle SSH-style URLs like git@github.com:owner/repo.git
+  if (remoteUrl.startsWith('git@')) {
+    const match = /^git@([^:]+):/.exec(remoteUrl);
+    return match?.[1];
+  }
+
+  try {
+    const url = new URL(remoteUrl);
+    return url.hostname;
+  } catch {
+    // If the URL cannot be parsed, treat it as unsupported
+    return undefined;
+  }
+}
+
 /**
  * Checks if a directory is within a supported git repository (e.g., GitHub, GitLab).
  * @returns true if the directory is in a supported git repository, false otherwise
  */
 export const isSupportedGitRepository = (): boolean => {
   try {
-    const remotes = (
+    const remotesOutput = (
       execSync('git remote -v', {
         encoding: 'utf-8',
       }) || ''
     ).trim();
 
-    return remotes.includes('github.com') || remotes.includes('gitlab.com');
+    const hosts = getGitRemoteHosts(remotesOutput);
+    for (const host of hosts) {
+      if (SUPPORTED_GIT_HOSTS.has(host)) {
+        return true;
+      }
+    }
+    return false;
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
     debugLogger.debug(`Failed to get git remote:`, _error);
@@ -38,13 +82,14 @@ export const isSupportedGitRepository = (): boolean => {
  */
 export const isGitHubRepository = (): boolean => {
   try {
-    const remotes = (
+    const remotesOutput = (
       execSync('git remote -v', {
         encoding: 'utf-8',
       }) || ''
     ).trim();
 
-    return remotes.includes('github.com');
+    const hosts = getGitRemoteHosts(remotesOutput);
+    return hosts.has('github.com');
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
     debugLogger.debug(`Failed to get git remote:`, _error);

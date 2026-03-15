@@ -1274,9 +1274,22 @@ export function getExtensionId(
     try {
       const { owner, repo } = getRepoInfoFromSource(installMetadata.source);
       // Reconstruct a normalized source URL for the ID
-      if (installMetadata.source.includes('gitlab.com')) {
+      let host: string | undefined;
+      try {
+        const url = new URL(installMetadata.source);
+        host = url.hostname;
+      } catch {
+        if (installMetadata.source.startsWith('git@gitlab.com:')) {
+          host = 'gitlab.com';
+        } else if (installMetadata.source.startsWith('git@github.com:')) {
+          host = 'github.com';
+        }
+      }
+
+      if (host === 'gitlab.com') {
         idValue = `https://gitlab.com/${owner}/${repo}`;
       } else {
+        // Default to GitHub if host is unknown or github.com
         idValue = `https://github.com/${owner}/${repo}`;
       }
     } catch {

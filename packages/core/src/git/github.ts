@@ -221,12 +221,31 @@ export class GitHubProvider extends BaseGitProvider {
   }
 
   convertToRawUrl(url: string): string {
-    if (url.includes('github.com') && url.includes('/blob/')) {
-      return url
-        .replace('github.com', 'raw.githubusercontent.com')
-        .replace('/blob/', '/');
+    try {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.hostname !== 'github.com') {
+        return url;
+      }
+
+      const segments = parsedUrl.pathname.split('/').filter(Boolean);
+      const blobIndex = segments.indexOf('blob');
+      if (blobIndex === -1 || blobIndex < 2) {
+        return url;
+      }
+
+      const owner = segments[0];
+      const repo = segments[1];
+      const refAndPath = segments.slice(blobIndex + 1);
+      if (refAndPath.length === 0) {
+        return url;
+      }
+
+      parsedUrl.hostname = 'raw.githubusercontent.com';
+      parsedUrl.pathname = `/${owner}/${repo}/${refAndPath.join('/')}`;
+      return parsedUrl.toString();
+    } catch {
+      return url;
     }
-    return url;
   }
 
   private findReleaseAsset(assets: Asset[]): Asset | undefined {

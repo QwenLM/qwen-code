@@ -181,10 +181,21 @@ export class GitLabProvider extends BaseGitProvider {
   }
 
   convertToRawUrl(url: string): string {
-    if (url.includes('gitlab.com') && url.includes('/-/blob/')) {
-      return url.replace('/-/blob/', '/-/raw/');
+    try {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.hostname !== 'gitlab.com') {
+        return url;
+      }
+
+      if (!parsedUrl.pathname.includes('/-/blob/')) {
+        return url;
+      }
+
+      parsedUrl.pathname = parsedUrl.pathname.replace('/-/blob/', '/-/raw/');
+      return parsedUrl.toString();
+    } catch {
+      return url;
     }
-    return url;
   }
 
   private async fetchJson<T>(url: string): Promise<T> {
