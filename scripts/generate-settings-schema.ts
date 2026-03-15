@@ -71,15 +71,15 @@ function convertItemDefinitionToJsonSchema(
     if (requiredFields.length > 0) {
       schema.required = requiredFields;
     }
+  }
 
-    if (itemDef.additionalProperties !== undefined) {
-      if (typeof itemDef.additionalProperties === 'boolean') {
-        schema.additionalProperties = itemDef.additionalProperties;
-      } else {
-        schema.additionalProperties = convertItemDefinitionToJsonSchema(
-          itemDef.additionalProperties,
-        );
-      }
+  if (itemDef.type === 'object' && itemDef.additionalProperties !== undefined) {
+    if (typeof itemDef.additionalProperties === 'boolean') {
+      schema.additionalProperties = itemDef.additionalProperties;
+    } else {
+      schema.additionalProperties = convertItemDefinitionToJsonSchema(
+        itemDef.additionalProperties,
+      );
     }
   }
 

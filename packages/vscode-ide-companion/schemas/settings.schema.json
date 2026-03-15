@@ -643,7 +643,10 @@
                     },
                     "env": {
                       "description": "Environment variables to set when executing the hook command.",
-                      "type": "object"
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -705,7 +708,10 @@
                     },
                     "env": {
                       "description": "Environment variables to set when executing the hook command.",
-                      "type": "object"
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [

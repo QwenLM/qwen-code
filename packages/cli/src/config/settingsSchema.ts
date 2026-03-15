@@ -85,7 +85,7 @@ export interface SettingDefinition {
  * Supports simple types (string, number, boolean) and complex object types.
  */
 export interface SettingItemDefinition {
-  type: 'string' | 'number' | 'boolean' | 'object';
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   properties?: Record<
     string,
     SettingItemDefinition & {
@@ -125,7 +125,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
         'Whether the hooks should be executed sequentially instead of in parallel.',
     },
     hooks: {
-      type: 'object',
+      type: 'array',
       description: 'The list of hook configurations to execute.',
       required: true,
       items: {
