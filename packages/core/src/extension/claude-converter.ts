@@ -16,7 +16,7 @@ import type {
   ExtensionInstallMetadata,
   MCPServerConfig,
 } from '../config/config.js';
-import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
+import { cloneFromGit, downloadFromGitRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
 import {
@@ -719,7 +719,7 @@ async function resolvePluginSource(
         originSource: 'Claude',
       };
       try {
-        await downloadFromGitHubRelease(installMetadata, pluginDir);
+        await downloadFromGitRelease(installMetadata, pluginDir);
       } catch {
         await cloneFromGit(installMetadata, pluginDir);
       }
@@ -752,7 +752,7 @@ async function resolvePluginSource(
       type: 'git',
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitRelease(installMetadata, pluginDir);
     } catch {
       await cloneFromGit(installMetadata, pluginDir);
     }
@@ -765,7 +765,7 @@ async function resolvePluginSource(
       type: 'git',
     };
     try {
-      await downloadFromGitHubRelease(installMetadata, pluginDir);
+      await downloadFromGitRelease(installMetadata, pluginDir);
     } catch {
       await cloneFromGit(installMetadata, pluginDir);
     }

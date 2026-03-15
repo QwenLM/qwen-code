@@ -25,6 +25,7 @@ import {
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
+import { GitProviderFactory } from '../git/factory.js';
 
 const URL_FETCH_TIMEOUT_MS = 10000;
 const MAX_CONTENT_LENGTH = 100000;
@@ -62,15 +63,20 @@ class WebFetchToolInvocation extends BaseToolInvocation<
 
   private async executeDirectFetch(signal: AbortSignal): Promise<ToolResult> {
     let url = this.params.url;
+    this.debugLogger.debug(`[WebFetchTool] Processing URL: ${url}`);
 
-    // Convert GitHub blob URL to raw URL
-    if (url.includes('github.com') && url.includes('/blob/')) {
-      url = url
-        .replace('github.com', 'raw.githubusercontent.com')
-        .replace('/blob/', '/');
-      this.debugLogger.debug(
-        `[WebFetchTool] Converted GitHub blob URL to raw URL: ${url}`,
-      );
+    // Try to convert blob URL to raw URL using GitProvider
+    try {
+      const provider = GitProviderFactory.getProvider(url);
+      const convertedUrl = provider.convertToRawUrl(url);
+      if (convertedUrl !== url) {
+        url = convertedUrl;
+        this.debugLogger.debug(
+          `[WebFetchTool] Converted blob URL to raw URL: ${url}`,
+        );
+      }
+    } catch {
+      // No provider found, continue with original URL
     }
 
     try {

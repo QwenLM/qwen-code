@@ -33,8 +33,8 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
-  downloadFromGitHubRelease,
-  parseGitHubRepoForReleases,
+  downloadFromGitRelease,
+  getRepoInfoFromSource,
 } from './github.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
@@ -778,24 +778,26 @@ export class ExtensionManager {
 
       if (
         installMetadata.type === 'git' ||
-        installMetadata.type === 'github-release'
+        installMetadata.type === 'github-release' ||
+        installMetadata.type === 'gitlab-release'
       ) {
         tempDir = await ExtensionStorage.createTmpDir();
         try {
-          const result = await downloadFromGitHubRelease(
-            installMetadata,
-            tempDir,
-          );
+          const result = await downloadFromGitRelease(installMetadata, tempDir);
           if (
             installMetadata.type === 'git' ||
-            installMetadata.type === 'github-release'
+            installMetadata.type === 'github-release' ||
+            installMetadata.type === 'gitlab-release'
           ) {
             installMetadata.type = result.type;
             installMetadata.releaseTag = result.tagName;
           }
         } catch (_error) {
           await cloneFromGit(installMetadata, tempDir);
-          if (installMetadata.type === 'github-release') {
+          if (
+            installMetadata.type === 'github-release' ||
+            installMetadata.type === 'gitlab-release'
+          ) {
             installMetadata.type = 'git';
           }
         }
@@ -1263,14 +1265,36 @@ export function getExtensionId(
   installMetadata?: ExtensionInstallMetadata,
 ): string {
   let idValue = config.name;
-  const githubUrlParts =
+  if (
     installMetadata &&
     (installMetadata.type === 'git' ||
-      installMetadata.type === 'github-release')
-      ? parseGitHubRepoForReleases(installMetadata.source)
-      : null;
-  if (githubUrlParts) {
-    idValue = `https://github.com/${githubUrlParts.owner}/${githubUrlParts.repo}`;
+      installMetadata.type === 'github-release' ||
+      installMetadata.type === 'gitlab-release')
+  ) {
+    try {
+      const { owner, repo } = getRepoInfoFromSource(installMetadata.source);
+      // Reconstruct a normalized source URL for the ID
+      let host: string | undefined;
+      try {
+        const url = new URL(installMetadata.source);
+        host = url.hostname;
+      } catch {
+        if (installMetadata.source.startsWith('git@gitlab.com:')) {
+          host = 'gitlab.com';
+        } else if (installMetadata.source.startsWith('git@github.com:')) {
+          host = 'github.com';
+        }
+      }
+
+      if (host === 'gitlab.com') {
+        idValue = `https://gitlab.com/${owner}/${repo}`;
+      } else {
+        // Default to GitHub if host is unknown or github.com
+        idValue = `https://github.com/${owner}/${repo}`;
+      }
+    } catch {
+      idValue = installMetadata.source;
+    }
   } else {
     idValue = installMetadata?.source ?? config.name;
   }

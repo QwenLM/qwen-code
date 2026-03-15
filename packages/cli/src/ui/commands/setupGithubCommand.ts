@@ -12,7 +12,7 @@ import { ProxyAgent } from 'undici';
 import type { CommandContext } from '../../ui/commands/types.js';
 import {
   getGitRepoRoot,
-  getLatestGitHubRelease,
+  getLatestActionRelease,
   isGitHubRepository,
   getGitHubRepoInfo,
 } from '../../utils/gitUtils.js';
@@ -130,9 +130,9 @@ export const setupGithubCommand: SlashCommand = {
       );
     }
 
-    // Get the latest release tag from GitHub
+    // Get the latest release tag for qwen-code-action
     const proxy = context?.services?.config?.getProxy();
-    const releaseTag = await getLatestGitHubRelease(proxy);
+    const releaseTag = await getLatestActionRelease(proxy);
     const readmeUrl = `https://github.com/QwenLM/qwen-code-action/blob/${releaseTag}/README.md#quick-start`;
 
     // Create the .github/workflows directory to download the files into

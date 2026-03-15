@@ -9,6 +9,8 @@ import { parseInstallSource } from './marketplace.js';
 import * as fs from 'node:fs/promises';
 import * as https from 'node:https';
 
+import { GitProviderFactory } from '../git/factory.js';
+
 // Mock dependencies
 vi.mock('node:fs/promises', () => ({
   stat: vi.fn(),
@@ -24,14 +26,21 @@ vi.mock('node:https', () => ({
   get: vi.fn(),
 }));
 
-vi.mock('./github.js', () => ({
-  parseGitHubRepoForReleases: vi.fn((url: string) => {
+const mockProviderInstance = {
+  getRepoInfo: vi.fn((url: string) => {
     const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (match) {
       return { owner: match[1], repo: match[2] };
     }
     throw new Error('Not a GitHub URL');
   }),
+  getFileContent: vi.fn(),
+};
+
+vi.mock('../git/factory.js', () => ({
+  GitProviderFactory: {
+    getProvider: vi.fn(() => mockProviderInstance),
+  },
 }));
 
 describe('parseInstallSource', () => {
@@ -243,24 +252,13 @@ describe('parseInstallSource', () => {
         plugins: [{ name: 'plugin1' }],
       };
 
-      // Mock successful API response
-      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
-        const mockRes = {
-          statusCode: 200,
-          on: vi.fn((event, handler) => {
-            if (event === 'data') {
-              handler(Buffer.from(JSON.stringify(mockMarketplaceConfig)));
-            }
-            if (event === 'end') {
-              handler();
-            }
-          }),
-        };
-        if (typeof callback === 'function') {
-          callback(mockRes as never);
-        }
-        return { on: vi.fn() } as never;
-      });
+      // Mock successful provider response
+      const mockProvider = GitProviderFactory.getProvider(
+        'https://github.com/owner/repo',
+      );
+      vi.mocked(mockProvider.getFileContent).mockResolvedValue(
+        JSON.stringify(mockMarketplaceConfig),
+      );
 
       const result = await parseInstallSource('owner/repo');
 
@@ -272,7 +270,14 @@ describe('parseInstallSource', () => {
       // Mock stat to fail (not a local path)
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
-      // HTTPS returns 404 (default mock behavior)
+      // Provider returns error (marketplace.json not found)
+      const mockProvider = GitProviderFactory.getProvider(
+        'https://github.com/owner/repo',
+      );
+      vi.mocked(mockProvider.getFileContent).mockRejectedValue(
+        new Error('Not found'),
+      );
+
       const result = await parseInstallSource('owner/repo');
 
       expect(result.type).toBe('git');
