@@ -16,7 +16,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
-  SubAgentEventEmitter,
+  AgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -489,7 +489,7 @@ export class Session implements SessionContext {
         // Access eventEmitter from TaskTool invocation
         const taskEventEmitter = (
           invocation as {
-            eventEmitter: SubAgentEventEmitter;
+            eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
@@ -498,7 +498,7 @@ export class Session implements SessionContext {
         const subagentType = (args['subagent_type'] as string) ?? '';
 
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(
+        const subSubAgentTracker = new SubAgentTracker(
           this,
           this.client,
           parentToolCallId,
@@ -506,7 +506,7 @@ export class Session implements SessionContext {
         );
 
         // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subAgentTracker.setup(
+        subAgentCleanupFunctions = subSubAgentTracker.setup(
           taskEventEmitter,
           abortSignal,
         );

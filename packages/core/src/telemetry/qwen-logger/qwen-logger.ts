@@ -45,6 +45,9 @@ import type {
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -918,6 +921,61 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // arena events
+  logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        model_ids: JSON.stringify(event.model_ids),
+        task_length: event.task_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaAgentCompletedEvent(event: ArenaAgentCompletedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_agent_completed', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        agent_session_id: event.agent_session_id,
+        agent_model_id: event.agent_model_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        rounds: event.rounds,
+        total_tokens: event.total_tokens,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        tool_calls: event.tool_calls,
+        successful_tool_calls: event.successful_tool_calls,
+        failed_tool_calls: event.failed_tool_calls,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaSessionEndedEvent(event: ArenaSessionEndedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_ended', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        display_backend: event.display_backend,
+        agent_count: event.agent_count,
+        completed_agents: event.completed_agents,
+        failed_agents: event.failed_agents,
+        cancelled_agents: event.cancelled_agents,
+        winner_model_id: event.winner_model_id,
       },
     });
 

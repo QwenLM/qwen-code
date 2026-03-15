@@ -427,6 +427,12 @@ export const useGeminiStream = (
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
 
+    // Report cancellation to arena status reporter (if in arena mode).
+    // This is needed because cancellation during tool execution won't
+    // flow through sendMessageStream where the inline reportCancelled()
+    // lives — tools get cancelled and handleCompletedTools returns early.
+    config.getArenaAgentClient()?.reportCancelled();
+
     // Log API cancellation
     const prompt_id = config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
@@ -1425,6 +1431,9 @@ export const useGeminiStream = (
             role: 'user',
             parts: combinedParts,
           });
+
+          // Report cancellation to arena (safety net — cancelOngoingRequest
+          config.getArenaAgentClient()?.reportCancelled();
         }
 
         const callIdsToMarkAsSubmitted = geminiTools.map(
@@ -1467,6 +1476,7 @@ export const useGeminiStream = (
       geminiClient,
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
+      config,
     ],
   );
 
