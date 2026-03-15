@@ -109,8 +109,9 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available Qwen Code tools. Usage: /tools [desc]':
+    'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available skills.': 'Listar habilidades disponíveis.',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -385,8 +386,10 @@ export default {
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
   'exit the cli': 'sair da cli',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    'listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Abrir diálogo de gerenciamento MCP ou autenticar com servidor habilitado para OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+    'Listar servidores e ferramentas MCP configurados, ou autenticar com servidores habilitados para OAuth',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Adicionar diretórios ao workspace. Use vírgula para separar vários caminhos',
@@ -399,6 +402,7 @@ export default {
     'Estes editores são suportados atualmente. Note que alguns editores não podem ser usados no modo sandbox.',
   'Your preferred editor is:': 'Seu editor preferido é:',
   'Manage extensions': 'Gerenciar extensões',
+  'Manage installed extensions': 'Gerenciar extensões instaladas',
   'List active extensions': 'Listar extensões ativas',
   'Update extensions. Usage: update <extension-names>|--all':
     'Atualizar extensões. Uso: update <nomes-das-extensoes>|--all',
@@ -588,6 +592,38 @@ export default {
     'Falha ao configurar {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Seu terminal já está configurado para uma experiência ideal com entrada multilinhas (Shift+Enter e Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Gerenciar hooks do Qwen Code',
+  'List all configured hooks': 'Listar todos os hooks configurados',
+  'Enable a disabled hook': 'Ativar um hook desativado',
+  'Disable an active hook': 'Desativar um hook ativo',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Exportar o histórico de mensagens da sessão atual para um arquivo',
+  'Export session to HTML format': 'Exportar a sessão para o formato HTML',
+  'Export session to JSON format': 'Exportar a sessão para o formato JSON',
+  'Export session to JSONL format (one message per line)':
+    'Exportar a sessão para o formato JSONL (uma mensagem por linha)',
+  'Export session to markdown format':
+    'Exportar a sessão para o formato Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Gerar insights personalizados de programação a partir do seu histórico de chat',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Retomar uma sessão anterior',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restaurar uma chamada de ferramenta. Isso redefinirá o histórico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Não foi possível detectar o tipo de terminal. Terminais suportados: VS Code, Cursor, Windsurf e Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -749,6 +785,15 @@ export default {
     "Falha ao autenticar com o servidor MCP '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Redescobrindo ferramentas de '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "{{count}} ferramenta(s) descoberta(s) de '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Autenticação concluída. Retornando aos detalhes do servidor...',
+  'Authentication successful.': 'Autenticação bem-sucedida.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Se o navegador não abrir, copie e cole esta URL no seu navegador:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Certifique-se de copiar a URL COMPLETA – ela pode ocupar várias linhas.',
 
   // ============================================================================
   // Commands - Chat
@@ -888,9 +933,116 @@ export default {
   'Do you want to proceed?': 'Você deseja prosseguir?',
   'Yes, allow once': 'Sim, permitir uma vez',
   'Allow always': 'Permitir sempre',
+  Yes: 'Sim',
   No: 'Não',
   'No (esc)': 'Não (esc)',
   'Yes, allow always for this session': 'Sim, permitir sempre para esta sessão',
+
+  // MCP Management - Core translations
+  'Manage MCP servers': 'Gerenciar servidores MCP',
+  'Server Detail': 'Detalhes do servidor',
+  'Disable Server': 'Desativar servidor',
+  Tools: 'Ferramentas',
+  'Tool Detail': 'Detalhes da ferramenta',
+  'MCP Management': 'Gerenciamento MCP',
+  'Loading...': 'Carregando...',
+  'Unknown step': 'Etapa desconhecida',
+  'Esc to back': 'Esc para voltar',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ navegar · Enter selecionar · Esc fechar',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ navegar · Enter selecionar · Esc voltar',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ navegar · Enter confirmar · Esc voltar',
+  'User Settings (global)': 'Configurações do usuário (global)',
+  'Workspace Settings (project-specific)':
+    'Configurações do workspace (específico do projeto)',
+  'Disable server:': 'Desativar servidor:',
+  'Select where to add the server to the exclude list:':
+    'Selecione onde adicionar o servidor à lista de exclusão:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter para confirmar, Esc para cancelar',
+  Disable: 'Desativar',
+  Enable: 'Ativar',
+  Authenticate: 'Autenticar',
+  'Re-authenticate': 'Reautenticar',
+  'Clear Authentication': 'Limpar autenticação',
+  disabled: 'desativado',
+  'Server:': 'Servidor:',
+  Reconnect: 'Reconectar',
+  'View tools': 'Ver ferramentas',
+  'Status:': 'Status:',
+  'Source:': 'Fonte:',
+  'Command:': 'Comando:',
+  'Working Directory:': 'Diretório de trabalho:',
+  'Capabilities:': 'Capacidades:',
+  'No server selected': 'Nenhum servidor selecionado',
+  '(disabled)': '(desativado)',
+  'Error:': 'Erro:',
+  Extension: 'Extensão',
+  tool: 'ferramenta',
+  tools: 'ferramentas',
+  connected: 'conectado',
+  connecting: 'conectando',
+  disconnected: 'desconectado',
+  error: 'erro',
+
+  // MCP Server List
+  'User MCPs': 'MCPs do usuário',
+  'Project MCPs': 'MCPs do projeto',
+  'Extension MCPs': 'MCPs de extensão',
+  server: 'servidor',
+  servers: 'servidores',
+  'Add MCP servers to your settings to get started.':
+    'Adicione servidores MCP às suas configurações para começar.',
+  'Run qwen --debug to see error logs':
+    'Execute qwen --debug para ver os logs de erro',
+
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'Autenticação OAuth',
+  'Press Enter to start authentication, Esc to go back':
+    'Pressione Enter para iniciar a autenticação, Esc para voltar',
+  'Authenticating... Please complete the login in your browser.':
+    'Autenticando... Por favor, conclua o login no seu navegador.',
+  'Press Enter or Esc to go back': 'Pressione Enter ou Esc para voltar',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Nenhuma ferramenta disponível para este servidor.',
+  destructive: 'destrutivo',
+  'read-only': 'somente leitura',
+  'open-world': 'mundo aberto',
+  idempotent: 'idempotente',
+  'Tools for {{name}}': 'Ferramentas para {{name}}',
+  'Tools for {{serverName}}': 'Ferramentas para {{serverName}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'obrigatório',
+  Type: 'Tipo',
+  Enum: 'Enumeração',
+  Parameters: 'Parâmetros',
+  'No tool selected': 'Nenhuma ferramenta selecionada',
+  Annotations: 'Anotações',
+  Title: 'Título',
+  'Read Only': 'Somente leitura',
+  Destructive: 'Destrutivo',
+  Idempotent: 'Idempotente',
+  'Open World': 'Mundo aberto',
+  Server: 'Servidor',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ferramentas inválidas',
+  invalid: 'inválido',
+  'invalid: {{reason}}': 'inválido: {{reason}}',
+  'missing name': 'nome ausente',
+  'missing description': 'descrição ausente',
+  '(unnamed)': '(sem nome)',
+  'Warning: This tool cannot be called by the LLM':
+    'Aviso: Esta ferramenta não pode ser chamada pelo LLM',
+  Reason: 'Motivo',
+  'Tools must have both name and description to be used by the LLM.':
+    'As ferramentas devem ter tanto nome quanto descrição para serem usadas pelo LLM.',
   'Modify in progress:': 'Modificação em progresso:',
   'Save and close external editor to continue':
     'Salve e feche o editor externo para continuar',
@@ -1439,6 +1591,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Cole sua chave de API do Bailian Coding Plan e pronto!',
+  Custom: 'Personalizado',
+  'More instructions about configuring `modelProviders` manually.':
+    'Mais instruções sobre como configurar `modelProviders` manualmente.',
+  'Select API-KEY configuration mode:':
+    'Selecione o modo de configuração da API-KEY:',
+  '(Press Escape to go back)': '(Pressione Escape para voltar)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Pressione Enter para enviar, Escape para cancelar)',
+  'More instructions please check:': 'Mais instruções, consulte:',
   'Select Region for Coding Plan': 'Selecionar região do Coding Plan',
   'Choose based on where your account is registered':
     'Escolha com base em onde sua conta está registrada',
@@ -1451,6 +1615,39 @@ export default {
     'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
+  '{{region}} configuration updated successfully.':
+    'Configuração do {{region}} atualizada com sucesso.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Dica: Use /model para alternar entre os modelos disponíveis do Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Por favor, responda à(s) seguinte(s) pergunta(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Não é possível fazer perguntas ao usuário no modo não interativo. Por favor, execute no modo interativo para usar esta ferramenta.',
+  'User declined to answer the questions.':
+    'O usuário recusou responder às perguntas.',
+  'User has provided the following answers:':
+    'O usuário forneceu as seguintes respostas:',
+  'Failed to process user answers:':
+    'Falha ao processar as respostas do usuário:',
+  'Type something...': 'Digite algo...',
+  Submit: 'Enviar',
+  'Submit answers': 'Enviar respostas',
+  Cancel: 'Cancelar',
+  'Your answers:': 'Suas respostas:',
+  '(not answered)': '(não respondido)',
+  'Ready to submit your answers?': 'Pronto para enviar suas respostas?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navegar | ←/→: Alternar abas | Enter: Selecionar',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | ←/→: Alternar abas | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
 };

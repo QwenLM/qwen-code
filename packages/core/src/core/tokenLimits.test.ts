@@ -108,11 +108,11 @@ describe('tokenLimit', () => {
   });
 
   describe('OpenAI', () => {
-    it('should return 400K for GPT-5.x (latest)', () => {
-      expect(tokenLimit('gpt-5')).toBe(400000);
-      expect(tokenLimit('gpt-5-mini')).toBe(400000);
-      expect(tokenLimit('gpt-5.2')).toBe(400000);
-      expect(tokenLimit('gpt-5.2-pro')).toBe(400000);
+    it('should return 272K for GPT-5.x (latest)', () => {
+      expect(tokenLimit('gpt-5')).toBe(272000);
+      expect(tokenLimit('gpt-5-mini')).toBe(272000);
+      expect(tokenLimit('gpt-5.2')).toBe(272000);
+      expect(tokenLimit('gpt-5.2-pro')).toBe(272000);
     });
 
     it('should return 128K for legacy GPT (fallback)', () => {
@@ -284,12 +284,14 @@ describe('tokenLimit with output type', () => {
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1-0528', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-chat', 'output')).toBe(8192);
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(16384);
-      expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
+      expect(tokenLimit('glm-5', 'output')).toBe(131072);
+      expect(tokenLimit('glm-4.7', 'output')).toBe(131072);
     });
 
     it('should return correct output limits for MiniMax', () => {

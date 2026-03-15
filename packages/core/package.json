@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.11.1",
+  "version": "0.12.4",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -42,6 +42,7 @@
     "ajv-formats": "^3.0.0",
     "async-mutex": "^0.5.0",
     "chardet": "^2.1.0",
+    "iconv-lite": "^0.6.3",
     "chokidar": "^4.0.3",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",

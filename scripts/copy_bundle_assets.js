@@ -51,6 +51,27 @@ if (existsSync(coreVendorDir)) {
   console.warn(`Warning: Vendor directory not found at ${coreVendorDir}`);
 }
 
+// Copy bundled skills (e.g. /review) so they are available at runtime.
+// In the esbuild bundle, import.meta.url resolves to dist/cli.js, so
+// SkillManager looks for bundled skills at dist/bundled/.
+const bundledSkillsDir = join(
+  root,
+  'packages',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+);
+if (existsSync(bundledSkillsDir)) {
+  const destBundledDir = join(distDir, 'bundled');
+  copyRecursiveSync(bundledSkillsDir, destBundledDir);
+  console.log('Copied bundled skills to dist/bundled/');
+} else {
+  console.warn(
+    `Warning: Bundled skills directory not found at ${bundledSkillsDir}`,
+  );
+}
+
 console.log('\n✅ All bundle assets copied to dist/');
 
 /**

@@ -14,8 +14,15 @@ import {
   type Mocked,
   type Mock,
 } from 'vitest';
-import { IdeClient, IDEConnectionStatus } from './ide-client.js';
+import {
+  IdeClient,
+  IDEConnectionStatus,
+  getIdeServerHost,
+  _resetCachedIdeServerHost,
+} from './ide-client.js';
 import * as fs from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
+import * as dns from 'node:dns';
 import { getIdeProcessInfo } from './process-utils.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -33,9 +40,17 @@ vi.mock('node:fs', async (importOriginal) => {
       readFile: vi.fn(),
       readdir: vi.fn(),
       stat: vi.fn(),
+      unlink: vi.fn(),
     },
     realpathSync: (p: string) => p,
-    existsSync: () => false,
+    existsSync: vi.fn().mockReturnValue(false),
+  };
+});
+vi.mock('node:dns', async (importOriginal) => {
+  const actual = await importOriginal<typeof dns>();
+  return {
+    ...(actual as object),
+    lookup: vi.fn(),
   };
 });
 vi.mock('./process-utils.js');
@@ -51,9 +66,13 @@ describe('IdeClient', () => {
   let mockStdioTransport: Mocked<StdioClientTransport>;
 
   beforeEach(async () => {
-    // Reset singleton instance for test isolation
-    (IdeClient as unknown as { instance: IdeClient | undefined }).instance =
-      undefined;
+    // Reset singleton instance and cached host for test isolation
+    (
+      IdeClient as unknown as {
+        instancePromise: Promise<IdeClient> | null;
+      }
+    ).instancePromise = null;
+    _resetCachedIdeServerHost();
 
     // Mock environment variables
     process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = '/test/workspace';
@@ -63,6 +82,10 @@ describe('IdeClient', () => {
 
     // Mock dependencies
     vi.spyOn(process, 'cwd').mockReturnValue('/test/workspace/sub-dir');
+    vi.mocked(fs.existsSync).mockImplementation((filePath: fs.PathLike) => {
+      const file = String(filePath);
+      return file !== '/.dockerenv' && file !== '/run/.containerenv';
+    });
     vi.mocked(detectIde).mockReturnValue(IDE_DEFINITIONS.vscode);
     vi.mocked(getIdeProcessInfo).mockResolvedValue({
       pid: 12345,
@@ -94,6 +117,7 @@ describe('IdeClient', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -181,6 +205,136 @@ describe('IdeClient', () => {
       expect(ideClient.getConnectionStatus().status).toBe(
         IDEConnectionStatus.Connected,
       );
+    });
+
+    it('should fall back to host.docker.internal when localhost fails in container', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '9090';
+      vi.mocked(fs.promises.readFile).mockRejectedValue(
+        new Error('File not found'),
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue([]);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (filePath: fs.PathLike) => filePath === '/.dockerenv',
+      );
+      (dns.lookup as unknown as Mock).mockImplementation(
+        (
+          _hostname: string,
+          callback: (
+            err: Error | null,
+            address?: string,
+            family?: number,
+          ) => void,
+        ) => {
+          callback(null, '192.168.65.254', 4);
+        },
+      );
+      mockClient.connect
+        .mockRejectedValueOnce(new Error('localhost unreachable'))
+        .mockResolvedValueOnce(undefined);
+
+      const ideClient = await IdeClient.getInstance();
+      await ideClient.connect();
+
+      // Localhost is always tried first.
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        1,
+        new URL('http://127.0.0.1:9090/mcp'),
+        expect.any(Object),
+      );
+      // In a container, host.docker.internal is used as fallback.
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        2,
+        new URL('http://host.docker.internal:9090/mcp'),
+        expect.any(Object),
+      );
+      expect(ideClient.getConnectionStatus().status).toBe(
+        IDEConnectionStatus.Connected,
+      );
+
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
+    it('should try a newer lock-file port when the configured port is stale', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1111';
+      const primaryConfig = {
+        port: '1111',
+        authToken: 'stale-token',
+        workspacePath: '/test/workspace',
+      };
+      const fallbackConfig = {
+        port: '2222',
+        authToken: 'fresh-token',
+        workspacePath: '/test/workspace',
+      };
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/home/test', '.qwen', 'ide', '1111.lock')) {
+            return JSON.stringify(primaryConfig);
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '2222.lock')) {
+            return JSON.stringify(fallbackConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['1111.lock', '2222.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockImplementation(async (filePath: fs.PathLike) => {
+        const now = Date.now();
+        const file = String(filePath);
+        return {
+          mtimeMs: file.endsWith('2222.lock') ? now : now - 1000,
+        } as fs.Stats;
+      });
+      vi.mocked(fs.existsSync).mockImplementation(
+        (filePath: fs.PathLike) => String(filePath) === '/test/workspace',
+      );
+      mockClient.request.mockResolvedValue({ tools: [] });
+      mockClient.connect
+        .mockRejectedValueOnce(new Error('stale port'))
+        .mockResolvedValueOnce(undefined);
+
+      const ideClient = await IdeClient.getInstance();
+      await ideClient.connect();
+
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        1,
+        new URL('http://127.0.0.1:1111/mcp'),
+        expect.objectContaining({
+          requestInit: {
+            headers: {
+              Authorization: 'Bearer stale-token',
+            },
+          },
+        }),
+      );
+      expect(StreamableHTTPClientTransport).toHaveBeenNthCalledWith(
+        2,
+        new URL('http://127.0.0.1:2222/mcp'),
+        expect.objectContaining({
+          requestInit: {
+            headers: {
+              Authorization: 'Bearer fresh-token',
+            },
+          },
+        }),
+      );
+      expect(ideClient.getConnectionStatus().status).toBe(
+        IDEConnectionStatus.Connected,
+      );
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
     it('should connect using stdio when stdio config is in environment variables', async () => {
@@ -277,6 +431,24 @@ describe('IdeClient', () => {
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     });
 
+    it('should not scan the lock directory when the env port lock file exists', async () => {
+      process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1234';
+      const config = { port: '1234', workspacePath: '/test/workspace' };
+      vi.mocked(fs.promises.readFile).mockResolvedValue(JSON.stringify(config));
+
+      const ideClient = await IdeClient.getInstance();
+      vi.mocked(fs.promises.readdir).mockClear();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toEqual(config);
+      expect(fs.promises.readdir).not.toHaveBeenCalled();
+      delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
     it('should return undefined if no config files are found', async () => {
       vi.mocked(fs.promises.readFile).mockRejectedValue(new Error('not found'));
 
@@ -357,6 +529,205 @@ describe('IdeClient', () => {
 
       expect(result).toEqual(config);
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    });
+
+    it('should keep a live lock file even when it is older than 7 days', async () => {
+      const liveConfig = {
+        port: '1000',
+        workspacePath: '/test/workspace',
+        ppid: 4242,
+      };
+      const oldTime = Date.now() - 8 * 24 * 60 * 60 * 1000;
+
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            throw new Error('not found');
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+            return JSON.stringify(liveConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['1000.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockResolvedValue({ mtimeMs: oldTime } as fs.Stats);
+      vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toEqual(liveConfig);
+      expect(fs.promises.unlink).not.toHaveBeenCalled();
+    });
+
+    it('should keep incomplete old lock files when there is no stronger stale signal', async () => {
+      const latestConfig = {
+        port: '2000',
+        workspacePath: '/test/workspace',
+      };
+      const now = Date.now();
+      const staleTime = now - 7 * 24 * 60 * 60 * 1000 - 1000;
+
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            throw new Error('not found');
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+            return JSON.stringify({ port: '1000' });
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+            return JSON.stringify(latestConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['1000.lock', '2000.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockImplementation(async (filePath: fs.PathLike) => {
+        const file = String(filePath);
+        return {
+          mtimeMs: file.endsWith('1000.lock') ? staleTime : now,
+        } as fs.Stats;
+      });
+      vi.mocked(fs.existsSync).mockImplementation(
+        (filePath: fs.PathLike) => String(filePath) === '/test/workspace',
+      );
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(fs.promises.unlink).not.toHaveBeenCalled();
+      expect(result).toEqual(latestConfig);
+    });
+
+    it('should scan IDE lock directory when env and legacy config are unavailable', async () => {
+      const latestConfig = {
+        port: '2000',
+        workspacePath: '/test/workspace',
+      };
+
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            throw new Error('not found');
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+            return JSON.stringify({
+              port: '1000',
+              workspacePath: '/older/workspace',
+            });
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+            return JSON.stringify(latestConfig);
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['1000.lock', '2000.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockImplementation(async (filePath: fs.PathLike) => {
+        const now = Date.now();
+        const file = String(filePath);
+        return {
+          mtimeMs: file.endsWith('2000.lock') ? now : now - 1000,
+        } as fs.Stats;
+      });
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toEqual(latestConfig);
+      expect(fs.promises.readdir).toHaveBeenCalledWith(
+        path.join('/home/test', '.qwen', 'ide'),
+      );
+    });
+
+    it('should return undefined when scanned lock files do not match current workspace', async () => {
+      vi.mocked(fs.promises.readFile).mockImplementation(
+        async (filePath: fs.PathLike | FileHandle) => {
+          const file = String(filePath);
+          if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
+            throw new Error('not found');
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+            return JSON.stringify({
+              port: '1000',
+              workspacePath: '/another/workspace',
+            });
+          }
+          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+            return JSON.stringify({
+              port: '2000',
+              workspacePath: '/yet/another/workspace',
+            });
+          }
+          throw new Error(`unexpected path: ${file}`);
+        },
+      );
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockResolvedValue(['1000.lock', '2000.lock']);
+      (
+        vi.mocked(fs.promises.stat) as Mock<
+          (path: fs.PathLike) => Promise<fs.Stats>
+        >
+      ).mockImplementation(async (filePath: fs.PathLike) => {
+        const now = Date.now();
+        const file = String(filePath);
+        return {
+          mtimeMs: file.endsWith('2000.lock') ? now : now - 1000,
+        } as fs.Stats;
+      });
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getConnectionConfigFromFile: () => Promise<unknown>;
+        }
+      ).getConnectionConfigFromFile();
+
+      expect(result).toBeUndefined();
     });
   });
 
@@ -477,5 +848,132 @@ describe('IdeClient', () => {
         IDEConnectionStatus.Connected,
       );
     });
+  });
+});
+
+describe('getIdeServerHost', () => {
+  const dnsLookupMock = dns.lookup as unknown as Mock;
+
+  function mockDnsResolvable(reachable: boolean): void {
+    dnsLookupMock.mockImplementation(
+      (_hostname: string, callback: (err: Error | null) => void) => {
+        if (reachable) {
+          callback(null);
+        } else {
+          callback(new Error('ENOTFOUND'));
+        }
+      },
+    );
+  }
+
+  beforeEach(() => {
+    _resetCachedIdeServerHost();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should return 127.0.0.1 when not in a container', async () => {
+    const host = await getIdeServerHost();
+
+    expect(host).toBe('127.0.0.1');
+    expect(dnsLookupMock).not.toHaveBeenCalled();
+  });
+
+  it('should return host.docker.internal when in a container and the host is reachable', async () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    mockDnsResolvable(true);
+
+    const host = await getIdeServerHost();
+
+    expect(host).toBe('host.docker.internal');
+    expect(dnsLookupMock).toHaveBeenCalledWith(
+      'host.docker.internal',
+      expect.any(Function),
+    );
+  });
+
+  it('should fall back to 127.0.0.1 when in a container but host.docker.internal is not reachable', async () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    mockDnsResolvable(false);
+
+    const host = await getIdeServerHost();
+
+    expect(host).toBe('127.0.0.1');
+    expect(dnsLookupMock).toHaveBeenCalledWith(
+      'host.docker.internal',
+      expect.any(Function),
+    );
+  });
+
+  it('should detect container via /run/.containerenv', async () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/run/.containerenv',
+    );
+    mockDnsResolvable(true);
+
+    const host = await getIdeServerHost();
+
+    expect(host).toBe('host.docker.internal');
+  });
+
+  it('should cache the result and not perform DNS lookup again', async () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    mockDnsResolvable(true);
+
+    const host1 = await getIdeServerHost();
+    const host2 = await getIdeServerHost();
+
+    expect(host1).toBe('host.docker.internal');
+    expect(host2).toBe('host.docker.internal');
+    expect(dnsLookupMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should fall back to 127.0.0.1 when DNS lookup times out in a container', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+    dnsLookupMock.mockImplementation(() => {
+      // Never call the callback to simulate a hung lookup.
+    });
+
+    const hostPromise = getIdeServerHost();
+    await vi.advanceTimersByTimeAsync(3000);
+    const host = await hostPromise;
+
+    expect(host).toBe('127.0.0.1');
+    expect(dnsLookupMock).toHaveBeenCalledWith(
+      'host.docker.internal',
+      expect.any(Function),
+    );
+  });
+
+  it('should perform only one DNS lookup when called concurrently', async () => {
+    vi.useRealTimers();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (filePath: fs.PathLike) => filePath === '/.dockerenv',
+    );
+
+    // Simulate a slow DNS lookup
+    dnsLookupMock.mockImplementation(
+      (_hostname: string, callback: (err: Error | null) => void) => {
+        setTimeout(() => callback(null), 50);
+      },
+    );
+
+    const promises = Array.from({ length: 5 }, () => getIdeServerHost());
+    const results = await Promise.all(promises);
+
+    expect(results.every((r) => r === 'host.docker.internal')).toBe(true);
+    expect(dnsLookupMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -389,8 +389,19 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+              'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.',
               { region: t('Alibaba Cloud Coding Plan') },
+            ),
+          },
+          Date.now(),
+        );
+
+        // Hint about /model command
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'Tip: Use /model to switch between available Coding Plan models.',
             ),
           },
           Date.now(),

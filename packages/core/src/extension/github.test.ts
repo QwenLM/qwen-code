@@ -69,6 +69,8 @@ describe('git extension helpers', () => {
       await cloneFromGit(installMetadata, destination);
 
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
+        '-c',
+        'core.symlinks=true',
         '--depth',
         '1',
       ]);

@@ -109,6 +109,38 @@ Supported key names: `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`,
 
 Auto-screenshot is triggered after the key sequence ends (when the next step is not a `key`).
 
+### `streaming` — Capture During Execution
+
+Capture multiple screenshots at intervals during long-running output (e.g., progress bars). Optionally generates an animated GIF.
+
+```typescript
+{
+  type: 'Run this command: bash progress.sh',
+  streaming: {
+    delayMs: 7000,    // Wait before first capture (skip initial waiting phase)
+    intervalMs: 500,  // Interval between captures
+    count: 20,        // Maximum number of captures
+    gif: true,        // Generate animated GIF (default: true, requires ffmpeg)
+  },
+}
+```
+
+- `delayMs` (optional): Milliseconds to wait after pressing Enter before starting captures. Useful for skipping model thinking/approval time.
+- Captures stop early if terminal output is unchanged for 3 consecutive intervals.
+- Duplicate frames (no output change) are automatically skipped.
+
+**GIF prerequisite**: If the scenario uses `streaming` with GIF enabled (default), check if `ffmpeg` is installed before running. If not, ask the user whether they'd like to install it:
+
+```bash
+# Check
+which ffmpeg
+
+# Install (macOS)
+brew install ffmpeg
+```
+
+If the user declines, the scenario still runs — GIF generation is skipped with a warning.
+
 ### `capture` / `captureFull` — Explicit Screenshot
 
 Use as a standalone step, or override automatic naming:
@@ -178,12 +210,24 @@ This tool is commonly used for visual verification during PR reviews. For the co
 ## Full ScenarioConfig Type
 
 ```typescript
+interface FlowStep {
+  type?: string; // Input text
+  key?: string | string[]; // Key press(es)
+  capture?: string; // Viewport screenshot filename
+  captureFull?: string; // Full scrollback screenshot filename
+  streaming?: {
+    delayMs?: number; // Delay before first capture (default: 0)
+    intervalMs: number; // Interval between captures in ms
+    count: number; // Maximum number of captures
+    gif?: boolean; // Generate animated GIF (default: true)
+  };
+}
+
 interface ScenarioConfig {
   name: string; // Scenario name (also used as screenshot subdirectory name)
   spawn: string[]; // Launch command ["node", "dist/cli.js", "--yolo"]
   flow: FlowStep[]; // Interaction steps
   terminal?: {
-    // Terminal configuration (all optional)
     cols?: number; // Number of columns, default 100
     rows?: number; // Number of rows, default 28
     theme?: string; // Theme: dracula|one-dark|github-dark|monokai|night-owl

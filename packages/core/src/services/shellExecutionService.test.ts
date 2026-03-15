@@ -19,6 +19,13 @@ const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
+const mockGetShellConfiguration = vi.hoisted(() =>
+  vi.fn().mockReturnValue({
+    executable: 'bash',
+    argsPrefix: ['-c'],
+    shell: 'bash',
+  }),
+);
 
 // Top-level Mocks
 vi.mock('@lydell/node-pty', () => ({
@@ -53,6 +60,9 @@ vi.mock('../utils/getPty.js', () => ({
 }));
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
+}));
+vi.mock('../utils/shell-utils.js', () => ({
+  getShellConfiguration: mockGetShellConfiguration,
 }));
 
 const mockProcessKill = vi
@@ -410,15 +420,48 @@ describe('ShellExecutionService', () => {
   describe('Platform-Specific Behavior', () => {
     it('should use cmd.exe on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       await simulateExecution('dir "foo bar"', (pty) =>
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
       );
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        '/c dir "foo bar"',
+        '/d /s /c dir "foo bar"',
         expect.any(Object),
       );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell on Windows with array args', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        expect.any(Object),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
     });
 
     it('should use bash on Linux', async () => {
@@ -820,20 +863,58 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe and hide window on Windows', async () => {
+    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       await simulateExecution('dir "foo bar"', (cp) =>
         cp.emit('exit', 0, null),
       );
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/c', 'dir "foo bar"'],
+        ['/d', '/s', '/c', 'dir "foo bar"'],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
+          windowsVerbatimArguments: true,
         }),
       );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (cp) =>
+        cp.emit('exit', 0, null),
+      );
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        expect.objectContaining({
+          detached: false,
+          windowsHide: true,
+          windowsVerbatimArguments: false,
+        }),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
     });
 
     it('should use bash and detached process group on Linux', async () => {

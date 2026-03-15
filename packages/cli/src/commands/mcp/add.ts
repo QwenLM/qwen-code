@@ -174,6 +174,7 @@ export const addCommand: CommandModule = {
         describe: 'Set environment variables (e.g. -e KEY=value)',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('header', {
         alias: 'H',
@@ -181,6 +182,7 @@ export const addCommand: CommandModule = {
           'Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123")',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('timeout', {
         describe: 'Set connection timeout in milliseconds',

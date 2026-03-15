@@ -8,9 +8,8 @@ import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
-import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
-
-const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
+import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
  * Session message handler
@@ -27,7 +26,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
-      'saveSession',
       'resumeSession',
       'cancelStreaming',
       // UI action: open a new chat tab (new WebviewPanel)
@@ -87,10 +85,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
         break;
 
-      case 'saveSession':
-        await this.handleSaveSession((data?.tag as string) || '');
-        break;
-
       case 'resumeSession':
         await this.handleResumeSession((data?.sessionId as string) || '');
         break;
@@ -106,9 +100,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
             '[SessionMessageHandler] Failed to open new chat tab:',
             error,
           );
+          const errorMsg = this.getErrorMessage(error);
           this.sendToWebView({
             type: 'error',
-            data: { message: `Failed to open new chat tab: ${error}` },
+            data: { message: `Failed to open new chat tab: ${errorMsg}` },
           });
         }
         break;
@@ -226,6 +221,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return 'dismiss';
   }
 
+  private getErrorMessage(error: unknown): string {
+    return getErrorMessage(error);
+  }
+
+  private shouldPromptLogin(error: unknown): boolean {
+    return isAuthenticationRequiredError(error);
+  }
+
   /**
    * Handle send message request
    */
@@ -284,7 +287,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data: newConv,
         });
       } catch (error) {
-        const errorMsg = `Failed to create conversation: ${error}`;
+        const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
         console.error('[SessionMessageHandler]', errorMsg);
         vscode.window.showErrorMessage(errorMsg);
         this.sendToWebView({
@@ -372,12 +375,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
           '[SessionMessageHandler] Failed to create session before sending message:',
           createErr,
         );
-        const errorMsg =
-          createErr instanceof Error ? createErr.message : String(createErr);
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN)
-        ) {
+        const errorMsg = this.getErrorMessage(createErr);
+        if (this.shouldPromptLogin(createErr)) {
           await this.promptLogin(
             'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
           );
@@ -418,7 +417,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       const err = error as unknown as Error;
       // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
+      const errorMsg = this.getErrorMessage(error);
       const lower = errorMsg.toLowerCase();
 
       // Suppress user-cancelled/aborted errors (ESC/Stop button)
@@ -440,11 +439,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for session not found error and handle it appropriately
       if (
         errorMsg.includes('Session not found') ||
-        errorMsg.includes('No active ACP session') ||
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token')
+        this.shouldPromptLogin(error)
       ) {
         // Show a more user-friendly error message for expired sessions
         await this.promptLogin(
@@ -482,7 +477,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.sendStreamEnd('timeout');
         } else {
           // Handling of Non-Timeout Errors
-          vscode.window.showErrorMessage(`Error sending message: ${error}`);
+          vscode.window.showErrorMessage(`Error sending message: ${errorMsg}`);
           this.sendToWebView({
             type: 'error',
             data: { message: errorMsg },
@@ -529,15 +524,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
 
       // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
+      const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
+      if (this.shouldPromptLogin(error)) {
         // Show a more user-friendly error message for expired sessions
         await this.promptLogin(
           'Your login session has expired or is invalid. Please login again to create a new session.',
@@ -551,7 +540,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       } else {
         this.sendToWebView({
           type: 'error',
-          data: { message: `Failed to create new session: ${error}` },
+          data: { message: `Failed to create new session: ${errorMsg}` },
         });
       }
     }
@@ -637,17 +626,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
           loadError,
         );
 
-        // Safely convert error to string
-        const errorMsg = loadError ? String(loadError) : 'Unknown error';
-
         // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
+        if (this.shouldPromptLogin(loadError)) {
           // Show a more user-friendly error message for expired sessions
           await this.promptLogin(
             'Your login session has expired or is invalid. Please login again to switch sessions.',
@@ -696,18 +676,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
               createError,
             );
 
-            // Safely convert error to string
-            const createErrorMsg = createError
-              ? String(createError)
-              : 'Unknown error';
             // Check for authentication/session expiration errors in session creation
-            if (
-              createErrorMsg.includes('Authentication required') ||
-              createErrorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-              createErrorMsg.includes('Unauthorized') ||
-              createErrorMsg.includes('Invalid token') ||
-              createErrorMsg.includes('No active ACP session')
-            ) {
+            if (this.shouldPromptLogin(createError)) {
               // Show a more user-friendly error message for expired sessions
               await this.promptLogin(
                 'Your login session has expired or is invalid. Please login again to switch sessions.',
@@ -739,15 +709,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       console.error('[SessionMessageHandler] Failed to switch session:', error);
 
       // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
+      const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
+      if (this.shouldPromptLogin(error)) {
         // Show a more user-friendly error message for expired sessions
         await this.promptLogin(
           'Your login session has expired or is invalid. Please login again to switch sessions.',
@@ -761,7 +725,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       } else {
         this.sendToWebView({
           type: 'error',
-          data: { message: `Failed to switch session: ${error}` },
+          data: { message: `Failed to switch session: ${errorMsg}` },
         });
       }
     }
@@ -794,15 +758,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       console.error('[SessionMessageHandler] Failed to get sessions:', error);
 
       // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
+      const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
+      if (this.shouldPromptLogin(error)) {
         // Show a more user-friendly error message for expired sessions
         await this.promptLogin(
           'Your login session has expired or is invalid. Please login again to view sessions.',
@@ -816,88 +774,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       } else {
         this.sendToWebView({
           type: 'error',
-          data: { message: `Failed to get sessions: ${error}` },
-        });
-      }
-    }
-  }
-
-  /**
-   * Handle save session request
-   */
-  private async handleSaveSession(tag: string): Promise<void> {
-    try {
-      if (!this.currentConversationId) {
-        throw new Error('No active conversation to save');
-      }
-
-      // Try ACP save first
-      try {
-        const response = await this.agentManager.saveSessionViaAcp(
-          this.currentConversationId,
-          tag,
-        );
-
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: response,
-        });
-      } catch (acpError) {
-        // Safely convert error to string
-        const errorMsg = acpError ? String(acpError) : 'Unknown error';
-        // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
-          // Show a more user-friendly error message for expired sessions
-          await this.promptLogin(
-            'Your login session has expired or is invalid. Please login again to save sessions.',
-          );
-
-          // Send a specific error to the webview for better UI handling
-          this.sendToWebView({
-            type: 'sessionExpired',
-            data: { message: 'Session expired. Please login again.' },
-          });
-          return;
-        }
-      }
-
-      await this.handleGetQwenSessions();
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to save session:', error);
-
-      // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
-      // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
-        // Show a more user-friendly error message for expired sessions
-        await this.promptLogin(
-          'Your login session has expired or is invalid. Please login again to save sessions.',
-        );
-
-        // Send a specific error to the webview for better UI handling
-        this.sendToWebView({
-          type: 'sessionExpired',
-          data: { message: 'Session expired. Please login again.' },
-        });
-      } else {
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: {
-            success: false,
-            message: `Failed to save session: ${error}`,
-          },
+          data: { message: `Failed to get sessions: ${errorMsg}` },
         });
       }
     }
@@ -977,16 +854,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
         await this.handleGetQwenSessions();
         return;
       } catch (acpError) {
-        // Safely convert error to string
-        const errorMsg = acpError ? String(acpError) : 'Unknown error';
         // Check for authentication/session expiration errors
-        if (
-          errorMsg.includes('Authentication required') ||
-          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-          errorMsg.includes('Unauthorized') ||
-          errorMsg.includes('Invalid token') ||
-          errorMsg.includes('No active ACP session')
-        ) {
+        if (this.shouldPromptLogin(acpError)) {
           // Show a more user-friendly error message for expired sessions
           await this.promptLogin(
             'Your login session has expired or is invalid. Please login again to resume sessions.',
@@ -1006,15 +875,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       console.error('[SessionMessageHandler] Failed to resume session:', error);
 
       // Safely convert error to string
-      const errorMsg = error ? String(error) : 'Unknown error';
+      const errorMsg = this.getErrorMessage(error);
       // Check for authentication/session expiration errors
-      if (
-        errorMsg.includes('Authentication required') ||
-        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
-        errorMsg.includes('Unauthorized') ||
-        errorMsg.includes('Invalid token') ||
-        errorMsg.includes('No active ACP session')
-      ) {
+      if (this.shouldPromptLogin(error)) {
         // Show a more user-friendly error message for expired sessions
         await this.promptLogin(
           'Your login session has expired or is invalid. Please login again to resume sessions.',
@@ -1028,7 +891,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       } else {
         this.sendToWebView({
           type: 'error',
-          data: { message: `Failed to resume session: ${error}` },
+          data: { message: `Failed to resume session: ${errorMsg}` },
         });
       }
     }
@@ -1046,9 +909,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // No explicit response needed; WebView listens for modeChanged
     } catch (error) {
       console.error('[SessionMessageHandler] Failed to set mode:', error);
+      const errorMsg = this.getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to set mode: ${error}` },
+        data: { message: `Failed to set mode: ${errorMsg}` },
       });
     }
   }
@@ -1068,7 +932,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         `Model switched to: ${modelId}`,
       );
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = this.getErrorMessage(error);
       console.error('[SessionMessageHandler] Failed to set model:', error);
       vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
       this.sendToWebView({

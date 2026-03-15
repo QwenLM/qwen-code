@@ -24,6 +24,8 @@ package-lock.json
 *.iml
 .cursor
 .qoder
+.claude
+CLAUDE.md
 
 # OS metadata
 .DS_Store
@@ -53,9 +55,11 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 
-.qwen/
+.qwen/*
 !.qwen/commands/
+!.qwen/commands/**
 !.qwen/skills/
+!.qwen/skills/**
 logs/
 # GHA credentials
 gha-creds-*.json

@@ -33,6 +33,7 @@ const noColorSemanticColors: SemanticColors = {
     secondary: '',
     link: '',
     accent: '',
+    code: '',
   },
   background: {
     primary: '',

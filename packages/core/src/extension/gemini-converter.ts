@@ -130,9 +130,24 @@ export async function copyDirectory(
 
     if (entry.isDirectory()) {
       await copyDirectory(sourcePath, destPath);
-    } else {
+    } else if (entry.isSymbolicLink()) {
+      // Resolve symlink and copy the target content
+      try {
+        const realPath = fs.realpathSync(sourcePath);
+        const targetStat = fs.statSync(realPath);
+        if (targetStat.isDirectory()) {
+          await copyDirectory(realPath, destPath);
+        } else if (targetStat.isFile()) {
+          fs.copyFileSync(realPath, destPath);
+        }
+        // Skip sockets, FIFOs, etc.
+      } catch {
+        // Skip broken symlinks
+      }
+    } else if (entry.isFile()) {
       fs.copyFileSync(sourcePath, destPath);
     }
+    // Skip sockets, FIFOs, block devices, and character devices
   }
 }
 
