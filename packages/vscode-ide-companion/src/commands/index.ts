@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/providers/WebViewProvider.js';
+import { getErrorMessage } from '../utils/errorMessage.js';
 import {
   CHAT_VIEW_ID_SIDEBAR,
   CHAT_VIEW_ID_SECONDARY,
@@ -79,8 +80,9 @@ export function registerNewCommands(
           log(`[Command] Showing diff for ${absolutePath}`);
           await diffManager.showDiff(absolutePath, args.oldText, args.newText);
         } catch (error) {
-          log(`[Command] Error showing diff: ${error}`);
-          vscode.window.showErrorMessage(`Failed to show diff: ${error}`);
+          const errorMsg = getErrorMessage(error);
+          log(`[Command] Error showing diff: ${errorMsg}`);
+          vscode.window.showErrorMessage(`Failed to show diff: ${errorMsg}`);
         }
       },
     ),

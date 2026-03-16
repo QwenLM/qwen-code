@@ -1014,6 +1014,20 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
+  describe('convertOpenAIResponseToGemini', () => {
+    it('should handle empty choices array without crashing', () => {
+      const response = converter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-empty',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      expect(response.candidates).toEqual([]);
+    });
+  });
+
   describe('OpenAI -> Gemini reasoning content', () => {
     it('should convert reasoning_content to a thought part for non-streaming responses', () => {
       const response = converter.convertOpenAIResponseToGemini({

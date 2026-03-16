@@ -973,3 +973,13 @@ export function isCommandNeedsPermission(command: string): {
     reason: 'Command requires permission to execute.',
   };
 }
+
+// ConPTY on Windows builds <= 19041 has known reliability issues (missing
+// output, hangs). VS Code uses the same cutoff: microsoft/vscode#123725.
+const CONPTY_MIN_WINDOWS_BUILD = 19042;
+
+export function shouldDefaultToNodePty(): boolean {
+  if (os.platform() !== 'win32') return true;
+  const build = parseInt(os.release().split('.')[2] ?? '', 10);
+  return !isNaN(build) && build >= CONPTY_MIN_WINDOWS_BUILD;
+}

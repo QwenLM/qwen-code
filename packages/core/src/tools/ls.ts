@@ -19,6 +19,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LS');
 
+const MAX_ENTRY_COUNT = 100;
+
 /**
  * Parameters for the LS tool
  */
@@ -235,12 +237,27 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         return a.name.localeCompare(b.name);
       });
 
-      // Create formatted content for LLM
-      const directoryContent = entries
+      const totalEntryCount = entries.length;
+      const entryLimit = Math.min(
+        MAX_ENTRY_COUNT,
+        this.config.getTruncateToolOutputLines(),
+      );
+      const truncated = totalEntryCount > entryLimit;
+
+      const entriesToShow = truncated ? entries.slice(0, entryLimit) : entries;
+
+      const directoryContent = entriesToShow
         .map((entry) => `${entry.isDirectory ? '[DIR] ' : ''}${entry.name}`)
         .join('\n');
 
-      let resultMessage = `Directory listing for ${this.params.path}:\n${directoryContent}`;
+      let resultMessage = `Listed ${totalEntryCount} item(s) in ${this.params.path}:\n---\n${directoryContent}`;
+
+      if (truncated) {
+        const omittedEntries = totalEntryCount - entryLimit;
+        const entryTerm = omittedEntries === 1 ? 'item' : 'items';
+        resultMessage += `\n---\n[${omittedEntries} ${entryTerm} truncated] ...`;
+      }
+
       const ignoredMessages = [];
       if (gitIgnoredCount > 0) {
         ignoredMessages.push(`${gitIgnoredCount} git-ignored`);
@@ -252,9 +269,12 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         resultMessage += `\n\n(${ignoredMessages.join(', ')})`;
       }
 
-      let displayMessage = `Listed ${entries.length} item(s).`;
+      let displayMessage = `Listed ${totalEntryCount} item(s)`;
       if (ignoredMessages.length > 0) {
         displayMessage += ` (${ignoredMessages.join(', ')})`;
+      }
+      if (truncated) {
+        displayMessage += ' (truncated)';
       }
 
       return {

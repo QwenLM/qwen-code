@@ -553,14 +553,18 @@ main() {
     if command_exists qwen; then
         log_success "Qwen Code is ready to use!"
         echo ""
-        log_info "Tips: Please restart your terminal and run: qwen"
+        echo "You can now run: qwen"
         echo ""
+        # Auto-start qwen
+        log_info "Starting Qwen Code..."
+        echo ""
+        exec qwen
     else
-        log_warning "Tips: To start using Qwen Code, please run:"
+        log_warning "Qwen Code command not found in current session"
         echo ""
-        local PROFILE_FILE
-        PROFILE_FILE=$(get_shell_profile)
-        echo "  source ${PROFILE_FILE}"
+        echo "To use Qwen Code immediately without restarting your terminal,"
+        echo "run the following command in your current shell:"
+        echo "  eval \$(${0} --print-env)"
         echo ""
         log_info "Or simply restart your terminal, then run: qwen"
     fi

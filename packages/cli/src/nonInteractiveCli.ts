@@ -19,6 +19,7 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -265,7 +266,11 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          { isContinuation: !isFirstTurn },
+          {
+            type: isFirstTurn
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          },
         );
         isFirstTurn = false;
 

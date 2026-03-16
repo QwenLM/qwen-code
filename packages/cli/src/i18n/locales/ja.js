@@ -85,6 +85,7 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
+  'List available skills.': '利用可能なスキルを一覧表示する。',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
@@ -328,6 +329,7 @@ export default {
     'ワークスペース内のすべてのディレクトリを表示',
   'set external editor preference': '外部エディタの設定',
   'Manage extensions': '拡張機能を管理',
+  'Manage installed extensions': 'インストール済みの拡張機能を管理する',
   'List active extensions': '有効な拡張機能を一覧表示',
   'Update extensions. Usage: update <extension-names>|--all':
     '拡張機能を更新。使い方: update <拡張機能名>|--all',
@@ -371,6 +373,38 @@ export default {
     '{{terminalName}} の設定に失敗しました',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'ターミナルは複数行入力(Shift+Enter と Ctrl+Enter)に最適化されています',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Qwen Code のフックを管理する',
+  'List all configured hooks': '設定済みのフックをすべて表示する',
+  'Enable a disabled hook': '無効なフックを有効にする',
+  'Disable an active hook': '有効なフックを無効にする',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    '現在のセッションのメッセージ履歴をファイルにエクスポートする',
+  'Export session to HTML format': 'セッションを HTML 形式でエクスポートする',
+  'Export session to JSON format': 'セッションを JSON 形式でエクスポートする',
+  'Export session to JSONL format (one message per line)':
+    'セッションを JSONL 形式でエクスポートする（1 行に 1 メッセージ）',
+  'Export session to markdown format':
+    'セッションを Markdown 形式でエクスポートする',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'チャット履歴からパーソナライズされたプログラミングインサイトを生成する',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': '前のセッションを再開する',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'ツール呼び出しを復元します。これにより、会話とファイルの履歴はそのツール呼び出しが提案された時点の状態に戻ります',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'ターミナルの種類を検出できませんでした。サポートされているターミナル: VS Code、Cursor、Windsurf、Trae',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -507,6 +541,15 @@ export default {
     "MCPサーバー '{{name}}' での認証に失敗: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "'{{name}}' からツールを再検出中...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "'{{name}}' から {{count}} 個のツールを検出しました。",
+  'Authentication complete. Returning to server details...':
+    '認証完了。サーバー詳細に戻ります...',
+  'Authentication successful.': '認証成功。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'ブラウザが開かない場合は、このURLをコピーしてブラウザに貼り付けてください：',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  URL全体をコピーしてください——複数行にまたがる場合があります。',
   'Configured MCP servers:': '設定済みMCPサーバー:',
   Ready: '準備完了',
   Disconnected: '切断',
@@ -655,6 +698,8 @@ export default {
   Disable: '無効化',
   Enable: '有効化',
   Authenticate: '認証',
+  'Re-authenticate': '再認証',
+  'Clear Authentication': '認証をクリア',
   disabled: '無効',
   'Server:': 'サーバー:',
   Reconnect: '再接続',

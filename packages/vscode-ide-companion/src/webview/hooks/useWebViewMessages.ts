@@ -168,6 +168,9 @@ export const useWebViewMessages = ({
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
   const modelInfoRef = useRef<ModelInfo | null>(null);
+  // Track the active requestId from the latest streamStart so we can
+  // discard stale streamEnd events from cancelled/previous requests.
+  const activeRequestIdRef = useRef<string | null>(null);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -461,11 +464,15 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'streamStart':
-          handlers.messageHandling.startStreaming(
-            (message.data as { timestamp?: number } | undefined)?.timestamp,
-          );
+        case 'streamStart': {
+          const startData = message.data as
+            | { timestamp?: number; requestId?: string }
+            | undefined;
+          // Store the requestId so we can validate streamEnd events
+          activeRequestIdRef.current = startData?.requestId ?? null;
+          handlers.messageHandling.startStreaming(startData?.timestamp);
           break;
+        }
 
         case 'streamChunk': {
           handlers.messageHandling.appendStreamChunk(message.data.chunk);
@@ -479,6 +486,24 @@ export const useWebViewMessages = ({
         }
 
         case 'streamEnd': {
+          const endData = message.data as
+            | { reason?: string; requestId?: string }
+            | undefined;
+          const endRequestId = endData?.requestId ?? null;
+
+          // Drop stale or untagged streamEnd when a tagged stream is active.
+          if (activeRequestIdRef.current) {
+            if (endRequestId !== activeRequestIdRef.current) {
+              console.log(
+                '[useWebViewMessages] Ignoring stale/untagged streamEnd:',
+                endRequestId,
+                'active:',
+                activeRequestIdRef.current,
+              );
+              break;
+            }
+          }
+
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
@@ -488,9 +513,7 @@ export const useWebViewMessages = ({
           // This avoids UI getting stuck with Stop button visible after
           // rejecting a permission request.
           try {
-            const reason = (
-              (message.data as { reason?: string } | undefined)?.reason || ''
-            ).toLowerCase();
+            const reason = (endData?.reason || '').toLowerCase();
 
             /**
              * Handle different types of stream end reasons that require a full reset:

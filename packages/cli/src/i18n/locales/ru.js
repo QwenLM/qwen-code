@@ -119,6 +119,7 @@ export default {
     'Анализ проекта и создание адаптированного файла QWEN.md',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
+  'List available skills.': 'Показать доступные навыки.',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
@@ -398,6 +399,7 @@ export default {
     'В настоящее время поддерживаются следующие редакторы. Обратите внимание, что некоторые редакторы нельзя использовать в режиме песочницы.',
   'Your preferred editor is:': 'Ваш предпочитаемый редактор:',
   'Manage extensions': 'Управление расширениями',
+  'Manage installed extensions': 'Управлять установленными расширениями',
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
     'Обновить расширения. Использование: update <extension-names>|--all',
@@ -596,6 +598,38 @@ export default {
     'Не удалось настроить {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Ваш терминал уже настроен для оптимальной работы с многострочным вводом (Shift+Enter и Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
+  'List all configured hooks': 'Показать все настроенные хуки',
+  'Enable a disabled hook': 'Включить отключенный хук',
+  'Disable an active hook': 'Отключить активный хук',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Экспортировать историю сообщений текущей сессии в файл',
+  'Export session to HTML format': 'Экспортировать сессию в формат HTML',
+  'Export session to JSON format': 'Экспортировать сессию в формат JSON',
+  'Export session to JSONL format (one message per line)':
+    'Экспортировать сессию в формат JSONL (одно сообщение на строку)',
+  'Export session to markdown format':
+    'Экспортировать сессию в формат Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Создать персонализированные инсайты по программированию на основе истории чата',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Продолжить предыдущую сессию',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Восстановить вызов инструмента. Это вернет историю разговора и файлов к состоянию на момент, когда был предложен этот вызов инструмента',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Не удалось определить тип терминала. Поддерживаемые терминалы: VS Code, Cursor, Windsurf и Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -754,6 +788,15 @@ export default {
     "Не удалось авторизоваться на MCP-сервере '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Повторное обнаружение инструментов от '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "Обнаружено {{count}} инструмент(ов) от '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Аутентификация завершена. Возврат к деталям сервера...',
+  'Authentication successful.': 'Аутентификация успешна.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Если браузер не открылся, скопируйте этот URL и вставьте его в браузер:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Убедитесь, что скопировали ПОЛНЫЙ URL — он может занимать несколько строк.',
 
   // ============================================================================
   // Команды - Чат
@@ -900,6 +943,8 @@ export default {
   Disable: 'Отключить',
   Enable: 'Включить',
   Authenticate: 'Аутентификация',
+  'Re-authenticate': 'Повторная аутентификация',
+  'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',

@@ -88,15 +88,35 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
+const REPLAY_TERMINAL_COLS = 1024;
+const REPLAY_TERMINAL_ROWS = 24;
+const REPLAY_TERMINAL_SCROLLBACK = 2000;
+
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
   for (let i = 0; i < buffer.length; i++) {
     const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString() : '';
+    const lineContent = line ? line.translateToString(true) : '';
     lines.push(lineContent);
   }
   return lines.join('\n').trimEnd();
+};
+
+const replayTerminalOutput = async (output: string): Promise<string> => {
+  const replayTerminal = new Terminal({
+    allowProposedApi: true,
+    cols: REPLAY_TERMINAL_COLS,
+    rows: REPLAY_TERMINAL_ROWS,
+    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    convertEol: true,
+  });
+
+  await new Promise<void>((resolve) => {
+    replayTerminal.write(output, () => resolve());
+  });
+
+  return getFullBufferText(replayTerminal);
 };
 
 interface ProcessCleanupStrategy {
@@ -224,15 +244,20 @@ export class ShellExecutionService {
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
-      const { executable, argsPrefix } = getShellConfiguration();
+      const { executable, argsPrefix, shell } = getShellConfiguration();
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
       // This is intentional - CLI tool executes user-provided shell commands.
+      //
+      // windowsVerbatimArguments must only be true for cmd.exe: it skips
+      // Node's MSVC CRT escaping, which cmd.exe doesn't understand. For
+      // PowerShell (.NET), we need the default escaping so that args
+      // round-trip correctly through CommandLineToArgvW.
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsVerbatimArguments: isWindows,
+        windowsVerbatimArguments: isWindows && shell === 'cmd',
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
@@ -418,8 +443,21 @@ export class ShellExecutionService {
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
-      const { executable, argsPrefix } = getShellConfiguration();
-      const args = [...argsPrefix, commandToExecute];
+      const { executable, argsPrefix, shell } = getShellConfiguration();
+      // On Windows with cmd.exe, pass args as a single string instead of
+      // an array. node-pty's argsToCommandLine re-quotes array elements
+      // that contain spaces, which mangles user-provided quoted arguments
+      // for cmd.exe (e.g., `type "hello world"` becomes
+      // `"type \"hello world\""`).
+      //
+      // For PowerShell, keep the array form: argsToCommandLine escapes for
+      // CommandLineToArgvW round-tripping, which .NET correctly parses.
+      // The string form breaks quoted paths ending in \ (e.g., "C:\Temp\")
+      // because CommandLineToArgvW treats \" as an escaped quote.
+      const args: string[] | string =
+        os.platform() === 'win32' && shell === 'cmd'
+          ? [...argsPrefix, commandToExecute].join(' ')
+          : [...argsPrefix, commandToExecute];
 
       const ptyProcess = ptyInfo.module.spawn(executable, args, {
         cwd,
@@ -448,6 +486,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
+        let outputEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -456,6 +495,7 @@ export class ShellExecutionService {
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
+        let totalBytesReceived = 0;
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
@@ -570,21 +610,33 @@ export class ShellExecutionService {
           }
         });
 
+        const ensureDecoder = (data: Buffer) => {
+          if (decoder) {
+            return;
+          }
+
+          const encoding = getCachedEncodingForBuffer(data);
+          try {
+            decoder = new TextDecoder(encoding);
+            outputEncoding = encoding;
+          } catch {
+            decoder = new TextDecoder('utf-8');
+            outputEncoding = 'utf-8';
+          }
+        };
+
         const handleOutput = (data: Buffer) => {
+          // Capture raw output immediately. Rendering the headless terminal is
+          // slower than appending a Buffer, and rapid PTY output can otherwise
+          // overrun the render queue before finalize() races on exit.
+          ensureDecoder(data);
+          outputChunks.push(data);
+          totalBytesReceived += data.length;
+          const bytesReceived = totalBytesReceived;
+
           processingChain = processingChain.then(
             () =>
               new Promise<void>((resolve) => {
-                if (!decoder) {
-                  const encoding = getCachedEncodingForBuffer(data);
-                  try {
-                    decoder = new TextDecoder(encoding);
-                  } catch {
-                    decoder = new TextDecoder('utf-8');
-                  }
-                }
-
-                outputChunks.push(data);
-
                 if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
                   const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
                   sniffedBytes = sniffBuffer.length;
@@ -596,7 +648,7 @@ export class ShellExecutionService {
                 }
 
                 if (isStreamingRawContent) {
-                  const decodedChunk = decoder.decode(data, { stream: true });
+                  const decodedChunk = decoder!.decode(data, { stream: true });
                   isWriting = true;
                   headlessTerminal.write(decodedChunk, () => {
                     render();
@@ -604,13 +656,9 @@ export class ShellExecutionService {
                     resolve();
                   });
                 } else {
-                  const totalBytes = outputChunks.reduce(
-                    (sum, chunk) => sum + chunk.length,
-                    0,
-                  );
                   onOutputEvent({
                     type: 'binary_progress',
-                    bytesReceived: totalBytes,
+                    bytesReceived,
                   });
                   resolve();
                 }
@@ -629,13 +677,31 @@ export class ShellExecutionService {
             abortSignal.removeEventListener('abort', abortHandler);
             this.activePtys.delete(ptyProcess.pid);
 
-            const finalize = () => {
+            const finalize = async () => {
               render(true);
               const finalBuffer = Buffer.concat(outputChunks);
+              let fullOutput = '';
+
+              try {
+                if (isStreamingRawContent) {
+                  const decodedOutput = new TextDecoder(outputEncoding).decode(
+                    finalBuffer,
+                  );
+                  fullOutput = await replayTerminalOutput(decodedOutput);
+                } else {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                }
+              } catch {
+                try {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                } catch {
+                  // Ignore fallback rendering errors and resolve with empty text.
+                }
+              }
 
               resolve({
                 rawOutput: finalBuffer,
-                output: getFullBufferText(headlessTerminal),
+                output: fullOutput,
                 exitCode,
                 signal: signal ?? null,
                 error,
@@ -647,16 +713,20 @@ export class ShellExecutionService {
               });
             };
 
-            // Always try to flush pending terminal writes before
-            // finalizing so result.output is as complete as possible.
-            // Race against abort or a short timeout to avoid hanging.
-            const processingComplete = processingChain.then(() => 'processed');
-            const deadline = new Promise<'timeout'>((res) =>
-              setTimeout(() => res('timeout'), SIGKILL_TIMEOUT_MS),
+            // Give any last onData callbacks a chance to run before finalizing.
+            // onExit can arrive slightly before late PTY data is processed.
+            const flushChain = () => processingChain.then(() => {});
+            const deadline = new Promise<void>((res) =>
+              setTimeout(res, SIGKILL_TIMEOUT_MS),
             );
+            const drain = () =>
+              new Promise<void>((res) => setImmediate(res)).then(flushChain);
 
-            void Promise.race([processingComplete, deadline]).then(() => {
-              finalize();
+            void Promise.race([
+              flushChain().then(drain).then(drain),
+              deadline,
+            ]).then(() => {
+              void finalize();
             });
           },
         );

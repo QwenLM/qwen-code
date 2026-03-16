@@ -36,6 +36,7 @@ import {
   extractSessionModelState,
 } from '../utils/acpModelInfo.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
+import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
@@ -1013,8 +1014,7 @@ export class QwenAgentManager {
 
       return response;
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
+      const errorMessage = getErrorMessage(error);
       console.error(
         '[QwenAgentManager] Session load via ACP failed for session:',
         sessionId,

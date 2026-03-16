@@ -22,6 +22,7 @@ import {
   toJsonl,
   generateExportFilename,
 } from '../utils/export/index.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Action for the 'md' subcommand - exports session to markdown.
@@ -50,9 +51,10 @@ async function exportMarkdownAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -122,9 +124,10 @@ async function exportHtmlAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -194,9 +197,10 @@ async function exportJsonAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -266,9 +270,10 @@ async function exportJsonlAction(
   }
 
   try {
-    // Load the current session
+    // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
-    const sessionData = await sessionService.loadLastSession();
+    const sessionId = config.getSessionId();
+    const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
       return {
@@ -316,30 +321,40 @@ async function exportJsonlAction(
  */
 export const exportCommand: SlashCommand = {
   name: 'export',
-  description: 'Export current session message history to a file',
+  get description() {
+    return t('Export current session message history to a file');
+  },
   kind: CommandKind.BUILT_IN,
   subCommands: [
     {
       name: 'html',
-      description: 'Export session to HTML format',
+      get description() {
+        return t('Export session to HTML format');
+      },
       kind: CommandKind.BUILT_IN,
       action: exportHtmlAction,
     },
     {
       name: 'md',
-      description: 'Export session to markdown format',
+      get description() {
+        return t('Export session to markdown format');
+      },
       kind: CommandKind.BUILT_IN,
       action: exportMarkdownAction,
     },
     {
       name: 'json',
-      description: 'Export session to JSON format',
+      get description() {
+        return t('Export session to JSON format');
+      },
       kind: CommandKind.BUILT_IN,
       action: exportJsonAction,
     },
     {
       name: 'jsonl',
-      description: 'Export session to JSONL format (one message per line)',
+      get description() {
+        return t('Export session to JSONL format (one message per line)');
+      },
       kind: CommandKind.BUILT_IN,
       action: exportJsonlAction,
     },
