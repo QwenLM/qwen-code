@@ -177,11 +177,12 @@ export function windowsCodePageToEncoding(cp: number): string | null {
 }
 
 /**
- * Attempts to detect the encoding of a non-UTF-8 buffer.
+ * Attempts to detect the encoding of a non-UTF-8 buffer using chardet
+ * statistical analysis. Returns null when chardet cannot determine the
+ * encoding (e.g. the buffer is too small or ambiguous).
  *
- * Tries chardet statistical detection first, then falls back to the
- * system codepage. The fallback catches cases where chardet fails or
- * misdetects (e.g. a small GBK file classified as ISO-8859-2).
+ * Callers that need a guaranteed result should provide their own fallback
+ * (e.g. {@link getCachedEncodingForBuffer} falls back to the system codepage).
  *
  * @param buffer The buffer to analyze for encoding.
  * @return The detected encoding as a lowercase string, or null if detection fails.
