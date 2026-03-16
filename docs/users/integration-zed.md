@@ -30,10 +30,9 @@ npm install -g @qwen-code/qwen-code
 
 3. In Zed, click the **settings button** in the top right corner, select **"Add agent"**, choose **"Install from Registry"**, find **Qwen Code**, then click **Install**.
 
-![ACP Registry](assets/integration-zed/acp-registry.png)
+   ![ACP Registry](https://img.alicdn.com/imgextra/i4/O1CN0186ybL61EeG35fHFjy_!!6000000000376-2-tps-3056-1705.png)
 
-![Qwen Code ACP Installed](assets/integration-zed/installed.png)
-
+   ![Qwen Code ACP Installed](https://img.alicdn.com/imgextra/i1/O1CN01OXHhoR1J8irAvjs8F_!!6000000000984-2-tps-1247-703.png)
 
 #### Manual Install
 
