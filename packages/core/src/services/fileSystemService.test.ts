@@ -11,16 +11,12 @@ import { StandardFileSystemService } from './fileSystemService.js';
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
 
 vi.mock('fs/promises');
-vi.mock('os', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('os')>();
-  return {
-    ...actual,
-    default: {
-      ...actual.default,
-      platform: mockPlatform,
-    },
-  };
-});
+vi.mock('os', () => ({
+  default: {
+    platform: mockPlatform,
+  },
+  platform: mockPlatform,
+}));
 
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
