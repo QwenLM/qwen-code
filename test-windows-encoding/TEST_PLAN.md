@@ -1,11 +1,9 @@
 # Windows Encoding Test Plan
 
-Run these tests on a Windows machine with a **non-UTF-8 system codepage**
-(e.g., GBK/CP936). All test scripts are in this directory.
+Run on a Windows machine with **non-UTF-8 system codepage** (e.g., GBK/CP936).
 
 ## Setup
 
-Copy this entire `test-windows-encoding/` folder to the Windows machine.
 Verify your system codepage:
 
 ```cmd
@@ -14,108 +12,72 @@ chcp
 
 Expected: `Active code page: 936` (or another non-UTF-8 codepage).
 
----
-
-## Test 1: GBK .bat file without chcp (Row 4)
-
-**What it tests:** A `.bat` file saved in GBK encoding — does it run and
-display correctly on a GBK system without any `chcp`?
-
-**Script:** `test1_gbk_native.cmd`
-
-**How to create it:** The file must be saved as GBK (not UTF-8). Open
-Notepad, paste the content from `test1_gbk_native.utf8.txt`, then
-**Save As → Encoding: ANSI** → `test1_gbk_native.cmd`.
-
-**Run:**
+Create test directories/files from the GBK system itself:
 
 ```cmd
-cmd /c test1_gbk_native.cmd
+mkdir C:\encoding_test
+mkdir C:\encoding_test\测试目录
+echo 测试内容 > C:\encoding_test\测试目录\报告.txt
+echo 第二行 >> C:\encoding_test\测试目录\报告.txt
 ```
-
-**Expected:** Chinese characters display correctly (native codepage match).
 
 ---
 
-## Test 2: UTF-8 output detection — GBK program output
+## Test 1: ASCII-only command output
 
-**What it tests:** When a GBK-native command produces CJK output (no chcp),
-does qwen-code's `getCachedEncodingForBuffer()` correctly detect it as
-non-UTF-8 and decode it?
+**What it tests:** Baseline — ASCII output should always work.
 
-**Script:** `test2_gbk_output.cmd`
+**Ask qwen-code:** `run dir C:\encoding_test`
 
-**Run (two ways):**
-
-```cmd
-REM Direct — should show correct GBK output
-cmd /c test2_gbk_output.cmd
-
-REM Through qwen-code shell tool — check if output is garbled or correct
-```
-
-Ask qwen-code to: `run test2_gbk_output.cmd` (no chcp hint).
-
-**Expected in qwen-code:** If `isValidUtf8()` rejects the GBK bytes and
-chardet identifies GBK, the output should be decoded correctly. If chardet
-fails, it falls back to system encoding (should also be correct on a GBK
-system). **This is the key test for output detection.**
+**Expected:** Directory listing displays correctly. No encoding issues.
 
 ---
 
-## Test 3: PowerShell encoding
+## Test 2: System-codepage output (GBK)
 
-**What it tests:** Does PowerShell output CJK correctly? Does qwen-code
-decode it?
+**What it tests:** Can qwen-code decode GBK output from commands that
+produce CJK text natively (not from our scripts)?
 
-**Script:** `test3_powershell.ps1`
+**Ask qwen-code:** `run dir C:\encoding_test\测试目录`
 
-**Run:**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File test3_powershell.ps1
-```
-
-Also ask qwen-code to run it.
-
-**Expected:** PowerShell on modern Windows defaults to UTF-8 for many
-cmdlets, but `[Console]::OutputEncoding` may still be the system codepage.
-The test prints both the encoding and CJK text so you can see what happens.
+**Expected:** CJK filenames (`报告.txt`) display correctly. The `dir`
+command outputs in the system codepage (GBK). qwen-code must detect
+this and decode it properly.
 
 ---
 
-## Test 4: File round-trip (write → edit → verify)
+## Test 3: Read a GBK text file
+
+**What it tests:** Can qwen-code read the content of a GBK-encoded file?
+
+**Ask qwen-code:** `run type C:\encoding_test\测试目录\报告.txt`
+
+**Expected:** `测试内容` and `第二行` display correctly. The `type`
+command outputs in the system codepage.
+
+---
+
+## Test 4: File round-trip (write UTF-8, edit, verify)
 
 **What it tests:** qwen-code writes a UTF-8 `.cmd` file, then edits it.
-Does the file maintain UTF-8 encoding and CRLF line endings after the edit?
+Does the file maintain UTF-8 encoding and CRLF line endings?
 
-**How to test:**
+**Steps:**
 
-1. Ask qwen-code: "Write a file called `test4_roundtrip.cmd` with this content:
-   `@echo off` / `echo 测试文件` / `echo 编辑成功`"
-2. Ask qwen-code: "Edit `test4_roundtrip.cmd` and change `测试文件` to `测试完成`"
-3. Verify manually:
+1. Ask qwen-code: "Write a file `C:\encoding_test\roundtrip.cmd` with:
+   `@echo off` / `echo hello` / `echo world`"
+2. Ask qwen-code: "Edit `roundtrip.cmd` and change `hello` to `goodbye`"
+3. Run: `cmd /c C:\encoding_test\roundtrip.cmd`
 
-   ```cmd
-   REM Check line endings (should see \r\n)
-   powershell -Command "Format-Hex test4_roundtrip.cmd | Select-Object -First 5"
-
-   REM Check encoding (should be UTF-8 without BOM)
-   powershell -Command "[System.IO.File]::ReadAllBytes('test4_roundtrip.cmd') | Select-Object -First 10"
-   ```
-
-4. Run: `chcp 65001 && cmd /c test4_roundtrip.cmd`
-
-**Expected:** File stays UTF-8, CRLF preserved, content updated correctly.
+**Expected:** File stays UTF-8 with CRLF. Output shows `goodbye` and `world`.
 
 ---
 
 ## Test 5: Edit a GBK file (preserve encoding)
 
-**What it tests:** qwen-code opens an existing GBK-encoded file, edits it,
-and the file stays GBK (not converted to UTF-8).
+**What it tests:** qwen-code edits a GBK-encoded file without corrupting it.
 
-**Setup:** Create a GBK file using Notepad (Save As → ANSI):
+**Setup:** Create a GBK file via Notepad (Save As → ANSI encoding):
 
 ```
 @echo off
@@ -123,96 +85,52 @@ echo 原始内容
 echo 第二行
 ```
 
-Save as `test5_gbk_edit.cmd`.
+Save as `C:\encoding_test\gbk_edit.cmd`.
 
-**How to test:**
+**Steps:**
 
-1. Ask qwen-code: "Edit `test5_gbk_edit.cmd` and change `原始内容` to `修改内容`"
-2. Verify encoding stayed GBK:
-   ```cmd
-   powershell -Command "[System.IO.File]::ReadAllBytes('test5_gbk_edit.cmd') | Select-Object -First 20"
-   ```
-   GBK `修改` = `D0 DE B8 C4`, not UTF-8 `E4 BF AE E6 94 B9`.
-3. Run without chcp: `cmd /c test5_gbk_edit.cmd`
+1. Ask qwen-code: "Edit `C:\encoding_test\gbk_edit.cmd` and change
+   `原始内容` to `修改内容`"
+2. Run without chcp: `cmd /c C:\encoding_test\gbk_edit.cmd`
 
-**Expected:** File stays GBK, runs correctly without chcp.
+**Expected:** Output shows `修改内容` and `第二行` correctly. File stays GBK.
 
 ---
 
-## Test 6: PTY path — chcp inside command
+## Test 6: PowerShell CJK output
 
-**What it tests:** The critical PTY question from FINDINGS.md §2.3. When
-ConPTY is used, does `chcp 65001 && script.cmd` produce correct output,
-or does ConPTY's pipe encoding (set at creation time) cause garbling?
+**What it tests:** Does the `[Console]::OutputEncoding=UTF8` prefix work?
 
-**How to test:**
-Ask qwen-code to run (ensure it uses PTY, not child_process):
+**Ask qwen-code:** `run powershell -Command "Get-ChildItem C:\encoding_test\测试目录"`
 
-```
-chcp 65001 && cmd /c test-windows-encoding\progress.cmd
-```
-
-Then compare with child_process fallback (if possible, or just note
-whether qwen-code used PTY or child_process in the tool call).
-
-**Expected if ConPTY respects chcp:** Correct output.
-**Expected if ConPTY ignores chcp:** Garbled — would mean we need
-the PTY `encoding: 'utf-8'` option back.
+**Expected:** CJK filenames display correctly. Our PowerShell prefix
+forces UTF-8 output, so this should work regardless of system codepage.
 
 ---
 
-## Test 7: CJK in directory/file names
+## Test 7: Large ASCII output followed by system-codepage CJK
 
-**What it tests:** Commands that produce CJK output from the filesystem
-(not from our scripts).
+**What it tests:** When early output is ASCII-only and later output
+contains GBK, does encoding detection still work?
 
-**Setup:**
+**Ask qwen-code:** `run the script test7_late_cjk.cmd`
 
-```cmd
-mkdir 测试目录
-echo test > 测试目录\测试文件.txt
-```
+**Script:** `test7_late_cjk.cmd` (ASCII-only file that produces
+GBK output via system commands at the end)
 
-**Run:**
-
-```cmd
-dir 测试目录
-```
-
-Also ask qwen-code to: `list files in 测试目录`
-
-**Expected:** qwen-code should display the CJK filenames correctly. This
-output is in the system codepage (GBK), so `getCachedEncodingForBuffer()`
-must detect it as non-UTF-8.
-
----
-
-## Test 8: Large CJK output (encoding detection at scale)
-
-**What it tests:** Encoding detection uses only the first chunk. If the
-first chunk is ASCII-only and subsequent chunks contain GBK, does the
-decoder still work?
-
-**Script:** `test8_large_output.cmd`
-
-**Run through qwen-code.**
-
-**Expected:** The ASCII header should display fine. The CJK block should
-also display correctly IF encoding detection/fallback handles the case
-where the first chunk was valid UTF-8 (because ASCII is valid UTF-8) but
-later chunks contain GBK bytes. This is a potential edge case.
+**Expected:** ASCII lines display correctly. The final `dir` output
+with CJK filenames also displays correctly.
 
 ---
 
 ## Results Template
 
-| #   | Test                   | Direct cmd | qwen-code (child_process) | qwen-code (PTY) | Notes |
-| --- | ---------------------- | ---------- | ------------------------- | --------------- | ----- |
-| 1   | GBK native .bat        |            |                           |                 |       |
-| 2   | GBK output detection   |            |                           |                 |       |
-| 3   | PowerShell encoding    |            |                           |                 |       |
-| 4   | File round-trip        |            |                           |                 |       |
-| 5   | GBK file edit          |            |                           |                 |       |
-| 6   | PTY + chcp 65001       |            |                           |                 |       |
-| 7   | CJK directory names    |            |                           |                 |       |
-| 8   | Large output, late CJK |            |                           |                 |       |
+| #   | Test                  | child_process | PTY | Notes |
+| --- | --------------------- | ------------- | --- | ----- |
+| 1   | ASCII output          |               |     |       |
+| 2   | GBK dir listing       |               |     |       |
+| 3   | GBK file content      |               |     |       |
+| 4   | UTF-8 file round-trip |               |     |       |
+| 5   | GBK file edit         |               |     |       |
+| 6   | PowerShell CJK        |               |     |       |
+| 7   | Late CJK after ASCII  |               |     |       |
