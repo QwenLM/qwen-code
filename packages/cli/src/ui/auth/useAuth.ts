@@ -250,7 +250,8 @@ export const useAuthCommand = (
 
       if (
         authType === AuthType.USE_OPENAI ||
-        authType === AuthType.USE_LM_STUDIO
+        authType === AuthType.USE_LM_STUDIO ||
+        authType === AuthType.USE_OLLAMA
       ) {
         if (credentials) {
           // Pass settings.model.generationConfig to updateCredentials so it can be merged
@@ -266,6 +267,19 @@ export const useAuthCommand = (
             },
             settingsGenerationConfig,
           );
+
+          if (authType === AuthType.USE_OLLAMA && credentials.model) {
+            const authTypeScope = getPersistScopeForModelSelection(settings);
+            settings.setValue(authTypeScope, 'security.auth', {
+              selectedType: authType,
+            });
+            settings.setValue(authTypeScope, 'model.name', credentials.model);
+            updateSettingsFilePreservingFormat(
+              settings.user.path,
+              settings.user.originalSettings as Record<string, unknown>,
+            );
+          }
+
           await performAuth(authType, credentials);
         }
         return;
