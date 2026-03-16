@@ -43,7 +43,6 @@ export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'summary',
   'compress',
   'bug',
-  'skills',
 ] as const;
 
 /**
