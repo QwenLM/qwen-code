@@ -160,15 +160,48 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Notify the webview that streaming has finished.
+   * Monotonically increasing request counter used to tag streamStart/streamEnd
+   * so the WebView can detect and discard stale events from previous requests.
    */
-  private sendStreamEnd(reason?: string): void {
-    const data: { timestamp: number; reason?: string } = {
+  private requestCounter = 0;
+  private currentRequestId: string | null = null;
+  private streamEndSent = false;
+
+  /**
+   * Notify the webview that streaming has finished.
+   * Includes the `requestId` so the webview can ignore stale events.
+   * Guarded by `streamEndSent` to prevent duplicate streamEnd for the
+   * same request (e.g. cancel handler + error handler both sending one).
+   *
+   * @param reason  Optional reason string (e.g. 'user_cancelled').
+   * @param forRequestId  When provided, the call is scoped to a specific
+   *   request invocation.  If a newer request has since overwritten
+   *   `this.currentRequestId`, the call is silently dropped — this
+   *   prevents a stale `handleSendMessage` invocation (resumed after
+   *   cancellation) from emitting a streamEnd tagged as the newer request.
+   */
+  private sendStreamEnd(reason?: string, forRequestId?: string): void {
+    if (this.streamEndSent) {
+      return;
+    }
+    // If the caller captured a request ID, only proceed when it still
+    // matches the active request.  A mismatch means a newer request has
+    // taken over the shared state; emitting now would incorrectly tag
+    // the event with the newer request's ID.
+    if (forRequestId && this.currentRequestId !== forRequestId) {
+      return;
+    }
+    this.streamEndSent = true;
+
+    const data: { timestamp: number; reason?: string; requestId?: string } = {
       timestamp: Date.now(),
     };
 
     if (reason) {
       data.reason = reason;
+    }
+    if (this.currentRequestId) {
+      data.requestId = this.currentRequestId;
     }
 
     this.sendToWebView({
@@ -388,12 +421,28 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     // Send to agent
+    //
+    // Generate a unique requestId so the webview can correlate
+    // streamStart/streamEnd and discard stale events.
+    this.requestCounter += 1;
+    this.currentRequestId = `req-${this.requestCounter}-${Date.now()}`;
+    this.streamEndSent = false;
+
+    // Capture locally so that if a newer handleSendMessage() overwrites
+    // the shared fields while we are awaiting, our sendStreamEnd calls
+    // will detect the mismatch and silently no-op instead of emitting
+    // a streamEnd tagged with the newer request's ID.
+    const myRequestId = this.currentRequestId;
+
     try {
       this.resetStreamContent();
 
       this.sendToWebView({
         type: 'streamStart',
-        data: { timestamp: Date.now() },
+        data: {
+          timestamp: Date.now(),
+          requestId: myRequestId,
+        },
       });
 
       await this.agentManager.sendMessage(formattedText);
@@ -411,7 +460,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
       }
 
-      this.sendStreamEnd();
+      this.sendStreamEnd(undefined, myRequestId);
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
 
@@ -433,7 +482,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       if (isAbortLike) {
         // Do not show VS Code error popup for intentional cancellations.
         // Ensure the webview knows the stream ended due to user action.
-        this.sendStreamEnd('user_cancelled');
+        this.sendStreamEnd('user_cancelled', myRequestId);
         return;
       }
       // Check for session not found error and handle it appropriately
@@ -451,7 +500,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           type: 'sessionExpired',
           data: { message: 'Session expired. Please login again.' },
         });
-        this.sendStreamEnd('session_expired');
+        this.sendStreamEnd('session_expired', myRequestId);
       } else {
         const isTimeoutError =
           lower.includes('timeout') || lower.includes('timed out');
@@ -474,7 +523,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             type: 'message',
             data: timeoutMessage,
           });
-          this.sendStreamEnd('timeout');
+          this.sendStreamEnd('timeout', myRequestId);
         } else {
           // Handling of Non-Timeout Errors
           vscode.window.showErrorMessage(`Error sending message: ${errorMsg}`);
@@ -482,7 +531,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             type: 'error',
             data: { message: errorMsg },
           });
-          this.sendStreamEnd('error');
+          this.sendStreamEnd('error', myRequestId);
         }
       }
     }
@@ -790,21 +839,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Cancel the current streaming operation in the agent manager
       await this.agentManager.cancelCurrentPrompt();
 
-      // Send streamEnd message to WebView to update UI
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
+      // Use sendStreamEnd to include requestId for proper correlation
+      this.sendStreamEnd('user_cancelled');
 
       console.log('[SessionMessageHandler] Streaming cancelled successfully');
     } catch (_error) {
       console.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
 
-      // Always send streamEnd to update UI, regardless of errors
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now(), reason: 'user_cancelled' },
-      });
+      // Use sendStreamEnd (with duplicate guard) to include requestId
+      this.sendStreamEnd('user_cancelled');
     }
   }
 

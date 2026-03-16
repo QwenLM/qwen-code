@@ -94,7 +94,7 @@ export function CreationSummary({
       }
 
       // Check length warnings
-      if (state.generatedDescription.length > 300) {
+      if (state.generatedDescription.length > 1000) {
         allWarnings.push(
           t('Description is over {{length}} characters', {
             length: state.generatedDescription.length.toString(),

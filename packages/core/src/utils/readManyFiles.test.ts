@@ -12,6 +12,7 @@ import os from 'node:os';
 import type { PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
@@ -44,6 +45,7 @@ describe('readManyFiles', () => {
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
       getTruncateToolOutputLines: () => 1000,
       getTruncateToolOutputThreshold: () => 2500,
+      getFileSystemService: () => new StandardFileSystemService(),
     }) as unknown as Config;
 
   async function createTestFile(

@@ -24,7 +24,7 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 ## 2. `read_file` (ReadFile)
 
-`read_file` reads and returns the content of a specified file. This tool handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges. Other binary file types are generally skipped.
+`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Media files whose modality is not supported by the current model are rejected with a helpful error message. Other binary file types are generally skipped.
 
 - **Tool name:** `read_file`
 - **Display name:** ReadFile
@@ -35,11 +35,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
   - `limit` (number, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
 - **Behavior:**
   - For text files: Returns the content. If `offset` and `limit` are used, returns only that slice of lines. Indicates if content was truncated due to line limits or line length limits.
-  - For image and PDF files: Returns the file content as a base64-encoded data structure suitable for model consumption.
+  - For media files (images, PDFs, audio, video): If the current model supports the file's modality, returns the file content as a base64-encoded `inlineData` object. If the model does not support the modality, returns an error message with guidance (e.g., suggesting skills or external tools).
   - For other binary files: Attempts to identify and skip them, returning a message indicating it's a generic binary file.
 - **Output:** (`llmContent`):
   - For text files: The file content, potentially prefixed with a truncation message (e.g., `[File content truncated: showing lines 1-100 of 500 total lines...]\nActual file content...`).
-  - For image/PDF files: An object containing `inlineData` with `mimeType` and base64 `data` (e.g., `{ inlineData: { mimeType: 'image/png', data: 'base64encodedstring' } }`).
+  - For supported media files: An object containing `inlineData` with `mimeType` and base64 `data` (e.g., `{ inlineData: { mimeType: 'image/png', data: 'base64encodedstring' } }`).
+  - For unsupported media files: An error message string explaining that the current model does not support this modality, with suggestions for alternatives.
   - For other binary files: A message like `Cannot display content of binary file: /path/to/data.bin`.
 - **Confirmation:** No.
 

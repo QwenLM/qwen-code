@@ -111,6 +111,7 @@ export default {
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available skills.': 'Listar habilidades disponíveis.',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -401,6 +402,7 @@ export default {
     'Estes editores são suportados atualmente. Note que alguns editores não podem ser usados no modo sandbox.',
   'Your preferred editor is:': 'Seu editor preferido é:',
   'Manage extensions': 'Gerenciar extensões',
+  'Manage installed extensions': 'Gerenciar extensões instaladas',
   'List active extensions': 'Listar extensões ativas',
   'Update extensions. Usage: update <extension-names>|--all':
     'Atualizar extensões. Uso: update <nomes-das-extensoes>|--all',
@@ -590,6 +592,38 @@ export default {
     'Falha ao configurar {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Seu terminal já está configurado para uma experiência ideal com entrada multilinhas (Shift+Enter e Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Gerenciar hooks do Qwen Code',
+  'List all configured hooks': 'Listar todos os hooks configurados',
+  'Enable a disabled hook': 'Ativar um hook desativado',
+  'Disable an active hook': 'Desativar um hook ativo',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Exportar o histórico de mensagens da sessão atual para um arquivo',
+  'Export session to HTML format': 'Exportar a sessão para o formato HTML',
+  'Export session to JSON format': 'Exportar a sessão para o formato JSON',
+  'Export session to JSONL format (one message per line)':
+    'Exportar a sessão para o formato JSONL (uma mensagem por linha)',
+  'Export session to markdown format':
+    'Exportar a sessão para o formato Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Gerar insights personalizados de programação a partir do seu histórico de chat',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Retomar uma sessão anterior',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restaurar uma chamada de ferramenta. Isso redefinirá o histórico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Não foi possível detectar o tipo de terminal. Terminais suportados: VS Code, Cursor, Windsurf e Trae.',
   'Terminal "{{terminal}}" is not supported yet.':

@@ -31,6 +31,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
@@ -311,6 +312,7 @@ export const useSlashCommandProcessor = (
       const loaders = [
         new McpPromptLoader(config),
         new BuiltinCommandLoader(config),
+        new BundledSkillLoader(config),
         new FileCommandLoader(config),
       ];
       const commandService = await CommandService.create(

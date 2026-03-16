@@ -27,6 +27,7 @@ export {
 export {
   logStartSession,
   logUserPrompt,
+  logUserRetry,
   logToolCall,
   logApiRequest,
   logApiError,
@@ -54,6 +55,7 @@ export {
   SlashCommandStatus,
   EndSessionEvent,
   UserPromptEvent,
+  UserRetryEvent,
   ApiRequestEvent,
   ApiErrorEvent,
   ApiResponseEvent,

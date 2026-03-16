@@ -13,7 +13,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -179,4 +178,17 @@ fs.writeFileSync(
 
 console.log('\n✅ Package prepared for publishing at dist/');
 console.log('\nPackage structure:');
-execSync('ls -lh dist/', { stdio: 'inherit', cwd: rootDir });
+// Use Node.js to list directory contents (cross-platform)
+const distFiles = fs.readdirSync(distDir);
+for (const file of distFiles) {
+  const filePath = path.join(distDir, file);
+  const stats = fs.statSync(filePath);
+  const size = stats.isDirectory() ? '<DIR>' : formatBytes(stats.size);
+  console.log(`  ${size.padEnd(12)} ${file}`);
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
