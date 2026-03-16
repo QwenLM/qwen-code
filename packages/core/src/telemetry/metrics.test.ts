@@ -80,6 +80,7 @@ describe('Telemetry Metrics', () => {
   let recordPerformanceScoreModule: typeof import('./metrics.js').recordPerformanceScore;
   let recordPerformanceRegressionModule: typeof import('./metrics.js').recordPerformanceRegression;
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
+  let recordHookCallMetricsModule: typeof import('./metrics.js').recordHookCallMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -107,6 +108,7 @@ describe('Telemetry Metrics', () => {
     recordPerformanceRegressionModule =
       metricsJsModule.recordPerformanceRegression;
     recordBaselineComparisonModule = metricsJsModule.recordBaselineComparison;
+    recordHookCallMetricsModule = metricsJsModule.recordHookCallMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -894,6 +896,163 @@ describe('Telemetry Metrics', () => {
         );
         expect(mockHistogramRecordFn).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('Hook Call Metrics', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getTelemetryEnabled: () => true,
+    } as unknown as Config;
+
+    it('should not record metrics if not initialized', () => {
+      recordHookCallMetricsModule(
+        mockConfig,
+        'UserPromptSubmit',
+        'test-hook',
+        100,
+        true,
+      );
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('should record hook call with correct attributes', () => {
+      initializeMetricsModule(mockConfig);
+
+      recordHookCallMetricsModule(
+        mockConfig,
+        'UserPromptSubmit',
+        'test-hook.sh',
+        150,
+        true,
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledTimes(2); // session counter + hook call counter
+      expect(mockHistogramRecordFn).toHaveBeenCalledTimes(1); // hook call latency
+
+      // Session counter called first
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {
+        'session.id': 'test-session-id',
+      });
+
+      // Hook call counter
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(2, 1, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'UserPromptSubmit',
+        hook_name: 'test-hook.sh',
+        success: true,
+      });
+
+      // Hook call latency
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(150, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'UserPromptSubmit',
+        hook_name: 'test-hook.sh',
+        success: true,
+      });
+    });
+
+    it('should sanitize hook names in metrics', () => {
+      initializeMetricsModule(mockConfig);
+
+      recordHookCallMetricsModule(
+        mockConfig,
+        'Stop',
+        '/full/path/to/.gemini/hooks/secrets-check.sh --api-key=secret123',
+        200,
+        false,
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'Stop',
+        hook_name: 'secrets-check.sh', // Sanitized
+        success: false,
+      });
+
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(200, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'Stop',
+        hook_name: 'secrets-check.sh', // Sanitized
+        success: false,
+      });
+    });
+
+    it('should record both successful and failed hook calls', () => {
+      initializeMetricsModule(mockConfig);
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      // Record successful hook call
+      recordHookCallMetricsModule(
+        mockConfig,
+        'UserPromptSubmit',
+        'success-hook',
+        100,
+        true,
+      );
+
+      // Record failed hook call
+      recordHookCallMetricsModule(
+        mockConfig,
+        'UserPromptSubmit',
+        'fail-hook',
+        50,
+        false,
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledTimes(2); // Two hook calls
+      expect(mockHistogramRecordFn).toHaveBeenCalledTimes(2); // Two latencies
+
+      // First call: success
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'UserPromptSubmit',
+        hook_name: 'success-hook',
+        success: true,
+      });
+
+      // Second call: failure
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(2, 1, {
+        'session.id': 'test-session-id',
+        hook_event_name: 'UserPromptSubmit',
+        hook_name: 'fail-hook',
+        success: false,
+      });
+    });
+
+    it('should handle different hook event names', () => {
+      initializeMetricsModule(mockConfig);
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordHookCallMetricsModule(mockConfig, 'Stop', 'stop-hook', 75, true);
+      recordHookCallMetricsModule(
+        mockConfig,
+        'PreToolUse',
+        'pretool-hook',
+        125,
+        false,
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledTimes(2);
+      expect(mockHistogramRecordFn).toHaveBeenCalledTimes(2);
+
+      // Check that different event names are properly tracked
+      expect(mockCounterAddFn).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          hook_event_name: 'Stop',
+        }),
+      );
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          hook_event_name: 'PreToolUse',
+        }),
+      );
     });
   });
 });

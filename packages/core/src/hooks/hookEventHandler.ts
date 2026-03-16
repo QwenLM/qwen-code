@@ -17,6 +17,8 @@ import type {
   StopInput,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { logHookCall } from '../telemetry/loggers.js';
+import { HookCallEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -28,6 +30,13 @@ export class HookEventHandler {
   private readonly hookPlanner: HookPlanner;
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
+
+  /**
+   * Track reported failures to suppress duplicate warnings during streaming.
+   * Uses a WeakMap with the original request object as a key to ensure
+   * failures are only reported once per logical model interaction.
+   */
+  private readonly reportedFailures = new WeakMap<object, Set<string>>();
 
   constructor(
     config: Config,
@@ -81,6 +90,7 @@ export class HookEventHandler {
     eventName: HookEventName,
     input: HookInput,
     context?: HookEventContext,
+    requestContext?: object,
   ): Promise<AggregatedHookResult> {
     try {
       // Create execution plan
@@ -95,12 +105,18 @@ export class HookEventHandler {
         };
       }
 
-      const onHookStart = (_config: HookConfig, _index: number) => {
-        // Hook start event (telemetry removed)
+      const onHookStart = (config: HookConfig, index: number) => {
+        // Hook start event
+        debugLogger.debug(
+          `Hook ${this.getHookName(config)} started for event ${eventName} (${index + 1}/${plan.hookConfigs.length})`,
+        );
       };
 
-      const onHookEnd = (_config: HookConfig, _result: HookExecutionResult) => {
-        // Hook end event (telemetry removed)
+      const onHookEnd = (config: HookConfig, result: HookExecutionResult) => {
+        // Hook end event
+        debugLogger.debug(
+          `Hook ${this.getHookName(config)} ended for event ${eventName}: ${result.success ? 'success' : 'failed'}`,
+        );
       };
 
       // Execute hooks according to the plan's strategy
@@ -128,6 +144,15 @@ export class HookEventHandler {
 
       // Process common hook output fields centrally
       this.processCommonHookOutputFields(aggregated);
+
+      // Log hook execution for telemetry
+      this.logHookExecution(
+        eventName,
+        input,
+        results,
+        aggregated,
+        requestContext,
+      );
 
       return aggregated;
     } catch (error) {
@@ -174,8 +199,6 @@ export class HookEventHandler {
       debugLogger.warn(`Hook system message: ${systemMessage}`);
     }
 
-    // Handle suppressOutput - already handled by not logging above when true
-
     // Handle continue=false - this should stop the entire agent execution
     if (aggregated.finalOutput.continue === false) {
       const stopReason =
@@ -183,10 +206,112 @@ export class HookEventHandler {
         aggregated.finalOutput.reason ||
         'No reason provided';
       debugLogger.debug(`Hook requested to stop execution: ${stopReason}`);
-
-      // Note: The actual stopping of execution must be handled by integration points
-      // as they need to interpret this signal in the context of their specific workflow
-      // This is just logging the request centrally
     }
+  }
+
+  /**
+   * Log hook execution for observability
+   */
+  private logHookExecution(
+    eventName: HookEventName,
+    input: HookInput,
+    results: HookExecutionResult[],
+    aggregated: AggregatedHookResult,
+    requestContext?: object,
+  ): void {
+    const failedHooks = results.filter((r) => !r.success);
+    const successCount = results.length - failedHooks.length;
+    const errorCount = failedHooks.length;
+
+    if (errorCount > 0) {
+      const failedNames = failedHooks
+        .map((r) => this.getHookNameFromResult(r))
+        .join(', ');
+
+      let shouldEmit = true;
+      if (requestContext) {
+        let reportedSet = this.reportedFailures.get(requestContext);
+        if (!reportedSet) {
+          reportedSet = new Set<string>();
+          this.reportedFailures.set(requestContext, reportedSet);
+        }
+
+        const failureKey = `${eventName}:${failedNames}`;
+        if (reportedSet.has(failureKey)) {
+          shouldEmit = false;
+        } else {
+          reportedSet.add(failureKey);
+        }
+      }
+
+      debugLogger.warn(
+        `Hook execution for ${eventName}: ${successCount} succeeded, ${errorCount} failed (${failedNames}), ` +
+          `total duration: ${aggregated.totalDuration}ms`,
+      );
+
+      if (shouldEmit) {
+        // Emit feedback event for failed hooks
+        debugLogger.warn(
+          `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.\n`,
+        );
+      }
+    } else {
+      debugLogger.debug(
+        `Hook execution for ${eventName}: ${successCount} hooks executed successfully, ` +
+          `total duration: ${aggregated.totalDuration}ms`,
+      );
+    }
+
+    // Log individual hook calls to telemetry
+    for (const result of results) {
+      // Determine hook name and type for telemetry
+      const hookName = this.getHookNameFromResult(result);
+      const hookType = this.getHookTypeFromResult(result);
+
+      const hookCallEvent = new HookCallEvent(
+        eventName,
+        hookType,
+        hookName,
+        { ...input },
+        result.duration,
+        result.success,
+        result.output ? { ...result.output } : undefined,
+        result.exitCode,
+        result.stdout,
+        result.stderr,
+        result.error?.message,
+      );
+
+      logHookCall(this.config, hookCallEvent);
+    }
+
+    // Log individual errors
+    for (const error of aggregated.errors) {
+      debugLogger.warn(`Hook execution error: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get hook name from config for display or telemetry
+   */
+  private getHookName(config: HookConfig): string {
+    if (config.type === 'command') {
+      return config.name || config.command || 'unknown-command';
+    }
+    return config.name || 'unknown-hook';
+  }
+
+  /**
+   * Get hook name from execution result for telemetry
+   */
+  private getHookNameFromResult(result: HookExecutionResult): string {
+    return this.getHookName(result.hookConfig);
+  }
+
+  /**
+   * Get hook type from execution result for telemetry
+   */
+  private getHookTypeFromResult(result: HookExecutionResult): 'command' {
+    return result.hookConfig.type as 'command';
   }
 }

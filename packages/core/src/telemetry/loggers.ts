@@ -53,6 +53,7 @@ import {
   recordSubagentExecutionMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordHookCallMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -91,6 +92,7 @@ import type {
   SkillLaunchEvent,
   UserFeedbackEvent,
 } from './types.js';
+import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 
@@ -102,6 +104,8 @@ function getCommonAttributes(config: Config): LogAttributes {
     'session.id': config.getSessionId(),
   };
 }
+
+export { getCommonAttributes };
 
 export function logStartSession(
   config: Config,
@@ -754,6 +758,25 @@ export function logModelSlashCommand(
   };
   logger.emit(logRecord);
   recordModelSlashCommand(config, event);
+}
+
+export function logHookCall(config: Config, event: HookCallEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: event.toLogBody(),
+    attributes: event.toOpenTelemetryAttributes(config),
+  };
+  logger.emit(logRecord);
+
+  recordHookCallMetrics(
+    config,
+    event.hook_event_name,
+    event.hook_name,
+    event.duration_ms,
+    event.success,
+  );
 }
 
 export function logExtensionInstallEvent(

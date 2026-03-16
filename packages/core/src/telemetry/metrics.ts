@@ -9,6 +9,7 @@ import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
 import type { ModelSlashCommandEvent } from './types.js';
+import { sanitizeHookName } from './sanitize.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
@@ -22,6 +23,8 @@ const CONTENT_RETRY_COUNT = `${SERVICE_NAME}.chat.content_retry.count`;
 const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
+const EVENT_HOOK_CALL_COUNT = `${SERVICE_NAME}.hook_call.count`;
+const EVENT_HOOK_CALL_LATENCY = `${SERVICE_NAME}.hook_call.latency`;
 
 // Performance Monitoring Metrics
 const STARTUP_TIME = `${SERVICE_NAME}.startup.duration`;
@@ -117,6 +120,16 @@ const COUNTER_DEFINITIONS = {
       'slash_command.model.model_name': string;
     },
   },
+  [EVENT_HOOK_CALL_COUNT]: {
+    description: 'Counts hook calls, tagged by hook event name and success.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (hookCallCounter = c),
+    attributes: {} as {
+      hook_event_name: string;
+      hook_name: string;
+      success: boolean;
+    },
+  },
   [EVENT_CHAT_COMPRESSION]: {
     description: 'Counts chat compression events.',
     valueType: ValueType.INT,
@@ -145,6 +158,17 @@ const HISTOGRAM_DEFINITIONS = {
     assign: (h: Histogram) => (apiRequestLatencyHistogram = h),
     attributes: {} as {
       model: string;
+    },
+  },
+  [EVENT_HOOK_CALL_LATENCY]: {
+    description: 'Latency of hook calls in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+    assign: (c: Histogram) => (hookCallLatencyHistogram = c),
+    attributes: {} as {
+      hook_event_name: string;
+      hook_name: string;
+      success: boolean;
     },
   },
 } as const;
@@ -332,6 +356,8 @@ let contentRetryCounter: Counter | undefined;
 let contentRetryFailureCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
+let hookCallCounter: Counter | undefined;
+let hookCallLatencyHistogram: Histogram | undefined;
 
 // Performance Monitoring Metrics
 let startupTimeHistogram: Histogram | undefined;
@@ -526,6 +552,29 @@ export function recordModelSlashCommand(
     ...baseMetricDefinition.getCommonAttributes(config),
     'slash_command.model.model_name': event.model_name,
   });
+}
+
+export function recordHookCallMetrics(
+  config: Config,
+  hookEventName: string,
+  hookName: string,
+  durationMs: number,
+  success: boolean,
+): void {
+  if (!hookCallCounter || !hookCallLatencyHistogram || !isMetricsInitialized)
+    return;
+
+  // Always sanitize hook names in metrics (metrics are aggregated and exposed)
+  const sanitizedHookName = sanitizeHookName(hookName);
+  const metricAttributes: Attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    hook_event_name: hookEventName,
+    hook_name: sanitizedHookName,
+    success,
+  };
+
+  hookCallCounter.add(1, metricAttributes);
+  hookCallLatencyHistogram.record(durationMs, metricAttributes);
 }
 
 // Performance Monitoring Functions

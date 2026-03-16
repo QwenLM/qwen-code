@@ -54,6 +54,7 @@ import {
   logExtensionDisable,
   logExtensionInstallEvent,
   logExtensionUninstall,
+  logHookCall,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
@@ -75,6 +76,7 @@ import {
   ExtensionDisableEvent,
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
+  HookCallEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -1279,6 +1281,186 @@ describe('loggers', () => {
           setting_scope: 'user',
         },
       });
+    });
+  });
+
+  describe('logHookCall', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getTargetDir: () => 'target-dir',
+      getUsageStatisticsEnabled: () => true,
+      getTelemetryEnabled: () => true,
+      getTelemetryLogPromptsEnabled: () => true,
+    } as unknown as Config;
+
+    const mockMetrics = {
+      recordHookCallMetrics: vi.fn(),
+    };
+
+    beforeEach(() => {
+      vi.spyOn(metrics, 'recordHookCallMetrics').mockImplementation(
+        mockMetrics.recordHookCallMetrics,
+      );
+    });
+
+    it('should log a successful hook call with all fields', () => {
+      const event = new HookCallEvent(
+        'UserPromptSubmit',
+        'command',
+        'check-secrets.sh',
+        { prompt: 'test prompt' },
+        150,
+        true,
+        { output: 'success' },
+        0,
+        'stdout message',
+        'stderr message',
+        undefined,
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Hook call UserPromptSubmit.check-secrets.sh succeeded in 150ms',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': 'qwen_code.hook_call',
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          hook_event_name: 'UserPromptSubmit',
+          hook_type: 'command',
+          hook_name: 'check-secrets.sh',
+          duration_ms: 150,
+          success: true,
+          exit_code: 0,
+          hook_input: '{\n  "prompt": "test prompt"\n}',
+          hook_output: '{\n  "output": "success"\n}',
+          stdout: 'stdout message',
+          stderr: 'stderr message',
+        },
+      });
+
+      expect(mockMetrics.recordHookCallMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        'UserPromptSubmit',
+        'check-secrets.sh',
+        150,
+        true,
+      );
+    });
+
+    it('should log a failed hook call with error', () => {
+      const event = new HookCallEvent(
+        'Stop',
+        'command',
+        'cleanup.sh',
+        { last_assistant_message: 'final message' },
+        200,
+        false,
+        undefined,
+        1,
+        'stdout message',
+        'stderr message',
+        'Error occurred',
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Hook call Stop.cleanup.sh failed in 200ms',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': 'qwen_code.hook_call',
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          hook_event_name: 'Stop',
+          hook_type: 'command',
+          hook_name: 'cleanup.sh',
+          duration_ms: 200,
+          success: false,
+          exit_code: 1,
+          hook_input: '{\n  "last_assistant_message": "final message"\n}',
+          hook_output: undefined,
+          stdout: 'stdout message',
+          stderr: 'stderr message',
+          error: 'Error occurred',
+        },
+      });
+
+      expect(mockMetrics.recordHookCallMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        'Stop',
+        'cleanup.sh',
+        200,
+        false,
+      );
+    });
+
+    it('should sanitize hook names when prompt logging is disabled', () => {
+      const mockConfigNoLogging = {
+        getSessionId: () => 'test-session-id',
+        getTargetDir: () => 'target-dir',
+        getUsageStatisticsEnabled: () => true,
+        getTelemetryEnabled: () => true,
+        getTelemetryLogPromptsEnabled: () => false, // Disabled
+      } as unknown as Config;
+
+      const event = new HookCallEvent(
+        'UserPromptSubmit',
+        'command',
+        '/full/path/to/.gemini/hooks/secrets-check.sh --api-key=secret123',
+        { prompt: 'test prompt' },
+        100,
+        true,
+        { result: 'valid' },
+        0,
+        '',
+        '',
+        undefined,
+      );
+
+      logHookCall(mockConfigNoLogging, event);
+
+      // Check that the attributes were sanitized in the attributes but the log body shows the original
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      expect(emittedEvent.body).toBe(
+        'Hook call UserPromptSubmit./full/path/to/.gemini/hooks/secrets-check.sh --api-key=secret123 succeeded in 100ms',
+      );
+      // In the attributes, the hook name should be sanitized when logging is disabled
+      expect(emittedEvent.attributes.hook_name).toBe('secrets-check.sh'); // Sanitized
+    });
+
+    it('should not include sensitive data when prompt logging is disabled', () => {
+      const mockConfigNoLogging = {
+        getSessionId: () => 'test-session-id',
+        getTargetDir: () => 'target-dir',
+        getUsageStatisticsEnabled: () => true,
+        getTelemetryEnabled: () => true,
+        getTelemetryLogPromptsEnabled: () => false, // Disabled
+      } as unknown as Config;
+
+      const event = new HookCallEvent(
+        'UserPromptSubmit',
+        'command',
+        'test-hook.sh',
+        { prompt: 'secret data', api_key: 'secret123' },
+        50,
+        true,
+        { result: 'success' },
+        0,
+        'secret output',
+        'error output',
+        undefined,
+      );
+
+      logHookCall(mockConfigNoLogging, event);
+
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      // When logging is disabled, hook_input, hook_output, stdout, stderr should not be included
+      expect(emittedEvent.attributes['hook_input']).toBeUndefined();
+      expect(emittedEvent.attributes['hook_output']).toBeUndefined();
+      expect(emittedEvent.attributes['stdout']).toBeUndefined();
+      expect(emittedEvent.attributes['stderr']).toBeUndefined();
+      // But hook_name should be sanitized
+      expect(emittedEvent.attributes.hook_name).toBe('test-hook.sh');
     });
   });
 });
