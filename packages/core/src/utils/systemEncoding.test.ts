@@ -283,6 +283,23 @@ describe('Shell Command Processor - Encoding Functions', () => {
       mockedOsPlatform.mockReturnValue('linux');
     });
 
+    it('should return utf-8 for valid UTF-8 buffers regardless of system encoding', () => {
+      // System encoding is GBK, but buffer is valid UTF-8
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 936');
+
+      const buffer = Buffer.from('Hello 你好', 'utf-8');
+      const result = getCachedEncodingForBuffer(buffer);
+      expect(result).toBe('utf-8');
+    });
+
+    it('should return utf-8 for pure ASCII buffers', () => {
+      // ASCII is valid UTF-8 — should return utf-8 immediately
+      const buffer = Buffer.from('hello world');
+      const result = getCachedEncodingForBuffer(buffer);
+      expect(result).toBe('utf-8');
+    });
+
     it('should use cached system encoding on subsequent calls', () => {
       process.env['LANG'] = 'en_US.UTF-8';
       const buffer = Buffer.from('test');
@@ -305,7 +322,8 @@ describe('Shell Command Processor - Encoding Functions', () => {
         throw new Error('locale command failed');
       });
 
-      const buffer = Buffer.from('test');
+      // Use bytes that are NOT valid UTF-8 so the UTF-8-first check fails
+      const buffer = Buffer.from([0x80, 0x81, 0x82]);
       mockedChardetDetect.mockReturnValue('ISO-8859-1');
 
       const result = getCachedEncodingForBuffer(buffer);
@@ -335,8 +353,9 @@ describe('Shell Command Processor - Encoding Functions', () => {
         throw new Error('locale command failed');
       });
 
-      const buffer1 = Buffer.from('test1');
-      const buffer2 = Buffer.from('test2');
+      // Use bytes that are NOT valid UTF-8 so the UTF-8-first check fails
+      const buffer1 = Buffer.from([0x80, 0x81]);
+      const buffer2 = Buffer.from([0x82, 0x83]);
 
       mockedChardetDetect
         .mockReturnValueOnce('ISO-8859-1')
@@ -354,7 +373,9 @@ describe('Shell Command Processor - Encoding Functions', () => {
       mockedOsPlatform.mockReturnValue('win32');
       mockedExecSync.mockReturnValue('Active code page: 1252');
 
-      const buffer = Buffer.from('test');
+      // Use bytes that are NOT valid UTF-8 so the UTF-8-first check fails
+      // and we fall through to system encoding detection
+      const buffer = Buffer.from([0x80, 0x81, 0x82]);
       const result = getCachedEncodingForBuffer(buffer);
 
       expect(result).toBe('windows-1252');
@@ -385,8 +406,9 @@ describe('Shell Command Processor - Encoding Functions', () => {
         throw new Error('locale command failed');
       });
 
-      const buffer1 = Buffer.from('test1');
-      const buffer2 = Buffer.from('test2');
+      // Use bytes that are NOT valid UTF-8 so the UTF-8-first check fails
+      const buffer1 = Buffer.from([0x80, 0x81]);
+      const buffer2 = Buffer.from([0x82, 0x83]);
 
       mockedChardetDetect
         .mockReturnValueOnce('ISO-8859-1')
@@ -398,18 +420,16 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const result1 = getCachedEncodingForBuffer(buffer1);
       const result2 = getCachedEncodingForBuffer(buffer2);
 
-      // Should call execSync only once due to caching (null result is cached)
-      expect(mockedExecSync).toHaveBeenCalledTimes(1);
+      // System encoding is only checked as fallback after UTF-8 and chardet
+      // both fail. Since chardet returns results here, execSync may not be called.
       expect(result1).toBe('iso-8859-1');
       expect(result2).toBe('utf-16');
 
-      // Call a third time to verify cache is still used
-      const buffer3 = Buffer.from('test3');
+      // Call a third time to verify chardet is called each time (not cached)
+      const buffer3 = Buffer.from([0x84, 0x85]);
       mockedChardetDetect.mockReturnValueOnce('UTF-32');
       const result3 = getCachedEncodingForBuffer(buffer3);
 
-      // Still should be only one call to execSync
-      expect(mockedExecSync).toHaveBeenCalledTimes(1);
       expect(result3).toBe('utf-32');
     });
   });

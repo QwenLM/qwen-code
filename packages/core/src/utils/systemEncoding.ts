@@ -23,34 +23,59 @@ export function resetEncodingCache(): void {
 }
 
 /**
- * Returns the system encoding, caching the result to avoid repeated system calls.
- * If system encoding detection fails, falls back to detecting from the provided buffer.
- * Note: Only the system encoding is cached - buffer-based detection runs for each buffer
- * since different buffers may have different encodings.
- * @param buffer A buffer to use for detecting encoding if system detection fails.
+ * Detects the encoding for a buffer of command output.
+ *
+ * Strategy: try UTF-8 first, then fall back to auto-detection.
+ * This is optimistic about UTF-8 because:
+ * - Modern developer tools increasingly output UTF-8
+ * - PowerShell Core defaults to UTF-8
+ * - git, node, and most CLI tools output UTF-8
+ * - Legacy codepage bytes (0x80-0xFF) rarely form valid UTF-8
+ *   multi-byte sequences by accident
+ *
+ * The system encoding is cached and used as a fallback when the buffer
+ * is not valid UTF-8 and chardet-based detection fails.
+ *
+ * @param buffer A buffer to analyze for encoding detection.
  */
 export function getCachedEncodingForBuffer(buffer: Buffer): string {
-  // Cache system encoding detection since it's system-wide
+  // Try UTF-8 first: if the buffer is valid UTF-8, use it immediately.
+  // This avoids misclassifying UTF-8 output as a legacy codepage on
+  // systems where the system encoding happens to also be valid for
+  // those same bytes.
+  if (isValidUtf8(buffer)) {
+    return 'utf-8';
+  }
+
+  // Buffer is not valid UTF-8 — try chardet-based detection
+  const detected = detectEncodingFromBuffer(buffer);
+  if (detected) {
+    return detected;
+  }
+
+  // Fall back to system encoding
   if (cachedSystemEncoding === undefined) {
     cachedSystemEncoding = getSystemEncoding();
   }
-
-  // If we have a cached system encoding, use it
   if (cachedSystemEncoding) {
-    // If the system encoding is not UTF-8 (e.g. Windows CP936), but the buffer
-    // is detected as UTF-8, prefer UTF-8. This handles tools like 'git' which
-    // often output UTF-8 regardless of the system code page.
-    if (cachedSystemEncoding !== 'utf-8') {
-      const detected = detectEncodingFromBuffer(buffer);
-      if (detected === 'utf-8') {
-        return 'utf-8';
-      }
-    }
     return cachedSystemEncoding;
   }
 
-  // Otherwise, detect from this specific buffer (don't cache this result)
-  return detectEncodingFromBuffer(buffer) || 'utf-8';
+  // Last resort
+  return 'utf-8';
+}
+
+/**
+ * Checks whether a buffer contains valid UTF-8 data.
+ * Uses Node.js TextDecoder in strict mode (fatal: true) to validate.
+ */
+function isValidUtf8(buffer: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -486,7 +486,7 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let outputEncoding = 'utf-8';
+        let detectedEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -618,10 +618,10 @@ export class ShellExecutionService {
           const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
-            outputEncoding = encoding;
+            detectedEncoding = encoding;
           } catch {
             decoder = new TextDecoder('utf-8');
-            outputEncoding = 'utf-8';
+            detectedEncoding = 'utf-8';
           }
         };
 
@@ -684,9 +684,9 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  const decodedOutput = new TextDecoder(outputEncoding).decode(
-                    finalBuffer,
-                  );
+                  const decodedOutput = new TextDecoder(
+                    detectedEncoding,
+                  ).decode(finalBuffer);
                   fullOutput = await replayTerminalOutput(decodedOutput);
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);
