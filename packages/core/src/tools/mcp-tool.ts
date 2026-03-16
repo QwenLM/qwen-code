@@ -23,6 +23,9 @@ import {
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MCP_TOOL');
 
 type ToolParams = Record<string, unknown>;
 
@@ -111,6 +114,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolResult
 > {
   private static readonly allowlist: Set<string> = new Set();
+  private static readonly MAX_RECONNECT_RETRIES = 3;
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -123,6 +127,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
     private readonly annotations?: McpToolAnnotations,
+    private readonly retryCount: number = 0,
   ) {
     super(params);
   }
@@ -192,6 +197,36 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return false;
   }
 
+  private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
+    if (!this.cliConfig) {
+      return null;
+    }
+
+    try {
+      debugLogger.info(
+        `Attempting to reconnect MCP server '${this.serverName}'...`,
+      );
+      const toolRegistry = this.cliConfig.getToolRegistry();
+      await toolRegistry.discoverToolsForServer(this.serverName);
+
+      const newTool = toolRegistry.getTool(
+        `mcp__${this.serverName}__${this.serverToolName}`,
+      );
+      if (newTool instanceof DiscoveredMCPTool) {
+        debugLogger.info(
+          `Successfully reconnected to MCP server '${this.serverName}'`,
+        );
+        return newTool;
+      }
+      return null;
+    } catch (error) {
+      debugLogger.error(
+        `Failed to reconnect MCP server '${this.serverName}': ${error}`,
+      );
+      return null;
+    }
+  }
+
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -214,60 +249,91 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
-    const callToolResult = await this.mcpClient!.callTool(
-      {
-        name: this.serverToolName,
-        arguments: this.params as Record<string, unknown>,
-      },
-      undefined,
-      {
-        onprogress: (progress) => {
-          if (updateOutput) {
-            const progressData: McpToolProgressData = {
-              type: 'mcp_tool_progress',
-              progress: progress.progress,
-              ...(progress.total != null && { total: progress.total }),
-              ...(progress.message != null && { message: progress.message }),
-            };
-            updateOutput(progressData);
-          }
+    try {
+      const callToolResult = await this.mcpClient!.callTool(
+        {
+          name: this.serverToolName,
+          arguments: this.params as Record<string, unknown>,
         },
-        timeout: this.mcpTimeout,
-        signal,
-      },
-    );
+        undefined,
+        {
+          onprogress: (progress) => {
+            if (updateOutput) {
+              const progressData: McpToolProgressData = {
+                type: 'mcp_tool_progress',
+                progress: progress.progress,
+                ...(progress.total != null && { total: progress.total }),
+                ...(progress.message != null && { message: progress.message }),
+              };
+              updateOutput(progressData);
+            }
+          },
+          timeout: this.mcpTimeout,
+          signal,
+        },
+      );
 
-    // Wrap the raw CallToolResult into the Part[] format that the
-    // existing transform/display functions expect.
-    const rawResponseParts = wrapMcpCallToolResultAsParts(
-      this.serverToolName,
-      callToolResult,
-    );
+      // Wrap the raw CallToolResult into the Part[] format that the
+      // existing transform/display functions expect.
+      const rawResponseParts = wrapMcpCallToolResultAsParts(
+        this.serverToolName,
+        callToolResult,
+      );
 
-    // Ensure the response is not an error
-    if (this.isMCPToolError(rawResponseParts)) {
-      const errorMessage = `MCP tool '${
-        this.serverToolName
-      }' reported tool error for function call: ${safeJsonStringify({
-        name: this.serverToolName,
-        args: this.params,
-      })} with response: ${safeJsonStringify(rawResponseParts)}`;
+      // Ensure the response is not an error
+      if (this.isMCPToolError(rawResponseParts)) {
+        const errorMessage = `MCP tool '${
+          this.serverToolName
+        }' reported tool error for function call: ${safeJsonStringify({
+          name: this.serverToolName,
+          args: this.params,
+        })} with response: ${safeJsonStringify(rawResponseParts)}`;
+        return {
+          llmContent: errorMessage,
+          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+          error: {
+            message: errorMessage,
+            type: ToolErrorType.MCP_TOOL_ERROR,
+          },
+        };
+      }
+
+      const transformedParts = transformMcpContentToParts(rawResponseParts);
+
       return {
-        llmContent: errorMessage,
-        returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-        error: {
-          message: errorMessage,
-          type: ToolErrorType.MCP_TOOL_ERROR,
-        },
+        llmContent: transformedParts,
+        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
       };
+    } catch (error) {
+      debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
+
+      // Attempt reconnection with retry limit
+      if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
+        const newTool = await this.attemptReconnect();
+        if (newTool) {
+          const newInvocation = new DiscoveredMCPToolInvocation(
+            newTool['mcpTool'],
+            this.serverName,
+            this.serverToolName,
+            this.displayName,
+            this.trust,
+            this.params,
+            this.cliConfig,
+            newTool['mcpClient'],
+            this.mcpTimeout,
+            this.annotations,
+            this.retryCount + 1,
+          );
+          return newInvocation.execute(signal, updateOutput);
+        }
+      } else {
+        debugLogger.error(
+          `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
+        );
+      }
+
+      throw error;
     }
-
-    const transformedParts = transformMcpContentToParts(rawResponseParts);
-
-    return {
-      llmContent: transformedParts,
-      returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
-    };
   }
 
   /**
@@ -285,59 +351,90 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     ];
 
     // Race MCP tool call with abort signal to respect cancellation
-    const rawResponseParts = await new Promise<Part[]>((resolve, reject) => {
-      if (signal.aborted) {
-        const error = new Error('Tool call aborted');
-        error.name = 'AbortError';
-        reject(error);
-        return;
+    try {
+      const rawResponseParts = await new Promise<Part[]>((resolve, reject) => {
+        if (signal.aborted) {
+          const error = new Error('Tool call aborted');
+          error.name = 'AbortError';
+          reject(error);
+          return;
+        }
+        const onAbort = () => {
+          cleanup();
+          const error = new Error('Tool call aborted');
+          error.name = 'AbortError';
+          reject(error);
+        };
+        const cleanup = () => {
+          signal.removeEventListener('abort', onAbort);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        this.mcpTool
+          .callTool(functionCalls)
+          .then((res) => {
+            cleanup();
+            resolve(res);
+          })
+          .catch((err) => {
+            cleanup();
+            reject(err);
+          });
+      });
+
+      // Ensure the response is not an error
+      if (this.isMCPToolError(rawResponseParts)) {
+        const errorMessage = `MCP tool '${
+          this.serverToolName
+        }' reported tool error for function call: ${safeJsonStringify(
+          functionCalls[0],
+        )} with response: ${safeJsonStringify(rawResponseParts)}`;
+        return {
+          llmContent: errorMessage,
+          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+          error: {
+            message: errorMessage,
+            type: ToolErrorType.MCP_TOOL_ERROR,
+          },
+        };
       }
-      const onAbort = () => {
-        cleanup();
-        const error = new Error('Tool call aborted');
-        error.name = 'AbortError';
-        reject(error);
-      };
-      const cleanup = () => {
-        signal.removeEventListener('abort', onAbort);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
 
-      this.mcpTool
-        .callTool(functionCalls)
-        .then((res) => {
-          cleanup();
-          resolve(res);
-        })
-        .catch((err) => {
-          cleanup();
-          reject(err);
-        });
-    });
+      const transformedParts = transformMcpContentToParts(rawResponseParts);
 
-    // Ensure the response is not an error
-    if (this.isMCPToolError(rawResponseParts)) {
-      const errorMessage = `MCP tool '${
-        this.serverToolName
-      }' reported tool error for function call: ${safeJsonStringify(
-        functionCalls[0],
-      )} with response: ${safeJsonStringify(rawResponseParts)}`;
       return {
-        llmContent: errorMessage,
-        returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-        error: {
-          message: errorMessage,
-          type: ToolErrorType.MCP_TOOL_ERROR,
-        },
+        llmContent: transformedParts,
+        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
       };
+    } catch (error) {
+      debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
+
+      // Attempt reconnection with retry limit
+      if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
+        const newTool = await this.attemptReconnect();
+        if (newTool) {
+          const newInvocation = new DiscoveredMCPToolInvocation(
+            newTool['mcpTool'],
+            this.serverName,
+            this.serverToolName,
+            this.displayName,
+            this.trust,
+            this.params,
+            this.cliConfig,
+            newTool['mcpClient'],
+            this.mcpTimeout,
+            this.annotations,
+            this.retryCount + 1,
+          );
+          return newInvocation.execute(signal);
+        }
+      } else {
+        debugLogger.error(
+          `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
+        );
+      }
+
+      throw error;
     }
-
-    const transformedParts = transformMcpContentToParts(rawResponseParts);
-
-    return {
-      llmContent: transformedParts,
-      returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
-    };
   }
 
   getDescription(): string {
