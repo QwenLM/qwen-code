@@ -73,7 +73,6 @@ vi.mock('../utils/shell-utils.js', () => ({
 vi.mock('../utils/systemEncoding.js', () => ({
   getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
   getSystemEncoding: mockGetSystemEncoding,
-  WINDOWS_UTF8_CODE_PAGE: 65001,
 }));
 
 const mockProcessKill = vi

@@ -47,6 +47,13 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return detected;
   }
 
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  if (cachedSystemEncoding) {
+    return cachedSystemEncoding;
+  }
+
   // Last resort
   return 'utf-8';
 }
@@ -134,8 +141,6 @@ export function getSystemEncoding(): string | null {
  * @param cp The Windows code page number (e.g., 437, 850, etc.)
  * @returns The corresponding encoding name as a string, or null if no mapping exists.
  */
-/** Windows code page number for UTF-8. */
-export const WINDOWS_UTF8_CODE_PAGE = 65001;
 
 export function windowsCodePageToEncoding(cp: number): string | null {
   // Most common mappings; extend as needed
@@ -160,7 +165,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     1256: 'windows-1256',
     1257: 'windows-1257',
     1258: 'windows-1258',
-    [WINDOWS_UTF8_CODE_PAGE]: 'utf-8',
+    65001: 'utf-8',
   };
 
   if (map[cp]) {
@@ -190,15 +195,6 @@ export function detectEncodingFromBuffer(buffer: Buffer): string | null {
     }
   } catch (error) {
     debugLogger.warn('Failed to detect encoding with chardet:', error);
-  }
-
-  // Fall back to system encoding — catches cases where chardet fails
-  // (e.g. small GBK files that chardet misdetects as ISO-8859-2)
-  if (cachedSystemEncoding === undefined) {
-    cachedSystemEncoding = getSystemEncoding();
-  }
-  if (cachedSystemEncoding) {
-    return cachedSystemEncoding;
   }
 
   return null;
