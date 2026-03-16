@@ -147,12 +147,16 @@ describe('Multi-Turn Conversations (E2E)', () => {
           if (isSDKAssistantMessage(message)) {
             assistantMessages.push(message);
             const text = extractText(message.message.content);
-            assistantTexts.push(text);
+            // Thinking models may emit assistant messages with only thinking
+            // blocks before the text content arrives, so skip those.
+            if (text.length > 0) {
+              assistantTexts.push(text);
+            }
           }
         }
 
         expect(messages.length).toBeGreaterThan(0);
-        expect(assistantMessages.length).toBeGreaterThanOrEqual(3);
+        expect(assistantTexts.length).toBeGreaterThanOrEqual(3);
 
         // Validate content of responses
         expect(assistantTexts[0]).toMatch(/2/);
