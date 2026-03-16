@@ -11,11 +11,7 @@ import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
-import {
-  getCachedEncodingForBuffer,
-  getSystemEncoding,
-  WINDOWS_UTF8_CODE_PAGE,
-} from '../utils/systemEncoding.js';
+import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
@@ -206,43 +202,6 @@ export class ShellExecutionService {
    * @returns An object containing the process ID (pid) and a promise that
    *          resolves with the complete execution result.
    */
-  /**
-   * On Windows with a non-UTF-8 codepage (e.g. CP936/GBK), cmd.exe
-   * interprets command and script file bytes using the active codepage.
-   * Since qwen-code writes all files as UTF-8, scripts containing
-   * non-ASCII characters will be corrupted when cmd.exe reads them
-   * under a non-UTF-8 codepage.
-   *
-   * Prefixing with `chcp 65001` switches cmd.exe to UTF-8 mode for
-   * the session so that both inline commands and script files are
-   * interpreted correctly.
-   */
-  private static wrapCommandForWindowsEncoding(command: string): {
-    command: string;
-    forceUtf8Output: boolean;
-  } {
-    if (os.platform() !== 'win32') {
-      return { command, forceUtf8Output: false };
-    }
-    const { shell } = getShellConfiguration();
-    if (shell !== 'cmd') {
-      // PowerShell handles Unicode natively
-      return { command, forceUtf8Output: false };
-    }
-    // Use getCachedEncodingForBuffer's cache path: pass an empty buffer
-    // to trigger system encoding detection without buffer-level detection.
-    // This avoids running `chcp` on every command.
-    const sysEncoding = getSystemEncoding();
-    if (!sysEncoding || sysEncoding === 'utf-8') {
-      // Already UTF-8 codepage (65001) or detection failed — don't wrap
-      return { command, forceUtf8Output: false };
-    }
-    return {
-      command: `chcp ${WINDOWS_UTF8_CODE_PAGE} >nul && ${command}`,
-      forceUtf8Output: true,
-    };
-  }
-
   static async execute(
     commandToExecute: string,
     cwd: string,
@@ -251,10 +210,6 @@ export class ShellExecutionService {
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
   ): Promise<ShellExecutionHandle> {
-    const { command: wrappedCommand, forceUtf8Output } =
-      ShellExecutionService.wrapCommandForWindowsEncoding(commandToExecute);
-    commandToExecute = wrappedCommand;
-
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
       if (ptyInfo) {
@@ -266,7 +221,6 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
-            forceUtf8Output,
           );
         } catch (_e) {
           // Fallback to child_process
@@ -279,7 +233,6 @@ export class ShellExecutionService {
       cwd,
       onOutputEvent,
       abortSignal,
-      forceUtf8Output,
     );
   }
 
@@ -288,7 +241,6 @@ export class ShellExecutionService {
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
-    forceUtf8Output = false,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -332,9 +284,7 @@ export class ShellExecutionService {
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
           if (!stdoutDecoder || !stderrDecoder) {
-            const encoding = forceUtf8Output
-              ? 'utf-8'
-              : getCachedEncodingForBuffer(data);
+            const encoding = getCachedEncodingForBuffer(data);
             try {
               stdoutDecoder = new TextDecoder(encoding);
               stderrDecoder = new TextDecoder(encoding);
@@ -485,7 +435,6 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
-    forceUtf8Output = false,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
       // This should not happen, but as a safeguard...
@@ -666,9 +615,7 @@ export class ShellExecutionService {
             return;
           }
 
-          const encoding = forceUtf8Output
-            ? 'utf-8'
-            : getCachedEncodingForBuffer(data);
+          const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
             outputEncoding = encoding;
