@@ -521,10 +521,10 @@ export const App: React.FC = () => {
   }, [vscode]);
 
   // Handle completion selection.
-  // Slash-command completions insert into the composer so users can append
-  // arguments; only built-in actions like /login and /model execute immediately.
+  // When fillOnly is true (Tab), slash commands are inserted into the input
+  // instead of being sent immediately, so users can append arguments.
   const handleCompletionSelect = useCallback(
-    (item: CompletionItem) => {
+    (item: CompletionItem, fillOnly?: boolean) => {
       // Handle completion selection by inserting the value into the input field
       const inputElement = inputFieldRef.current;
       if (!inputElement) {
@@ -610,6 +610,22 @@ export const App: React.FC = () => {
         if (action.kind === 'open-model-selector') {
           clearTriggerText();
           setShowModelSelector(true);
+          completion.closeCompletion();
+          return;
+        }
+
+        // Handle server-provided slash commands by sending them as messages.
+        // Skip when fillOnly (Tab) — let the generic insertion path fill the
+        // command text so the user can keep typing arguments.
+        const serverCmd = availableCommands.find((c) => c.name === itemId);
+        if (serverCmd && !fillOnly) {
+          // Clear the trigger text since we're sending the command
+          clearTriggerText();
+          // Send the slash command as a user message
+          vscode.postMessage({
+            type: 'sendMessage',
+            data: { text: `/${serverCmd.name}` },
+          });
           completion.closeCompletion();
           return;
         }
@@ -1023,6 +1039,7 @@ export const App: React.FC = () => {
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionFill={(item) => handleCompletionSelect(item, true)}
           onCompletionClose={completion.closeCompletion}
           showModelSelector={showModelSelector}
           availableModels={availableModels}
