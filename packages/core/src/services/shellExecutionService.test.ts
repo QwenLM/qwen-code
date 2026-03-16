@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
+import {
+  vi,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
@@ -80,6 +88,13 @@ const shellExecutionConfig = {
   disableDynamicLineTrimming: true,
 };
 
+const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
+const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
+const EXPECTED_MERGED_WINDOWS_PATH =
+  'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin';
+
+let originalProcessEnv: NodeJS.ProcessEnv;
+
 const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   const lines = Array.isArray(text) ? text : text.split('\n');
   const expected: AnsiOutput = Array.from(
@@ -98,6 +113,19 @@ const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
     ],
   );
   return expected;
+};
+
+const setupConflictingPathEnv = () => {
+  process.env = {
+    ...originalProcessEnv,
+    PATH: WINDOWS_SYSTEM_PATH,
+    Path: WINDOWS_USER_PATH,
+  };
+};
+
+const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
+  expect(env.PATH).toBe(EXPECTED_MERGED_WINDOWS_PATH);
+  expect(env.Path).toBeUndefined();
 };
 
 describe('ShellExecutionService', () => {
@@ -122,6 +150,7 @@ describe('ShellExecutionService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -158,6 +187,11 @@ describe('ShellExecutionService', () => {
     };
 
     mockPtySpawn.mockReturnValue(mockPtyProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -540,6 +574,18 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('should normalize PATH-like env keys on Windows for pty execution', async () => {
+      mockPlatform.mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
+    });
+
     it('should use bash on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
       await simulateExecution('ls "foo bar"', (pty) =>
@@ -647,6 +693,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -666,6 +713,11 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     mockCpSpawn.mockReturnValue(mockChildProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -991,6 +1043,16 @@ describe('ShellExecutionService child_process fallback', () => {
         argsPrefix: ['-c'],
         shell: 'bash',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
+      mockPlatform.mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
     });
 
     it('should use bash and detached process group on Linux', async () => {
