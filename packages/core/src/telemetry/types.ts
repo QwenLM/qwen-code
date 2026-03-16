@@ -10,7 +10,7 @@ import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { FileDiff } from '../tools/tools.js';
-import { AuthType } from '../core/contentGenerator.js';
+import type { AuthType } from '../core/contentGenerator.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
@@ -35,55 +35,60 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   session_id: string;
   model: string;
-  embedding_model: string;
   sandbox_enabled: boolean;
-  core_tools_enabled: string;
+  core_tools_enabled?: string;
   approval_mode: string;
-  api_key_enabled: boolean;
-  vertex_ai_enabled: boolean;
   debug_enabled: boolean;
+  truncate_tool_output_threshold: number;
+  truncate_tool_output_lines: number;
   mcp_servers: string;
   telemetry_enabled: boolean;
-  telemetry_log_user_prompts_enabled: boolean;
   file_filtering_respect_git_ignore: boolean;
   mcp_servers_count: number;
   mcp_tools_count?: number;
   mcp_tools?: string;
   output_format: OutputFormat;
+  hooks?: string;
+  ide_enabled: boolean;
+  interactive_shell_enabled: boolean;
   skills?: string;
   subagents?: string;
 
   constructor(config: Config) {
-    const generatorConfig = config.getContentGeneratorConfig();
     const mcpServers = config.getMcpServers();
     const toolRegistry = config.getToolRegistry();
-
-    let useGemini = false;
-    let useVertex = false;
-    if (generatorConfig && generatorConfig.authType) {
-      useGemini = generatorConfig.authType === AuthType.USE_GEMINI;
-      useVertex = generatorConfig.authType === AuthType.USE_VERTEX_AI;
-    }
 
     this['event.name'] = 'cli_config';
     this.session_id = config.getSessionId();
     this.model = config.getModel();
-    this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    this.core_tools_enabled = (config.getCoreTools() ?? []).join(',');
+    const coreTools = (config.getCoreTools() ?? []).join(',');
+    if (coreTools) {
+      this.core_tools_enabled = coreTools;
+    }
     this.approval_mode = config.getApprovalMode();
-    this.api_key_enabled = useGemini || useVertex;
-    this.vertex_ai_enabled = useVertex;
     this.debug_enabled = config.getDebugMode();
+    this.truncate_tool_output_threshold =
+      config.getTruncateToolOutputThreshold();
+    this.truncate_tool_output_lines = config.getTruncateToolOutputLines();
     this.mcp_servers = mcpServers ? Object.keys(mcpServers).join(',') : '';
     this.telemetry_enabled = config.getTelemetryEnabled();
-    this.telemetry_log_user_prompts_enabled =
-      config.getTelemetryLogPromptsEnabled();
     this.file_filtering_respect_git_ignore =
       config.getFileFilteringRespectGitIgnore();
     this.mcp_servers_count = mcpServers ? Object.keys(mcpServers).length : 0;
     this.output_format = config.getOutputFormat();
+    this.ide_enabled = config.getIdeMode();
+    this.interactive_shell_enabled = config.getShouldUseNodePtyShell();
+
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const allHooks = hookSystem.getAllHooks();
+      const uniqueEventNames = [...new Set(allHooks.map((h) => h.eventName))];
+      if (uniqueEventNames.length > 0) {
+        this.hooks = uniqueEventNames.join(',');
+      }
+    }
 
     if (toolRegistry) {
       const mcpTools = toolRegistry

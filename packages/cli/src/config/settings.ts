@@ -103,10 +103,6 @@ export interface CheckpointingSettings {
   enabled?: boolean;
 }
 
-export interface SummarizeToolOutputSettings {
-  tokenBudget?: number;
-}
-
 export interface AccessibilitySettings {
   enableLoadingPhrases?: boolean;
   screenReader?: boolean;
