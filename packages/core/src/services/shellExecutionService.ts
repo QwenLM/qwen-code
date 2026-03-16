@@ -248,7 +248,7 @@ export class ShellExecutionService {
 
       // On Windows with PowerShell, force UTF-8 output encoding so that
       // CJK and other non-ASCII characters are emitted as UTF-8 regardless
-      // of the system codepage. This matches the Codex CLI approach.
+      // of the system codepage.
       if (isWindows && shell === 'powershell') {
         commandToExecute =
           '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
