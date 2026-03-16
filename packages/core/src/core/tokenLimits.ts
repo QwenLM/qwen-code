@@ -166,6 +166,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3\.5/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen3-max/, LIMITS['64k']],
+  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
