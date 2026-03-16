@@ -817,12 +817,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'unknown-model',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 10000, // Exceeds the default limit
+        max_tokens: 20000, // Exceeds the default limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(8192); // Should be limited to default output limit (8K)
+      expect(result.max_tokens).toBe(16384); // Should be limited to default output limit (16K)
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {

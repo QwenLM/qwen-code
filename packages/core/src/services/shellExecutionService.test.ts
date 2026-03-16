@@ -124,8 +124,8 @@ const setupConflictingPathEnv = () => {
 };
 
 const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
-  expect(env.PATH).toBe(EXPECTED_MERGED_WINDOWS_PATH);
-  expect(env.Path).toBeUndefined();
+  expect(env['PATH']).toBe(EXPECTED_MERGED_WINDOWS_PATH);
+  expect(env['Path']).toBeUndefined();
 };
 
 describe('ShellExecutionService', () => {
