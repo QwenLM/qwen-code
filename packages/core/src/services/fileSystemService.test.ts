@@ -6,9 +6,16 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
-import { StandardFileSystemService } from './fileSystemService.js';
+import {
+  StandardFileSystemService,
+  needsUtf8Bom,
+  resetUtf8BomCache,
+} from './fileSystemService.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 
 vi.mock('fs/promises');
 vi.mock('os', () => ({
@@ -16,6 +23,9 @@ vi.mock('os', () => ({
     platform: mockPlatform,
   },
   platform: mockPlatform,
+}));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getSystemEncoding: mockGetSystemEncoding,
 }));
 
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
@@ -33,6 +43,9 @@ describe('StandardFileSystemService', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    resetUtf8BomCache();
+    mockPlatform.mockReturnValue('linux');
+    mockGetSystemEncoding.mockReturnValue('utf-8');
     fileSystem = new StandardFileSystemService();
   });
 
@@ -373,6 +386,66 @@ describe('StandardFileSystemService', () => {
         '@echo off\necho hello\n',
         'utf-8',
       );
+    });
+  });
+
+  describe('needsUtf8Bom', () => {
+    beforeEach(() => {
+      resetUtf8BomCache();
+    });
+
+    it('should return true for .ps1 files on Windows with non-UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
+    });
+
+    it('should return true for .PS1 files (case-insensitive)', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/SCRIPT.PS1')).toBe(true);
+    });
+
+    it('should return false for .ps1 files on Windows with UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('utf-8');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
+    });
+
+    it('should return false for .ps1 files on non-Windows', () => {
+      mockPlatform.mockReturnValue('darwin');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
+    });
+
+    it('should return false for non-.ps1 files on Windows with non-UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/script.sh')).toBe(false);
+      expect(needsUtf8Bom('/test/file.txt')).toBe(false);
+      expect(needsUtf8Bom('/test/script.bat')).toBe(false);
+    });
+
+    it('should cache the platform/encoding check across calls', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      needsUtf8Bom('/test/script.ps1');
+      needsUtf8Bom('/test/other.ps1');
+
+      // getSystemEncoding should only be called once due to caching
+      expect(mockGetSystemEncoding).toHaveBeenCalledTimes(1);
+    });
+
+    it('should treat null system encoding as non-UTF-8', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue(null);
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
     });
   });
 });

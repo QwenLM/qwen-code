@@ -10,7 +10,6 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  FileEncoding,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
@@ -1041,8 +1040,7 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
-    defaultFileEncoding:
-      settings.general?.defaultFileEncoding ?? FileEncoding.UTF8,
+    defaultFileEncoding: settings.general?.defaultFileEncoding,
     lsp: {
       enabled: lspEnabled,
     },

@@ -37,7 +37,6 @@ import {
   type FileSystemService,
   StandardFileSystemService,
   type FileEncodingType,
-  FileEncoding,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
 
@@ -523,7 +522,7 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
-  private readonly defaultFileEncoding: FileEncodingType;
+  private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -641,7 +640,7 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
-    this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
+    this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
@@ -1647,7 +1646,7 @@ export class Config {
    * Get the default file encoding for new files.
    * @returns FileEncodingType
    */
-  getDefaultFileEncoding(): FileEncodingType {
+  getDefaultFileEncoding(): FileEncodingType | undefined {
     return this.defaultFileEncoding;
   }
 
