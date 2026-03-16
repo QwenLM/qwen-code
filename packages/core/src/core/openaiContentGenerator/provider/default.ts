@@ -42,6 +42,7 @@ export class DefaultOpenAICompatibleProvider
       baseUrl,
       timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
+      authType,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options to ensure user-configured timeout works as expected
@@ -50,8 +51,9 @@ export class DefaultOpenAICompatibleProvider
       'openai',
       this.cliConfig.getProxy(),
     );
+    const isLocalProvider = authType === 'ollama' || authType === 'lm-studio';
     return new OpenAI({
-      apiKey,
+      apiKey: isLocalProvider ? '' : apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,

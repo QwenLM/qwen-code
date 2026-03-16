@@ -48,7 +48,8 @@ type ViewLevel =
   | 'api-key-input'
   | 'custom-info'
   | 'lm-studio-input'
-  | 'ollama-input';
+  | 'ollama-input'
+  | 'ollama-models';
 
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
@@ -76,7 +77,13 @@ export function AuthDialog(): React.JSX.Element {
     'http://localhost:11434/v1',
   );
   const [ollamaApiKey, setOllamaApiKey] = useState<string>('');
-  const [ollamaStep, setOllamaStep] = useState<'baseUrl' | 'apiKey'>('baseUrl');
+  const [ollamaStep, setOllamaStep] = useState<'baseUrl' | 'apiKey' | 'models'>(
+    'baseUrl',
+  );
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [loadingOllamaModels, setLoadingOllamaModels] =
+    useState<boolean>(false);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>('');
 
   // Main authentication entries (flat three-option layout)
   const mainItems: Array<{
@@ -291,15 +298,48 @@ export function AuthDialog(): React.JSX.Element {
 
   const handleOllamaSubmit = async () => {
     setErrorMessage(null);
+    setLoadingOllamaModels(true);
 
-    if (!ollamaApiKey.trim()) {
-      setErrorMessage(t('API key cannot be empty.'));
-      return;
+    try {
+      const url = `${ollamaBaseUrl.replace('/v1', '')}/api/tags`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: ollamaApiKey
+          ? { Authorization: `Bearer ${ollamaApiKey}` }
+          : {},
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch models: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const models = (data.models || []).map((m: { name: string }) => m.name);
+
+      if (models.length === 0) {
+        setErrorMessage(t('No models found on Ollama server'));
+        return;
+      }
+
+      setOllamaModels(models);
+      setSelectedOllamaModel(models[0]);
+      setOllamaStep('models');
+    } catch (err) {
+      setErrorMessage(
+        t('Failed to connect to Ollama: {{error}}', {
+          error: err instanceof Error ? err.message : 'Unknown error',
+        }),
+      );
+    } finally {
+      setLoadingOllamaModels(false);
     }
+  };
 
+  const handleOllamaModelSelect = async () => {
     await onAuthSelect(AuthType.USE_OLLAMA, {
       apiKey: ollamaApiKey,
       baseUrl: ollamaBaseUrl,
+      model: selectedOllamaModel,
     });
   };
 
@@ -311,7 +351,8 @@ export function AuthDialog(): React.JSX.Element {
       viewLevel === 'region-select' ||
       viewLevel === 'custom-info' ||
       viewLevel === 'lm-studio-input' ||
-      viewLevel === 'ollama-input'
+      viewLevel === 'ollama-input' ||
+      viewLevel === 'ollama-models'
     ) {
       setViewLevel('main');
       setLmStudioStep('baseUrl');
@@ -345,7 +386,9 @@ export function AuthDialog(): React.JSX.Element {
         }
 
         if (viewLevel === 'ollama-input') {
-          if (ollamaStep === 'apiKey') {
+          if (ollamaStep === 'models') {
+            setOllamaStep('apiKey');
+          } else if (ollamaStep === 'apiKey') {
             setOllamaStep('baseUrl');
           } else {
             handleGoBack();
@@ -577,7 +620,51 @@ export function AuthDialog(): React.JSX.Element {
           )}
           <Box marginTop={1}>
             <Text color={theme.text.secondary}>
-              {t('↑↓ to navigate, Enter to submit, Esc to go back')}
+              {t('↑↓ to navigate, Enter to fetch models, Esc to go back')}
+            </Text>
+          </Box>
+        </>
+      )}
+
+      {ollamaStep === 'models' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Server')}:{' '}
+              <Text color={theme.text.primary}>{ollamaBaseUrl}</Text>
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Select Model:')}</Text>
+          </Box>
+          <Box marginTop={0}>
+            {loadingOllamaModels ? (
+              <Text color={theme.text.secondary}>{t('Loading models...')}</Text>
+            ) : (
+              <DescriptiveRadioButtonSelect
+                items={ollamaModels.map((m) => ({
+                  key: m,
+                  title: m,
+                  description: '',
+                  value: m,
+                }))}
+                initialIndex={ollamaModels.indexOf(selectedOllamaModel)}
+                onSelect={(val) => {
+                  setSelectedOllamaModel(val);
+                  handleOllamaModelSelect();
+                }}
+                maxItemsToShow={5}
+              />
+            )}
+          </Box>
+          {errorMessage && (
+            <Box marginTop={1}>
+              <Text color={theme.status.error}>{errorMessage}</Text>
+            </Box>
+          )}
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('↑↓ to navigate, Enter to select, Esc to go back')}
             </Text>
           </Box>
         </>

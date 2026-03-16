@@ -228,8 +228,12 @@ export function validateModelConfig(
     return { valid: true, errors: [] };
   }
 
+  const isLocalModelProvider =
+    config.authType === AuthType.USE_OLLAMA ||
+    config.authType === AuthType.USE_LM_STUDIO;
+
   // API key is required for all other auth types
-  if (!config.apiKey) {
+  if (!config.apiKey && !isLocalModelProvider) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
