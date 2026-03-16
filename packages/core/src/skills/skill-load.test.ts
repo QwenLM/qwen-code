@@ -207,8 +207,18 @@ Some content without frontmatter.
 
     it('should load skills from directory', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'skill1', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
-        { name: 'not-a-dir.txt', isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false },
+        {
+          name: 'skill1',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+        {
+          name: 'not-a-dir.txt',
+          isDirectory: () => false,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -347,8 +357,18 @@ Valid skill body.
 
     it('should skip skills with invalid YAML and continue loading others', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'valid-skill', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
-        { name: 'invalid-skill', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        {
+          name: 'valid-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+        {
+          name: 'invalid-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
