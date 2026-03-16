@@ -23,6 +23,18 @@ const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
 
+/**
+ * On Windows with PowerShell, prefix the command with a statement that forces
+ * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
+ * as UTF-8 regardless of the system codepage.
+ */
+function applyPowerShellUtf8Prefix(command: string, shell: string): string {
+  if (os.platform() === 'win32' && shell === 'powershell') {
+    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  }
+  return command;
+}
+
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
   /** The raw, unprocessed output buffer. */
@@ -245,16 +257,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-
-      // On Windows with PowerShell, force UTF-8 output encoding so that
-      // CJK and other non-ASCII characters are emitted as UTF-8 regardless
-      // of the system codepage.
-      if (isWindows && shell === 'powershell') {
-        commandToExecute =
-          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
-          commandToExecute;
-      }
-
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -454,13 +457,7 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
-
-      // On Windows with PowerShell, force UTF-8 output encoding.
-      if (os.platform() === 'win32' && shell === 'powershell') {
-        commandToExecute =
-          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
-          commandToExecute;
-      }
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
 
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements

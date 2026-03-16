@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isUtf8 } from 'node:buffer';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
 import { detect as chardetDetect } from 'chardet';
@@ -37,7 +38,7 @@ export function resetEncodingCache(): void {
  * @param buffer A buffer to analyze for encoding detection.
  */
 export function getCachedEncodingForBuffer(buffer: Buffer): string {
-  if (isValidUtf8(buffer)) {
+  if (isUtf8(buffer)) {
     return 'utf-8';
   }
 
@@ -56,19 +57,6 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
 
   // Last resort
   return 'utf-8';
-}
-
-/**
- * Checks whether a buffer contains valid UTF-8 data.
- * Uses Node.js TextDecoder in strict mode (fatal: true) to validate.
- */
-function isValidUtf8(buffer: Buffer): boolean {
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(buffer);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**

@@ -8,7 +8,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import { StandardFileSystemService } from './fileSystemService.js';
 
+const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
+
 vi.mock('fs/promises');
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      platform: mockPlatform,
+    },
+  };
+});
 
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
@@ -255,7 +267,8 @@ describe('StandardFileSystemService', () => {
       expect(!(buf[0] === 0xff && buf[1] === 0xfe)).toBe(true);
     });
 
-    it('should convert LF to CRLF when writing .bat files', async () => {
+    it('should convert LF to CRLF when writing .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -270,7 +283,8 @@ describe('StandardFileSystemService', () => {
       );
     });
 
-    it('should convert LF to CRLF when writing .cmd files', async () => {
+    it('should convert LF to CRLF when writing .cmd files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -285,7 +299,8 @@ describe('StandardFileSystemService', () => {
       );
     });
 
-    it('should not double-convert existing CRLF in .bat files', async () => {
+    it('should not double-convert existing CRLF in .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -300,7 +315,8 @@ describe('StandardFileSystemService', () => {
       );
     });
 
-    it('should handle mixed line endings in .bat files', async () => {
+    it('should handle mixed line endings in .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -315,7 +331,8 @@ describe('StandardFileSystemService', () => {
       );
     });
 
-    it('should be case-insensitive for .BAT extension', async () => {
+    it('should be case-insensitive for .BAT extension on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -330,7 +347,8 @@ describe('StandardFileSystemService', () => {
       );
     });
 
-    it('should not convert line endings for non-.bat/.cmd files', async () => {
+    it('should not convert line endings for non-.bat/.cmd files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
       vi.mocked(fs.writeFile).mockResolvedValue();
 
       await fileSystem.writeTextFile({
@@ -341,6 +359,22 @@ describe('StandardFileSystemService', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         '/test/script.sh',
         '#!/bin/bash\necho hello\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings for .bat files on non-Windows', async () => {
+      mockPlatform.mockReturnValue('darwin');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\necho hello\n',
         'utf-8',
       );
     });
