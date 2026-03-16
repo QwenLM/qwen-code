@@ -19,13 +19,27 @@ export async function loadSkillsFromDir(
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
     for (const entry of entries) {
-      // Only process directories (each skill is a directory)
-      if (!entry.isDirectory()) {
+      const skillDir = path.join(baseDir, entry.name);
+
+      // Process directories or symlinks pointing to directories (each skill is a directory)
+      let isSkillDir = false;
+
+      if (entry.isDirectory()) {
+        isSkillDir = true;
+      } else if (entry.isSymbolicLink()) {
+        try {
+          const stats = await fs.stat(skillDir); // stat follows symlinks
+          isSkillDir = stats.isDirectory();
+        } catch {
+          debugLogger.warn(`Broken symlink or access error: ${entry.name}`);
+          continue;
+        }
+      }
+
+      if (!isSkillDir) {
         debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
         continue;
       }
-
-      const skillDir = path.join(baseDir, entry.name);
       const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
       try {

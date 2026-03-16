@@ -35,6 +35,24 @@ describe('skill-load', () => {
           description: 'Context7 documentation skill',
         };
       }
+      if (yamlString.includes('name: symlinked-skill')) {
+        return {
+          name: 'symlinked-skill',
+          description: 'A symlinked test skill',
+        };
+      }
+      if (yamlString.includes('name: regular-skill')) {
+        return {
+          name: 'regular-skill',
+          description: 'A regular test skill',
+        };
+      }
+      if (yamlString.includes('name: valid-skill')) {
+        return {
+          name: 'valid-skill',
+          description: 'A valid test skill',
+        };
+      }
       if (yamlString.includes('allowedTools:')) {
         return {
           name: 'test-skill',
@@ -189,8 +207,8 @@ Some content without frontmatter.
 
     it('should load skills from directory', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'skill1', isDirectory: () => true, isFile: () => false },
-        { name: 'not-a-dir.txt', isDirectory: () => false, isFile: () => true },
+        { name: 'skill1', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        { name: 'not-a-dir.txt', isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -208,6 +226,117 @@ Skill body.
       expect(skills[0]?.name).toBe('test-skill');
     });
 
+    it('should load skills from symlink directories', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'symlink-skill',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+        {
+          name: 'not-a-dir.txt',
+          isDirectory: () => false,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to return directory stats for symlink
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: symlinked-skill
+description: A symlinked test skill
+---
+
+Symlinked skill body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('symlinked-skill');
+      expect(fs.stat).toHaveBeenCalledWith(
+        expect.stringContaining('symlink-skill'),
+      );
+    });
+
+    it('should skip symlinks pointing to non-directories', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'symlink-file',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+        {
+          name: 'regular-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to return file stats for symlink (pointing to a file, not directory)
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => false,
+      } as unknown as Awaited<ReturnType<typeof fs.stat>>);
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: regular-skill
+description: A regular test skill
+---
+
+Regular skill body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      // Should only load the regular skill, not the symlink to a file
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('regular-skill');
+    });
+
+    it('should skip broken symlinks and continue loading others', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'broken-symlink',
+          isDirectory: () => false,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        },
+        {
+          name: 'valid-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to throw error for broken symlink
+      vi.mocked(fs.stat).mockRejectedValue(new Error('ENOENT'));
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: valid-skill
+description: A valid test skill
+---
+
+Valid skill body.
+`);
+
+      const skills = await loadSkillsFromDir(testBaseDir);
+
+      // Should only load the valid skill, skip the broken symlink
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.name).toBe('valid-skill');
+    });
+
     it('should return empty array if directory does not exist', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
 
@@ -218,8 +347,8 @@ Skill body.
 
     it('should skip skills with invalid YAML and continue loading others', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'valid-skill', isDirectory: () => true, isFile: () => false },
-        { name: 'invalid-skill', isDirectory: () => true, isFile: () => false },
+        { name: 'valid-skill', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        { name: 'invalid-skill', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
