@@ -957,6 +957,34 @@ describe('ShellTool', () => {
       expect(details.type).toBe('exec');
     });
 
+    it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
+      // "cd" is read-only, "npm run build" is not
+      const params = {
+        command: 'cd packages/core && npm run build',
+        is_background: false,
+      };
+      const invocation = shellTool.build(params);
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      // rootCommand should only include 'npm', not 'cd'
+      expect(details.rootCommand).not.toContain('cd');
+      expect(details.rootCommand).toContain('npm');
+
+      // permissionRules should not include Bash(cd *)
+      expect(details.permissionRules).not.toContainEqual(
+        expect.stringContaining('cd'),
+      );
+      expect(details.permissionRules).toContainEqual(
+        expect.stringContaining('npm'),
+      );
+    });
+
     it('should throw an error if validation fails', () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),

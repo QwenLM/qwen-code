@@ -729,14 +729,7 @@ export async function loadCliConfig(
 
   const includeDirectories = (settings.context?.includeDirectories || [])
     .map(resolvePath)
-    .concat((argv.includeDirectories || []).map(resolvePath))
-    .concat(
-      (
-        ((settings.permissions as Record<string, unknown> | undefined)?.[
-          'additionalDirectories'
-        ] as string[] | undefined) ?? []
-      ).map(resolvePath),
-    );
+    .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled = argv.experimentalLsp === true;

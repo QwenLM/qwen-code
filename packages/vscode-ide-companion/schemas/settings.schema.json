@@ -390,13 +390,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "additionalDirectories": {
-          "description": "Additional directories to include in the workspace context. Alias for context.includeDirectories. Files in these directories are treated as workspace files.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         }
       }
     },
