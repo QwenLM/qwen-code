@@ -100,10 +100,6 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
-const REPLAY_TERMINAL_COLS = 1024;
-const REPLAY_TERMINAL_ROWS = 24;
-const REPLAY_TERMINAL_SCROLLBACK = 2000;
-
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
@@ -115,12 +111,16 @@ const getFullBufferText = (terminal: pkg.Terminal): string => {
   return lines.join('\n').trimEnd();
 };
 
-const replayTerminalOutput = async (output: string): Promise<string> => {
+const replayTerminalOutput = async (
+  output: string,
+  cols: number,
+  rows: number,
+): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
-    cols: REPLAY_TERMINAL_COLS,
-    rows: REPLAY_TERMINAL_ROWS,
-    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    cols,
+    rows,
+    scrollback: 10000,
     convertEol: true,
   });
 
@@ -704,7 +704,11 @@ export class ShellExecutionService {
                   const decodedOutput = new TextDecoder(finalEncoding).decode(
                     finalBuffer,
                   );
-                  fullOutput = await replayTerminalOutput(decodedOutput);
+                  fullOutput = await replayTerminalOutput(
+                    decodedOutput,
+                    cols,
+                    rows,
+                  );
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);
                 }
