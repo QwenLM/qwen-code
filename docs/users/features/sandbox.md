@@ -181,6 +181,29 @@ export SANDBOX_SET_UID_GID=false  # Disable UID/GID mapping
 - Container sandbox: add them via `.qwen/sandbox.Dockerfile` or `.qwen/sandbox.bashrc`.
 - Seatbelt: your host binaries are used, but the sandbox may restrict access to some paths.
 
+**Java not available in Docker sandbox**
+
+The official Qwen Code Docker image is intentionally minimal to keep the image small, secure, and fast to pull. Different users require different language runtimes (Java, Python, Node.js, etc.), and bundling all environments into a single image is not practical. Therefore, Java is **not included by default** in the Docker sandbox.
+
+If your workflow requires Java, you can extend the base image by creating a `.qwen/sandbox.Dockerfile` in your project:
+
+```dockerfile
+FROM ghcr.io/qwenlm/qwen-code:latest
+
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jre && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+Then rebuild the sandbox image:
+
+```bash
+QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
+```
+
+For more details on customizing the sandbox, see [Customizing the sandbox environment](/developers/tools/sandbox).
+
 **Network issues**
 
 - Check sandbox profile allows network.
