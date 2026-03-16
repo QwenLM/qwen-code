@@ -21,6 +21,7 @@ import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
@@ -133,6 +134,7 @@ function DetailRow({
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
+  const uiActions = useContext(UIActionsContext);
   const settings = useSettings();
 
   // Local error state for displaying errors within the dialog
@@ -360,9 +362,13 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
         effectiveModelId,
         isRuntime,
       });
+      // Close AuthDialog if model switch was successful and user is now authenticated
+      if (effectiveAuthType && uiActions?.closeAuthDialog) {
+        uiActions.closeAuthDialog();
+      }
       onClose();
     },
-    [authType, config, onClose, settings, uiState, setErrorMessage],
+    [authType, config, onClose, settings, uiState, setErrorMessage, uiActions],
   );
 
   const hasModels = MODEL_OPTIONS.length > 0;

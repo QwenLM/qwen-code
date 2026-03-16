@@ -47,6 +47,7 @@ export interface UIActions {
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
+  closeAuthDialog: () => void;
   handleEditorSelect: (
     editorType: EditorType | undefined,
     scope: SettingScope,

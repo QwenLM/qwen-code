@@ -185,9 +185,11 @@ export function AuthDialog(): React.JSX.Element {
       const configuredModels =
         config?.getAllConfiguredModels([AuthType.USE_OPENAI]) ?? [];
       if (configuredModels.length > 0) {
-        // If models are configured, open ModelDialog directly
-        // Note: We don't close AuthDialog here - DialogManager will show ModelDialog
-        // on top of AuthDialog. When user closes ModelDialog, they'll return to AuthDialog.
+        // If models are configured, open ModelDialog directly.
+        // Keep AuthDialog open in background so that if user closes ModelDialog
+        // without selecting a model, they return to AuthDialog.
+        // After successful model selection, AuthDialog will be closed automatically
+        // because config.getAuthType() will be set.
         openModelDialog();
         return;
       }

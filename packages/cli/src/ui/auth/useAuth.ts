@@ -268,6 +268,10 @@ export const useAuthCommand = (
     setIsAuthDialogOpen(true);
   }, []);
 
+  const closeAuthDialog = useCallback(() => {
+    setIsAuthDialogOpen(false);
+  }, []);
+
   const cancelAuthentication = useCallback(() => {
     if (isAuthenticating && pendingAuthType === AuthType.QWEN_OAUTH) {
       cancelQwenAuth();
@@ -473,6 +477,7 @@ export const useAuthCommand = (
     handleAuthSelect,
     handleCodingPlanSubmit,
     openAuthDialog,
+    closeAuthDialog,
     cancelAuthentication,
   };
 };
