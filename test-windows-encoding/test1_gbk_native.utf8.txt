@@ -1,0 +1,5 @@
+@echo off
+echo 这是一个GBK编码的批处理文件
+echo 中文显示测试：你好世界
+echo 特殊符号：★☆●○■□▲△
+echo 完成
