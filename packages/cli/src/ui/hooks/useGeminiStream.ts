@@ -9,6 +9,7 @@ import type {
   Config,
   EditorType,
   GeminiClient,
+  RetryInfo,
   ServerGeminiChatCompressedEvent,
   ServerGeminiContentEvent as ContentEvent,
   ServerGeminiFinishedEvent,
@@ -268,6 +269,7 @@ export const useGeminiStream = (
    */
   const clearRetryCountdown = useCallback(() => {
     stopRetryCountdownTimer();
+    skipRetryDelayRef.current = null;
     setPendingRetryErrorItem(null);
     setPendingRetryCountdownItem(null);
   }, [
@@ -276,14 +278,14 @@ export const useGeminiStream = (
     stopRetryCountdownTimer,
   ]);
 
+  // Holds the skipDelay callback from the current rate-limit RetryInfo.
+  // Managed symmetrically: set in startRetryCountdown, cleared in clearRetryCountdown.
+  const skipRetryDelayRef = useRef<(() => void) | null>(null);
+
   const startRetryCountdown = useCallback(
-    (retryInfo: {
-      message?: string;
-      attempt: number;
-      maxRetries: number;
-      delayMs: number;
-    }) => {
+    (retryInfo: RetryInfo) => {
       stopRetryCountdownTimer();
+      skipRetryDelayRef.current = retryInfo.skipDelay;
       const startTime = Date.now();
       const { message, attempt, maxRetries, delayMs } = retryInfo;
       const retryReasonText =
@@ -1293,6 +1295,15 @@ export const useGeminiStream = (
    * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
    */
   const retryLastPrompt = useCallback(async () => {
+    // During a rate-limit retry countdown, skip the delay so the generator
+    // retries immediately — no abort/re-submit needed.
+    if (skipRetryDelayRef.current) {
+      skipRetryDelayRef.current();
+      skipRetryDelayRef.current = null;
+      clearRetryCountdown();
+      return;
+    }
+
     if (
       streamingState === StreamingState.Responding ||
       streamingState === StreamingState.WaitingForConfirmation
