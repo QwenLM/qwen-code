@@ -49,6 +49,7 @@ export function AuthDialog(): React.JSX.Element {
     handleAuthSelect: onAuthSelect,
     handleCodingPlanSubmit,
     onAuthError,
+    openModelDialog,
   } = useUIActions();
   const config = useConfig();
 
@@ -180,7 +181,17 @@ export function AuthDialog(): React.JSX.Element {
     }
 
     if (value === 'API_KEY') {
-      // Navigate directly to custom API key info
+      // Check if there are already configured models for USE_OPENAI
+      const configuredModels =
+        config?.getAllConfiguredModels([AuthType.USE_OPENAI]) ?? [];
+      if (configuredModels.length > 0) {
+        // If models are configured, open ModelDialog directly
+        // Note: We don't close AuthDialog here - DialogManager will show ModelDialog
+        // on top of AuthDialog. When user closes ModelDialog, they'll return to AuthDialog.
+        openModelDialog();
+        return;
+      }
+      // Otherwise, navigate to custom API key info
       setViewLevel('custom-info');
       return;
     }

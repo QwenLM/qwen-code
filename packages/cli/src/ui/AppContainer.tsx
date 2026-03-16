@@ -1567,6 +1567,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Model dialog
+      openModelDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1614,6 +1616,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Model dialog
+      openModelDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
