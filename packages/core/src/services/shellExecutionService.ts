@@ -14,6 +14,7 @@ import type { IPty } from '@lydell/node-pty';
 import {
   getCachedEncodingForBuffer,
   getSystemEncoding,
+  WINDOWS_UTF8_CODE_PAGE,
 } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration } from '../utils/shell-utils.js';
@@ -207,14 +208,14 @@ export class ShellExecutionService {
    */
   /**
    * On Windows with a non-UTF-8 codepage (e.g. CP936/GBK), cmd.exe
-   * interprets command bytes using the active codepage. When the command
-   * string contains non-ASCII characters (e.g. Chinese), the CRT's
-   * UTF-16→codepage conversion can corrupt multi-byte sequences.
+   * interprets command and script file bytes using the active codepage.
+   * Since qwen-code writes all files as UTF-8, scripts containing
+   * non-ASCII characters will be corrupted when cmd.exe reads them
+   * under a non-UTF-8 codepage.
    *
-   * We only prefix with `chcp 65001` when the command itself contains
-   * non-ASCII characters, to avoid breaking execution of pre-existing
-   * scripts that are encoded in the system codepage (e.g. legacy GBK
-   * batch files).
+   * Prefixing with `chcp 65001` switches cmd.exe to UTF-8 mode for
+   * the session so that both inline commands and script files are
+   * interpreted correctly.
    */
   private static wrapCommandForWindowsEncoding(command: string): string {
     if (os.platform() !== 'win32') {
@@ -230,12 +231,7 @@ export class ShellExecutionService {
       // Already UTF-8 codepage (65001), no need to switch
       return command;
     }
-    // Only switch codepage when the command contains non-ASCII characters
-    // eslint-disable-next-line no-control-regex
-    if (!/[^\x00-\x7F]/.test(command)) {
-      return command;
-    }
-    return `chcp 65001 >nul && ${command}`;
+    return `chcp ${WINDOWS_UTF8_CODE_PAGE} >nul && ${command}`;
   }
 
   static async execute(

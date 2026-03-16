@@ -16,6 +16,9 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
 // Hoisted Mocks
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
@@ -66,6 +69,11 @@ vi.mock('../utils/terminalSerializer.js', () => ({
 }));
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
+}));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getSystemEncoding: mockGetSystemEncoding,
+  WINDOWS_UTF8_CODE_PAGE: 65001,
 }));
 
 const mockProcessKill = vi

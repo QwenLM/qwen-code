@@ -123,6 +123,9 @@ export function getSystemEncoding(): string | null {
  * @param cp The Windows code page number (e.g., 437, 850, etc.)
  * @returns The corresponding encoding name as a string, or null if no mapping exists.
  */
+/** Windows code page number for UTF-8. */
+export const WINDOWS_UTF8_CODE_PAGE = 65001;
+
 export function windowsCodePageToEncoding(cp: number): string | null {
   // Most common mappings; extend as needed
   const map: { [key: number]: string } = {
@@ -146,7 +149,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     1256: 'windows-1256',
     1257: 'windows-1257',
     1258: 'windows-1258',
-    65001: 'utf-8',
+    [WINDOWS_UTF8_CODE_PAGE]: 'utf-8',
   };
 
   if (map[cp]) {
