@@ -54,7 +54,7 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(windowsCodePageToEncoding(65001)).toBe('utf-8');
       expect(windowsCodePageToEncoding(1252)).toBe('windows-1252');
       expect(windowsCodePageToEncoding(932)).toBe('shift_jis');
-      expect(windowsCodePageToEncoding(936)).toBe('gb2312');
+      expect(windowsCodePageToEncoding(936)).toBe('gbk');
       expect(windowsCodePageToEncoding(949)).toBe('euc-kr');
       expect(windowsCodePageToEncoding(950)).toBe('big5');
       expect(windowsCodePageToEncoding(1200)).toBe('utf-16le');

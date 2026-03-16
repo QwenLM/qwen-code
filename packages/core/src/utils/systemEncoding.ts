@@ -132,7 +132,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     866: 'cp866',
     874: 'windows-874',
     932: 'shift_jis',
-    936: 'gb2312',
+    936: 'gbk',
     949: 'euc-kr',
     950: 'big5',
     1200: 'utf-16le',

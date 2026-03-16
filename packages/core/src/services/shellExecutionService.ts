@@ -11,7 +11,10 @@ import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
-import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
+import {
+  getCachedEncodingForBuffer,
+  getSystemEncoding,
+} from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
@@ -202,6 +205,39 @@ export class ShellExecutionService {
    * @returns An object containing the process ID (pid) and a promise that
    *          resolves with the complete execution result.
    */
+  /**
+   * On Windows with a non-UTF-8 codepage (e.g. CP936/GBK), cmd.exe
+   * interprets command bytes using the active codepage. When the command
+   * string contains non-ASCII characters (e.g. Chinese), the CRT's
+   * UTF-16→codepage conversion can corrupt multi-byte sequences.
+   *
+   * We only prefix with `chcp 65001` when the command itself contains
+   * non-ASCII characters, to avoid breaking execution of pre-existing
+   * scripts that are encoded in the system codepage (e.g. legacy GBK
+   * batch files).
+   */
+  private static wrapCommandForWindowsEncoding(command: string): string {
+    if (os.platform() !== 'win32') {
+      return command;
+    }
+    const { shell } = getShellConfiguration();
+    if (shell !== 'cmd') {
+      // PowerShell handles Unicode natively
+      return command;
+    }
+    const sysEncoding = getSystemEncoding();
+    if (sysEncoding === 'utf-8') {
+      // Already UTF-8 codepage (65001), no need to switch
+      return command;
+    }
+    // Only switch codepage when the command contains non-ASCII characters
+    // eslint-disable-next-line no-control-regex
+    if (!/[^\x00-\x7F]/.test(command)) {
+      return command;
+    }
+    return `chcp 65001 >nul && ${command}`;
+  }
+
   static async execute(
     commandToExecute: string,
     cwd: string,
@@ -210,6 +246,9 @@ export class ShellExecutionService {
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
   ): Promise<ShellExecutionHandle> {
+    commandToExecute =
+      ShellExecutionService.wrapCommandForWindowsEncoding(commandToExecute);
+
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
       if (ptyInfo) {
