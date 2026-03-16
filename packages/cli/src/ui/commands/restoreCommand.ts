@@ -13,6 +13,7 @@ import {
   CommandKind,
 } from './types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 async function restoreAction(
   context: CommandContext,
@@ -144,8 +145,11 @@ export const restoreCommand = (config: Config | null): SlashCommand | null => {
 
   return {
     name: 'restore',
-    description:
-      'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
+    get description() {
+      return t(
+        'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
+      );
+    },
     kind: CommandKind.BUILT_IN,
     action: restoreAction,
     completion,

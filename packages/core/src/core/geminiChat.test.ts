@@ -1718,4 +1718,73 @@ describe('GeminiChat', async () => {
       ]);
     });
   });
+
+  describe('stripOrphanedUserEntriesFromHistory', () => {
+    it('should pop a single trailing user entry', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first message' }] },
+        { role: 'model', parts: [{ text: 'first response' }] },
+        { role: 'user', parts: [{ text: 'orphaned message' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'first message' }] },
+        { role: 'model', parts: [{ text: 'first response' }] },
+      ]);
+    });
+
+    it('should pop multiple trailing user entries', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+        { role: 'user', parts: [{ text: 'IDE context' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+      ]);
+    });
+
+    it('should be a no-op when last entry is a model response', () => {
+      const history = [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      chat.setHistory([...history]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual(history);
+    });
+
+    it('should handle empty history', () => {
+      chat.setHistory([]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([]);
+    });
+  });
 });

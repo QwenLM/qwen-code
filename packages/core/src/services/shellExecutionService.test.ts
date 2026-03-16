@@ -8,9 +8,12 @@ import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
+import pkg from '@xterm/headless';
 import type { ShellOutputEvent } from './shellExecutionService.js';
 import { ShellExecutionService } from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+
+const { Terminal } = pkg;
 
 // Hoisted Mocks
 const mockPtySpawn = vi.hoisted(() => vi.fn());
@@ -258,6 +261,68 @@ describe('ShellExecutionService', () => {
       await handle.result;
       expect(handle.pid).toBe(12345);
     });
+
+    it('should preserve full raw output when terminal writes are backlogged', async () => {
+      vi.useFakeTimers();
+      const originalWrite = Terminal.prototype.write;
+      const delayedWrite = vi
+        .spyOn(Terminal.prototype, 'write')
+        .mockImplementation(function (
+          this: pkg.Terminal,
+          data: string | Uint8Array,
+          callback?: () => void,
+        ) {
+          setTimeout(() => {
+            originalWrite.call(this, data, callback);
+          }, 10);
+        });
+
+      try {
+        const abortController = new AbortController();
+        const handle = await ShellExecutionService.execute(
+          'fast-output',
+          '/test/dir',
+          onOutputEventMock,
+          abortController.signal,
+          true,
+          shellExecutionConfig,
+        );
+
+        const onData = mockPtyProcess.onData.mock.calls[0][0] as (
+          data: string,
+        ) => void;
+        for (let i = 1; i <= 500; i++) {
+          onData(`Line ${String(i).padStart(4, '0')}\n`);
+        }
+
+        const resultPromise = handle.result;
+        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+
+        await vi.advanceTimersByTimeAsync(250);
+        const result = await resultPromise;
+
+        const lines = result.output.split('\n');
+        expect(lines).toHaveLength(500);
+        expect(lines[0]).toBe('Line 0001');
+        expect(lines[499]).toBe('Line 0500');
+      } finally {
+        delayedWrite.mockRestore();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('should collapse carriage-return progress updates in final output', async () => {
+      const { result } = await simulateExecution('progress-output', (pty) => {
+        pty.onData.mock.calls[0][0]('Compressing objects: 14% (1/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 28% (2/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 42% (3/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 100% (7/7), done.\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.output).toBe('Compressing objects: 100% (7/7), done.');
+    });
   });
 
   describe('pty interaction', () => {
@@ -272,17 +337,28 @@ describe('ShellExecutionService', () => {
 
     it('should write to the pty and trigger a render', async () => {
       vi.useFakeTimers();
-      await simulateExecution('interactive-app', (pty) => {
-        ShellExecutionService.writeToPty(pty.pid!, 'input');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      try {
+        const abortController = new AbortController();
+        const handle = await ShellExecutionService.execute(
+          'interactive-app',
+          '/test/dir',
+          onOutputEventMock,
+          abortController.signal,
+          true,
+          shellExecutionConfig,
+        );
 
-      expect(mockPtyProcess.write).toHaveBeenCalledWith('input');
-      // Use fake timers to check for the delayed render
-      await vi.advanceTimersByTimeAsync(17);
-      // The render will cause an output event
-      expect(onOutputEventMock).toHaveBeenCalled();
-      vi.useRealTimers();
+        ShellExecutionService.writeToPty(handle.pid!, 'input');
+        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+
+        await vi.runAllTimersAsync();
+        await handle.result;
+
+        expect(mockPtyProcess.write).toHaveBeenCalledWith('input');
+        expect(onOutputEventMock).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should resize the pty and the headless terminal', async () => {
@@ -431,7 +507,30 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/d', '/s', '/c', 'dir "foo bar"'],
+        '/d /s /c dir "foo bar"',
+        expect.any(Object),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell on Windows with array args', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -840,7 +939,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe and hide window on Windows', async () => {
+    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',
@@ -857,6 +956,34 @@ describe('ShellExecutionService child_process fallback', () => {
         expect.objectContaining({
           detached: false,
           windowsHide: true,
+          windowsVerbatimArguments: true,
+        }),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (cp) =>
+        cp.emit('exit', 0, null),
+      );
+
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        expect.objectContaining({
+          detached: false,
+          windowsHide: true,
+          windowsVerbatimArguments: false,
         }),
       );
       mockGetShellConfiguration.mockReturnValue({

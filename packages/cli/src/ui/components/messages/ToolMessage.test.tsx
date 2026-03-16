@@ -300,4 +300,55 @@ describe('<ToolMessage />', () => {
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
   });
+
+  it('renders rejected plan content with plan text still visible', () => {
+    const planResultDisplay = {
+      type: 'plan_summary' as const,
+      message: 'Plan was rejected. Remaining in plan mode.',
+      plan: '# My Plan\n- Step 1: Do something\n- Step 2: Do another thing',
+      rejected: true,
+    };
+
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ExitPlanMode"
+        description="Plan:"
+        status={ToolCallStatus.Canceled}
+        resultDisplay={planResultDisplay}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Plan was rejected. Remaining in plan mode.');
+    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('- Step 1: Do something');
+    expect(output).toContain('- Step 2: Do another thing');
+  });
+
+  it('renders approved plan content with approval message', () => {
+    const planResultDisplay = {
+      type: 'plan_summary' as const,
+      message: 'User approved the plan.',
+      plan: '# My Plan\n- Step 1\n- Step 2',
+    };
+
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ExitPlanMode"
+        description="Plan:"
+        status={ToolCallStatus.Success}
+        resultDisplay={planResultDisplay}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('User approved the plan.');
+    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('- Step 1');
+    expect(output).toContain('- Step 2');
+  });
 });

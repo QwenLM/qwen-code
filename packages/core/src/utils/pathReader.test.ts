@@ -31,6 +31,9 @@ const createMockConfig = (
     getFileService: () => mockFileService,
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, pdf: true, audio: true, video: true },
+    }),
   } as unknown as Config;
 };
 
