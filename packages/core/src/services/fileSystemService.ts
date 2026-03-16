@@ -84,6 +84,29 @@ export interface WriteTextFileOptions {
 }
 
 /**
+ * File extensions that require CRLF (\r\n) line endings to function correctly.
+ * cmd.exe parses .bat/.cmd files using CRLF delimiters; LF-only endings can
+ * break multi-line constructs, labels, and goto statements.
+ */
+const CRLF_EXTENSIONS = new Set(['.bat', '.cmd']);
+
+/**
+ * Returns true if the file at the given path requires CRLF line endings.
+ */
+function needsCrlfLineEndings(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return CRLF_EXTENSIONS.has(ext);
+}
+
+/**
+ * Ensures content uses CRLF line endings. First normalizes any existing
+ * \r\n to \n to avoid double-conversion, then converts all \n to \r\n.
+ */
+function ensureCrlfLineEndings(content: string): string {
+  return content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+}
+
+/**
  * Return the BOM byte sequence for a given encoding name, or null if the
  * encoding does not use a standard BOM. Used when writing back a file that
  * originally had a BOM so the BOM is preserved.
@@ -129,7 +152,11 @@ export class StandardFileSystemService implements FileSystemService {
   async writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
-    const { content, path: filePath, _meta } = params;
+    const { path: filePath, _meta } = params;
+    // Convert LF to CRLF for file types that require it (e.g. .bat, .cmd)
+    const content = needsCrlfLineEndings(filePath)
+      ? ensureCrlfLineEndings(params.content)
+      : params.content;
     const bom = _meta?.['bom'] ?? (false as boolean);
     const encoding = _meta?.['encoding'] as string | undefined;
 

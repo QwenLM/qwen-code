@@ -229,9 +229,12 @@ export class ShellExecutionService {
       // PowerShell handles Unicode natively
       return { command, forceUtf8Output: false };
     }
+    // Use getCachedEncodingForBuffer's cache path: pass an empty buffer
+    // to trigger system encoding detection without buffer-level detection.
+    // This avoids running `chcp` on every command.
     const sysEncoding = getSystemEncoding();
-    if (sysEncoding === 'utf-8') {
-      // Already UTF-8 codepage (65001), no need to switch
+    if (!sysEncoding || sysEncoding === 'utf-8') {
+      // Already UTF-8 codepage (65001) or detection failed — don't wrap
       return { command, forceUtf8Output: false };
     }
     return {

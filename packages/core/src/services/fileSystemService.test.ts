@@ -254,5 +254,95 @@ describe('StandardFileSystemService', () => {
       // First two bytes should NOT be FF FE (the UTF-16LE BOM)
       expect(!(buf[0] === 0xff && buf[1] === 0xfe)).toBe(true);
     });
+
+    it('should convert LF to CRLF when writing .bat files', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\necho hello\nexit /b 0\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\r\necho hello\r\nexit /b 0\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should convert LF to CRLF when writing .cmd files', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.cmd',
+        content: '@echo off\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.cmd',
+        '@echo off\r\necho hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should not double-convert existing CRLF in .bat files', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\r\necho hello\r\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\r\necho hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should handle mixed line endings in .bat files', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: 'line1\r\nline2\nline3\r\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        'line1\r\nline2\r\nline3\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should be case-insensitive for .BAT extension', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/SCRIPT.BAT',
+        content: 'echo hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/SCRIPT.BAT',
+        'echo hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings for non-.bat/.cmd files', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.sh',
+        content: '#!/bin/bash\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.sh',
+        '#!/bin/bash\necho hello\n',
+        'utf-8',
+      );
+    });
   });
 });
