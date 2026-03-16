@@ -42,6 +42,7 @@ import type {
   AuthEvent,
   SkillLaunchEvent,
   UserFeedbackEvent,
+  UserRetryEvent,
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
@@ -465,9 +466,19 @@ export class QwenLogger {
   logNewPromptEvent(event: UserPromptEvent): void {
     const rumEvent = this.createActionEvent('user', 'new_prompt', {
       properties: {
-        auth_type: event.auth_type,
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logRetryEvent(event: UserRetryEvent): void {
+    const rumEvent = this.createActionEvent('user', 'retry', {
+      properties: {
+        prompt_id: event.prompt_id,
       },
     });
 
