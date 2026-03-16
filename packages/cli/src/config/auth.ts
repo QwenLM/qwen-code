@@ -19,6 +19,7 @@ import { t } from '../i18n/index.js';
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
   [AuthType.USE_LM_STUDIO]: 'LMSTUDIO_API_KEY',
+  [AuthType.USE_OLLAMA]: 'OLLAMA_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -197,8 +198,6 @@ export function validateAuthMethod(
     const modelId =
       config?.getModelsConfig().getModel() ?? settings.merged.model?.name;
     const modelConfig = findModelConfig(modelProviders, authMethod, modelId);
-
-    // Check baseUrl from modelProviders OR settings.security.auth.baseUrl
     const baseUrl =
       modelConfig?.baseUrl || settings.merged.security?.auth?.baseUrl;
     if (!baseUrl) {
@@ -206,6 +205,10 @@ export function validateAuthMethod(
         'LM Studio provider missing baseUrl. Please configure baseUrl in modelProviders or settings.security.auth.baseUrl.',
       );
     }
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_OLLAMA) {
     return null;
   }
 

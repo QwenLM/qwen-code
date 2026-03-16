@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import { TextInput } from '../components/shared/TextInput.js';
@@ -59,6 +59,7 @@ export function AuthDialog(): React.JSX.Element {
     onAuthError,
   } = useUIActions();
   const config = useConfig();
+  const savedConfig = config.getContentGeneratorConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
@@ -67,23 +68,59 @@ export function AuthDialog(): React.JSX.Element {
     CodingPlanRegion.CHINA,
   );
   const [lmStudioBaseUrl, setLmStudioBaseUrl] = useState<string>(
-    'http://localhost:1234/v1',
+    savedConfig?.baseUrl?.includes('1234')
+      ? savedConfig.baseUrl
+      : 'http://localhost:1234/v1',
   );
-  const [lmStudioApiKey, setLmStudioApiKey] = useState<string>('');
+  const [lmStudioApiKey, setLmStudioApiKey] = useState<string>(
+    savedConfig?.apiKey || '',
+  );
   const [lmStudioStep, setLmStudioStep] = useState<'baseUrl' | 'apiKey'>(
     'baseUrl',
   );
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState<string>(
-    'http://localhost:11434/v1',
+    savedConfig?.baseUrl?.includes('11434')
+      ? savedConfig.baseUrl
+      : 'http://localhost:11434/v1',
   );
-  const [ollamaApiKey, setOllamaApiKey] = useState<string>('');
+  const [ollamaApiKey, setOllamaApiKey] = useState<string>(
+    savedConfig?.apiKey || '',
+  );
   const [ollamaStep, setOllamaStep] = useState<'baseUrl' | 'apiKey' | 'models'>(
     'baseUrl',
   );
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [loadingOllamaModels, setLoadingOllamaModels] =
     useState<boolean>(false);
-  const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>('');
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>(
+    savedConfig?.model || '',
+  );
+
+  useEffect(() => {
+    const currentAuthType = config.getAuthType();
+    const contentGenConfig = config.getContentGeneratorConfig();
+
+    if (currentAuthType === AuthType.USE_LM_STUDIO && contentGenConfig) {
+      if (contentGenConfig.baseUrl) {
+        setLmStudioBaseUrl(contentGenConfig.baseUrl);
+      }
+      if (contentGenConfig.apiKey) {
+        setLmStudioApiKey(contentGenConfig.apiKey);
+      }
+    }
+
+    if (currentAuthType === AuthType.USE_OLLAMA && contentGenConfig) {
+      if (contentGenConfig.baseUrl) {
+        setOllamaBaseUrl(contentGenConfig.baseUrl);
+      }
+      if (contentGenConfig.apiKey) {
+        setOllamaApiKey(contentGenConfig.apiKey);
+      }
+      if (contentGenConfig.model) {
+        setSelectedOllamaModel(contentGenConfig.model);
+      }
+    }
+  }, [config]);
 
   // Main authentication entries (flat three-option layout)
   const mainItems: Array<{
@@ -335,11 +372,11 @@ export function AuthDialog(): React.JSX.Element {
     }
   };
 
-  const handleOllamaModelSelect = async () => {
+  const handleOllamaModelSelect = async (model: string) => {
     await onAuthSelect(AuthType.USE_OLLAMA, {
       apiKey: ollamaApiKey,
       baseUrl: ollamaBaseUrl,
-      model: selectedOllamaModel,
+      model: model,
     });
   };
 
@@ -651,7 +688,7 @@ export function AuthDialog(): React.JSX.Element {
                 initialIndex={ollamaModels.indexOf(selectedOllamaModel)}
                 onSelect={(val) => {
                   setSelectedOllamaModel(val);
-                  handleOllamaModelSelect();
+                  handleOllamaModelSelect(val);
                 }}
                 maxItemsToShow={5}
               />

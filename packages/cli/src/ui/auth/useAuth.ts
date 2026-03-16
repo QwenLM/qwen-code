@@ -280,6 +280,18 @@ export const useAuthCommand = (
             );
           }
 
+          if (authType === AuthType.USE_LM_STUDIO && credentials.model) {
+            const authTypeScope = getPersistScopeForModelSelection(settings);
+            settings.setValue(authTypeScope, 'security.auth', {
+              selectedType: authType,
+            });
+            settings.setValue(authTypeScope, 'model.name', credentials.model);
+            updateSettingsFilePreservingFormat(
+              settings.user.path,
+              settings.user.originalSettings as Record<string, unknown>,
+            );
+          }
+
           await performAuth(authType, credentials);
         }
         return;
