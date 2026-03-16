@@ -1956,6 +1956,25 @@ describe('InputPrompt', () => {
   });
 
   describe('command search (Ctrl+R when not in shell)', () => {
+    it('passes newest-first user history to command search', async () => {
+      props.shellModeActive = false;
+      props.userMessages = ['oldest', 'middle', 'newest'];
+
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+      await wait();
+
+      const commandSearchCall =
+        mockedUseReverseSearchCompletion.mock.calls.find(
+          ([, history]) =>
+            Array.isArray(history) &&
+            history.length === 3 &&
+            history.includes('newest'),
+        );
+
+      expect(commandSearchCall?.[1]).toEqual(['newest', 'middle', 'oldest']);
+      unmount();
+    });
+
     it('enters command search on Ctrl+R and shows suggestions', async () => {
       props.shellModeActive = false;
 

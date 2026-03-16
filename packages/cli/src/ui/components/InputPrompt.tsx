@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
 import { theme } from '../semantic-colors.js';
@@ -213,9 +213,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     reverseSearchActive,
   );
 
+  const commandSearchHistory = useMemo(
+    () => [...userMessages].reverse(),
+    [userMessages],
+  );
+
   const commandSearchCompletion = useReverseSearchCompletion(
     buffer,
-    userMessages,
+    commandSearchHistory,
     commandSearchActive,
   );
 
