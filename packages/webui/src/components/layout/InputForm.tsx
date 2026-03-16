@@ -111,8 +111,10 @@ export interface InputFormProps {
   completionIsOpen: boolean;
   /** Completion items */
   completionItems?: CompletionItem[];
-  /** Completion select callback */
+  /** Completion select callback (Enter key or click) */
   onCompletionSelect?: (item: CompletionItem) => void;
+  /** Completion tab select callback (Tab key only, fills without sending) */
+  onCompletionTabSelect?: (item: CompletionItem) => void;
   /** Completion close callback */
   onCompletionClose?: () => void;
   /** Placeholder text */
@@ -170,6 +172,7 @@ export const InputForm: FC<InputFormProps> = ({
   completionIsOpen,
   completionItems,
   onCompletionSelect,
+  onCompletionTabSelect,
   onCompletionClose,
   placeholder = 'Ask Qwen Code …',
 }) => {
@@ -242,6 +245,7 @@ export const InputForm: FC<InputFormProps> = ({
               <CompletionMenu
                 items={completionItemsResolved}
                 onSelect={onCompletionSelect}
+                onTabSelect={onCompletionTabSelect}
                 onClose={onCompletionClose}
                 title={undefined}
               />

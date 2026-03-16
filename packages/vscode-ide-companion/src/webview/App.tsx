@@ -715,6 +715,195 @@ export const App: React.FC = () => {
     ],
   );
 
+  // Handle Tab key completion selection - fills input without sending
+  const handleCompletionTabSelect = useCallback(
+    (item: CompletionItem) => {
+      // Handle completion selection by inserting the value into the input field
+      const inputElement = inputFieldRef.current;
+      if (!inputElement) {
+        return;
+      }
+
+      // Ignore info items (placeholders like "Searching files…")
+      if (item.type === 'info') {
+        completion.closeCompletion();
+        return;
+      }
+
+      // For Tab key: commands should fill input but NOT execute
+      if (item.type === 'command') {
+        const itemId = item.id;
+
+        // Helper to replace trigger text with command in input
+        const replaceTriggerWithCommand = () => {
+          const text = inputElement.textContent || '';
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) {
+            // Fallback: just set the command text
+            inputElement.textContent = `/${itemId} `;
+            setInputText(`/${itemId} `);
+            return;
+          }
+
+          // Find and replace the slash command trigger
+          const range = selection.getRangeAt(0);
+          let cursorPos = text.length;
+          if (range.startContainer === inputElement) {
+            const childIndex = range.startOffset;
+            let offset = 0;
+            for (
+              let i = 0;
+              i < childIndex && i < inputElement.childNodes.length;
+              i++
+            ) {
+              offset += inputElement.childNodes[i].textContent?.length || 0;
+            }
+            cursorPos = offset || text.length;
+          } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
+            const walker = document.createTreeWalker(
+              inputElement,
+              NodeFilter.SHOW_TEXT,
+              null,
+            );
+            let offset = 0;
+            let found = false;
+            let node: Node | null = walker.nextNode();
+            while (node) {
+              if (node === range.startContainer) {
+                offset += range.startOffset;
+                found = true;
+                break;
+              }
+              offset += node.textContent?.length || 0;
+              node = walker.nextNode();
+            }
+            cursorPos = found ? offset : text.length;
+          }
+
+          const textBeforeCursor = text.substring(0, cursorPos);
+          const slashPos = textBeforeCursor.lastIndexOf('/');
+          if (slashPos >= 0) {
+            const newText =
+              text.substring(0, slashPos) +
+              `/${itemId} ` +
+              text.substring(cursorPos);
+            inputElement.textContent = newText;
+            setInputText(newText);
+
+            // Move caret to after the inserted command
+            const newRange = document.createRange();
+            const sel = window.getSelection();
+            newRange.setStart(
+              inputElement.firstChild || inputElement,
+              slashPos + itemId.length + 2,
+            );
+            newRange.collapse(true);
+            sel?.removeAllRanges();
+            sel?.addRange(newRange);
+          }
+        };
+
+        // Handle special commands - for Tab, just fill input (don't execute)
+        if (itemId === 'login' || itemId === 'model') {
+          replaceTriggerWithCommand();
+          completion.closeCompletion();
+          return;
+        }
+
+        // Handle server-provided slash commands - fill input only, don't send
+        const serverCmd = availableCommands.find((c) => c.name === itemId);
+        if (serverCmd) {
+          replaceTriggerWithCommand();
+          completion.closeCompletion();
+          return;
+        }
+      }
+
+      // For file types: same behavior as Enter (add reference and fill input)
+      if (item.type === 'file' && item.value && item.path) {
+        try {
+          fileContext.addFileReference(item.value, item.path);
+        } catch (err) {
+          console.warn('[App] addFileReference failed:', err);
+        }
+      }
+
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) {
+        return;
+      }
+
+      // Current text and cursor
+      const text = inputElement.textContent || '';
+      const range = selection.getRangeAt(0);
+
+      // Compute total text offset for contentEditable
+      let cursorPos = text.length;
+      if (range.startContainer === inputElement) {
+        const childIndex = range.startOffset;
+        let offset = 0;
+        for (
+          let i = 0;
+          i < childIndex && i < inputElement.childNodes.length;
+          i++
+        ) {
+          offset += inputElement.childNodes[i].textContent?.length || 0;
+        }
+        cursorPos = offset || text.length;
+      } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
+        const walker = document.createTreeWalker(
+          inputElement,
+          NodeFilter.SHOW_TEXT,
+          null,
+        );
+        let offset = 0;
+        let found = false;
+        let node: Node | null = walker.nextNode();
+        while (node) {
+          if (node === range.startContainer) {
+            offset += range.startOffset;
+            found = true;
+            break;
+          }
+          offset += node.textContent?.length || 0;
+          node = walker.nextNode();
+        }
+        cursorPos = found ? offset : text.length;
+      }
+
+      // Replace from trigger to cursor with selected value
+      const textBeforeCursor = text.substring(0, cursorPos);
+      const atPos = textBeforeCursor.lastIndexOf('@');
+      const slashPos = textBeforeCursor.lastIndexOf('/');
+      const triggerPos = Math.max(atPos, slashPos);
+
+      if (triggerPos >= 0) {
+        const insertValue =
+          typeof item.value === 'string' ? item.value : String(item.label);
+        const newText =
+          text.substring(0, triggerPos + 1) + // keep the trigger symbol
+          insertValue +
+          ' ' +
+          text.substring(cursorPos);
+
+        // Update DOM and state, and move caret to end
+        inputElement.textContent = newText;
+        setInputText(newText);
+
+        const newRange = document.createRange();
+        const sel = window.getSelection();
+        newRange.selectNodeContents(inputElement);
+        newRange.collapse(false);
+        sel?.removeAllRanges();
+        sel?.addRange(newRange);
+      }
+
+      // Close the completion menu
+      completion.closeCompletion();
+    },
+    [completion, inputFieldRef, setInputText, fileContext, availableCommands],
+  );
+
   // Handle model selection
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -1031,6 +1220,7 @@ export const App: React.FC = () => {
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionTabSelect={handleCompletionTabSelect}
           onCompletionClose={completion.closeCompletion}
           showModelSelector={showModelSelector}
           availableModels={availableModels}
