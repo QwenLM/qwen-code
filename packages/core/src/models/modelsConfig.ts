@@ -782,9 +782,12 @@ export class ModelsConfig {
         this._generationConfig.samplingParams = {};
       }
       this._generationConfig.samplingParams.max_tokens = outputLimit;
+      const existingSource = this.generationConfigSources['samplingParams'];
       this.generationConfigSources['samplingParams'] = {
         kind: 'computed',
-        detail: 'max_tokens auto-detected from model',
+        detail: existingSource
+          ? `max_tokens auto-detected from model (other params from ${existingSource.kind})`
+          : 'max_tokens auto-detected from model',
       };
     }
 
