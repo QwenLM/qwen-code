@@ -16,6 +16,7 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -126,10 +127,12 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     const dirPath = path.resolve(this.params.path);
     const workspaceContext = this.config.getWorkspaceContext();
     const userSkillsBase = this.config.storage.getUserSkillsDir();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
 
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
-      isSubpath(userSkillsBase, dirPath)
+      isSubpath(userSkillsBase, dirPath) ||
+      isSubpath(userExtensionsDir, dirPath)
     ) {
       return 'allow';
     }

@@ -88,12 +88,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const globalTempDir = Storage.getGlobalTempDir();
     const projectTempDir = this.config.storage.getProjectTempDir();
     const userSkillsDir = this.config.storage.getUserSkillsDir();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
 
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpath(projectTempDir, filePath) ||
       isSubpath(globalTempDir, filePath) ||
-      isSubpath(userSkillsDir, filePath)
+      isSubpath(userSkillsDir, filePath) ||
+      isSubpath(userExtensionsDir, filePath)
     ) {
       return 'allow';
     }

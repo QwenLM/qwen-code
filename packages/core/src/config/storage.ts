@@ -137,6 +137,15 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), 'skills');
   }
 
+  /**
+   * Returns the user-level extensions directory (~/.qwen/extensions/).
+   * Extensions installed at user scope are stored here, as opposed to
+   * project-level extensions which live in <project>/.qwen/extensions/.
+   */
+  static getUserExtensionsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'extensions');
+  }
+
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
   }
