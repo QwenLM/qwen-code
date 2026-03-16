@@ -539,6 +539,8 @@ export const App: React.FC = () => {
 
       // Commands can execute immediately
       if (item.type === 'command') {
+        const itemId = item.id;
+
         // Helper to clear trigger text from input
         const clearTriggerText = () => {
           const text = inputElement.textContent || '';
