@@ -309,22 +309,24 @@ export const App: React.FC = () => {
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
-      // Proactively end local states and add an 'Interrupted' line
-      try {
-        messageHandling.endStreaming?.();
-      } catch {
-        /* no-op */
+      // End streaming state and add an 'Interrupted' line.
+      // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
+      // extension's streamEnd message clear it after the cancel is
+      // properly processed on the backend.  This keeps the submit
+      // guard active and prevents any cached input from being
+      // auto-submitted during the cancel → confirmed window.
+      if (messageHandling.isStreaming) {
+        try {
+          messageHandling.endStreaming?.();
+        } catch {
+          /* no-op */
+        }
+        messageHandling.addMessage({
+          role: 'assistant',
+          content: 'Interrupted',
+          timestamp: Date.now(),
+        });
       }
-      try {
-        messageHandling.clearWaitingForResponse?.();
-      } catch {
-        /* no-op */
-      }
-      messageHandling.addMessage({
-        role: 'assistant',
-        content: 'Interrupted',
-        timestamp: Date.now(),
-      });
     }
     // Notify extension/agent to cancel server-side work
     vscode.postMessage({

@@ -36,9 +36,9 @@ export class SubagentValidator {
     // Validate description
     if (!config.description || config.description.trim().length === 0) {
       errors.push('Description is required and cannot be empty');
-    } else if (config.description.length > 500) {
+    } else if (config.description.length > 1000) {
       warnings.push(
-        'Description is quite long (>500 chars), consider shortening for better readability',
+        'Description is quite long (>1,000 chars), consider shortening for better readability',
       );
     }
 
@@ -181,12 +181,10 @@ export class SubagentValidator {
       errors.push('System prompt must be at least 10 characters long');
     }
 
-    // Check maximum length to prevent token issues
+    // Warn for very long prompts
     if (trimmedPrompt.length > 10000) {
-      errors.push('System prompt is too long (>10,000 characters)');
-    } else if (trimmedPrompt.length > 5000) {
       warnings.push(
-        'System prompt is quite long (>5,000 characters), consider shortening',
+        'System prompt is quite long (>10,000 characters), consider shortening',
       );
     }
 

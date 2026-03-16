@@ -15,7 +15,7 @@ import {
 } from 'vitest';
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
-import { GeminiClient } from './client.js';
+import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
   AuthType,
@@ -1551,7 +1551,7 @@ Other open files:
         [{ text: 'Start conversation' }],
         signal,
         'prompt-id-3',
-        { isContinuation: false },
+        { type: SendMessageType.UserQuery },
         Number.MAX_SAFE_INTEGER, // Bypass the MAX_TURNS protection
       );
 
@@ -2303,6 +2303,70 @@ Other open files:
 
       // Assert - loop detection methods should not be called when skipLoopDetection is true
       expect(ldMock.addAndCheck).not.toHaveBeenCalled();
+    });
+
+    describe('retry sendMessageType', () => {
+      it('should call stripOrphanedUserEntriesFromHistory before executing', async () => {
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          setHistory: vi.fn(),
+          stripThoughtsFromHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn(),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'retry response' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
+
+        // Act: send with retry type
+        const stream = client.sendMessageStream(
+          [{ text: 'second message' }],
+          new AbortController().signal,
+          'prompt-retry',
+          { type: SendMessageType.Retry },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        // Assert: the cleanup method was called
+        expect(
+          mockChat.stripOrphanedUserEntriesFromHistory,
+        ).toHaveBeenCalledOnce();
+      });
+
+      it('should not increment sessionTurnCount for retry', async () => {
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          setHistory: vi.fn(),
+          stripThoughtsFromHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn(),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'ok' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
+
+        const turnCountBefore = client['sessionTurnCount'];
+
+        const stream = client.sendMessageStream(
+          [{ text: 'retry' }],
+          new AbortController().signal,
+          'prompt-retry-3',
+          { type: SendMessageType.Retry },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        expect(client['sessionTurnCount']).toBe(turnCountBefore);
+      });
     });
   });
 
