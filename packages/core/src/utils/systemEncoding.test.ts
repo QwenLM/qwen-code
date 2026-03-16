@@ -386,7 +386,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
       mockedExecSync.mockReturnValue('Active code page: 936'); // GBK
 
       const buffer = Buffer.from('test');
-      // Mock chardet to return UTF-8
       mockedChardetDetect.mockReturnValue('UTF-8');
 
       const result = getCachedEncodingForBuffer(buffer);

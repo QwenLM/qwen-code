@@ -245,6 +245,16 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
+
+      // On Windows with PowerShell, force UTF-8 output encoding so that
+      // CJK and other non-ASCII characters are emitted as UTF-8 regardless
+      // of the system codepage. This matches the Codex CLI approach.
+      if (isWindows && shell === 'powershell') {
+        commandToExecute =
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+          commandToExecute;
+      }
+
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -444,6 +454,14 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
+
+      // On Windows with PowerShell, force UTF-8 output encoding.
+      if (os.platform() === 'win32' && shell === 'powershell') {
+        commandToExecute =
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+          commandToExecute;
+      }
+
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
       // that contain spaces, which mangles user-provided quoted arguments
@@ -486,7 +504,6 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let detectedEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -618,10 +635,8 @@ export class ShellExecutionService {
           const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
-            detectedEncoding = encoding;
           } catch {
             decoder = new TextDecoder('utf-8');
-            detectedEncoding = 'utf-8';
           }
         };
 
@@ -684,9 +699,14 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  const decodedOutput = new TextDecoder(
-                    detectedEncoding,
-                  ).decode(finalBuffer);
+                  // Re-decode the full buffer with proper encoding detection.
+                  // The streaming decoder used the first-chunk heuristic which
+                  // can misdetect when early output is ASCII-only but later
+                  // output is in a different encoding (e.g. GBK).
+                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                  const decodedOutput = new TextDecoder(finalEncoding).decode(
+                    finalBuffer,
+                  );
                   fullOutput = await replayTerminalOutput(decodedOutput);
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);

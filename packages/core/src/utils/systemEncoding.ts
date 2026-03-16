@@ -23,42 +23,28 @@ export function resetEncodingCache(): void {
 }
 
 /**
- * Detects the encoding for a buffer of command output.
+ * Detects the encoding of a buffer.
  *
- * Strategy: try UTF-8 first, then fall back to auto-detection.
- * This is optimistic about UTF-8 because:
- * - Modern developer tools increasingly output UTF-8
- * - PowerShell Core defaults to UTF-8
- * - git, node, and most CLI tools output UTF-8
- * - Legacy codepage bytes (0x80-0xFF) rarely form valid UTF-8
- *   multi-byte sequences by accident
+ * Strategy: try UTF-8 first, then chardet, then system encoding.
+ * UTF-8 is tried first because modern developer tools, PowerShell Core,
+ * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
+ * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
  *
- * The system encoding is cached and used as a fallback when the buffer
- * is not valid UTF-8 and chardet-based detection fails.
+ * This function should be called on the **complete** output buffer
+ * (after the command finishes), not on individual streaming chunks,
+ * to avoid misdetection when early chunks are ASCII-only.
  *
  * @param buffer A buffer to analyze for encoding detection.
  */
 export function getCachedEncodingForBuffer(buffer: Buffer): string {
-  // Try UTF-8 first: if the buffer is valid UTF-8, use it immediately.
-  // This avoids misclassifying UTF-8 output as a legacy codepage on
-  // systems where the system encoding happens to also be valid for
-  // those same bytes.
   if (isValidUtf8(buffer)) {
     return 'utf-8';
   }
 
-  // Buffer is not valid UTF-8 — try chardet-based detection
+  // Buffer is not valid UTF-8 — try chardet, then system encoding
   const detected = detectEncodingFromBuffer(buffer);
   if (detected) {
     return detected;
-  }
-
-  // Fall back to system encoding
-  if (cachedSystemEncoding === undefined) {
-    cachedSystemEncoding = getSystemEncoding();
-  }
-  if (cachedSystemEncoding) {
-    return cachedSystemEncoding;
   }
 
   // Last resort
@@ -186,13 +172,17 @@ export function windowsCodePageToEncoding(cp: number): string | null {
 }
 
 /**
- * Attempts to detect encoding from a buffer using chardet.
- * This is useful when system encoding detection fails.
- * Returns the detected encoding in lowercase, or null if detection fails.
+ * Attempts to detect the encoding of a non-UTF-8 buffer.
+ *
+ * Tries chardet statistical detection first, then falls back to the
+ * system codepage. The fallback catches cases where chardet fails or
+ * misdetects (e.g. a small GBK file classified as ISO-8859-2).
+ *
  * @param buffer The buffer to analyze for encoding.
  * @return The detected encoding as a lowercase string, or null if detection fails.
  */
 export function detectEncodingFromBuffer(buffer: Buffer): string | null {
+  // Try chardet statistical detection first — works well for larger files
   try {
     const detected = chardetDetect(buffer);
     if (detected && typeof detected === 'string') {
@@ -200,6 +190,15 @@ export function detectEncodingFromBuffer(buffer: Buffer): string | null {
     }
   } catch (error) {
     debugLogger.warn('Failed to detect encoding with chardet:', error);
+  }
+
+  // Fall back to system encoding — catches cases where chardet fails
+  // (e.g. small GBK files that chardet misdetects as ISO-8859-2)
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  if (cachedSystemEncoding) {
+    return cachedSystemEncoding;
   }
 
   return null;

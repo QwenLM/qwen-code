@@ -525,7 +525,7 @@ describe('ShellExecutionService', () => {
       });
     });
 
-    it('should use PowerShell on Windows with array args', async () => {
+    it('should use PowerShell on Windows with array args and UTF-8 prefix', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -536,9 +536,14 @@ describe('ShellExecutionService', () => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -974,7 +979,7 @@ describe('ShellExecutionService child_process fallback', () => {
       });
     });
 
-    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+    it('should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -985,9 +990,14 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
