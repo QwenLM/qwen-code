@@ -9,27 +9,20 @@ import {
   DEFAULT_DASHSCOPE_BASE_URL,
 } from '../constants.js';
 import type {
-  OpenAICompatibleProvider,
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
-import { tokenLimit } from '../../tokenLimits.js';
+import { DefaultOpenAICompatibleProvider } from './default.js';
 
-export class DashScopeOpenAICompatibleProvider
-  implements OpenAICompatibleProvider
-{
-  private contentGeneratorConfig: ContentGeneratorConfig;
-  private cliConfig: Config;
-
+export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
   ) {
-    this.cliConfig = cliConfig;
-    this.contentGeneratorConfig = contentGeneratorConfig;
+    super(contentGeneratorConfig, cliConfig);
   }
 
   static isDashScopeProvider(
@@ -44,7 +37,7 @@ export class DashScopeOpenAICompatibleProvider
     return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
   }
 
-  buildHeaders(): Record<string, string | undefined> {
+  override buildHeaders(): Record<string, string | undefined> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
@@ -60,7 +53,7 @@ export class DashScopeOpenAICompatibleProvider
       : defaultHeaders;
   }
 
-  buildClient(): OpenAI {
+  override buildClient(): OpenAI {
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
@@ -98,7 +91,7 @@ export class DashScopeOpenAICompatibleProvider
    * @param userPromptId - Unique identifier for the user prompt for session tracking
    * @returns Configured request with DashScope-specific parameters applied
    */
-  buildRequest(
+  override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
@@ -116,8 +109,9 @@ export class DashScopeOpenAICompatibleProvider
       tools = updatedTools;
     }
 
-    // Apply output token limits based on model capabilities
-    // This ensures max_tokens doesn't exceed the model's maximum output limit
+    // Apply output token limits using parent class logic
+    // Uses conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
+    // to preserve input quota when user hasn't explicitly configured max_tokens
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const extraBody = this.contentGeneratorConfig.extra_body;
@@ -155,7 +149,7 @@ export class DashScopeOpenAICompatibleProvider
     };
   }
 
-  getDefaultGenerationConfig(): GenerateContentConfig {
+  override getDefaultGenerationConfig(): GenerateContentConfig {
     return {
       temperature: 0.3,
     };
@@ -314,41 +308,6 @@ export class DashScopeOpenAICompatibleProvider
     }
 
     return false;
-  }
-
-  /**
-   * Apply output token limit to a request's max_tokens parameter.
-   *
-   * Ensures that existing max_tokens parameters don't exceed the model's maximum output
-   * token limit. Only modifies max_tokens when already present in the request.
-   *
-   * @param request - The chat completion request parameters
-   * @returns The request with max_tokens adjusted to respect the model's limits (if present)
-   */
-  private applyOutputTokenLimit<
-    T extends { max_tokens?: number | null; model: string },
-  >(request: T): T {
-    const currentMaxTokens = request.max_tokens;
-
-    // Only process if max_tokens is already present in the request
-    if (currentMaxTokens === undefined || currentMaxTokens === null) {
-      return request; // No max_tokens parameter, return unchanged
-    }
-
-    // Dynamically calculate output token limit using tokenLimit function
-    // This ensures we always use the latest model-specific limits without relying on user configuration
-    const modelLimit = tokenLimit(request.model, 'output');
-
-    // If max_tokens exceeds the model limit, cap it to the model's limit
-    if (currentMaxTokens > modelLimit) {
-      return {
-        ...request,
-        max_tokens: modelLimit,
-      };
-    }
-
-    // If max_tokens is within the limit, return the request unchanged
-    return request;
   }
 
   /**
