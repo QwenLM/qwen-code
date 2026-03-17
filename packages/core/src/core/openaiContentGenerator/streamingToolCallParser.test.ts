@@ -861,4 +861,53 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getState(0).depth).toBe(1);
     });
   });
+
+  describe('Name arrives after JSON completion', () => {
+    it('should keep name at correct index when it arrives after JSON', () => {
+      // JSON completes before name arrives
+      parser.addChunk(0, '{"file":', 'call_abc', undefined);
+      parser.addChunk(0, '"test.txt"}', undefined, undefined);
+
+      // Name arrives in separate chunk
+      parser.addChunk(0, '', undefined, 'write_file');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].id).toBe('call_abc');
+      expect(completed[0].name).toBe('write_file');
+      expect(completed[0].args).toEqual({ file: 'test.txt' });
+    });
+
+    it('should not reassign index when name arrives after JSON', () => {
+      // Setup: JSON complete, no name yet
+      parser.addChunk(0, '{"param": "value"}', 'call_1', undefined);
+
+      // Name arrives later
+      parser.addChunk(0, '', undefined, 'function1');
+
+      // Tool call should be at index 0, not reassigned
+      const meta = parser.getToolCallMeta(0);
+      expect(meta.id).toBe('call_1');
+      expect(meta.name).toBe('function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].name).toBe('function1');
+    });
+
+    it('should handle multiple tool calls with late names', () => {
+      // First tool call: JSON then name
+      parser.addChunk(0, '{"a": 1}', 'call_1', undefined);
+      parser.addChunk(0, '', undefined, 'func1');
+
+      // Second tool call: JSON then name
+      parser.addChunk(1, '{"b": 2}', 'call_2', undefined);
+      parser.addChunk(1, '', undefined, 'func2');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(2);
+      expect(completed.find((c) => c.id === 'call_1')?.name).toBe('func1');
+      expect(completed.find((c) => c.id === 'call_2')?.name).toBe('func2');
+    });
+  });
 });
