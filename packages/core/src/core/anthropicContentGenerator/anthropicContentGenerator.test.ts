@@ -427,7 +427,7 @@ describe('AnthropicContentGenerator', () => {
         );
       });
 
-      it('caps max_tokens to DEFAULT_OUTPUT_TOKEN_LIMIT for unknown models', async () => {
+      it('respects configured max_tokens for unknown models', async () => {
         const { AnthropicContentGenerator } = await importGenerator();
         anthropicState.createImpl.mockResolvedValue({
           id: 'anthropic-1',
@@ -455,7 +455,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 32000 }),
+          expect.objectContaining({ max_tokens: 100_000 }),
         );
       });
 
