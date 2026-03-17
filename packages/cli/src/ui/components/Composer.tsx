@@ -29,10 +29,10 @@ export const Composer = () => {
 
   const { showAutoAcceptIndicator, sessionStats } = uiState;
 
-  const tokens = Object.values(sessionStats.metrics.models).reduce(
+  const tokens = Object.values(sessionStats.metrics?.models ?? {}).reduce(
     (acc, model) => ({
-      prompt: acc.prompt + model.tokens.prompt,
-      candidates: acc.candidates + model.tokens.candidates,
+      prompt: acc.prompt + (model.tokens?.prompt ?? 0),
+      candidates: acc.candidates + (model.tokens?.candidates ?? 0),
     }),
     { prompt: 0, candidates: 0 },
   );

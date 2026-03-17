@@ -313,11 +313,7 @@ describe('<LoadingIndicator />', () => {
   describe('token display', () => {
     it('should display output tokens inline with arrow notation', () => {
       const { lastFrame } = renderWithContext(
-        <LoadingIndicator
-          {...defaultProps}
-          promptTokens={1500}
-          candidatesTokens={847}
-        />,
+        <LoadingIndicator {...defaultProps} candidatesTokens={847} />,
         StreamingState.Responding,
       );
       const output = lastFrame();
@@ -329,11 +325,7 @@ describe('<LoadingIndicator />', () => {
 
     it('should not display tokens when output tokens is 0', () => {
       const { lastFrame } = renderWithContext(
-        <LoadingIndicator
-          {...defaultProps}
-          promptTokens={1500}
-          candidatesTokens={0}
-        />,
+        <LoadingIndicator {...defaultProps} candidatesTokens={0} />,
         StreamingState.Responding,
       );
       const output = lastFrame();
