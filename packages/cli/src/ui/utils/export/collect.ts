@@ -109,53 +109,59 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
 function calculateTokenStats(
   records: ChatRecord[],
   contextWindowSize?: number,
-): { totalTokens: number; promptTokens: number; contextUsagePercent?: number } {
+): { totalTokens: number; contextUsagePercent?: number } {
   let totalTokens = 0;
-  let lastPromptTokens = 0;
+  let lastTotalTokens = 0;
 
   // Aggregate usageMetadata from all assistant records
-  // Use last available promptTokenCount for context usage calculation
+  // Use last available totalTokenCount for context usage calculation
   for (const record of records) {
     if (record.type === 'assistant' && record.usageMetadata) {
       totalTokens += record.usageMetadata.totalTokenCount ?? 0;
-      // Use the last available promptTokenCount (represents current context usage)
-      if (record.usageMetadata.promptTokenCount !== undefined) {
-        lastPromptTokens = record.usageMetadata.promptTokenCount;
+      // Use the last available totalTokenCount for context usage calculation
+      if (record.usageMetadata.totalTokenCount !== undefined) {
+        lastTotalTokens = record.usageMetadata.totalTokenCount;
       }
     }
   }
 
-  // Use promptTokens (input tokens) for context usage calculation
-  // This represents how much of the context window is being used
-  if (contextWindowSize && lastPromptTokens > 0) {
-    const percent = (lastPromptTokens / contextWindowSize) * 100;
+  // Use last totalTokenCount for context usage calculation
+  // This represents how much of the context window is being used by the total tokens
+  if (contextWindowSize && lastTotalTokens > 0) {
+    const percent = (lastTotalTokens / contextWindowSize) * 100;
     return {
       totalTokens,
-      promptTokens: lastPromptTokens,
       contextUsagePercent: Math.round(percent * 10) / 10,
     };
   }
 
-  return { totalTokens, promptTokens: lastPromptTokens };
+  return { totalTokens };
 }
 
 /**
  * Extract session metadata from ChatRecords.
  */
-function extractMetadata(
+async function extractMetadata(
   conversation: {
     sessionId: string;
     startTime: string;
     messages: ChatRecord[];
   },
   config: Config,
-): ExportMetadata {
+): Promise<ExportMetadata> {
   const { sessionId, startTime, messages } = conversation;
 
   // Extract basic info from the first record
   const firstRecord = messages[0];
   const cwd = firstRecord?.cwd ?? '';
   const gitBranch = firstRecord?.gitBranch;
+
+  // Get git repository name
+  let gitRepo: string | undefined;
+  if (cwd) {
+    const { getGitRepoName } = await import('@qwen-code/qwen-code-core');
+    gitRepo = getGitRepoName(cwd);
+  }
 
   // Try to get model from assistant messages
   let model: string | undefined;
@@ -197,11 +203,13 @@ function extractMetadata(
     startTime,
     exportTime: new Date().toISOString(),
     cwd,
+    gitRepo,
     gitBranch,
     model,
     channel,
     promptCount,
     contextUsagePercent: tokenStats.contextUsagePercent,
+    contextWindowSize,
     totalTokens: tokenStats.totalTokens,
     filesRead: fileStats.filesRead,
     filesWritten: fileStats.filesWritten,
@@ -505,7 +513,7 @@ export async function collectSessionData(
   const messages = exportContext.getMessages();
 
   // Extract metadata from conversation
-  const metadata = extractMetadata(conversation, config);
+  const metadata = await extractMetadata(conversation, config);
 
   return {
     sessionId: conversation.sessionId,

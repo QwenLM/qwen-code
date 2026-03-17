@@ -64,6 +64,8 @@ export interface ExportMetadata {
   exportTime: string;
   /** Current working directory */
   cwd: string;
+  /** Git repository name, if available */
+  gitRepo?: string;
   /** Git branch name, if available */
   gitBranch?: string;
   /** Model used in the session */
@@ -74,6 +76,8 @@ export interface ExportMetadata {
   promptCount: number;
   /** Context window utilization percentage (0-100) */
   contextUsagePercent?: number;
+  /** Context window size in tokens (used for calculating percentage) */
+  contextWindowSize?: number;
   /** Total tokens used (prompt + completion) */
   totalTokens?: number;
   /** Number of files read */
