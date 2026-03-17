@@ -486,17 +486,6 @@ export async function showAuthStatus(): Promise<void> {
       );
       writeStdoutLine(t('  Status: Configured\n'));
     }
-
-    // Show available commands
-    writeStdoutLine(t('---'));
-    writeStdoutLine(t('Commands:'));
-    writeStdoutLine(
-      t('  qwen auth              - Change authentication method'),
-    );
-    writeStdoutLine(t('  qwen auth status       - Show this status'));
-    writeStdoutLine(t('  qwen auth qwen-oauth   - Switch to Qwen OAuth'));
-    writeStdoutLine(t('  qwen auth code-plan    - Switch to Coding Plan\n'));
-
     process.exit(0);
   } catch (error) {
     writeStderrLine(
