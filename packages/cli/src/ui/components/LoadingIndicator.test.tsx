@@ -345,11 +345,7 @@ describe('<LoadingIndicator />', () => {
 
     it('should hide tokens in narrow terminal', () => {
       const { lastFrame } = renderWithContext(
-        <LoadingIndicator
-          {...defaultProps}
-          promptTokens={1000}
-          candidatesTokens={500}
-        />,
+        <LoadingIndicator {...defaultProps} candidatesTokens={500} />,
         StreamingState.Responding,
         79,
       );
@@ -361,11 +357,7 @@ describe('<LoadingIndicator />', () => {
 
     it('should show tokens in wide terminal with inline format', () => {
       const { lastFrame } = renderWithContext(
-        <LoadingIndicator
-          {...defaultProps}
-          promptTokens={1000}
-          candidatesTokens={5400}
-        />,
+        <LoadingIndicator {...defaultProps} candidatesTokens={5400} />,
         StreamingState.Responding,
         80,
       );
