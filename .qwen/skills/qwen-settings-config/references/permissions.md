@@ -197,6 +197,40 @@ Different tool types use different specifier matching algorithms:
 }
 ```
 
+### Block Dangerous Commands
+
+```jsonc
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(curl * | sh)",
+      "Bash(wget * -O * | sh)",
+    ],
+  },
+}
+```
+
+### Allow All Read Operations, Ask for Writes
+
+```jsonc
+{
+  "permissions": {
+    "allow": ["ReadFile", "Grep", "Glob", "ListDir"],
+    "ask": ["Edit", "WriteFile"],
+  },
+}
+```
+
+### Session-Specific Rules (via UI)
+
+When you click "Always allow for this session" in the UI, rules are added to session memory:
+
+- Session rules take priority over persistent rules
+- Session rules are cleared when the session ends
+- Use `/permissions` command to view all active rules
+
 ---
 
 ## ⚠️ Deprecated Fields

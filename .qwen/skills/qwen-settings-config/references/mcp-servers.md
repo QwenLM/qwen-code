@@ -77,6 +77,22 @@ MCP (Model Context Protocol) servers are configured via the top-level `mcpServer
       "command": "uvx",
       "args": ["mcp-server-filesystem", "--root", "/home/user/projects"],
     },
+    // GitHub MCP server
+    "github": {
+      "command": "npx",
+      "args": ["@github/mcp-server@latest"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_TOKEN",
+      },
+    },
+    // Database MCP server
+    "postgres": {
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-postgres"],
+      "env": {
+        "DATABASE_URL": "postgresql://user:pass@localhost:5432/mydb",
+      },
+    },
   },
 }
 ```
@@ -225,6 +241,79 @@ Control MCP tool permissions via the `permissions` config (see `permissions.md`)
     "allow": ["mcp__playwright__*"], // allow all playwright tools
     "deny": ["mcp__untrusted__*"], // block all untrusted tools
     "ask": ["mcp__github__delete_repo"], // github delete requires confirmation
+  },
+}
+```
+
+---
+
+## Common Scenarios
+
+### Add a New MCP Server
+
+```jsonc
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+    },
+  },
+}
+```
+
+### Configure MCP Server with API Key
+
+```jsonc
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["@github/mcp-server@latest"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_TOKEN",
+      },
+    },
+  },
+}
+```
+
+### Limit MCP Server Tools
+
+```jsonc
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["@github/mcp-server@latest"],
+      "includeTools": ["create_issue", "list_repos"],
+      "excludeTools": ["delete_repo"],
+    },
+  },
+}
+```
+
+### Connect to Remote MCP Server
+
+```jsonc
+{
+  "mcpServers": {
+    "remote-server": {
+      "httpUrl": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer $TOKEN",
+      },
+    },
+  },
+}
+```
+
+### Allow Only Specific MCP Servers
+
+```jsonc
+{
+  "mcp": {
+    "allowed": ["playwright", "github"],
   },
 }
 ```

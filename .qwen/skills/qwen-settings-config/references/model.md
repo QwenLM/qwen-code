@@ -31,6 +31,59 @@
 }
 ```
 
+### Common Scenarios
+
+#### Switch Model
+
+```jsonc
+{
+  "model": {
+    "name": "qwen-plus", // or "qwen-max", "gpt-4o", etc.
+  },
+}
+```
+
+#### Configure OpenAI-Compatible Endpoint
+
+```jsonc
+{
+  "modelProviders": {
+    "openai-compatible": [
+      {
+        "name": "my-custom-model",
+        "baseUrl": "https://api.example.com/v1",
+        "apiKey": "$CUSTOM_API_KEY",
+        "model": "gpt-4-turbo",
+      },
+    ],
+  },
+}
+```
+
+#### Adjust Request Timeout
+
+```jsonc
+{
+  "model": {
+    "generationConfig": {
+      "timeout": 60000, // 60 second timeout
+      "maxRetries": 5, // max 5 retries
+    },
+  },
+}
+```
+
+#### Enable Request Logging
+
+```jsonc
+{
+  "model": {
+    "enableOpenAILogging": true,
+    "openAILoggingDir": "./logs/openai",
+  },
+}
+```
+
 ---
 
 ## `modelProviders` — Model Provider Configuration

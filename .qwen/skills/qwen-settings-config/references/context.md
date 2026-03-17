@@ -29,7 +29,57 @@ Controls the context information provided to the model.
 }
 ```
 
-### `.qwenignore` File
+### Common Scenarios
+
+#### Multiple Context Files
+
+```jsonc
+{
+  "context": {
+    "fileName": ["QWEN.md", "CONTEXT.md", "PROJECT.md"],
+  },
+}
+```
+
+#### Include Shared Directories
+
+```jsonc
+{
+  "context": {
+    "includeDirectories": ["../shared/libs", "/path/to/common-utils"],
+    "loadFromIncludeDirectories": true,
+  },
+}
+```
+
+#### Disable Fuzzy Search
+
+```jsonc
+{
+  "context": {
+    "fileFiltering": {
+      "enableFuzzySearch": false,
+    },
+  },
+}
+```
+
+#### Ignore Git and Qwen Ignore Files
+
+```jsonc
+{
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": false,
+      "respectQwenIgnore": false,
+    },
+  },
+}
+```
+
+---
+
+## `.qwenignore` File
 
 Similar to `.gitignore`, used to exclude files/directories from the agent's context:
 
@@ -43,3 +93,41 @@ secrets/
 ```
 
 Place it in the project root or any subdirectory. Syntax is identical to `.gitignore`.
+
+### Common `.qwenignore` Patterns
+
+```gitignore
+# Dependencies
+node_modules/
+vendor/
+.pnp.*
+
+# Build outputs
+dist/
+build/
+*.min.js
+*.min.css
+
+# Logs and caches
+*.log
+.npm/
+.yarn/
+.cache/
+
+# Environment and secrets
+.env
+.env.local
+secrets/
+*.pem
+*.key
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+```

@@ -20,6 +20,33 @@
 }
 ```
 
+### Common Scenarios
+
+#### Configure OpenAI-Compatible API
+
+```jsonc
+{
+  "security": {
+    "auth": {
+      "apiKey": "$OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+    },
+  },
+}
+```
+
+#### Enable Folder Trust
+
+```jsonc
+{
+  "security": {
+    "folderTrust": {
+      "enabled": true,
+    },
+  },
+}
+```
+
 ---
 
 ## `hooks` — Hook System
@@ -65,7 +92,72 @@ Run custom commands before or after agent processing.
 }
 ```
 
-### `hooksConfig` — Hook Control
+### Common Scenarios
+
+#### Run Lint Before Processing Python Files
+
+```jsonc
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*.py",
+        "hooks": [
+          {
+            "command": "ruff check .",
+            "name": "python-lint",
+          },
+        ],
+      },
+    ],
+  },
+}
+```
+
+#### Auto-Format After Agent Completes
+
+```jsonc
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "prettier --write .",
+            "name": "auto-format",
+          },
+        ],
+      },
+    ],
+  },
+}
+```
+
+#### Run Tests Before Commit-Related Tasks
+
+```jsonc
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*commit*",
+        "sequential": true,
+        "hooks": [
+          {
+            "command": "npm test",
+            "timeout": 60000,
+            "name": "pre-commit-test",
+          },
+        ],
+      },
+    ],
+  },
+}
+```
+
+---
+
+## `hooksConfig` — Hook Control
 
 ```jsonc
 {
@@ -93,6 +185,19 @@ Low-priority environment variable defaults. Load order: system env vars > .env f
 ```
 
 **Merge strategy**: `shallow_merge`
+
+### Common Scenarios
+
+#### Set API Keys as Fallback
+
+```jsonc
+{
+  "env": {
+    "OPENAI_API_KEY": "sk-your-key-here",
+    "ANTHROPIC_API_KEY": "sk-ant-your-key-here",
+  },
+}
+```
 
 ---
 
@@ -144,6 +249,56 @@ Low-priority environment variable defaults. Load order: system env vars > .env f
 }
 ```
 
+### Common Scenarios
+
+#### Configure Tavily Search
+
+```jsonc
+{
+  "webSearch": {
+    "provider": [
+      {
+        "type": "tavily",
+        "apiKey": "$TAVILY_API_KEY",
+      },
+    ],
+    "default": "tavily",
+  },
+}
+```
+
+#### Configure Google Custom Search
+
+```jsonc
+{
+  "webSearch": {
+    "provider": [
+      {
+        "type": "google",
+        "apiKey": "$GOOGLE_API_KEY",
+        "searchEngineId": "your-cse-id",
+      },
+    ],
+    "default": "google",
+  },
+}
+```
+
+#### Use DashScope Built-in Search
+
+```jsonc
+{
+  "webSearch": {
+    "provider": [
+      {
+        "type": "dashscope",
+      },
+    ],
+    "default": "dashscope",
+  },
+}
+```
+
 ---
 
 ## `advanced` — Advanced Settings
@@ -161,6 +316,28 @@ Low-priority environment variable defaults. Load order: system env vars > .env f
       // BugCommandSettings
     },
     "tavilyApiKey": "xxx", // ⚠️ Deprecated — use webSearch.provider instead
+  },
+}
+```
+
+### Common Scenarios
+
+#### Configure DNS Resolution Order
+
+```jsonc
+{
+  "advanced": {
+    "dnsResolutionOrder": "verbatim", // or "ipv4first"
+  },
+}
+```
+
+#### Exclude Specific Environment Variables
+
+```jsonc
+{
+  "advanced": {
+    "excludedEnvVars": ["DEBUG", "DEBUG_MODE", "SECRET_KEY"],
   },
 }
 ```

@@ -26,6 +26,58 @@
 }
 ```
 
+### Common Scenarios
+
+#### Enable Vim Mode
+
+```jsonc
+{
+  "general": {
+    "vimMode": true,
+  },
+}
+```
+
+#### Disable Auto Update
+
+```jsonc
+{
+  "general": {
+    "enableAutoUpdate": false,
+  },
+}
+```
+
+#### Switch UI Language
+
+```jsonc
+{
+  "general": {
+    "language": "zh", // or "en", "ja", "auto"
+  },
+}
+```
+
+#### Set Preferred Editor
+
+```jsonc
+{
+  "general": {
+    "preferredEditor": "code", // or "vim", "nvim", "sublime", etc.
+  },
+}
+```
+
+#### Configure File Encoding
+
+```jsonc
+{
+  "general": {
+    "defaultFileEncoding": "utf-8-bom", // for projects requiring BOM
+  },
+}
+```
+
 ---
 
 ## `ui` — UI Settings
@@ -47,6 +99,50 @@
       "enableLoadingPhrases": true, // enable loading phrases (disable for accessibility)
       "screenReader": false, // screen reader mode (plain-text rendering)
     },
+  },
+}
+```
+
+### Common Scenarios
+
+#### Switch Theme
+
+```jsonc
+{
+  "ui": {
+    "theme": "Qwen Light", // or "Qwen Dark"
+  },
+}
+```
+
+#### Hide Tips
+
+```jsonc
+{
+  "ui": {
+    "hideTips": true,
+  },
+}
+```
+
+#### Enable Screen Reader Mode
+
+```jsonc
+{
+  "ui": {
+    "accessibility": {
+      "screenReader": true,
+    },
+  },
+}
+```
+
+#### Show Agent Status in Title
+
+```jsonc
+{
+  "ui": {
+    "showStatusInTitle": true,
   },
 }
 ```

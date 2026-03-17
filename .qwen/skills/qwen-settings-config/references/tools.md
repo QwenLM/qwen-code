@@ -128,6 +128,74 @@ Used to integrate external custom tool systems.
 
 ---
 
+## Common Scenarios
+
+### Enable Plan Mode (Read-Only Analysis)
+
+```jsonc
+{
+  "tools": {
+    "approvalMode": "plan",
+  },
+}
+```
+
+### Enable Auto-Edit Mode
+
+```jsonc
+{
+  "tools": {
+    "approvalMode": "auto_edit",
+  },
+}
+```
+
+### Enable Full Auto Mode (Use with Caution)
+
+```jsonc
+{
+  "tools": {
+    "approvalMode": "yolo",
+  },
+}
+```
+
+### Configure Sandbox
+
+```jsonc
+{
+  "tools": {
+    "sandbox": true, // or "/path/to/sandbox"
+  },
+}
+```
+
+### Configure Shell Pager
+
+```jsonc
+{
+  "tools": {
+    "shell": {
+      "pager": "less",
+      "showColor": true,
+    },
+  },
+}
+```
+
+### Use System Ripgrep
+
+```jsonc
+{
+  "tools": {
+    "useRipgrep": true,
+    "useBuiltinRipgrep": false, // use system-installed `rg`
+  },
+}
+```
+
+---
+
 ## ⚠️ Deprecated Fields
 
 | Field           | Replacement         | Description         |
