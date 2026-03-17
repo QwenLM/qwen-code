@@ -72,7 +72,8 @@ describe('<LoadingIndicator />', () => {
     const output = lastFrame();
     expect(output).toContain('MockRespondingSpinner');
     expect(output).toContain('Loading...');
-    expect(output).toContain('(esc to cancel, 5s)');
+    expect(output).toContain('5s');
+    expect(output).toContain('esc to cancel');
   });
 
   it('should render spinner (static), phrase but no time/cancel when streamingState is WaitingForConfirmation', () => {
@@ -88,7 +89,7 @@ describe('<LoadingIndicator />', () => {
     expect(output).toContain('⠏'); // Static char for WaitingForConfirmation
     expect(output).toContain('Confirm action');
     expect(output).not.toContain('(esc to cancel)');
-    expect(output).not.toContain(', 10s');
+    expect(output).not.toContain('10s');
   });
 
   it('should display the currentLoadingPhrase correctly', () => {
@@ -112,7 +113,7 @@ describe('<LoadingIndicator />', () => {
       <LoadingIndicator {...props} />,
       StreamingState.Responding,
     );
-    expect(lastFrame()).toContain('(esc to cancel, 1m)');
+    expect(lastFrame()).toContain('(1m · esc to cancel)');
   });
 
   it('should display the elapsedTime correctly in human-readable format', () => {
@@ -124,7 +125,7 @@ describe('<LoadingIndicator />', () => {
       <LoadingIndicator {...props} />,
       StreamingState.Responding,
     );
-    expect(lastFrame()).toContain('(esc to cancel, 2m 5s)');
+    expect(lastFrame()).toContain('(2m 5s · esc to cancel)');
   });
 
   it('should render rightContent when provided', () => {
@@ -155,7 +156,7 @@ describe('<LoadingIndicator />', () => {
     let output = lastFrame();
     expect(output).toContain('MockRespondingSpinner');
     expect(output).toContain('Now Responding');
-    expect(output).toContain('(esc to cancel, 2s)');
+    expect(output).toContain('(2s · esc to cancel)');
 
     // Transition to WaitingForConfirmation
     rerender(
@@ -170,7 +171,7 @@ describe('<LoadingIndicator />', () => {
     expect(output).toContain('⠏');
     expect(output).toContain('Please Confirm');
     expect(output).not.toContain('(esc to cancel)');
-    expect(output).not.toContain(', 15s');
+    expect(output).not.toContain('15s');
 
     // Transition back to Idle
     rerender(
@@ -262,7 +263,7 @@ describe('<LoadingIndicator />', () => {
       // Check for single line output
       expect(output?.includes('\n')).toBe(false);
       expect(output).toContain('Loading...');
-      expect(output).toContain('(esc to cancel, 5s)');
+      expect(output).toContain('(5s · esc to cancel)');
       expect(output).toContain('Right');
     });
 
@@ -284,8 +285,8 @@ describe('<LoadingIndicator />', () => {
       expect(lines).toHaveLength(3);
       if (lines) {
         expect(lines[0]).toContain('Loading...');
-        expect(lines[0]).not.toContain('(esc to cancel, 5s)');
-        expect(lines[1]).toContain('(esc to cancel, 5s)');
+        expect(lines[0]).not.toContain('5s');
+        expect(lines[1]).toContain('5s');
         expect(lines[2]).toContain('Right');
       }
     });
@@ -306,6 +307,88 @@ describe('<LoadingIndicator />', () => {
         79,
       );
       expect(lastFrame()?.includes('\n')).toBe(true);
+    });
+  });
+
+  describe('token display', () => {
+    it('should display output tokens inline with arrow notation', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          promptTokens={1500}
+          candidatesTokens={847}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 847 tokens');
+      expect(output).not.toContain('↑');
+      expect(output).toContain('5s');
+      expect(output).toContain('esc to cancel');
+    });
+
+    it('should not display tokens when output tokens is 0', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          promptTokens={1500}
+          candidatesTokens={0}
+        />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame();
+      expect(output).not.toContain('↓');
+      expect(output).not.toContain('tokens');
+    });
+
+    it('should not display tokens when props are undefined', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator {...defaultProps} />,
+        StreamingState.Responding,
+      );
+      const output = lastFrame();
+      expect(output).not.toContain('↓');
+      expect(output).not.toContain('tokens');
+    });
+
+    it('should hide tokens in narrow terminal', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          promptTokens={1000}
+          candidatesTokens={500}
+        />,
+        StreamingState.Responding,
+        79,
+      );
+      const output = lastFrame();
+      expect(output).not.toContain('↓');
+      expect(output).not.toContain('tokens');
+      expect(output).toContain('esc to cancel');
+    });
+
+    it('should show tokens in wide terminal with inline format', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          promptTokens={1000}
+          candidatesTokens={5400}
+        />,
+        StreamingState.Responding,
+        80,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 5.4k tokens');
+    });
+
+    it('should format tokens inline with time and cancel', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator {...defaultProps} candidatesTokens={5400} />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('(5s · ↓ 5.4k tokens · esc to cancel)');
     });
   });
 });

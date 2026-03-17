@@ -27,7 +27,15 @@ export const Composer = () => {
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
 
-  const { showAutoAcceptIndicator } = uiState;
+  const { showAutoAcceptIndicator, sessionStats } = uiState;
+
+  const tokens = Object.values(sessionStats.metrics.models).reduce(
+    (acc, model) => ({
+      prompt: acc.prompt + model.tokens.prompt,
+      candidates: acc.candidates + model.tokens.candidates,
+    }),
+    { prompt: 0, candidates: 0 },
+  );
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -64,6 +72,7 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          candidatesTokens={tokens.candidates}
         />
       )}
 
