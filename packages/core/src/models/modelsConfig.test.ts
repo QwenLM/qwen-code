@@ -1507,8 +1507,8 @@ describe('ModelsConfig', () => {
     });
   });
 
-  describe('max_tokens fallback', () => {
-    it('should auto-detect max_tokens when samplingParams is undefined', async () => {
+  describe('max_tokens in modelsConfig', () => {
+    it('should not auto-fill max_tokens when samplingParams is undefined', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         openai: [
           {
@@ -1528,20 +1528,10 @@ describe('ModelsConfig', () => {
       await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
 
       const gc = currentGenerationConfig(modelsConfig);
-      // GPT-4 output limit is 16K per tokenLimits.ts
-      expect(gc.samplingParams?.max_tokens).toBe(16384);
-      expect(gc.samplingParams?.temperature).toBeUndefined();
-
-      const sources = modelsConfig.getGenerationConfigSources();
-      expect(sources['samplingParams']?.kind).toBe('computed');
-      // Even when samplingParams is not explicitly defined in provider config,
-      // the field is still tracked as from modelProviders, so the detail reflects that
-      expect(sources['samplingParams']?.detail).toBe(
-        'max_tokens auto-detected from model (other params from modelProviders)',
-      );
+      expect(gc.samplingParams).toBeUndefined();
     });
 
-    it('should auto-detect max_tokens when samplingParams exists but max_tokens is missing', async () => {
+    it('should not auto-fill max_tokens when samplingParams exists but max_tokens is missing', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         openai: [
           {
@@ -1563,15 +1553,12 @@ describe('ModelsConfig', () => {
       await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
 
       const gc = currentGenerationConfig(modelsConfig);
-      // Should preserve temperature from provider and add max_tokens
+      // Should preserve existing sampling params but not inject max_tokens
       expect(gc.samplingParams?.temperature).toBe(0.7);
-      expect(gc.samplingParams?.max_tokens).toBe(16384);
+      expect(gc.samplingParams?.max_tokens).toBeUndefined();
 
       const sources = modelsConfig.getGenerationConfigSources();
-      expect(sources['samplingParams']?.kind).toBe('computed');
-      expect(sources['samplingParams']?.detail).toBe(
-        'max_tokens auto-detected from model (other params from modelProviders)',
-      );
+      expect(sources['samplingParams']?.kind).toBe('modelProviders');
     });
 
     it('should not override existing max_tokens from modelProviders', async () => {
@@ -1604,7 +1591,7 @@ describe('ModelsConfig', () => {
       expect(sources['samplingParams']?.kind).toBe('modelProviders');
     });
 
-    it('should use correct output limit for different model families', async () => {
+    it('should not auto-fill max_tokens for different model families', async () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         anthropic: [
           {
@@ -1622,7 +1609,7 @@ describe('ModelsConfig', () => {
         ],
       };
 
-      // Test Claude model (64K output limit)
+      // Test Claude model without provider max_tokens
       const claudeConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_ANTHROPIC,
         modelProvidersConfig,
@@ -1631,9 +1618,9 @@ describe('ModelsConfig', () => {
       await claudeConfig.switchModel(AuthType.USE_ANTHROPIC, 'claude-3-opus');
 
       let gc = currentGenerationConfig(claudeConfig);
-      expect(gc.samplingParams?.max_tokens).toBe(65536); // 64K = 2^16
+      expect(gc.samplingParams).toBeUndefined();
 
-      // Test Gemini model (8K output limit)
+      // Test Gemini model without provider max_tokens
       const geminiConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_GEMINI,
         modelProvidersConfig,
@@ -1642,7 +1629,7 @@ describe('ModelsConfig', () => {
       await geminiConfig.switchModel(AuthType.USE_GEMINI, 'gemini-pro');
 
       gc = currentGenerationConfig(geminiConfig);
-      expect(gc.samplingParams?.max_tokens).toBe(8192);
+      expect(gc.samplingParams).toBeUndefined();
     });
   });
 });
