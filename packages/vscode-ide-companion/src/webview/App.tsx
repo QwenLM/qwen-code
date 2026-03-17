@@ -18,7 +18,10 @@ import { useFileContext } from './hooks/file/useFileContext.js';
 import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
-import { useMessageSubmit } from './hooks/useMessageSubmit.js';
+import {
+  shouldSendMessage,
+  useMessageSubmit,
+} from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
@@ -36,6 +39,8 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  ImageMessageRenderer,
+  ImagePreview,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -52,8 +57,6 @@ import {
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 import { useImageAttachments } from './hooks/useImageAttachments.js';
-import { ImagePreview } from './components/messages/ImagePreview.js';
-import { ImageMessageRenderer } from './components/messages/ImageMessageRenderer.js';
 import type { WebViewImageMessage } from './utils/imageMessageUtils.js';
 
 export const App: React.FC = () => {
@@ -93,16 +96,10 @@ export const App: React.FC = () => {
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
-  const messagesContainerRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
-  const inputFieldRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const inputFieldRef = useRef<HTMLDivElement | null>(null);
 
   const [editMode, setEditMode] = useState<ApprovalModeValue>(
     ApprovalMode.DEFAULT,
@@ -314,6 +311,13 @@ export const App: React.FC = () => {
     skipAutoActiveContext,
     vscode,
     inputFieldRef,
+    isStreaming: messageHandling.isStreaming,
+    isWaitingForResponse: messageHandling.isWaitingForResponse,
+  });
+
+  const canSubmit = shouldSendMessage({
+    inputText,
+    attachedImages,
     isStreaming: messageHandling.isStreaming,
     isWaitingForResponse: messageHandling.isWaitingForResponse,
   });
@@ -849,7 +853,6 @@ export const App: React.FC = () => {
                 key={`message-${index}`}
                 msg={msg as WebViewImageMessage}
                 imageIndex={imageIndex}
-                index={index}
               />
             );
           }
@@ -1059,6 +1062,7 @@ export const App: React.FC = () => {
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
           onCompletionClose={completion.closeCompletion}
+          canSubmit={canSubmit}
           extraContent={
             attachedImages.length > 0 ? (
               <ImagePreview

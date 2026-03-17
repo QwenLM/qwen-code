@@ -121,7 +121,7 @@ interface UseWebViewMessagesProps {
   ) => void;
 
   // Input
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   setInputText: (text: string) => void;
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;

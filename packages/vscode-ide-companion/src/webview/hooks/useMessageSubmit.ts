@@ -15,7 +15,7 @@ interface UseMessageSubmitProps {
   setInputText: (text: string) => void;
   attachedImages?: ImageAttachment[];
   clearImages?: () => void;
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
   // When true, do NOT auto-attach the active editor file/selection to context

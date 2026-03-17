@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { unescapePath } from '@qwen-code/qwen-code-core';
+
 const IMAGE_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -15,8 +17,6 @@ const IMAGE_EXTENSIONS = new Set([
   '.heif',
   '.gif',
 ]);
-
-const FILE_REF_PATTERN = /@([^\s]+)/g;
 
 export interface WebViewMessageBase {
   role: 'user' | 'assistant' | 'thinking';
@@ -38,6 +38,12 @@ export interface WebViewImageMessage extends WebViewMessageBase {
 }
 
 export type WebViewMessage = WebViewMessageBase | WebViewImageMessage;
+
+interface ParsedImageReference {
+  imagePath: string;
+  start: number;
+  end: number;
+}
 
 function isImageReference(ref: string): boolean {
   const lower = ref.toLowerCase();
@@ -65,28 +71,92 @@ export function splitMessageContentForImages(content: string): {
     return { text: '', imagePaths: [] };
   }
 
-  const imagePaths: string[] = [];
-  let match: RegExpExecArray | null;
+  const imageReferences = parseImageReferences(content);
 
-  FILE_REF_PATTERN.lastIndex = 0;
-  while ((match = FILE_REF_PATTERN.exec(content)) !== null) {
-    const ref = match[1];
-    if (isImageReference(ref)) {
-      imagePaths.push(ref);
-    }
-  }
-
-  if (imagePaths.length === 0) {
+  if (imageReferences.length === 0) {
     return { text: content, imagePaths: [] };
   }
 
-  const cleaned = normalizeWhitespace(
-    content.replace(FILE_REF_PATTERN, (full, ref: string) =>
-      isImageReference(ref) ? '' : full,
-    ),
-  );
+  let cleanedContent = '';
+  let lastIndex = 0;
+
+  for (const reference of imageReferences) {
+    cleanedContent += content.slice(lastIndex, reference.start);
+    lastIndex = reference.end;
+  }
+
+  cleanedContent += content.slice(lastIndex);
+
+  const cleaned = normalizeWhitespace(cleanedContent);
+  const imagePaths = imageReferences.map((reference) => reference.imagePath);
 
   return { text: cleaned, imagePaths };
+}
+
+function parseImageReferences(content: string): ParsedImageReference[] {
+  const references: ParsedImageReference[] = [];
+  let currentIndex = 0;
+
+  while (currentIndex < content.length) {
+    let atIndex = -1;
+    let nextSearchIndex = currentIndex;
+
+    while (nextSearchIndex < content.length) {
+      if (
+        content[nextSearchIndex] === '@' &&
+        (nextSearchIndex === 0 || content[nextSearchIndex - 1] !== '\\')
+      ) {
+        atIndex = nextSearchIndex;
+        break;
+      }
+      nextSearchIndex += 1;
+    }
+
+    if (atIndex === -1) {
+      break;
+    }
+
+    let pathEndIndex = atIndex + 1;
+    let inEscape = false;
+
+    while (pathEndIndex < content.length) {
+      const char = content[pathEndIndex];
+
+      if (inEscape) {
+        inEscape = false;
+      } else if (char === '\\') {
+        inEscape = true;
+      } else if (/[,\s;!?()[\]{}]/.test(char)) {
+        break;
+      } else if (char === '.') {
+        const nextChar =
+          pathEndIndex + 1 < content.length ? content[pathEndIndex + 1] : '';
+        if (nextChar === '' || /\s/.test(nextChar)) {
+          break;
+        }
+      }
+
+      pathEndIndex += 1;
+    }
+
+    const rawReference = content.slice(atIndex, pathEndIndex);
+    const unescapedReference = unescapePath(rawReference);
+    const imagePath = unescapedReference.startsWith('@')
+      ? unescapedReference.slice(1)
+      : unescapedReference;
+
+    if (isImageReference(imagePath)) {
+      references.push({
+        imagePath,
+        start: atIndex,
+        end: pathEndIndex,
+      });
+    }
+
+    currentIndex = pathEndIndex;
+  }
+
+  return references;
 }
 
 export function expandUserMessageWithImages(message: WebViewMessageBase): {

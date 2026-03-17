@@ -332,9 +332,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
     const {
       formattedText: updatedFormattedText,
       displayText: updatedDisplayText,
+      savedImageCount,
     } = await processImageAttachments(formattedText, attachments);
     formattedText = updatedFormattedText;
     displayText = updatedDisplayText;
+
+    if (hasAttachments && !trimmedText && savedImageCount === 0) {
+      const errorMsg =
+        'Failed to attach the pasted image. Nothing was sent. Please paste the image again.';
+      console.warn('[SessionMessageHandler]', errorMsg);
+      vscode.window.showErrorMessage(errorMsg);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
 
     // Ensure we have an active conversation
     if (!this.currentConversationId) {

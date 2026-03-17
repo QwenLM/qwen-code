@@ -4,19 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WebViewImageMessage } from '../../utils/imageMessageUtils.js';
+import type { FC } from 'react';
 
-export interface ImageMessageRendererProps {
-  msg: WebViewImageMessage;
-  imageIndex: number;
-  index: number;
+export interface ImageMessageLike {
+  kind: 'image';
+  imagePath: string;
+  imageSrc?: string;
+  imageMissing?: boolean;
 }
 
-export function ImageMessageRenderer({
+export interface ImageMessageRendererProps {
+  msg: ImageMessageLike;
+  imageIndex: number;
+}
+
+export const ImageMessageRenderer: FC<ImageMessageRendererProps> = ({
   msg,
   imageIndex,
-  index,
-}: ImageMessageRendererProps) {
+}) => {
   if (msg.kind !== 'image' || !msg.imagePath) {
     return null;
   }
@@ -25,11 +30,7 @@ export function ImageMessageRenderer({
   const showImage = Boolean(msg.imageSrc) && !msg.imageMissing;
 
   return (
-    <div
-      key={`message-${index}`}
-      className="qwen-message user-message-container flex gap-0 my-1 items-start text-left flex-col relative"
-      style={{ position: 'relative' }}
-    >
+    <div className="qwen-message user-message-container flex gap-0 my-1 items-start text-left flex-col relative">
       <div
         className="inline-block relative whitespace-pre-wrap rounded-md max-w-full overflow-x-auto overflow-y-hidden select-text leading-[1.5]"
         style={{
@@ -68,4 +69,4 @@ export function ImageMessageRenderer({
       </div>
     </div>
   );
-}
+};

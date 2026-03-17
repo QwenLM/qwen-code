@@ -16,7 +16,7 @@ import type {
   PermissionResponseMessage,
   AskUserQuestionResponseMessage,
 } from '../../types/webviewMessageTypes.js';
-import { PanelManager } from './PanelManager.js';
+import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
@@ -473,10 +473,10 @@ export class WebViewProvider {
     // Configure webview options
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.extensionUri, 'dist'),
-        vscode.Uri.joinPath(this.extensionUri, 'assets'),
-      ],
+      localResourceRoots: getLocalResourceRoots(
+        this.extensionUri,
+        vscode.workspace.workspaceFolders,
+      ),
     };
 
     // Store reference so sendMessageToWebView can reach it
@@ -495,6 +495,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data);
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -1230,17 +1234,12 @@ export class WebViewProvider {
    */
   private sendMessageToWebView(message: unknown): void {
     this.updateAuthStateFromMessage(message);
-    const panel = this.panelManager.getPanel();
-    if (panel) {
-      panel.webview.postMessage(message);
-    } else if (this.attachedWebview) {
-      this.attachedWebview.postMessage(message);
-    }
+    this.getActiveWebview()?.postMessage(message);
   }
 
   private handleResolveImagePaths(data: unknown): void {
-    const panel = this.panelManager.getPanel();
-    if (!panel) {
+    const webview = this.getActiveWebview();
+    if (!webview) {
       return;
     }
 
@@ -1255,7 +1254,7 @@ export class WebViewProvider {
     const resolveImagePaths = createImagePathResolver({
       workspaceRoots,
       toWebviewUri: (filePath: string) =>
-        panel.webview.asWebviewUri(vscode.Uri.file(filePath)).toString(),
+        webview.asWebviewUri(vscode.Uri.file(filePath)).toString(),
     });
 
     const resolved = resolveImagePaths(paths);
@@ -1264,6 +1263,10 @@ export class WebViewProvider {
       type: 'imagePathsResolved',
       data: { resolved, requestId: payload?.requestId },
     });
+  }
+
+  private getActiveWebview(): vscode.Webview | null {
+    return this.panelManager.getPanel()?.webview ?? this.attachedWebview;
   }
 
   /**
