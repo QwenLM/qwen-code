@@ -331,24 +331,6 @@ describe('agentMessagesToHistoryItems — tool metadata', () => {
     expect(group.tools[0]!.resultDisplay).toBe('file contents');
   });
 
-  it('forwards outputFile from tool_result', () => {
-    const items = agentMessagesToHistoryItems(
-      [
-        toolCallMsg('c1', 'shell'),
-        toolResultMsg('c1', 'shell', {
-          success: true,
-          outputFile: '/tmp/output.txt',
-        }),
-      ],
-      noApprovals,
-    );
-    const group = items[0] as Extract<
-      (typeof items)[0],
-      { type: 'tool_group' }
-    >;
-    expect(group.tools[0]!.outputFile).toBe('/tmp/output.txt');
-  });
-
   it('forwards renderOutputAsMarkdown from tool_call', () => {
     const items = agentMessagesToHistoryItems(
       [

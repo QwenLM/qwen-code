@@ -650,7 +650,6 @@ export class AgentCore {
             error: errorMessage,
             responseParts: call.response.responseParts,
             resultDisplay: call.response.resultDisplay,
-            outputFile: call.response.outputFile,
             durationMs: duration,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
