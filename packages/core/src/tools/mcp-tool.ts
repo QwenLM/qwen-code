@@ -228,6 +228,45 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  private async handleReconnectOnError(
+    error: unknown,
+    signal: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ): Promise<ToolResult> {
+    debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
+
+    if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
+      debugLogger.info(
+        `Reconnection attempt ${this.retryCount + 1}/${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES} for MCP server '${this.serverName}'`,
+      );
+      const newTool = await this.attemptReconnect();
+      if (newTool) {
+        const newInvocation = new DiscoveredMCPToolInvocation(
+          newTool['mcpTool'],
+          this.serverName,
+          this.serverToolName,
+          this.displayName,
+          this.trust,
+          this.params,
+          this.cliConfig,
+          newTool['mcpClient'],
+          this.mcpTimeout,
+          this.annotations,
+          this.retryCount + 1,
+        );
+        return newInvocation.execute(signal, updateOutput);
+      }
+    } else if (
+      this.retryCount >= DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES
+    ) {
+      debugLogger.error(
+        `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
+      );
+    }
+
+    throw error;
+  }
+
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -306,34 +345,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
       };
     } catch (error) {
-      debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
-
-      // Attempt reconnection with retry limit
-      if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
-        const newTool = await this.attemptReconnect();
-        if (newTool) {
-          const newInvocation = new DiscoveredMCPToolInvocation(
-            newTool['mcpTool'],
-            this.serverName,
-            this.serverToolName,
-            this.displayName,
-            this.trust,
-            this.params,
-            this.cliConfig,
-            newTool['mcpClient'],
-            this.mcpTimeout,
-            this.annotations,
-            this.retryCount + 1,
-          );
-          return newInvocation.execute(signal, updateOutput);
-        }
-      } else {
-        debugLogger.error(
-          `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
-        );
-      }
-
-      throw error;
+      return this.handleReconnectOnError(error, signal, updateOutput);
     }
   }
 
@@ -407,34 +419,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
       };
     } catch (error) {
-      debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
-
-      // Attempt reconnection with retry limit
-      if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
-        const newTool = await this.attemptReconnect();
-        if (newTool) {
-          const newInvocation = new DiscoveredMCPToolInvocation(
-            newTool['mcpTool'],
-            this.serverName,
-            this.serverToolName,
-            this.displayName,
-            this.trust,
-            this.params,
-            this.cliConfig,
-            newTool['mcpClient'],
-            this.mcpTimeout,
-            this.annotations,
-            this.retryCount + 1,
-          );
-          return newInvocation.execute(signal);
-        }
-      } else {
-        debugLogger.error(
-          `Max reconnection attempts (${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES}) reached for MCP server '${this.serverName}'`,
-        );
-      }
-
-      throw error;
+      return this.handleReconnectOnError(error, signal);
     }
   }
 

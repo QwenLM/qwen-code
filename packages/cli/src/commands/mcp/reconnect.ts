@@ -15,16 +15,21 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 
-async function getMcpServersFromConfig(): Promise<
-  Record<string, MCPServerConfig>
-> {
+async function getMcpServersFromConfig(
+  extensionManager?: ExtensionManager,
+): Promise<Record<string, MCPServerConfig>> {
   const settings = loadSettings();
-  const extensionManager = new ExtensionManager({
-    isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
-    telemetrySettings: settings.merged.telemetry,
-  });
-  await extensionManager.refreshCache();
-  const extensions = extensionManager.getLoadedExtensions();
+  const extManager =
+    extensionManager ??
+    new ExtensionManager({
+      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+      telemetrySettings: settings.merged.telemetry,
+    });
+
+  if (!extensionManager) {
+    await extManager.refreshCache();
+  }
+  const extensions = extManager.getLoadedExtensions();
   const mcpServers = { ...(settings.merged.mcpServers || {}) };
   for (const extension of extensions) {
     if (extension.isActive) {
@@ -64,14 +69,26 @@ async function createMinimalConfig(): Promise<Config> {
   return config;
 }
 
+interface ReconnectError extends Error {
+  exitCode: number;
+}
+
+function createReconnectError(
+  message: string,
+  exitCode: number = 1,
+): ReconnectError {
+  const error = new Error(message) as ReconnectError;
+  error.exitCode = exitCode;
+  return error;
+}
+
 async function reconnectMcpServer(serverName: string): Promise<void> {
   const mcpServers = await getMcpServersFromConfig();
 
   if (!mcpServers[serverName]) {
-    writeStderrLine(
+    throw createReconnectError(
       `Error: Server "${serverName}" not found in configuration.`,
     );
-    process.exit(1);
   }
 
   writeStdoutLine(`Reconnecting to server "${serverName}"...`);
@@ -84,15 +101,21 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
     await config.shutdown();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    writeStderrLine(
+    throw createReconnectError(
       `Failed to reconnect to server "${serverName}": ${message}`,
     );
-    process.exit(1);
   }
 }
 
 async function reconnectAllMcpServers(): Promise<void> {
-  const mcpServers = await getMcpServersFromConfig();
+  const settings = loadSettings();
+  const extensionManager = new ExtensionManager({
+    isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+    telemetrySettings: settings.merged.telemetry,
+  });
+  await extensionManager.refreshCache();
+
+  const mcpServers = await getMcpServersFromConfig(extensionManager);
   const serverNames = Object.keys(mcpServers);
 
   if (serverNames.length === 0) {
@@ -154,10 +177,17 @@ export const reconnectCommand: CommandModule = {
     const serverName = argv['server-name'] as string | undefined;
     const all = argv['all'] as boolean;
 
-    if (all) {
-      await reconnectAllMcpServers();
-    } else if (serverName) {
-      await reconnectMcpServer(serverName);
+    try {
+      if (all) {
+        await reconnectAllMcpServers();
+      } else if (serverName) {
+        await reconnectMcpServer(serverName);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const exitCode = (error as ReconnectError)?.exitCode ?? 1;
+      writeStderrLine(message);
+      process.exit(exitCode);
     }
   },
 };
