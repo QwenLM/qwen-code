@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -69,11 +69,32 @@ import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
+// Hook types and utilities
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
+import { partToString } from '../utils/partUtils.js';
+import { createHookOutput } from '../hooks/types.js';
+
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
+
+export enum SendMessageType {
+  UserQuery = 'userQuery',
+  ToolResult = 'toolResult',
+  Retry = 'retry',
+  Hook = 'hook',
+}
+
+export interface SendMessageOptions {
+  type: SendMessageType;
+}
 
 export class GeminiClient {
   private chat?: GeminiChat;
@@ -140,6 +161,10 @@ export class GeminiClient {
 
   stripThoughtsFromHistory() {
     this.getChat().stripThoughtsFromHistory();
+  }
+
+  private stripOrphanedUserEntriesFromHistory() {
+    this.getChat().stripOrphanedUserEntriesFromHistory();
   }
 
   setHistory(history: Content[]) {
@@ -404,10 +429,61 @@ export class GeminiClient {
     request: PartListUnion,
     signal: AbortSignal,
     prompt_id: string,
-    options?: { isContinuation: boolean },
+    options?: SendMessageOptions,
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    if (!options?.isContinuation) {
+    const messageType = options?.type ?? SendMessageType.UserQuery;
+
+    if (messageType === SendMessageType.Retry) {
+      this.stripOrphanedUserEntriesFromHistory();
+    }
+
+    // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
+    const hooksEnabled = this.config.getEnableHooks();
+    const messageBus = this.config.getMessageBus();
+    if (messageType !== SendMessageType.Retry && hooksEnabled && messageBus) {
+      const promptText = partToString(request);
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'UserPromptSubmit',
+          input: {
+            prompt: promptText,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+      const hookOutput = response.output
+        ? createHookOutput('UserPromptSubmit', response.output)
+        : undefined;
+
+      if (
+        hookOutput?.isBlockingDecision() ||
+        hookOutput?.shouldStopExecution()
+      ) {
+        yield {
+          type: GeminiEventType.Error,
+          value: {
+            error: new Error(
+              `UserPromptSubmit hook blocked processing: ${hookOutput.getEffectiveReason()}`,
+            ),
+          },
+        };
+        return new Turn(this.getChat(), prompt_id);
+      }
+
+      // Add additional context from hooks to the request
+      const additionalContext = hookOutput?.getAdditionalContext();
+      if (additionalContext) {
+        const requestArray = Array.isArray(request) ? request : [request];
+        request = [...requestArray, { text: additionalContext }];
+      }
+    }
+
+    if (messageType === SendMessageType.UserQuery) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
 
@@ -417,14 +493,18 @@ export class GeminiClient {
       // strip thoughts from history before sending the message
       this.stripThoughtsFromHistory();
     }
-    this.sessionTurnCount++;
-    if (
-      this.config.getMaxSessionTurns() > 0 &&
-      this.sessionTurnCount > this.config.getMaxSessionTurns()
-    ) {
-      yield { type: GeminiEventType.MaxSessionTurns };
-      return new Turn(this.getChat(), prompt_id);
+    if (messageType !== SendMessageType.Retry) {
+      this.sessionTurnCount++;
+
+      if (
+        this.config.getMaxSessionTurns() > 0 &&
+        this.sessionTurnCount > this.config.getMaxSessionTurns()
+      ) {
+        yield { type: GeminiEventType.MaxSessionTurns };
+        return new Turn(this.getChat(), prompt_id);
+      }
     }
+
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
@@ -486,17 +566,9 @@ export class GeminiClient {
 
     const turn = new Turn(this.getChat(), prompt_id);
 
-    if (!this.config.getSkipLoopDetection()) {
-      const loopDetected = await this.loopDetector.turnStarted(signal);
-      if (loopDetected) {
-        yield { type: GeminiEventType.LoopDetected };
-        return turn;
-      }
-    }
-
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (!options?.isContinuation) {
+    if (messageType === SendMessageType.UserQuery) {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
@@ -536,6 +608,65 @@ export class GeminiClient {
         return turn;
       }
     }
+    // Fire Stop hook through MessageBus (only if hooks are enabled)
+    // This must be done before any early returns to ensure hooks are always triggered
+    if (hooksEnabled && messageBus && !turn.pendingToolCalls.length) {
+      // Get response text from the chat history
+      const history = this.getHistory();
+      const lastModelMessage = history
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '[no response text]';
+
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
+
+      const stopOutput = hookOutput as StopHookOutput | undefined;
+
+      // For Stop hooks, blocking/stop execution should force continuation
+      if (
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
+      ) {
+        // Emit system message if provided (e.g., "🔄 Ralph iteration 5")
+        if (stopOutput.systemMessage) {
+          yield {
+            type: GeminiEventType.HookSystemMessage,
+            value: stopOutput.systemMessage,
+          };
+        }
+
+        const continueReason = stopOutput.getEffectiveReason();
+        const continueRequest = [{ text: continueReason }];
+        return yield* this.sendMessageStream(
+          continueRequest,
+          signal,
+          prompt_id,
+          { type: SendMessageType.Hook },
+          boundedTurns - 1,
+        );
+      }
+    }
+
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
         return turn;
@@ -557,9 +688,9 @@ export class GeminiClient {
       );
       if (nextSpeakerCheck?.next_speaker === 'model') {
         const nextRequest = [{ text: 'Please continue.' }];
-        // This recursive call's events will be yielded out, but the final
-        // turn object will be from the top-level call.
-        yield* this.sendMessageStream(
+        // This recursive call's events will be yielded out, and the final
+        // turn object from the recursive call will be returned.
+        return yield* this.sendMessageStream(
           nextRequest,
           signal,
           prompt_id,
@@ -568,6 +699,7 @@ export class GeminiClient {
         );
       }
     }
+
     return turn;
   }
 

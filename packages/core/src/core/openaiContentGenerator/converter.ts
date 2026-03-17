@@ -821,62 +821,66 @@ export class OpenAIContentConverter {
   convertOpenAIResponseToGemini(
     openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
-    const choice = openaiResponse.choices[0];
+    const choice = openaiResponse.choices?.[0];
     const response = new GenerateContentResponse();
 
-    const parts: Part[] = [];
+    if (choice) {
+      const parts: Part[] = [];
 
-    // Handle reasoning content (thoughts)
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
-    }
+      // Handle reasoning content (thoughts)
+      const reasoningText =
+        (choice.message as ExtendedCompletionMessage).reasoning_content ??
+        (choice.message as ExtendedCompletionMessage).reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
 
-    // Handle text content
-    if (choice.message.content) {
-      parts.push({ text: choice.message.content });
-    }
+      // Handle text content
+      if (choice.message.content) {
+        parts.push({ text: choice.message.content });
+      }
 
-    // Handle tool calls
-    if (choice.message.tool_calls) {
-      for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.function) {
-          let args: Record<string, unknown> = {};
-          if (toolCall.function.arguments) {
-            args = safeJsonParse(toolCall.function.arguments, {});
+      // Handle tool calls
+      if (choice.message.tool_calls) {
+        for (const toolCall of choice.message.tool_calls) {
+          if (toolCall.function) {
+            let args: Record<string, unknown> = {};
+            if (toolCall.function.arguments) {
+              args = safeJsonParse(toolCall.function.arguments, {});
+            }
+
+            parts.push({
+              functionCall: {
+                id: toolCall.id,
+                name: toolCall.function.name,
+                args,
+              },
+            });
           }
-
-          parts.push({
-            functionCall: {
-              id: toolCall.id,
-              name: toolCall.function.name,
-              args,
-            },
-          });
         }
       }
+
+      response.candidates = [
+        {
+          content: {
+            parts,
+            role: 'model' as const,
+          },
+          finishReason: this.mapOpenAIFinishReasonToGemini(
+            choice.finish_reason || 'stop',
+          ),
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+    } else {
+      response.candidates = [];
     }
 
     response.responseId = openaiResponse.id;
     response.createTime = openaiResponse.created
       ? openaiResponse.created.toString()
       : new Date().getTime().toString();
-
-    response.candidates = [
-      {
-        content: {
-          parts,
-          role: 'model' as const,
-        },
-        finishReason: this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason || 'stop',
-        ),
-        index: 0,
-        safetyRatings: [],
-      },
-    ];
 
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };
@@ -973,7 +977,14 @@ export class OpenAIContentConverter {
       }
 
       // Only emit function calls when streaming is complete (finish_reason is present)
+      let toolCallsTruncated = false;
       if (choice.finish_reason) {
+        // Detect truncation the provider may not report correctly.
+        // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
+        // even when output was cut off mid-JSON due to max_tokens.
+        toolCallsTruncated =
+          this.streamingToolCallParser.hasIncompleteToolCalls();
+
         const completedToolCalls =
           this.streamingToolCallParser.getCompletedToolCalls();
 
@@ -995,6 +1006,13 @@ export class OpenAIContentConverter {
         this.streamingToolCallParser.reset();
       }
 
+      // If tool call JSON was truncated, override to "length" so downstream
+      // (turn.ts) correctly sets wasOutputTruncated=true.
+      const effectiveFinishReason =
+        toolCallsTruncated && choice.finish_reason !== 'length'
+          ? 'length'
+          : choice.finish_reason;
+
       // Only include finishReason key if finish_reason is present
       const candidate: Candidate = {
         content: {
@@ -1004,9 +1022,9 @@ export class OpenAIContentConverter {
         index: 0,
         safetyRatings: [],
       };
-      if (choice.finish_reason) {
+      if (effectiveFinishReason) {
         candidate.finishReason = this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason,
+          effectiveFinishReason,
         );
       }
       response.candidates = [candidate];

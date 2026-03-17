@@ -91,13 +91,6 @@ vi.mock('./sharedTokenManager.js', () => ({
   },
 }));
 
-// Mock qrcode-terminal
-vi.mock('qrcode-terminal', () => ({
-  default: {
-    generate: vi.fn(),
-  },
-}));
-
 // Mock open
 vi.mock('open', () => ({
   default: vi.fn(),

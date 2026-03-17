@@ -94,6 +94,51 @@ Prompt content.`;
     expect(result.frontmatter).toBeDefined();
     expect(result.prompt).toBe('Prompt content.');
   });
+
+  it('should parse frontmatter in CRLF files', () => {
+    const content =
+      '---\r\ndescription: Windows command\r\n---\r\n\r\nLine 1\r\nLine 2\r\n';
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'Windows command',
+      },
+      prompt: 'Line 1\nLine 2',
+    });
+  });
+
+  it('should parse frontmatter in CR-only files', () => {
+    const content =
+      '---\rdescription: Old mac command\r---\r\rLine 1\rLine 2\r';
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'Old mac command',
+      },
+      prompt: 'Line 1\nLine 2',
+    });
+  });
+
+  it('should parse frontmatter when content starts with UTF-8 BOM', () => {
+    const content = `\uFEFF---
+description: BOM command
+---
+
+Prompt from BOM file.`;
+
+    const result = parseMarkdownCommand(content);
+
+    expect(result).toEqual({
+      frontmatter: {
+        description: 'BOM command',
+      },
+      prompt: 'Prompt from BOM file.',
+    });
+  });
 });
 
 describe('MarkdownCommandDefSchema', () => {

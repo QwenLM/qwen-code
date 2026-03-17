@@ -148,7 +148,9 @@ export interface OpenDialogActionReturn {
     | 'subagent_list'
     | 'permissions'
     | 'approval-mode'
-    | 'resume';
+    | 'resume'
+    | 'extensions_manage'
+    | 'mcp';
 }
 
 /**
@@ -209,6 +211,7 @@ export enum CommandKind {
   BUILT_IN = 'built-in',
   FILE = 'file',
   MCP_PROMPT = 'mcp-prompt',
+  SKILL = 'skill',
 }
 
 export interface CommandCompletionItem {

@@ -35,6 +35,7 @@ import {
   InterruptedMessage,
   FileIcon,
   PermissionDrawer,
+  AskUserQuestionDialog,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -44,7 +45,8 @@ import { InputForm } from './components/layout/InputForm.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
-import type { ModelInfo, AvailableCommand } from '../types/acpTypes.js';
+import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
+import type { Question } from '../types/acpTypes.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
@@ -73,6 +75,13 @@ export const App: React.FC = () => {
   const [permissionRequest, setPermissionRequest] = useState<{
     options: PermissionOption[];
     toolCall: PermissionToolCall;
+  } | null>(null);
+  const [askUserQuestionRequest, setAskUserQuestionRequest] = useState<{
+    questions: Question[];
+    sessionId: string;
+    metadata?: {
+      source?: string;
+    };
   } | null>(null);
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -313,22 +322,24 @@ export const App: React.FC = () => {
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
-      // Proactively end local states and add an 'Interrupted' line
-      try {
-        messageHandling.endStreaming?.();
-      } catch {
-        /* no-op */
+      // End streaming state and add an 'Interrupted' line.
+      // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
+      // extension's streamEnd message clear it after the cancel is
+      // properly processed on the backend.  This keeps the submit
+      // guard active and prevents any cached input from being
+      // auto-submitted during the cancel → confirmed window.
+      if (messageHandling.isStreaming) {
+        try {
+          messageHandling.endStreaming?.();
+        } catch {
+          /* no-op */
+        }
+        messageHandling.addMessage({
+          role: 'assistant',
+          content: 'Interrupted',
+          timestamp: Date.now(),
+        });
       }
-      try {
-        messageHandling.clearWaitingForResponse?.();
-      } catch {
-        /* no-op */
-      }
-      messageHandling.addMessage({
-        role: 'assistant',
-        content: 'Interrupted',
-        timestamp: Date.now(),
-      });
     }
     // Notify extension/agent to cancel server-side work
     vscode.postMessage({
@@ -346,6 +357,7 @@ export const App: React.FC = () => {
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest: setPermissionRequest,
+    handleAskUserQuestion: setAskUserQuestionRequest,
     inputFieldRef,
     setInputText,
     setEditMode,
@@ -495,6 +507,31 @@ export const App: React.FC = () => {
     },
     [vscode],
   );
+
+  // Handle ask user question response
+  const handleAskUserQuestionResponse = useCallback(
+    (answers: Record<string, string>) => {
+      // Forward answers to extension as ACP permission response
+      vscode.postMessage({
+        type: 'askUserQuestionResponse',
+        data: { answers },
+      });
+
+      setAskUserQuestionRequest(null);
+    },
+    [vscode],
+  );
+
+  // Handle ask user question cancel
+  const handleAskUserQuestionCancel = useCallback(() => {
+    // Forward cancel to extension as ACP permission response with cancel option
+    vscode.postMessage({
+      type: 'askUserQuestionResponse',
+      data: { answers: {}, cancelled: true },
+    });
+
+    setAskUserQuestionRequest(null);
+  }, [vscode]);
 
   // Handle completion selection
   const handleCompletionSelect = useCallback(
@@ -1045,6 +1082,14 @@ export const App: React.FC = () => {
           toolCall={permissionRequest.toolCall}
           onResponse={handlePermissionResponse}
           onClose={() => setPermissionRequest(null)}
+        />
+      )}
+
+      {isAuthenticated && askUserQuestionRequest && (
+        <AskUserQuestionDialog
+          questions={askUserQuestionRequest.questions}
+          onSubmit={handleAskUserQuestionResponse}
+          onCancel={handleAskUserQuestionCancel}
         />
       )}
     </div>

@@ -56,6 +56,7 @@ describe('git extension helpers', () => {
     });
 
     it('should clone, fetch and checkout a repo', async () => {
+      mockPlatform.mockReturnValue('linux');
       const installMetadata = {
         source: 'http://my-repo.com',
         ref: 'my-ref',
@@ -69,12 +70,58 @@ describe('git extension helpers', () => {
       await cloneFromGit(installMetadata, destination);
 
       expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
+        '-c',
+        'core.symlinks=true',
         '--depth',
         '1',
       ]);
       expect(mockGit.getRemotes).toHaveBeenCalledWith(true);
       expect(mockGit.fetch).toHaveBeenCalledWith('origin', 'my-ref');
       expect(mockGit.checkout).toHaveBeenCalledWith('FETCH_HEAD');
+    });
+
+    it('should use core.symlinks=false on Windows to avoid permission errors', async () => {
+      mockPlatform.mockReturnValue('win32');
+      const installMetadata = {
+        source: 'http://my-repo.com',
+        ref: 'my-ref',
+        type: 'git' as const,
+      };
+      const destination = '/dest';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: 'http://my-repo.com' } },
+      ]);
+
+      await cloneFromGit(installMetadata, destination);
+
+      expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
+        '-c',
+        'core.symlinks=false',
+        '--depth',
+        '1',
+      ]);
+    });
+
+    it('should use core.symlinks=true on non-Windows platforms', async () => {
+      mockPlatform.mockReturnValue('darwin');
+      const installMetadata = {
+        source: 'http://my-repo.com',
+        ref: 'my-ref',
+        type: 'git' as const,
+      };
+      const destination = '/dest';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: 'http://my-repo.com' } },
+      ]);
+
+      await cloneFromGit(installMetadata, destination);
+
+      expect(mockGit.clone).toHaveBeenCalledWith('http://my-repo.com', './', [
+        '-c',
+        'core.symlinks=true',
+        '--depth',
+        '1',
+      ]);
     });
 
     it('should use HEAD if ref is not provided', async () => {

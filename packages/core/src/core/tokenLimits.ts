@@ -9,7 +9,7 @@ type TokenCount = number;
 export type TokenLimitType = 'input' | 'output';
 
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
-export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 8_192; // 8K tokens
+export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 16_384; // 16K tokens
 
 /**
  * Accurate numeric limits:
@@ -23,6 +23,7 @@ const LIMITS = {
   '128k': 131_072,
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
+  '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
   '400k': 400_000, // vendor-declared decimal, used by OpenAI GPT-5.x
   '512k': 524_288,
   '1m': 1_000_000,
@@ -87,7 +88,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // OpenAI
   // -------------------
-  [/^gpt-5/, LIMITS['400k']], // GPT-5.x: 400K
+  [/^gpt-5/, LIMITS['272k']], // GPT-5.x: 272K input (400K total - 128K output)
   [/^gpt-/, LIMITS['128k']], // GPT fallback (4o, 4.1, etc.): 128K
   [/^o\d/, LIMITS['200k']], // o-series (o3, o4-mini, etc.): 200K
 
@@ -165,14 +166,16 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3\.5/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen3-max/, LIMITS['64k']],
+  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
+  [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
-  [/^glm-4\.7/, LIMITS['16k']],
+  [/^glm-5/, LIMITS['128k']],
+  [/^glm-4\.7/, LIMITS['128k']],
 
   // MiniMax
   [/^minimax-m2\.5/i, LIMITS['64k']],

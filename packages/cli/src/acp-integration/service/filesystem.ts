@@ -1,100 +1,96 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FileSystemService } from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
-import { ACP_ERROR_CODES } from '../errorCodes.js';
+import type {
+  AgentSideConnection,
+  FileSystemCapability,
+  ReadTextFileRequest,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
+} from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
+import type {
+  FileSystemService,
+  ReadTextFileResponse,
+} from '@qwen-code/qwen-code-core';
 
-/**
- * ACP client-based implementation of FileSystemService
- */
+const RESOURCE_NOT_FOUND_CODE = -32002;
+
+function getErrorCode(error: unknown): unknown {
+  if (error instanceof RequestError) {
+    return error.code;
+  }
+
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return (error as { code?: unknown }).code;
+  }
+
+  return undefined;
+}
+
+function createEnoentError(filePath: string): NodeJS.ErrnoException {
+  const err = new Error(`File not found: ${filePath}`) as NodeJS.ErrnoException;
+  err.code = 'ENOENT';
+  err.errno = -2;
+  err.path = filePath;
+  return err;
+}
+
 export class AcpFileSystemService implements FileSystemService {
   constructor(
-    private readonly client: acp.Client,
+    private readonly connection: AgentSideConnection,
     private readonly sessionId: string,
-    private readonly capabilities: acp.FileSystemCapability,
+    private readonly capabilities: FileSystemCapability,
     private readonly fallback: FileSystemService,
   ) {}
 
-  async readTextFile(filePath: string): Promise<string> {
+  async readTextFile(
+    params: Omit<ReadTextFileRequest, 'sessionId'>,
+  ): Promise<ReadTextFileResponse> {
     if (!this.capabilities.readTextFile) {
-      return this.fallback.readTextFile(filePath);
+      return this.fallback.readTextFile(params);
     }
 
-    let response: { content: string };
+    let response: ReadTextFileResponse;
     try {
-      response = await this.client.readTextFile({
-        path: filePath,
+      response = await this.connection.readTextFile({
+        ...params,
         sessionId: this.sessionId,
-        line: null,
-        limit: null,
       });
     } catch (error) {
-      const errorCode =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? (error as { code?: unknown }).code
-          : undefined;
+      const errorCode = getErrorCode(error);
 
-      if (errorCode === ACP_ERROR_CODES.RESOURCE_NOT_FOUND) {
-        const err = new Error(
-          `File not found: ${filePath}`,
-        ) as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        err.errno = -2;
-        err.path = filePath;
-        throw err;
+      if (errorCode === RESOURCE_NOT_FOUND_CODE) {
+        throw createEnoentError(params.path);
       }
 
       throw error;
     }
 
-    return response.content;
+    return response;
   }
 
   async writeTextFile(
-    filePath: string,
-    content: string,
-    options?: { bom?: boolean },
-  ): Promise<void> {
+    params: Omit<WriteTextFileRequest, 'sessionId'>,
+  ): Promise<WriteTextFileResponse> {
     if (!this.capabilities.writeTextFile) {
-      return this.fallback.writeTextFile(filePath, content, options);
+      return this.fallback.writeTextFile(params);
     }
 
-    // Prepend BOM character if requested
-    const finalContent = options?.bom ? '\uFEFF' + content : content;
+    const finalContent = params._meta?.['bom']
+      ? '\uFEFF' + params.content
+      : params.content;
 
-    await this.client.writeTextFile({
-      path: filePath,
+    await this.connection.writeTextFile({
+      ...params,
       content: finalContent,
       sessionId: this.sessionId,
     });
-  }
 
-  async detectFileBOM(filePath: string): Promise<boolean> {
-    // Try to detect BOM through ACP client first by reading first line
-    if (this.capabilities.readTextFile) {
-      try {
-        const response = await this.client.readTextFile({
-          path: filePath,
-          sessionId: this.sessionId,
-          line: null,
-          limit: 1,
-        });
-        // Check if content starts with BOM character (U+FEFF)
-        // Use codePointAt for better Unicode support and check content length first
-        return (
-          response.content.length > 0 &&
-          response.content.codePointAt(0) === 0xfeff
-        );
-      } catch {
-        // Fall through to fallback if ACP read fails
-      }
-    }
-    // Fall back to local filesystem detection
-    return this.fallback.detectFileBOM(filePath);
+    return { _meta: params._meta };
   }
 
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {

@@ -49,6 +49,18 @@ export function ApiKeyInput({
           setError(t('API key cannot be empty.'));
           return;
         }
+        // Only validate sk-sp- prefix for China region (aliyun.com)
+        if (
+          region === CodingPlanRegion.CHINA &&
+          !trimmedKey.startsWith('sk-sp-')
+        ) {
+          setError(
+            t(
+              'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+            ),
+          );
+          return;
+        }
         onSubmit(trimmedKey);
       }
     },
@@ -57,9 +69,6 @@ export function ApiKeyInput({
 
   return (
     <Box flexDirection="column">
-      <Box marginBottom={1}>
-        <Text>{t('Please enter your API key:')}</Text>
-      </Box>
       <TextInput value={apiKey} onChange={setApiKey} placeholder="sk-sp-..." />
       {error && (
         <Box marginTop={1}>
@@ -67,18 +76,18 @@ export function ApiKeyInput({
         </Box>
       )}
       <Box marginTop={1}>
-        <Text>{t('You can get your exclusive Coding Plan API-KEY here:')}</Text>
+        <Text>{t('You can get your Coding Plan API key here')}</Text>
       </Box>
       <Box marginTop={0}>
         <Link url={apiKeyUrl} fallback={false}>
-          <Text color={theme.status.success} underline>
+          <Text color={theme.text.link} underline>
             {apiKeyUrl}
           </Text>
         </Link>
       </Box>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
-          {t('(Press Enter to submit, Escape to cancel)')}
+          {t('Enter to submit, Esc to go back')}
         </Text>
       </Box>
     </Box>

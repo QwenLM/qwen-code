@@ -6,13 +6,56 @@
 
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
-const AUTH_ERROR_PATTERNS = [
-  'Authentication required', // Standard authentication request message
-  `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`, // RPC error code indicates auth failure
-  'Unauthorized', // HTTP unauthorized error
-  'Invalid token', // Invalid token
-  'Session expired', // Session expired
-];
+const CODE_PATTERN = /\(\s*code:\s*(-?\d+)\s*\)/i;
+
+const toNumericCode = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^-?\d+$/.test(trimmed)) {
+      return Number.parseInt(trimmed, 10);
+    }
+  }
+  return null;
+};
+
+const extractCodeFromUnknown = (value: unknown): number | null => {
+  if (!value) {
+    return null;
+  }
+
+  const directCode = toNumericCode(value);
+  if (directCode !== null) {
+    return directCode;
+  }
+
+  if (typeof value === 'string') {
+    const match = value.match(CODE_PATTERN);
+    return match?.[1] ? Number.parseInt(match[1], 10) : null;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const topLevelCode = toNumericCode(record['code']);
+    if (topLevelCode !== null) {
+      return topLevelCode;
+    }
+
+    const nestedCode = extractCodeFromUnknown(record['error']);
+    if (nestedCode !== null) {
+      return nestedCode;
+    }
+
+    const messageCode = extractCodeFromUnknown(record['message']);
+    if (messageCode !== null) {
+      return messageCode;
+    }
+  }
+
+  return null;
+};
 
 /**
  * Determines if the given error is authentication-related
@@ -23,14 +66,6 @@ export const isAuthenticationRequiredError = (error: unknown): boolean => {
     return false;
   }
 
-  // Extract error message text
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : String(error);
-
-  // Match authentication-related errors using predefined patterns
-  return AUTH_ERROR_PATTERNS.some((pattern) => message.includes(pattern));
+  const code = extractCodeFromUnknown(error);
+  return code === ACP_ERROR_CODES.AUTH_REQUIRED;
 };

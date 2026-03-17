@@ -7,7 +7,7 @@
  * This allows local ApprovalModeValue to work with webui's EditModeInfo
  */
 
-import type { FC } from 'react';
+import type { ClipboardEvent, FC, ReactNode } from 'react';
 import { InputForm as BaseInputForm, getEditModeIcon } from '@qwen-code/webui';
 import type {
   InputFormProps as BaseInputFormProps,
@@ -15,7 +15,7 @@ import type {
 } from '@qwen-code/webui';
 import { getApprovalModeInfoFromString } from '../../../types/acpTypes.js';
 import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
-import type { ModelInfo } from '../../../types/acpTypes.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
 import { ModelSelector } from './ModelSelector.js';
 
 /**
@@ -25,6 +25,10 @@ export interface InputFormProps
   extends Omit<BaseInputFormProps, 'editModeInfo'> {
   /** Edit mode value (local type) */
   editMode: ApprovalModeValue;
+  /** Optional paste handler forwarded to the base input */
+  onPaste?: (e: ClipboardEvent) => void;
+  /** Optional content rendered between the input and actions */
+  extraContent?: ReactNode;
   /** Whether to show model selector */
   showModelSelector?: boolean;
   /** Available models for selection */

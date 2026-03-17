@@ -9,17 +9,16 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
-import type { QwenSession, QwenMessage } from './qwenSessionReader.js';
+import type { QwenSession } from './qwenSessionReader.js';
 
 /**
  * Qwen Session Manager
  *
- * This service provides direct filesystem access to save and load sessions
- * without relying on the CLI's ACP session/save method.
+ * This service provides direct filesystem access to load sessions.
  *
- * Note: This is primarily used as a fallback mechanism when ACP methods are
- * unavailable or fail. In normal operation, ACP session/list and session/load
- * should be preferred for consistency with the CLI.
+ * Note: Sessions are auto-saved by the CLI's ChatRecordingService.
+ * This class is primarily used as a fallback mechanism for loading sessions
+ * when ACP methods are unavailable or fail.
  */
 export class QwenSessionManager {
   private qwenDir: string;
@@ -42,60 +41,6 @@ export class QwenSessionManager {
    */
   private generateSessionId(): string {
     return crypto.randomUUID();
-  }
-
-  /**
-   * Save current conversation as a named session
-   *
-   * @param messages - Current conversation messages
-   * @param sessionName - Name/tag for the saved session
-   * @param workingDir - Current working directory
-   * @returns Session ID of the saved session
-   */
-  async saveSession(
-    messages: QwenMessage[],
-    sessionName: string,
-    workingDir: string,
-  ): Promise<string> {
-    try {
-      // Create session directory if it doesn't exist
-      const sessionDir = this.getSessionDir(workingDir);
-      if (!fs.existsSync(sessionDir)) {
-        fs.mkdirSync(sessionDir, { recursive: true });
-      }
-
-      // Generate session ID and filename using CLI's naming convention
-      const sessionId = this.generateSessionId();
-      const shortId = sessionId.split('-')[0]; // First part of UUID (8 chars)
-      const now = new Date();
-      const isoDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
-      const isoTime = now
-        .toISOString()
-        .split('T')[1]
-        .split(':')
-        .slice(0, 2)
-        .join('-'); // HH-MM
-      const filename = `session-${isoDate}T${isoTime}-${shortId}.json`;
-      const filePath = path.join(sessionDir, filename);
-
-      // Create session object
-      const session: QwenSession = {
-        sessionId,
-        projectHash: getProjectHash(workingDir),
-        startTime: messages[0]?.timestamp || new Date().toISOString(),
-        lastUpdated: new Date().toISOString(),
-        messages,
-      };
-
-      // Save session to file
-      fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
-
-      console.log(`[QwenSessionManager] Session saved: ${filePath}`);
-      return sessionId;
-    } catch (error) {
-      console.error('[QwenSessionManager] Failed to save session:', error);
-      throw error;
-    }
   }
 
   /**

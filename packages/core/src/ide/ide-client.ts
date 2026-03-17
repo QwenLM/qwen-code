@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as dns from 'node:dns';
 import * as fs from 'node:fs';
 import { isSubpath } from '../utils/paths.js';
 import { detectIde, type IdeInfo } from '../ide/detect-ide.js';
@@ -61,6 +62,19 @@ type ConnectionConfig = {
   stdio?: StdioConfig;
 };
 
+type IdeConnectionConfig = ConnectionConfig & {
+  workspacePath?: string;
+  ideInfo?: IdeInfo;
+  ppid?: number;
+};
+
+type ParsedConnectionLockFile = {
+  file: string;
+  fullPath: string;
+  mtimeMs: number;
+  parsed: IdeConnectionConfig;
+};
+
 function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
@@ -84,9 +98,7 @@ export class IdeClient {
   };
   private currentIde: IdeInfo | undefined;
   private ideProcessInfo: { pid: number; command: string } | undefined;
-  private connectionConfig:
-    | (ConnectionConfig & { workspacePath?: string; ideInfo?: IdeInfo })
-    | undefined;
+  private connectionConfig: IdeConnectionConfig | undefined;
   private authToken: string | undefined;
   private diffResponses = new Map<string, (result: DiffUpdateResult) => void>();
   private statusListeners = new Set<(state: IDEConnectionState) => void>();
@@ -169,6 +181,10 @@ export class IdeClient {
           this.connectionConfig.port,
         );
         if (connected) {
+          return;
+        }
+        const fallbackConnected = await this.tryFallbackPorts();
+        if (fallbackConnected) {
           return;
         }
       }
@@ -569,10 +585,10 @@ export class IdeClient {
   }
 
   private async getConnectionConfigFromFile(): Promise<
-    | (ConnectionConfig & { workspacePath?: string; ideInfo?: IdeInfo })
-    | undefined
+    IdeConnectionConfig | undefined
   > {
     const portFromEnv = this.getPortFromEnv();
+
     if (portFromEnv) {
       try {
         const ideDir = Storage.getGlobalIdeDir();
@@ -585,16 +601,25 @@ export class IdeClient {
     }
 
     // Legacy discovery for VSCode extension < v0.5.1.
-    return this.getLegacyConnectionConfig(portFromEnv);
+    const legacyConfig = await this.getLegacyConnectionConfig(portFromEnv);
+    if (legacyConfig) {
+      return legacyConfig;
+    }
+
+    const ideDir = Storage.getGlobalIdeDir();
+    const configs = await this.getAllConnectionConfigs(ideDir);
+    const cwd = process.cwd();
+    return configs.find(
+      (config) =>
+        config.workspacePath !== undefined &&
+        IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid,
+    );
   }
 
   // Legacy connection files were written in the global temp directory.
   private async getLegacyConnectionConfig(
     portFromEnv?: string,
-  ): Promise<
-    | (ConnectionConfig & { workspacePath?: string; ideInfo?: IdeInfo })
-    | undefined
-  > {
+  ): Promise<IdeConnectionConfig | undefined> {
     if (this.ideProcessInfo) {
       try {
         const portFile = path.join(
@@ -629,15 +654,13 @@ export class IdeClient {
 
   protected async getAllConnectionConfigs(
     ideDir: string,
-  ): Promise<
-    ConnectionConfig & Array<{ workspacePath?: string; ideInfo?: IdeInfo }>
-  > {
-    const fileRegex = new RegExp('^\\d+\\.lock$');
+  ): Promise<IdeConnectionConfig[]> {
+    const fileRegex = /^\d+\.lock$/;
     let lockFiles: string[];
     try {
-      lockFiles = (await fs.promises.readdir(ideDir)).filter((file) =>
-        fileRegex.test(file),
-      );
+      lockFiles = (await fs.promises.readdir(ideDir))
+        .map((file) => file.toString())
+        .filter((file) => fileRegex.test(file));
     } catch (e) {
       debugLogger.debug('Failed to read IDE connection directory:', e);
       return [];
@@ -650,32 +673,138 @@ export class IdeClient {
           const stat = await fs.promises.stat(fullPath);
           const content = await fs.promises.readFile(fullPath, 'utf8');
           try {
-            const parsed = JSON.parse(content);
-            return { file, mtimeMs: stat.mtimeMs, parsed };
-          } catch (e) {
-            debugLogger.debug('Failed to parse JSON from lock file: ', e);
-            return { file, mtimeMs: stat.mtimeMs, parsed: undefined };
+            return {
+              file,
+              fullPath,
+              mtimeMs: stat.mtimeMs,
+              parsed: JSON.parse(content) as IdeConnectionConfig,
+            };
+          } catch (error) {
+            debugLogger.debug('Failed to parse JSON from lock file: ', error);
+            return undefined;
           }
-        } catch (e) {
-          // If we can't stat/read the file, treat it as very old so it doesn't
-          // win ties, and skip parsing by returning undefined content.
-          debugLogger.debug('Failed to read/stat IDE lock file:', e);
-          return { file, mtimeMs: -Infinity, parsed: undefined };
+        } catch (error) {
+          debugLogger.debug('Failed to read/stat IDE lock file:', error);
+          return undefined;
         }
       }),
     );
 
-    return fileContents
-      .filter(({ parsed }) => parsed !== undefined)
+    const parsedLockFiles = fileContents.filter(
+      (lockFile): lockFile is ParsedConnectionLockFile =>
+        lockFile !== undefined,
+    );
+    const activeLockFiles = await Promise.all(
+      parsedLockFiles.map(async (lockFile) => ({
+        lockFile,
+        isStale: await this.cleanupStaleLockFile(lockFile),
+      })),
+    );
+
+    const staleCount = activeLockFiles.filter(({ isStale }) => isStale).length;
+    if (staleCount > 0) {
+      debugLogger.debug(
+        `[cleanupStaleLockFiles] Cleaned up ${staleCount} stale lock file(s)`,
+      );
+    }
+
+    return activeLockFiles
+      .filter(({ isStale }) => !isStale)
+      .map(({ lockFile }) => lockFile)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .map(({ parsed }) => parsed);
   }
 
-  private createProxyAwareFetch() {
-    // ignore proxy for '127.0.0.1' by deafult to allow connecting to the ide mcp server
+  private async cleanupStaleLockFile({
+    file,
+    fullPath,
+    parsed,
+  }: ParsedConnectionLockFile): Promise<boolean> {
+    try {
+      if (parsed.ppid) {
+        try {
+          process.kill(parsed.ppid, 0);
+          return false;
+        } catch {
+          debugLogger.debug(
+            `[cleanupStaleLockFiles] Removing lock file "${file}" - ppid ${parsed.ppid} no longer exists`,
+          );
+          await fs.promises.unlink(fullPath);
+          return true;
+        }
+      }
+
+      if (parsed.workspacePath) {
+        if (fs.existsSync(parsed.workspacePath)) {
+          return false;
+        }
+
+        debugLogger.debug(
+          `[cleanupStaleLockFiles] Removing lock file "${file}" - workspace doesn't exist`,
+        );
+        await fs.promises.unlink(fullPath);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      debugLogger.debug(
+        `[cleanupStaleLockFiles] Error checking lock file "${file}":`,
+        error,
+      );
+      return false;
+    }
+  }
+
+  private async tryFallbackPorts(): Promise<boolean> {
+    const cwd = process.cwd();
+    const currentPort = this.connectionConfig?.port;
+    const configs = await this.getAllConnectionConfigs(
+      Storage.getGlobalIdeDir(),
+    );
+    const workspaceMatches: IdeConnectionConfig[] = [];
+    const otherConfigs: IdeConnectionConfig[] = [];
+
+    for (const config of configs) {
+      if (!config.port || config.port === currentPort) {
+        continue;
+      }
+
+      if (
+        config.workspacePath !== undefined &&
+        IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
+      ) {
+        workspaceMatches.push(config);
+      } else {
+        otherConfigs.push(config);
+      }
+    }
+
+    for (const config of [...workspaceMatches, ...otherConfigs]) {
+      const port = config.port;
+      if (!port) {
+        continue;
+      }
+      if (config.authToken) {
+        this.authToken = config.authToken;
+      }
+      const connected = await this.establishHttpConnection(port);
+      if (connected) {
+        this.connectionConfig = config;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private createProxyAwareFetch(ideHost: string) {
+    // Ignore proxy for IDE server host to allow connecting to the ide mcp
+    // server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
+    const noProxyHosts = [existingNoProxy, ideHost];
     const agent = new EnvHttpProxyAgent({
-      noProxy: [existingNoProxy, '127.0.0.1'].filter(Boolean).join(','),
+      noProxy: noProxyHosts.filter(Boolean).join(','),
     });
     const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
@@ -778,9 +907,34 @@ export class IdeClient {
   }
 
   private async establishHttpConnection(port: string): Promise<boolean> {
+    // Always try localhost first. This covers the most common scenarios:
+    // non-container environments, and code-server where the extension runs
+    // inside the same container as the CLI.
+    const connected = await this.tryHttpConnect(port, LOCAL_HOST);
+    if (connected) {
+      return true;
+    }
+
+    // If localhost failed and we are inside a container, the IDE server may
+    // be running on the host machine (e.g. VS Code Dev Containers). Try
+    // host.docker.internal as a fallback when it is DNS-resolvable.
+    const ideHost = await getIdeServerHost();
+    if (ideHost === CONTAINER_HOST) {
+      debugLogger.debug(
+        `Connection to ${LOCAL_HOST}:${port} failed, retrying with ${CONTAINER_HOST}`,
+      );
+      return this.tryHttpConnect(port, CONTAINER_HOST);
+    }
+
+    return false;
+  }
+
+  private async tryHttpConnect(port: string, host: string): Promise<boolean> {
     let transport: StreamableHTTPClientTransport | undefined;
     try {
-      debugLogger.debug('Attempting to connect to IDE via HTTP SSE');
+      debugLogger.debug(
+        `Attempting to connect to IDE via HTTP at ${host}:${port}`,
+      );
       this.client = new Client({
         name: 'streamable-http-client',
         // TODO(#3487): use the CLI version here.
@@ -788,9 +942,9 @@ export class IdeClient {
       });
 
       transport = new StreamableHTTPClientTransport(
-        new URL(`http://${getIdeServerHost()}:${port}/mcp`),
+        new URL(`http://${host}:${port}/mcp`),
         {
-          fetch: this.createProxyAwareFetch(),
+          fetch: this.createProxyAwareFetch(host),
           requestInit: {
             headers: this.authToken
               ? { Authorization: `Bearer ${this.authToken}` }
@@ -806,7 +960,8 @@ export class IdeClient {
       await this.discoverTools();
       this.setState(IDEConnectionStatus.Connected);
       return true;
-    } catch (_error) {
+    } catch (error) {
+      debugLogger.debug(`HTTP connection to ${host}:${port} failed:`, error);
       if (transport) {
         try {
           await transport.close();
@@ -853,8 +1008,81 @@ export class IdeClient {
   }
 }
 
-function getIdeServerHost() {
+const CONTAINER_HOST = 'host.docker.internal';
+const LOCAL_HOST = '127.0.0.1';
+const DNS_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
+ * Cached promise for IDE server host. Caching the promise itself handles both
+ * result caching and concurrent-call deduplication in one mechanism: a resolved
+ * promise returns instantly, and a pending promise is shared across callers.
+ */
+let hostPromise: Promise<string> | undefined;
+
+/**
+ * Reset the cached host promise. Exported for testing only.
+ * @internal
+ */
+export function _resetCachedIdeServerHost(): void {
+  hostPromise = undefined;
+}
+
+/**
+ * Check if a hostname is DNS-resolvable, with a timeout guard.
+ * Uses callback-based dns.lookup() for better compatibility across
+ * different Node.js environments (e.g., VSCode, Cursor).
+ */
+async function isHostResolvable(hostname: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, DNS_LOOKUP_TIMEOUT_MS);
+    timeout.unref?.();
+
+    dns.lookup(hostname, (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Determine the IDE server host to connect to.
+ *
+ * In container environments (`/.dockerenv` or `/run/.containerenv`), verify
+ * `host.docker.internal` is DNS-resolvable and use it if reachable.
+ * Otherwise fall back to `127.0.0.1`.
+ *
+ * Results are cached; concurrent calls share a single lookup.
+ */
+async function resolveIdeServerHost(): Promise<string> {
   const isInContainer =
     fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
-  return isInContainer ? 'host.docker.internal' : '127.0.0.1';
+
+  if (!isInContainer) {
+    return LOCAL_HOST;
+  }
+
+  const reachable = await isHostResolvable(CONTAINER_HOST);
+  if (reachable) {
+    debugLogger.debug('Container detected, host.docker.internal is reachable');
+    return CONTAINER_HOST;
+  }
+
+  debugLogger.debug(
+    'Container detected, but host.docker.internal is NOT reachable, falling back to 127.0.0.1',
+  );
+  return LOCAL_HOST;
+}
+
+export async function getIdeServerHost(): Promise<string> {
+  if (!hostPromise) {
+    hostPromise = resolveIdeServerHost();
+  }
+  return hostPromise;
 }

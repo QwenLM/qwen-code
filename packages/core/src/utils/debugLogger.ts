@@ -5,9 +5,11 @@
  */
 
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
 import { Storage } from '../config/storage.js';
+import { updateSymlink } from './symlink.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -115,6 +117,23 @@ export function resetDebugLoggingState(): void {
   ensureDebugDirPromise = null;
 }
 
+const DEBUG_LATEST_ALIAS = 'latest';
+
+function updateLatestDebugLogAlias(sessionId: string): void {
+  if (!isDebugLogFileEnabled()) {
+    return;
+  }
+
+  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
+  const targetPath = Storage.getDebugLogPath(sessionId);
+
+  void ensureDebugDirExists()
+    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
+    .catch(() => {
+      // Best-effort; don't degrade overall logging
+    });
+}
+
 /**
  * Sets the process-wide debug log session used by createDebugLogger().
  *
@@ -125,6 +144,9 @@ export function setDebugLogSession(
   session: DebugLogSession | null | undefined,
 ) {
   globalSession = session ?? null;
+  if (session) {
+    updateLatestDebugLogAlias(session.getSessionId());
+  }
 }
 
 /**

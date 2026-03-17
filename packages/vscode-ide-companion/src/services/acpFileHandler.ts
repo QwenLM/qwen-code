@@ -10,8 +10,9 @@
  * Responsible for handling file read and write operations in the ACP protocol
  */
 
-import { promises as fs } from 'fs';
 import * as path from 'path';
+import * as vscode from 'vscode';
+import { getErrorMessage } from '../utils/errorMessage.js';
 
 /**
  * ACP File Operation Handler Class
@@ -43,15 +44,21 @@ export class AcpFileHandler {
     });
 
     try {
-      const content = await fs.readFile(params.path, 'utf-8');
+      const uri = vscode.Uri.file(params.path);
+      // openTextDocument handles encoding detection (BOM, files.encoding setting,
+      // chardet) and returns properly decoded Unicode text regardless of the
+      // source encoding (UTF-8, GBK, Shift-JIS, etc.).
+      const document = await vscode.workspace.openTextDocument(uri);
+      const content = document.getText();
       console.log(
-        `[ACP] Successfully read file: ${params.path} (${content.length} bytes)`,
+        `[ACP] Successfully read file: ${params.path} (${content.length} chars)`,
       );
 
-      // Handle line offset and limit
+      // Handle line offset and limit.
+      // ACP spec: `line` is 1-based (first line = 1).
       if (params.line !== null || params.limit !== null) {
         const lines = content.split('\n');
-        const startLine = params.line || 0;
+        const startLine = Math.max(0, (params.line ?? 1) - 1);
         const endLine = params.limit ? startLine + params.limit : lines.length;
         const selectedLines = lines.slice(startLine, endLine);
         const result = { content: selectedLines.join('\n') };
@@ -63,12 +70,25 @@ export class AcpFileHandler {
       console.log(`[ACP] Returning full file content`);
       return result;
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       console.error(`[ACP] Failed to read file ${params.path}:`, errorMsg);
 
-      const nodeError = error as NodeJS.ErrnoException;
-      if (nodeError?.code === 'ENOENT') {
-        throw error;
+      // Detect "file not found" from both Node.js (code === 'ENOENT') and
+      // VS Code's FileSystemError.FileNotFound (code === 'FileNotFound').
+      const errorCode =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+
+      if (errorCode === 'ENOENT' || errorCode === 'FileNotFound') {
+        // Normalise to a Node-style ENOENT so downstream ACP layers
+        // (mapReadTextFileError → AcpFileSystemService) can recognise it.
+        const enoent = new Error(
+          `ENOENT: no such file or directory, open '${params.path}'`,
+        ) as NodeJS.ErrnoException;
+        enoent.code = 'ENOENT';
+        enoent.path = params.path;
+        throw enoent;
       }
 
       throw new Error(`Failed to read file '${params.path}': ${errorMsg}`);
@@ -96,18 +116,56 @@ export class AcpFileHandler {
     console.log(`[ACP] Content size: ${params.content.length} bytes`);
 
     try {
-      // Ensure directory exists
-      const dirName = path.dirname(params.path);
-      console.log(`[ACP] Ensuring directory exists: ${dirName}`);
-      await fs.mkdir(dirName, { recursive: true });
+      const uri = vscode.Uri.file(params.path);
 
-      // Write file
-      await fs.writeFile(params.path, params.content, 'utf-8');
+      // Ensure the parent directory exists.
+      const dirUri = vscode.Uri.file(path.dirname(params.path));
+      console.log(`[ACP] Ensuring directory exists: ${dirUri.fsPath}`);
+      await vscode.workspace.fs.createDirectory(dirUri);
+
+      // Determine whether the file already exists so we can choose the right
+      // write strategy.
+      let fileExists = false;
+      try {
+        await vscode.workspace.fs.stat(uri);
+        fileExists = true;
+      } catch {
+        fileExists = false;
+      }
+
+      if (fileExists) {
+        // Open the document so VS Code tracks its original encoding, replace
+        // all content via WorkspaceEdit, then save.  VS Code writes back using
+        // the same encoding it detected on open (e.g. GBK), preserving the
+        // original encoding without any manual codec work.
+        const document = await vscode.workspace.openTextDocument(uri);
+        const edit = new vscode.WorkspaceEdit();
+        const fullRange = new vscode.Range(
+          document.positionAt(0),
+          document.positionAt(document.getText().length),
+        );
+        edit.replace(uri, fullRange, params.content);
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (!applied) {
+          throw new Error('WorkspaceEdit was not applied');
+        }
+        const updatedDoc = await vscode.workspace.openTextDocument(uri);
+        if (updatedDoc.isDirty) {
+          const saved = await updatedDoc.save();
+          if (!saved) {
+            throw new Error(`File could not be saved: ${params.path}`);
+          }
+        }
+      } else {
+        // New file – write UTF-8 bytes directly.
+        const bytes = Buffer.from(params.content, 'utf-8');
+        await vscode.workspace.fs.writeFile(uri, bytes);
+      }
 
       console.log(`[ACP] Successfully wrote file: ${params.path}`);
       return null;
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       console.error(`[ACP] Failed to write file ${params.path}:`, errorMsg);
 
       throw new Error(`Failed to write file '${params.path}': ${errorMsg}`);

@@ -32,27 +32,27 @@ const argv = yargs(hideBin(process.argv)).option('q', {
   default: false,
 }).argv;
 
-let geminiSandbox = process.env.GEMINI_SANDBOX;
+let qwenSandbox = process.env.QWEN_SANDBOX;
 
-if (!geminiSandbox) {
+if (!qwenSandbox) {
   const userSettingsFile = join(os.homedir(), '.qwen', 'settings.json');
   if (existsSync(userSettingsFile)) {
     const settings = JSON.parse(
       stripJsonComments(readFileSync(userSettingsFile, 'utf-8')),
     );
     if (settings.sandbox) {
-      geminiSandbox = settings.sandbox;
+      qwenSandbox = settings.sandbox;
     }
   }
 }
 
-if (!geminiSandbox) {
+if (!qwenSandbox) {
   let currentDir = process.cwd();
   while (true) {
-    const geminiEnv = join(currentDir, '.qwen', '.env');
+    const qwenEnv = join(currentDir, '.qwen', '.env');
     const regularEnv = join(currentDir, '.env');
-    if (existsSync(geminiEnv)) {
-      dotenv.config({ path: geminiEnv, quiet: true });
+    if (existsSync(qwenEnv)) {
+      dotenv.config({ path: qwenEnv, quiet: true });
       break;
     } else if (existsSync(regularEnv)) {
       dotenv.config({ path: regularEnv, quiet: true });
@@ -64,10 +64,10 @@ if (!geminiSandbox) {
     }
     currentDir = parentDir;
   }
-  geminiSandbox = process.env.GEMINI_SANDBOX;
+  qwenSandbox = process.env.QWEN_SANDBOX;
 }
 
-geminiSandbox = (geminiSandbox || '').toLowerCase();
+qwenSandbox = (qwenSandbox || '').toLowerCase();
 
 const commandExists = (cmd) => {
   // Use 'where.exe' (not 'where') on Windows because PowerShell aliases
@@ -90,23 +90,23 @@ const commandExists = (cmd) => {
 };
 
 let command = '';
-if (['1', 'true'].includes(geminiSandbox)) {
+if (['1', 'true'].includes(qwenSandbox)) {
   if (commandExists('docker')) {
     command = 'docker';
   } else if (commandExists('podman')) {
     command = 'podman';
   } else {
     console.error(
-      'ERROR: install docker or podman or specify command in GEMINI_SANDBOX',
+      'ERROR: install docker or podman or specify command in QWEN_SANDBOX',
     );
     process.exit(1);
   }
-} else if (geminiSandbox && !['0', 'false'].includes(geminiSandbox)) {
-  if (commandExists(geminiSandbox)) {
-    command = geminiSandbox;
+} else if (qwenSandbox && !['0', 'false'].includes(qwenSandbox)) {
+  if (commandExists(qwenSandbox)) {
+    command = qwenSandbox;
   } else {
     console.error(
-      `ERROR: missing sandbox command '${geminiSandbox}' (from GEMINI_SANDBOX)`,
+      `ERROR: missing sandbox command '${qwenSandbox}' (from QWEN_SANDBOX)`,
     );
     process.exit(1);
   }

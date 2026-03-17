@@ -14,7 +14,7 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
-import { getCorrectedFileContent, WriteFileTool } from './write-file.js';
+import { WriteFileTool } from './write-file.js';
 import { ToolErrorType } from './tool-error.js';
 import type { FileDiff, ToolEditConfirmationDetails } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -193,70 +193,6 @@ describe('WriteFileTool', () => {
     });
   });
 
-  describe('getCorrectedFileContent', () => {
-    it('should return proposed content unchanged for a new file', async () => {
-      const filePath = path.join(rootDir, 'new_corrected_file.txt');
-      const proposedContent = 'Proposed new content.';
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(false);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return proposed content unchanged for an existing file', async () => {
-      const filePath = path.join(rootDir, 'existing_corrected_file.txt');
-      const originalContent = 'Original existing content.';
-      const proposedContent = 'Proposed replacement content.';
-      fs.writeFileSync(filePath, originalContent, 'utf8');
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe(originalContent);
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return error if reading an existing file fails (e.g. permissions)', async () => {
-      const filePath = path.join(rootDir, 'unreadable_file.txt');
-      const proposedContent = 'some content';
-      fs.writeFileSync(filePath, 'content', { mode: 0o000 });
-
-      const readError = new Error('Permission denied');
-      vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() =>
-        Promise.reject(readError),
-      );
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(fsService.readTextFile).toHaveBeenCalledWith(filePath);
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toEqual({
-        message: 'Permission denied',
-        code: undefined,
-      });
-
-      fs.chmodSync(filePath, 0o600);
-    });
-  });
-
   describe('shouldConfirmExecute', () => {
     const abortSignal = new AbortController().signal;
 
@@ -275,6 +211,26 @@ describe('WriteFileTool', () => {
       expect(confirmation).toBe(false);
 
       fs.chmodSync(filePath, 0o600);
+    });
+
+    it('should return false and skip confirmation when approval mode is AUTO_EDIT', async () => {
+      mockConfigInternal.getApprovalMode.mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const filePath = path.join(rootDir, 'auto_edit_skip_confirm.txt');
+      const params = { file_path: filePath, content: 'content' };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
+      expect(confirmation).toBe(false);
+    });
+
+    it('should return false and skip confirmation when approval mode is YOLO', async () => {
+      mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.YOLO);
+      const filePath = path.join(rootDir, 'yolo_skip_confirm.txt');
+      const params = { file_path: filePath, content: 'content' };
+      const invocation = tool.build(params);
+      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
+      expect(confirmation).toBe(false);
     });
 
     it('should request confirmation with diff for a new file', async () => {
@@ -484,7 +440,9 @@ describe('WriteFileTool', () => {
         /Successfully created and wrote to new file/,
       );
       expect(fs.existsSync(filePath)).toBe(true);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_new_file.txt');
@@ -516,7 +474,9 @@ describe('WriteFileTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.llmContent).toMatch(/Successfully overwrote file/);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_existing_file.txt');
@@ -526,6 +486,36 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    it('should treat metadata ENOENT as new file when readTextFile returned empty content', async () => {
+      const filePath = path.join(rootDir, 'execute_acp_like_missing_file.txt');
+      const proposedContent = 'content from acp-like flow';
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      // Simulate ENOENT: file does not exist, readTextFile throws ENOENT.
+      const enoentError = new Error('File not found') as NodeJS.ErrnoException;
+      enoentError.code = 'ENOENT';
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(enoentError);
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: proposedContent,
+        _meta: {
+          bom: false,
+          encoding: undefined,
+        },
+      });
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(proposedContent);
     });
 
     it('should create directory if it does not exist', async () => {
@@ -757,8 +747,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: 'utf-8' },
       });
 
       // Cleanup
@@ -783,8 +775,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: 'utf-8' },
       });
 
       // Cleanup
@@ -810,8 +804,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false (default is utf-8)
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: undefined },
       });
 
       // Cleanup
@@ -842,8 +838,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: undefined },
       });
 
       // Restore mock

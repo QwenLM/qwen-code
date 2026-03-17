@@ -116,8 +116,9 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analyzes the project and creates a tailored QWEN.md file.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
-    'list available Qwen Code tools. Usage: /tools [desc]',
+  'List available Qwen Code tools. Usage: /tools [desc]':
+    'List available Qwen Code tools. Usage: /tools [desc]',
+  'List available skills.': 'List available skills.',
   'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
@@ -178,6 +179,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter to confirm, Esc to cancel',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter to select, ↑↓ to navigate, Esc to go back',
+  'Enter to submit, Esc to go back': 'Enter to submit, Esc to go back',
   'Invalid step: {{step}}': 'Invalid step: {{step}}',
   'No subagents found.': 'No subagents found.',
   "Use '/agents create' to create your first subagent.":
@@ -289,6 +291,73 @@ export default {
     'Failed to save and edit subagent: {{error}}',
 
   // ============================================================================
+  // Extensions - Management Dialog
+  // ============================================================================
+  'Manage Extensions': 'Manage Extensions',
+  'Extension Details': 'Extension Details',
+  'View Extension': 'View Extension',
+  'Update Extension': 'Update Extension',
+  'Disable Extension': 'Disable Extension',
+  'Enable Extension': 'Enable Extension',
+  'Uninstall Extension': 'Uninstall Extension',
+  'Select Scope': 'Select Scope',
+  'User Scope': 'User Scope',
+  'Workspace Scope': 'Workspace Scope',
+  'No extensions found.': 'No extensions found.',
+  Active: 'Active',
+  Disabled: 'Disabled',
+  'Update available': 'Update available',
+  'Up to date': 'Up to date',
+  'Checking...': 'Checking...',
+  'Updating...': 'Updating...',
+  Unknown: 'Unknown',
+  Error: 'Error',
+  'Version:': 'Version:',
+  'Status:': 'Status:',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    'Are you sure you want to uninstall extension "{{name}}"?',
+  'This action cannot be undone.': 'This action cannot be undone.',
+  'Extension "{{name}}" disabled successfully.':
+    'Extension "{{name}}" disabled successfully.',
+  'Extension "{{name}}" enabled successfully.':
+    'Extension "{{name}}" enabled successfully.',
+  'Extension "{{name}}" updated successfully.':
+    'Extension "{{name}}" updated successfully.',
+  'Failed to update extension "{{name}}": {{error}}':
+    'Failed to update extension "{{name}}": {{error}}',
+  'Select the scope for this action:': 'Select the scope for this action:',
+  'User - Applies to all projects': 'User - Applies to all projects',
+  'Workspace - Applies to current project only':
+    'Workspace - Applies to current project only',
+  // Extension dialog - missing keys
+  'Name:': 'Name:',
+  'MCP Servers:': 'MCP Servers:',
+  'Settings:': 'Settings:',
+  active: 'active',
+  disabled: 'disabled',
+  'View Details': 'View Details',
+  'Update failed:': 'Update failed:',
+  'Updating {{name}}...': 'Updating {{name}}...',
+  'Update complete!': 'Update complete!',
+  'User (global)': 'User (global)',
+  'Workspace (project-specific)': 'Workspace (project-specific)',
+  'Disable "{{name}}" - Select Scope': 'Disable "{{name}}" - Select Scope',
+  'Enable "{{name}}" - Select Scope': 'Enable "{{name}}" - Select Scope',
+  'No extension selected': 'No extension selected',
+  'Press Y/Enter to confirm, N/Esc to cancel':
+    'Press Y/Enter to confirm, N/Esc to cancel',
+  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter to confirm, N/Esc to cancel',
+  '{{count}} extensions installed': '{{count}} extensions installed',
+  "Use '/extensions install' to install your first extension.":
+    "Use '/extensions install' to install your first extension.",
+  // Update status values
+  'up to date': 'up to date',
+  'update available': 'update available',
+  'checking...': 'checking...',
+  'not updatable': 'not updatable',
+  error: 'error',
+
+  // ============================================================================
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
@@ -375,8 +444,10 @@ export default {
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
   'exit the cli': 'exit the cli',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
-    'list configured MCP servers and tools, or authenticate with OAuth-enabled servers',
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Open MCP management dialog, or authenticate with OAuth-enabled servers',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+    'List configured MCP servers and tools, or authenticate with OAuth-enabled servers',
   'Manage workspace directories': 'Manage workspace directories',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'Add directories to the workspace. Use comma to separate multiple paths',
@@ -389,6 +460,7 @@ export default {
     'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.',
   'Your preferred editor is:': 'Your preferred editor is:',
   'Manage extensions': 'Manage extensions',
+  'Manage installed extensions': 'Manage installed extensions',
   'List active extensions': 'List active extensions',
   'Update extensions. Usage: update <extension-names>|--all':
     'Update extensions. Usage: update <extension-names>|--all',
@@ -589,6 +661,37 @@ export default {
     'Failed to configure {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
+  'List all configured hooks': 'List all configured hooks',
+  'Enable a disabled hook': 'Enable a disabled hook',
+  'Disable an active hook': 'Disable an active hook',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Export current session message history to a file',
+  'Export session to HTML format': 'Export session to HTML format',
+  'Export session to JSON format': 'Export session to JSON format',
+  'Export session to JSONL format (one message per line)':
+    'Export session to JSONL format (one message per line)',
+  'Export session to markdown format': 'Export session to markdown format',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'generate personalized programming insights from your chat history',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Resume a previous session',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -725,6 +828,7 @@ export default {
   'List configured MCP servers and tools':
     'List configured MCP servers and tools',
   'Restarts MCP servers.': 'Restarts MCP servers.',
+  'Open MCP management dialog': 'Open MCP management dialog',
   'Config not loaded.': 'Config not loaded.',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   'No MCP servers configured with OAuth authentication.':
@@ -740,6 +844,118 @@ export default {
     "Failed to authenticate with MCP server '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Re-discovering tools from '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "Discovered {{count}} tool(s) from '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Authentication complete. Returning to server details...',
+  'Authentication successful.': 'Authentication successful.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'If the browser does not open, copy and paste this URL into your browser:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
+
+  // ============================================================================
+  // MCP Management Dialog
+  // ============================================================================
+  'Manage MCP servers': 'Manage MCP servers',
+  'Server Detail': 'Server Detail',
+  'Disable Server': 'Disable Server',
+  Tools: 'Tools',
+  'Tool Detail': 'Tool Detail',
+  'MCP Management': 'MCP Management',
+  'Loading...': 'Loading...',
+  'Unknown step': 'Unknown step',
+  'Esc to back': 'Esc to back',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ to navigate · Enter to select · Esc to close',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ to navigate · Enter to select · Esc to back',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ to navigate · Enter to confirm · Esc to back',
+  'User Settings (global)': 'User Settings (global)',
+  'Workspace Settings (project-specific)':
+    'Workspace Settings (project-specific)',
+  'Disable server:': 'Disable server:',
+  'Select where to add the server to the exclude list:':
+    'Select where to add the server to the exclude list:',
+  'Press Enter to confirm, Esc to cancel':
+    'Press Enter to confirm, Esc to cancel',
+  'View tools': 'View tools',
+  Reconnect: 'Reconnect',
+  Enable: 'Enable',
+  Disable: 'Disable',
+  Authenticate: 'Authenticate',
+  'Re-authenticate': 'Re-authenticate',
+  'Clear Authentication': 'Clear Authentication',
+  'Server:': 'Server:',
+  'Command:': 'Command:',
+  'Working Directory:': 'Working Directory:',
+  'Capabilities:': 'Capabilities:',
+  'No server selected': 'No server selected',
+  prompts: 'prompts',
+  '(disabled)': '(disabled)',
+  'Error:': 'Error:',
+  Extension: 'Extension',
+  tool: 'tool',
+  tools: 'tools',
+  connected: 'connected',
+  connecting: 'connecting',
+  disconnected: 'disconnected',
+
+  // MCP Server List
+  'User MCPs': 'User MCPs',
+  'Project MCPs': 'Project MCPs',
+  'Extension MCPs': 'Extension MCPs',
+  server: 'server',
+  servers: 'servers',
+  'Add MCP servers to your settings to get started.':
+    'Add MCP servers to your settings to get started.',
+  'Run qwen --debug to see error logs': 'Run qwen --debug to see error logs',
+
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth Authentication',
+  'Press Enter to start authentication, Esc to go back':
+    'Press Enter to start authentication, Esc to go back',
+  'Authenticating... Please complete the login in your browser.':
+    'Authenticating... Please complete the login in your browser.',
+  'Press Enter or Esc to go back': 'Press Enter or Esc to go back',
+
+  // MCP Tool List
+  'No tools available for this server.': 'No tools available for this server.',
+  destructive: 'destructive',
+  'read-only': 'read-only',
+  'open-world': 'open-world',
+  idempotent: 'idempotent',
+  'Tools for {{name}}': 'Tools for {{name}}',
+  'Tools for {{serverName}}': 'Tools for {{serverName}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'required',
+  Type: 'Type',
+  Enum: 'Enum',
+  Parameters: 'Parameters',
+  'No tool selected': 'No tool selected',
+  Annotations: 'Annotations',
+  Title: 'Title',
+  'Read Only': 'Read Only',
+  Destructive: 'Destructive',
+  Idempotent: 'Idempotent',
+  'Open World': 'Open World',
+  Server: 'Server',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} invalid tools',
+  invalid: 'invalid',
+  'invalid: {{reason}}': 'invalid: {{reason}}',
+  'missing name': 'missing name',
+  'missing description': 'missing description',
+  '(unnamed)': '(unnamed)',
+  'Warning: This tool cannot be called by the LLM':
+    'Warning: This tool cannot be called by the LLM',
+  Reason: 'Reason',
+  'Tools must have both name and description to be used by the LLM.':
+    'Tools must have both name and description to be used by the LLM.',
 
   // ============================================================================
   // Commands - Chat
@@ -873,6 +1089,7 @@ export default {
   'Do you want to proceed?': 'Do you want to proceed?',
   'Yes, allow once': 'Yes, allow once',
   'Allow always': 'Allow always',
+  Yes: 'Yes',
   No: 'No',
   'No (esc)': 'No (esc)',
   'Yes, allow always for this session': 'Yes, allow always for this session',
@@ -935,18 +1152,22 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Get started',
-  'How would you like to authenticate for this project?':
-    'How would you like to authenticate for this project?',
+  'Select Authentication Method': 'Select Authentication Method',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI API key is required to use OpenAI authentication.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'You must select an auth method to proceed. Press Ctrl+C again to exit.',
-  '(Use Enter to Set Auth)': '(Use Enter to Set Auth)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Terms of Services and Privacy Notice for Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
   'Login with QwenChat account to use daily free quota.':
     'Login with QwenChat account to use daily free quota.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Bring your own API key',
   'API-KEY': 'API-KEY',
   'Use coding plan credentials or your own api-keys/providers.':
     'Use coding plan credentials or your own api-keys/providers.',
@@ -974,6 +1195,8 @@ export default {
     'Waiting for Qwen OAuth authentication...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Note: Your existing API key will not be cleared when using Qwen OAuth.',
   'Authentication timed out. Please try again.':
     'Authentication timed out. Please try again.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1402,14 +1625,13 @@ export default {
   // ============================================================================
   // Coding Plan Authentication
   // ============================================================================
-  'Please enter your API key:': 'Please enter your API key:',
   'API key cannot be empty.': 'API key cannot be empty.',
-  'You can get your exclusive Coding Plan API-KEY here:':
-    'You can get your exclusive Coding Plan API-KEY here:',
+  'You can get your Coding Plan API key here':
+    'You can get your Coding Plan API key here',
   'API key is stored in settings.env. You can migrate it to a .env file for better security.':
     'API key is stored in settings.env. You can migrate it to a .env file for better security.',
-  'New model configurations are available for Bailian Coding Plan. Update now?':
-    'New model configurations are available for Bailian Coding Plan. Update now?',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'New model configurations are available for Alibaba Cloud Coding Plan. Update now?',
   'Coding Plan configuration updated successfully. New models are now available.':
     'Coding Plan configuration updated successfully. New models are now available.',
   'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
@@ -1418,34 +1640,19 @@ export default {
     'Failed to update Coding Plan configuration: {{message}}',
 
   // ============================================================================
-  // Custom API-KEY Configuration
+  // Custom API Key Configuration
   // ============================================================================
-  'For advanced users who want to configure models manually.':
-    'For advanced users who want to configure models manually.',
-  'Please configure your models in settings.json:':
-    'Please configure your models in settings.json:',
-  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
-    'Set API key via environment variable (e.g., OPENAI_API_KEY)',
-  "Add model configuration to modelProviders['openai'] (or other auth types)":
-    "Add model configuration to modelProviders['openai'] (or other auth types)",
-  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
-    'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig',
-  'Use /model command to select your preferred model from the configured list':
-    'Use /model command to select your preferred model from the configured list',
-  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
-    'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.',
-  'More instructions please check:': 'More instructions please check:',
+  'You can configure your API key and models in settings.json':
+    'You can configure your API key and models in settings.json',
+  'Refer to the documentation for setup instructions':
+    'Refer to the documentation for setup instructions',
 
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  'Coding Plan (Bailian, China)': 'Coding Plan (Bailian, China)',
-  'Coding Plan (Bailian, Global/Intl)': 'Coding Plan (Bailian, Global/Intl)',
   "Paste your api key of Bailian Coding Plan and you're all set!":
     "Paste your api key of Bailian Coding Plan and you're all set!",
-  "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!":
-    "Paste your api key of Coding Plan (Bailian, Global/Intl) and you're all set!",
   Custom: 'Custom',
   'More instructions about configuring `modelProviders` manually.':
     'More instructions about configuring `modelProviders` manually.',
@@ -1453,18 +1660,50 @@ export default {
   '(Press Escape to go back)': '(Press Escape to go back)',
   '(Press Enter to submit, Escape to cancel)':
     '(Press Enter to submit, Escape to cancel)',
+  'Select Region for Coding Plan': 'Select Region for Coding Plan',
+  'Choose based on where your account is registered':
+    'Choose based on where your account is registered',
+  'Enter Coding Plan API Key': 'Enter Coding Plan API Key',
 
   // ============================================================================
   // Coding Plan International Updates
   // ============================================================================
   'New model configurations are available for {{region}}. Update now?':
     'New model configurations are available for {{region}}. Update now?',
-  'New model configurations are available for Bailian Coding Plan (China). Update now?':
-    'New model configurations are available for Bailian Coding Plan (China). Update now?',
-  'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?':
-    'New model configurations are available for Coding Plan (Bailian, Global/Intl). Update now?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
-  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
-    'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+  '{{region}} configuration updated successfully.':
+    '{{region}} configuration updated successfully.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Tip: Use /model to switch between available Coding Plan models.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Please answer the following question(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.',
+  'User declined to answer the questions.':
+    'User declined to answer the questions.',
+  'User has provided the following answers:':
+    'User has provided the following answers:',
+  'Failed to process user answers:': 'Failed to process user answers:',
+  'Type something...': 'Type something...',
+  Submit: 'Submit',
+  'Submit answers': 'Submit answers',
+  Cancel: 'Cancel',
+  'Your answers:': 'Your answers:',
+  '(not answered)': '(not answered)',
+  'Ready to submit your answers?': 'Ready to submit your answers?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigate | Enter: Select | Esc: Cancel',
 };
