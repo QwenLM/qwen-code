@@ -301,38 +301,44 @@ export function useCompletionTrigger(
       const lastAtMatch = textBeforeCursor.lastIndexOf('@');
       const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
 
-      // Check if we're in a trigger context
+      // Build candidate triggers sorted by proximity (nearest first)
+      const candidates: Array<{ pos: number; char: '@' | '/' }> = [];
+      if (lastAtMatch >= 0) {
+        candidates.push({ pos: lastAtMatch, char: '@' });
+      }
+      if (lastSlashMatch >= 0) {
+        candidates.push({ pos: lastSlashMatch, char: '/' });
+      }
+      // Sort by position descending (nearest to cursor first)
+      candidates.sort((a, b) => b.pos - a.pos);
+
+      // Find the nearest valid trigger (at word boundary)
       let triggerPos = -1;
       let triggerChar: '@' | '/' | null = null;
 
-      // Priority: @ trigger takes precedence over / trigger
-      // This allows path-like queries (e.g., "src/components/Button") in @ mentions
-      // But skip if the trigger is inside a file tag
-      if (lastAtMatch >= 0) {
-        triggerPos = lastAtMatch;
-        triggerChar = '@';
-      } else if (lastSlashMatch >= 0) {
-        triggerPos = lastSlashMatch;
-        triggerChar = '/';
-      }
-
-      // Check if trigger is at word boundary (start of line or after space)
-      if (triggerPos >= 0 && triggerChar) {
-        const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
+      for (const candidate of candidates) {
+        const charBefore = candidate.pos > 0 ? text[candidate.pos - 1] : ' ';
         const isValidTrigger =
-          charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
+          charBefore === ' ' || charBefore === '\n' || candidate.pos === 0;
 
         if (isValidTrigger) {
-          const query = text.substring(triggerPos + 1, effectiveCursorPosition);
+          triggerPos = candidate.pos;
+          triggerChar = candidate.char;
+          break;
+        }
+      }
 
-          // Only show if query doesn't contain spaces (still typing the reference)
-          if (!query.includes(' ') && !query.includes('\n')) {
-            // Get precise cursor position for menu
-            const cursorPos = getCursorPosition();
-            if (cursorPos) {
-              await openCompletion(triggerChar, query, cursorPos);
-              return;
-            }
+      // Check if we found a valid trigger
+      if (triggerPos >= 0 && triggerChar) {
+        const query = text.substring(triggerPos + 1, effectiveCursorPosition);
+
+        // Only show if query doesn't contain spaces (still typing the reference)
+        if (!query.includes(' ') && !query.includes('\n')) {
+          // Get precise cursor position for menu
+          const cursorPos = getCursorPosition();
+          if (cursorPos) {
+            await openCompletion(triggerChar, query, cursorPos);
+            return;
           }
         }
       }
