@@ -473,9 +473,9 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
-  private readonly permissionsAllow: string[] | undefined;
-  private readonly permissionsAsk: string[] | undefined;
-  private readonly permissionsDeny: string[] | undefined;
+  private readonly permissionsAllow: string[];
+  private readonly permissionsAsk: string[];
+  private readonly permissionsDeny: string[];
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -587,9 +587,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
-    this.permissionsAllow = params.permissions?.allow;
-    this.permissionsAsk = params.permissions?.ask;
-    this.permissionsDeny = params.permissions?.deny;
+    this.permissionsAllow = params.permissions?.allow || [];
+    this.permissionsAsk = params.permissions?.ask || [];
+    this.permissionsDeny = params.permissions?.deny || [];
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -1262,10 +1262,10 @@ export class Config {
    * before constructing Config, so those fields will be empty for CLI usage.
    * SDK callers construct Config directly and rely on allowedTools.
    */
-  getPermissionsAllow(): string[] | undefined {
+  getPermissionsAllow(): string[] {
     const base = this.permissionsAllow ?? [];
     const sdkAllow = [...(this.allowedTools ?? [])];
-    if (sdkAllow.length === 0) return base.length > 0 ? base : undefined;
+    if (sdkAllow.length === 0) return base.length > 0 ? base : [];
     const merged = [...base];
     for (const t of sdkAllow) {
       if (t && !merged.includes(t)) merged.push(t);
@@ -1273,7 +1273,7 @@ export class Config {
     return merged;
   }
 
-  getPermissionsAsk(): string[] | undefined {
+  getPermissionsAsk(): string[] {
     return this.permissionsAsk;
   }
 
@@ -1286,10 +1286,10 @@ export class Config {
    *
    * CLI callers pre-merge argv.excludeTools into permissionsDeny.
    */
-  getPermissionsDeny(): string[] | undefined {
+  getPermissionsDeny(): string[] {
     const base = this.permissionsDeny ?? [];
     const sdkDeny = this.excludeTools ?? [];
-    if (sdkDeny.length === 0) return base.length > 0 ? base : undefined;
+    if (sdkDeny.length === 0) return base.length > 0 ? base : [];
     const merged = [...base];
     for (const t of sdkDeny) {
       if (t && !merged.includes(t)) merged.push(t);

@@ -216,7 +216,7 @@ describe('WriteFileTool', () => {
       const invocation = tool.build(params);
       await expect(
         invocation.getConfirmationDetails(abortSignal),
-      ).rejects.toThrow('Error checking existing file');
+      ).rejects.toThrow('Error reading existing file for confirmation');
 
       fs.chmodSync(filePath, 0o600);
     });
