@@ -69,26 +69,44 @@ export class StreamJsonOutputAdapter
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
-    const state = this.mainAgentMessageState;
+    return this.finalizeAssistantMessageInternal(
+      this.mainAgentMessageState,
+      null,
+    );
+  }
+
+  /**
+   * Overrides base class to emit message_stop event when message is finalized.
+   * This ensures message_start and message_stop are always paired.
+   */
+  protected override finalizeAssistantMessageInternal(
+    state: MessageState,
+    parentToolUseId: string | null,
+  ): CLIAssistantMessage {
     if (state.finalized) {
-      return this.buildMessage(null);
+      return this.buildMessage(parentToolUseId);
     }
     state.finalized = true;
 
-    this.finalizePendingBlocks(state, null);
+    this.finalizePendingBlocks(state, parentToolUseId);
     const orderedOpenBlocks = Array.from(state.openBlocks).sort(
       (a, b) => a - b,
     );
     for (const index of orderedOpenBlocks) {
-      this.onBlockClosed(state, index, null);
+      this.onBlockClosed(state, index, parentToolUseId);
       this.closeBlock(state, index);
     }
 
-    if (state.messageStarted && this.includePartialMessages) {
+    // Emit message_stop for main agent when message was started and partial messages are enabled
+    if (
+      state.messageStarted &&
+      this.includePartialMessages &&
+      parentToolUseId === null
+    ) {
       this.emitStreamEventIfEnabled({ type: 'message_stop' }, null);
     }
 
-    const message = this.buildMessage(null);
+    const message = this.buildMessage(parentToolUseId);
     this.updateLastAssistantMessage(message);
     this.emitMessageImpl(message);
     return message;
