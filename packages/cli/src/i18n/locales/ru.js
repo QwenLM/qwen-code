@@ -1662,4 +1662,77 @@ export default {
     '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Настроить аутентификацию Qwen через Qwen-OAuth или Alibaba Cloud Coding Plan',
+  'Authenticate using Qwen OAuth': 'Аутентификация через Qwen OAuth',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Аутентификация через Alibaba Cloud Coding Plan',
+  'Region for Coding Plan (china/global)':
+    'Регион для Coding Plan (china/global)',
+  'API key for Coding Plan': 'API-ключ для Coding Plan',
+  'Show current authentication status':
+    'Показать текущий статус аутентификации',
+  'Authentication completed successfully.': 'Аутентификация успешно завершена.',
+  'Starting Qwen OAuth authentication...':
+    'Запуск аутентификации Qwen OAuth...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Успешная аутентификация через Qwen OAuth.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Ошибка аутентификации через Qwen OAuth: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Обработка аутентификации Alibaba Cloud Coding Plan...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Успешная аутентификация через Alibaba Cloud Coding Plan.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Ошибка аутентификации через Coding Plan: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Глобальный',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Выберите регион для Coding Plan:',
+  'Enter your Coding Plan API key: ': 'Введите ваш API-ключ Coding Plan: ',
+  'Select authentication method:': 'Выберите метод аутентификации:',
+  '\n=== Authentication Status ===\n': '\n=== Статус аутентификации ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  Метод аутентификации не настроен.\n',
+  'Run one of the following commands to get started:\n':
+    'Выполните одну из следующих команд для начала:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (бесплатно)',
+  '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth code-plan      - Аутентификация через Alibaba Cloud Coding Plan\n',
+  'Or simply run:': 'Или просто выполните:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Интерактивная настройка аутентификации\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
+  '  Type: Free tier': '  Тип: Бесплатный',
+  '  Limit: Up to 1,000 requests/day': '  Лимит: До 1 000 запросов/день',
+  '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Метод аутентификации: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Глобальный - Alibaba Cloud',
+  '  Region: {{region}}': '  Регион: {{region}}',
+  '  Current Model: {{model}}': '  Текущая модель: {{model}}',
+  '  Config Version: {{version}}': '  Версия конфигурации: {{version}}',
+  '  Status: API key configured\n': '  Статус: API-ключ настроен\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Метод аутентификации: Alibaba Cloud Coding Plan (Не завершён)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Проблема: API-ключ не найден в окружении или настройках\n',
+  '  Run `qwen auth code-plan` to re-configure.\n':
+    '  Выполните `qwen auth code-plan` для повторной настройки.\n',
+  '✓ Authentication Method: {{type}}': '✓ Метод аутентификации: {{type}}',
+  '  Status: Configured\n': '  Статус: Настроено\n',
+  'Failed to check authentication status: {{error}}':
+    'Не удалось проверить статус аутентификации: {{error}}',
+  'Select an option:': 'Выберите вариант:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
 };
