@@ -11,20 +11,92 @@ import type { ExportSessionData, ExportMessage } from '../types.js';
  */
 export function toMarkdown(sessionData: ExportSessionData): string {
   const lines: string[] = [];
+  const metadata = sessionData.metadata;
 
   // Add header with metadata
   lines.push('# Chat Session Export\n');
   lines.push(`- **Session ID**: \`${sanitizeText(sessionData.sessionId)}\``);
   lines.push(`- **Start Time**: ${sanitizeText(sessionData.startTime)}`);
 
-  // Add requestId if available
-  if (sessionData.metadata?.requestId) {
-    lines.push(
-      `- **Request ID**: \`${sanitizeText(sessionData.metadata.requestId)}\``,
-    );
+  // Add exportTime if available
+  if (metadata?.exportTime) {
+    lines.push(`- **Exported**: ${sanitizeText(metadata.exportTime)}`);
   }
 
-  lines.push(`- **Exported**: ${new Date().toISOString()}`);
+  // Add requestId if available
+  if (metadata?.requestId) {
+    lines.push(`- **Request ID**: \`${sanitizeText(metadata.requestId)}\``);
+  }
+
+  lines.push('');
+
+  // Add context info
+  if (metadata?.cwd) {
+    lines.push(`- **Working Directory**: \`${sanitizeText(metadata.cwd)}\``);
+  }
+  if (metadata?.gitRepo) {
+    lines.push(`- **Git Repository**: ${sanitizeText(metadata.gitRepo)}`);
+  }
+  if (metadata?.gitBranch) {
+    lines.push(`- **Git Branch**: \`${sanitizeText(metadata.gitBranch)}\``);
+  }
+
+  lines.push('');
+
+  // Add model info
+  if (metadata?.model) {
+    lines.push(`- **Model**: ${sanitizeText(metadata.model)}`);
+  }
+  if (metadata?.channel) {
+    lines.push(`- **Channel**: ${sanitizeText(metadata.channel)}`);
+  }
+  if (metadata?.promptCount !== undefined) {
+    lines.push(`- **Prompt Count**: ${metadata.promptCount}`);
+  }
+
+  lines.push('');
+
+  // Add token stats
+  if (metadata?.totalTokens !== undefined) {
+    lines.push(`- **Total Tokens**: ${metadata.totalTokens}`);
+  }
+  if (metadata?.contextWindowSize !== undefined) {
+    lines.push(`- **Context Window Size**: ${metadata.contextWindowSize}`);
+  }
+  if (metadata?.contextUsagePercent !== undefined) {
+    lines.push(`- **Context Usage**: ${metadata.contextUsagePercent}%`);
+  }
+
+  lines.push('');
+
+  // Add file operation stats
+  if (metadata?.filesRead !== undefined) {
+    lines.push(`- **Files Read**: ${metadata.filesRead}`);
+  }
+  if (metadata?.filesWritten !== undefined) {
+    lines.push(`- **Files Written**: ${metadata.filesWritten}`);
+  }
+  if (metadata?.linesAdded !== undefined) {
+    lines.push(`- **Lines Added**: ${metadata.linesAdded}`);
+  }
+  if (metadata?.linesRemoved !== undefined) {
+    lines.push(`- **Lines Removed**: ${metadata.linesRemoved}`);
+  }
+
+  // Add unique files list if available
+  if (metadata?.uniqueFiles && metadata.uniqueFiles.length > 0) {
+    lines.push('');
+    lines.push('<details>');
+    lines.push(
+      `<summary><strong>Unique Files Referenced (${metadata.uniqueFiles.length})</strong></summary>`,
+    );
+    lines.push('');
+    for (const file of metadata.uniqueFiles) {
+      lines.push(`- \`${sanitizeText(file)}\``);
+    }
+    lines.push('</details>');
+  }
+
   lines.push('\n---\n');
 
   // Process each message
