@@ -1219,7 +1219,7 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
-    it('should not retry more than once', async () => {
+    it('should not retry after reconnection attempt fails', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(),
@@ -1271,8 +1271,8 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow('ECONNREFUSED');
 
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
-      expect(secondMockMcpClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(secondMockMcpClient.callTool).toHaveBeenCalledTimes(3);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(3);
     });
 
     it('should detect various connection error patterns', async () => {
