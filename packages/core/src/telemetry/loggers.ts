@@ -20,6 +20,7 @@ import {
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
   EVENT_USER_PROMPT,
+  EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
   EVENT_NEXT_SPEAKER_CHECK,
   SERVICE_NAME,
@@ -72,6 +73,7 @@ import type {
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
+  UserRetryEvent,
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
@@ -124,19 +126,20 @@ export function logStartSession(
     'event.name': EVENT_CLI_CONFIG,
     'event.timestamp': new Date().toISOString(),
     model: event.model,
-    embedding_model: event.embedding_model,
     sandbox_enabled: event.sandbox_enabled,
     core_tools_enabled: event.core_tools_enabled,
     approval_mode: event.approval_mode,
-    api_key_enabled: event.api_key_enabled,
-    vertex_ai_enabled: event.vertex_ai_enabled,
-    log_user_prompts_enabled: event.telemetry_log_user_prompts_enabled,
     file_filtering_respect_git_ignore: event.file_filtering_respect_git_ignore,
     debug_mode: event.debug_enabled,
+    truncate_tool_output_threshold: event.truncate_tool_output_threshold,
+    truncate_tool_output_lines: event.truncate_tool_output_lines,
     mcp_servers: event.mcp_servers,
     mcp_servers_count: event.mcp_servers_count,
     mcp_tools: event.mcp_tools,
     mcp_tools_count: event.mcp_tools_count,
+    hooks: event.hooks,
+    ide_enabled: event.ide_enabled,
+    interactive_shell_enabled: event.interactive_shell_enabled,
     output_format: event.output_format,
     skills: event.skills,
     subagents: event.subagents,
@@ -173,6 +176,25 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `User prompt. Length: ${event.prompt_length}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logUserRetry(config: Config, event: UserRetryEvent): void {
+  QwenLogger.getInstance(config)?.logRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_USER_RETRY,
+    'event.timestamp': new Date().toISOString(),
+    prompt_id: event.prompt_id,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `User retry.`,
     attributes,
   };
   logger.emit(logRecord);

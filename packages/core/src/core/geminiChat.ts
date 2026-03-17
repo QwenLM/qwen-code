@@ -575,6 +575,20 @@ export class GeminiChat {
       .filter((content) => content.parts && content.parts.length > 0);
   }
 
+  /**
+   * Pop all orphaned trailing user entries from chat history.
+   * In a valid conversation the last entry is always a model response;
+   * any trailing user entries are leftovers from a request that failed.
+   */
+  stripOrphanedUserEntriesFromHistory(): void {
+    while (
+      this.history.length > 0 &&
+      this.history[this.history.length - 1]!.role === 'user'
+    ) {
+      this.history.pop();
+    }
+  }
+
   setTools(tools: Tool[]): void {
     this.generationConfig.tools = tools;
   }

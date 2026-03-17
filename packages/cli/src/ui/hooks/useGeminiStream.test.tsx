@@ -28,6 +28,7 @@ import {
   ApprovalMode,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
+  SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -483,7 +484,7 @@ describe('useGeminiStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
-      { isContinuation: true },
+      { type: SendMessageType.ToolResult },
     );
   });
 
@@ -807,7 +808,7 @@ describe('useGeminiStream', () => {
         toolCallResponseParts,
         expect.any(AbortSignal),
         'prompt-id-4',
-        { isContinuation: true },
+        { type: SendMessageType.ToolResult },
       );
     });
 
@@ -1123,7 +1124,7 @@ describe('useGeminiStream', () => {
           'This is the actual prompt from the command file.',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
@@ -1150,7 +1151,7 @@ describe('useGeminiStream', () => {
           '',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1169,7 +1170,7 @@ describe('useGeminiStream', () => {
           '// This is a line comment',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1188,7 +1189,7 @@ describe('useGeminiStream', () => {
           '/* This is a block comment */',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -2092,7 +2093,7 @@ describe('useGeminiStream', () => {
       processedQueryParts, // Argument 1: The parts array directly
       expect.any(AbortSignal), // Argument 2: An AbortSignal
       expect.any(String), // Argument 3: The prompt_id string
-      undefined, // Argument 4: Options (undefined for normal prompts)
+      { type: SendMessageType.UserQuery }, // Argument 4: The options
     );
   });
 
@@ -2777,7 +2778,7 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
 
       // Verify only the first query was added to history
@@ -2829,14 +2830,14 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
       expect(mockSendMessageStream).toHaveBeenNthCalledWith(
         2,
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
 
@@ -2859,7 +2860,7 @@ describe('useGeminiStream', () => {
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
   });

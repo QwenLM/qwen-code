@@ -81,6 +81,11 @@ const makeFakeConfig = (overrides: Partial<Config> = {}): Config => {
     getFileFilteringRespectGitIgnore: () => true,
     getOutputFormat: () => 'text',
     getToolRegistry: () => undefined,
+    getTruncateToolOutputThreshold: () => 25000,
+    getTruncateToolOutputLines: () => 0,
+    getIdeMode: () => false,
+    getShouldUseNodePtyShell: () => false,
+    getHookSystem: () => undefined,
     ...overrides,
   };
   return defaults as Config;

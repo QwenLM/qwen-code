@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
@@ -13,6 +14,7 @@ import {
   iconvEncodingExists,
   isUtf8CompatibleEncoding,
 } from '../utils/iconvHelper.js';
+import { getSystemEncoding } from '../utils/systemEncoding.js';
 import type {
   ReadTextFileRequest,
   WriteTextFileRequest,
@@ -84,6 +86,75 @@ export interface WriteTextFileOptions {
 }
 
 /**
+ * File extensions that require CRLF (\r\n) line endings to function correctly.
+ * cmd.exe parses .bat/.cmd files using CRLF delimiters; LF-only endings can
+ * break multi-line constructs, labels, and goto statements.
+ */
+const CRLF_EXTENSIONS = new Set(['.bat', '.cmd']);
+
+/**
+ * File extensions that need UTF-8 BOM on Windows with a non-UTF-8 code page.
+ * PowerShell 5.1 (the version that ships with Windows) reads BOM-less files
+ * using the system's ANSI code page. Without a BOM, any non-ASCII characters
+ * in the script will be misinterpreted (e.g. on a GBK system). PowerShell 7+
+ * defaults to UTF-8 and handles BOM fine, so adding BOM is always safe.
+ */
+const UTF8_BOM_EXTENSIONS = new Set(['.ps1']);
+
+// Cache so we only call getSystemEncoding() once per process
+let cachedIsNonUtf8Windows: boolean | undefined;
+
+/**
+ * Returns true if a newly created file at the given path should be written
+ * with a UTF-8 BOM. Conditions (all must be true):
+ * 1. Running on Windows
+ * 2. System code page is not UTF-8
+ * 3. File extension is in UTF8_BOM_EXTENSIONS (e.g. .ps1)
+ */
+export function needsUtf8Bom(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!UTF8_BOM_EXTENSIONS.has(ext)) {
+    return false;
+  }
+  if (cachedIsNonUtf8Windows === undefined) {
+    if (os.platform() !== 'win32') {
+      cachedIsNonUtf8Windows = false;
+    } else {
+      const sysEnc = getSystemEncoding();
+      cachedIsNonUtf8Windows = sysEnc !== 'utf-8';
+    }
+  }
+  return cachedIsNonUtf8Windows;
+}
+
+/**
+ * Reset the UTF-8 BOM cache — useful for testing.
+ */
+export function resetUtf8BomCache(): void {
+  cachedIsNonUtf8Windows = undefined;
+}
+
+/**
+ * Returns true if the file at the given path requires CRLF line endings.
+ * Only applies on Windows where cmd.exe actually parses these files.
+ */
+function needsCrlfLineEndings(filePath: string): boolean {
+  if (os.platform() !== 'win32') {
+    return false;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  return CRLF_EXTENSIONS.has(ext);
+}
+
+/**
+ * Ensures content uses CRLF line endings. First normalizes any existing
+ * \r\n to \n to avoid double-conversion, then converts all \n to \r\n.
+ */
+function ensureCrlfLineEndings(content: string): string {
+  return content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+}
+
+/**
  * Return the BOM byte sequence for a given encoding name, or null if the
  * encoding does not use a standard BOM. Used when writing back a file that
  * originally had a BOM so the BOM is preserved.
@@ -129,7 +200,11 @@ export class StandardFileSystemService implements FileSystemService {
   async writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
-    const { content, path: filePath, _meta } = params;
+    const { path: filePath, _meta } = params;
+    // Convert LF to CRLF for file types that require it (e.g. .bat, .cmd)
+    const content = needsCrlfLineEndings(filePath)
+      ? ensureCrlfLineEndings(params.content)
+      : params.content;
     const bom = _meta?.['bom'] ?? (false as boolean);
     const encoding = _meta?.['encoding'] as string | undefined;
 

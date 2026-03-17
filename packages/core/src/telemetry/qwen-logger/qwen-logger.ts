@@ -42,6 +42,7 @@ import type {
   AuthEvent,
   SkillLaunchEvent,
   UserFeedbackEvent,
+  UserRetryEvent,
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
@@ -418,20 +419,20 @@ export class QwenLogger {
 
     const applicationEvent = this.createViewEvent('session', 'session_start', {
       properties: {
-        model: event.model,
         approval_mode: event.approval_mode,
-        embedding_model: event.embedding_model,
-        sandbox_enabled: event.sandbox_enabled,
         core_tools_enabled: event.core_tools_enabled,
-        api_key_enabled: event.api_key_enabled,
-        vertex_ai_enabled: event.vertex_ai_enabled,
         debug_enabled: event.debug_enabled,
+        hooks: event.hooks,
+        ide_enabled: event.ide_enabled,
+        interactive_shell_enabled: event.interactive_shell_enabled,
         mcp_servers: event.mcp_servers,
-        telemetry_enabled: event.telemetry_enabled,
-        telemetry_log_user_prompts_enabled:
-          event.telemetry_log_user_prompts_enabled,
+        model: event.model,
+        sandbox_enabled: event.sandbox_enabled,
         skills: event.skills,
         subagents: event.subagents,
+        telemetry_enabled: event.telemetry_enabled,
+        truncate_tool_output_lines: event.truncate_tool_output_lines,
+        truncate_tool_output_threshold: event.truncate_tool_output_threshold,
       },
     });
 
@@ -468,9 +469,19 @@ export class QwenLogger {
   logNewPromptEvent(event: UserPromptEvent): void {
     const rumEvent = this.createActionEvent('user', 'new_prompt', {
       properties: {
-        auth_type: event.auth_type,
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logRetryEvent(event: UserRetryEvent): void {
+    const rumEvent = this.createActionEvent('user', 'retry', {
+      properties: {
+        prompt_id: event.prompt_id,
       },
     });
 

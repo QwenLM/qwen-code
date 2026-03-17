@@ -9,7 +9,7 @@ type TokenCount = number;
 export type TokenLimitType = 'input' | 'output';
 
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
-export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 8_192; // 8K tokens
+export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 16_384; // 16K tokens
 
 /**
  * Accurate numeric limits:
@@ -166,9 +166,11 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3\.5/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen3-max/, LIMITS['64k']],
+  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
+  [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
