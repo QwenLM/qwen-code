@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { unescapePath } from '@qwen-code/qwen-code-core';
+import { unescapePath } from '../../utils/pathEscaping.js';
 
 const IMAGE_EXTENSIONS = new Set([
   '.png',

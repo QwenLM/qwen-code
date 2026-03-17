@@ -7,7 +7,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
-import { Storage, escapePath } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core';
+import { escapePath } from '../../utils/pathEscaping.js';
 
 const CLIPBOARD_DIR_NAME = 'clipboard';
 const MAX_CLIPBOARD_IMAGES = 100;
