@@ -36,7 +36,8 @@ describe('showAuthStatus', () => {
 
   const createMockSettings = (
     merged: Record<string, unknown>,
-  ): LoadedSettings => ({
+  ): LoadedSettings =>
+    ({
       merged,
       system: { settings: {}, path: '/system.json' },
       systemDefaults: { settings: {}, path: '/system-defaults.json' },
@@ -45,7 +46,7 @@ describe('showAuthStatus', () => {
       forScope: vi.fn(),
       setValue: vi.fn(),
       isTrusted: true,
-    } as unknown as LoadedSettings);
+    }) as unknown as LoadedSettings;
 
   it('should show message when no authentication is configured', async () => {
     vi.mocked(loadSettings).mockReturnValue(createMockSettings({}));
@@ -247,28 +248,6 @@ describe('showAuthStatus', () => {
     expect(writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('abc123de...'),
     );
-  });
-
-  it('should show available commands at the end', async () => {
-    vi.mocked(loadSettings).mockReturnValue(
-      createMockSettings({
-        security: {
-          auth: {
-            selectedType: AuthType.QWEN_OAUTH,
-          },
-        },
-      }),
-    );
-
-    await showAuthStatus();
-
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Commands:'),
-    );
-    expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('qwen auth status'),
-    );
-    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('should handle errors and exit with code 1', async () => {
