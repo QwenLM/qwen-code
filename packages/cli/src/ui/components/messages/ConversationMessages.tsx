@@ -90,7 +90,9 @@ function parseThinkingContent(text: string): {
   mainContent: string;
   hasThinking: boolean;
 } {
-  const thinkPattern = /<think(ing)?>([\s\S]*?)<\/think(ing)?>/g;
+  // Match <think>...</think> or <thinking>...</thinking> (case-insensitive)
+  // Also handles variations like <Think>, </THINK>, etc.
+  const thinkPattern = /<think(?:ing)?[^>]*>([\s\S]*?)<\/think(?:ing)?[^>]*>/gi;
 
   const matches = [...text.matchAll(thinkPattern)];
 
@@ -100,7 +102,7 @@ function parseThinkingContent(text: string): {
 
   const thinkingParts: string[] = [];
   for (const match of matches) {
-    const content = match[2]?.trim();
+    const content = match[1]?.trim();
     if (content) {
       thinkingParts.push(content);
     }
@@ -111,11 +113,14 @@ function parseThinkingContent(text: string): {
     return { thinkingContent: '', mainContent: text, hasThinking: false };
   }
 
-  const lastMatch = matches[matches.length - 1];
-  const lastIndex = lastMatch.index! + lastMatch[0].length;
+  // Remove all think blocks from the original text to get clean main content
+  let mainContent = text;
+  for (const match of matches) {
+    mainContent = mainContent.replace(match[0], '');
+  }
+  mainContent = mainContent.trim();
 
   const thinkingContent = thinkingParts.join('\n') + '\n';
-  const mainContent = text.slice(lastIndex).trim();
 
   return { thinkingContent, mainContent, hasThinking };
 }
