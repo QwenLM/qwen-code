@@ -134,18 +134,11 @@ export const App: React.FC = () => {
           }),
         );
 
-        if (query && query.length >= 1) {
-          const lowerQuery = query.toLowerCase();
-          return allItems.filter(
-            (item) =>
-              item.label.toLowerCase().includes(lowerQuery) ||
-              (item.description &&
-                item.description.toLowerCase().includes(lowerQuery)),
-          );
-        }
+        // Fuzzy search is handled by the backend (FileSearchFactory)
+        // No client-side filtering needed - results are already fuzzy-matched
 
         // If first time and still loading, show a placeholder
-        if (allItems.length === 0) {
+        if (allItems.length === 0 && query && query.length >= 1) {
           return [
             {
               id: 'loading-files',
@@ -678,7 +671,9 @@ export const App: React.FC = () => {
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
       const atPos = textBeforeCursor.lastIndexOf('@');
-      const slashPos = textBeforeCursor.lastIndexOf('/');
+      // Only consider slash as trigger if we're in slash command mode
+      const slashPos =
+        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {

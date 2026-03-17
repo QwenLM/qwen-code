@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type * as vscode from 'vscode';
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
@@ -24,6 +25,7 @@ export class MessageRouter {
   private handlers: IMessageHandler[] = [];
   private sessionHandler: SessionMessageHandler;
   private authHandler: AuthMessageHandler;
+  private fileHandler: FileMessageHandler;
   private currentConversationId: string | null = null;
   private permissionHandler:
     | ((message: PermissionResponseMessage) => void)
@@ -48,7 +50,7 @@ export class MessageRouter {
       sendToWebView,
     );
 
-    const fileHandler = new FileMessageHandler(
+    this.fileHandler = new FileMessageHandler(
       agentManager,
       conversationStore,
       currentConversationId,
@@ -72,10 +74,14 @@ export class MessageRouter {
     // Register handlers in order of priority
     this.handlers = [
       this.sessionHandler,
-      fileHandler,
+      this.fileHandler,
       editorHandler,
       this.authHandler,
     ];
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    return this.fileHandler.setupFileWatchers();
   }
 
   /**

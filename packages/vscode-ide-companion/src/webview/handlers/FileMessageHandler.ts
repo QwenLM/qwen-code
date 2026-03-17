@@ -14,6 +14,10 @@ import {
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
+import {
+  FileSearchFactory,
+  type FileSearch,
+} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
@@ -25,6 +29,9 @@ export class FileMessageHandler extends BaseMessageHandler {
     string,
     FileDiscoveryService
   >();
+  private readonly fileSearchInstances = new Map<string, FileSearch>();
+  private readonly fileSearchInitializing = new Map<string, Promise<void>>();
+  private readonly fileWatchers: vscode.Disposable[] = [];
   private readonly globSpecialChars = new Set([
     '\\',
     '*',
@@ -49,6 +56,110 @@ export class FileMessageHandler extends BaseMessageHandler {
       'openDiff',
       'createAndOpenTempFile',
     ].includes(messageType);
+  }
+
+  private async getOrCreateFileSearch(
+    rootPath: string,
+  ): Promise<FileSearch | null> {
+    const existing = this.fileSearchInstances.get(rootPath);
+    if (existing) {
+      return existing;
+    }
+
+    const initializing = this.fileSearchInitializing.get(rootPath);
+    if (initializing) {
+      await initializing;
+      return this.fileSearchInstances.get(rootPath) ?? null;
+    }
+
+    const initPromise = (async () => {
+      const search = FileSearchFactory.create({
+        projectRoot: rootPath,
+        ignoreDirs: ['.git', 'node_modules'],
+        useGitignore: true,
+        useQwenignore: false,
+        cache: true,
+        cacheTtl: 30000,
+        enableRecursiveFileSearch: true,
+        enableFuzzySearch: true,
+      });
+      await search.initialize();
+      this.fileSearchInstances.set(rootPath, search);
+    })();
+
+    this.fileSearchInitializing.set(rootPath, initPromise);
+
+    try {
+      await initPromise;
+      return this.fileSearchInstances.get(rootPath) ?? null;
+    } catch (error) {
+      this.fileSearchInitializing.delete(rootPath);
+      console.error(
+        '[FileMessageHandler] Failed to initialize file search:',
+        error,
+      );
+      return null;
+    }
+  }
+
+  private invalidateFileSearchCache(rootPath: string): void {
+    this.fileSearchInstances.delete(rootPath);
+    this.fileSearchInitializing.delete(rootPath);
+    console.log(
+      '[FileMessageHandler] Invalidated file search cache for:',
+      rootPath,
+    );
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+      return { dispose: () => {} };
+    }
+
+    for (const folder of workspaceFolders) {
+      const rootPath = folder.uri.fsPath;
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(folder, '**/*'),
+      );
+
+      watcher.onDidCreate(() => {
+        this.invalidateFileSearchCache(rootPath);
+      });
+
+      watcher.onDidDelete(() => {
+        this.invalidateFileSearchCache(rootPath);
+      });
+
+      watcher.onDidChange(() => {
+        this.invalidateFileSearchCache(rootPath);
+      });
+
+      this.fileWatchers.push(watcher);
+    }
+
+    const foldersChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(
+      (e) => {
+        for (const folder of e.removed) {
+          const rootPath = folder.uri.fsPath;
+          this.invalidateFileSearchCache(rootPath);
+        }
+        for (const folder of e.added) {
+          this.invalidateFileSearchCache(folder.uri.fsPath);
+        }
+      },
+    );
+
+    this.fileWatchers.push(foldersChangeListener);
+
+    return {
+      dispose: () => {
+        for (const watcher of this.fileWatchers) {
+          watcher.dispose();
+        }
+        this.fileWatchers.length = 0;
+      },
+    };
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
@@ -282,20 +393,43 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Search or show recent files
       if (query) {
-        const includePattern = `**/*${this.buildCaseInsensitiveGlob(query)}*`;
-        // Query mode: perform filesystem search (may take longer on large workspaces)
         console.log(
-          '[FileMessageHandler] Searching workspace files for query',
+          '[FileMessageHandler] Searching workspace files with fuzzy search for query',
           query,
         );
-        const uris = await vscode.workspace.findFiles(
-          includePattern,
-          '**/{.git,node_modules}/**',
-          50,
-        );
 
-        for (const uri of uris) {
-          addFile(uri);
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders) {
+          for (const folder of workspaceFolders) {
+            const rootPath = folder.uri.fsPath;
+            const fileSearch = await this.getOrCreateFileSearch(rootPath);
+            if (!fileSearch) {
+              continue;
+            }
+
+            const relativePaths = await fileSearch.search(query, {
+              maxResults: 50,
+            });
+
+            for (let relativePath of relativePaths) {
+              const isDirectory = relativePath.endsWith('/');
+              if (isDirectory) {
+                relativePath = relativePath.slice(0, -1);
+              }
+              const absolutePath = vscode.Uri.joinPath(
+                folder.uri,
+                relativePath,
+              ).fsPath;
+
+              files.push({
+                id: absolutePath,
+                label: relativePath,
+                description: relativePath,
+                path: absolutePath,
+              });
+              addedPaths.add(absolutePath);
+            }
+          }
         }
       } else {
         // Non-query mode: respond quickly with currently active and open files
