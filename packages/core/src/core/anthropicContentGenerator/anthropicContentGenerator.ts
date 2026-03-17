@@ -31,6 +31,7 @@ import { AnthropicContentConverter } from './converter.js';
 import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { tokenLimit, DEFAULT_OUTPUT_TOKEN_LIMIT } from '../tokenLimits.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -223,8 +224,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
+    // Apply output token limit logic consistent with OpenAI providers
+    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    const modelLimit = tokenLimit(this.contentGeneratorConfig.model, 'output');
+
     const maxTokens =
-      getParam<number>('max_tokens', 'maxOutputTokens') ?? 10_000;
+      userMaxTokens !== undefined && userMaxTokens !== null
+        ? Math.min(userMaxTokens, modelLimit)
+        : Math.min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT);
 
     return {
       max_tokens: maxTokens,

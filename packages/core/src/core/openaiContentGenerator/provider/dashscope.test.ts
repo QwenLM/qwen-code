@@ -789,7 +789,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(1000); // Should remain unchanged
     });
 
-    it('should not add max_tokens when not present in request', () => {
+    it('should set conservative max_tokens default when not present in request', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -798,31 +798,34 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBeUndefined(); // Should remain undefined
+      // Should set conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
+      // qwen3-max has 64K output limit, so min(64K, 32K) = 32K
+      expect(result.max_tokens).toBe(32768);
     });
 
-    it('should handle null max_tokens parameter', () => {
+    it('should set conservative max_tokens when null is provided', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-max',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: null,
+        max_tokens: null as unknown as undefined,
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBeNull(); // Should remain null
+      // null is treated as not configured, so set conservative default
+      expect(result.max_tokens).toBe(32768);
     });
 
     it('should use default output limit for unknown models', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'unknown-model',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 20000, // Exceeds the default limit
+        max_tokens: 40000, // Exceeds the default limit (32K)
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(16384); // Should be limited to default output limit (16K)
+      expect(result.max_tokens).toBe(32768); // Should be limited to default output limit (32K)
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {
