@@ -24,7 +24,6 @@ import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
 import { hasToolCallOutput } from './utils/utils.js';
-import { resolveCommandSelectionAction } from './utils/commandSelectionBehavior.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
@@ -597,19 +596,14 @@ export const App: React.FC = () => {
           }
         };
 
-        const action = resolveCommandSelectionAction(
-          item.id,
-          availableCommands,
-        );
-
-        if (action.kind === 'execute-login') {
+        if (itemId === 'login') {
           clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
           completion.closeCompletion();
           return;
         }
 
-        if (action.kind === 'open-model-selector') {
+        if (itemId === 'model') {
           clearTriggerText();
           setShowModelSelector(true);
           completion.closeCompletion();
