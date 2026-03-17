@@ -18,6 +18,7 @@ import {
   FileSearchFactory,
   type FileSearch,
 } from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
+import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
@@ -31,7 +32,7 @@ export class FileMessageHandler extends BaseMessageHandler {
   >();
   private readonly fileSearchInstances = new Map<string, FileSearch>();
   private readonly fileSearchInitializing = new Map<string, Promise<void>>();
-  private readonly fileWatchers: vscode.Disposable[] = [];
+  private readonly fileWatchers = new Map<string, vscode.FileSystemWatcher>();
   private readonly globSpecialChars = new Set([
     '\\',
     '*',
@@ -102,62 +103,74 @@ export class FileMessageHandler extends BaseMessageHandler {
     }
   }
 
-  private invalidateFileSearchCache(rootPath: string): void {
+  private clearFileSearchCache(rootPath: string): void {
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    crawlCache.clear();
     console.log(
-      '[FileMessageHandler] Invalidated file search cache for:',
+      '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
     );
   }
 
-  setupFileWatchers(): vscode.Disposable {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) {
-      return { dispose: () => {} };
+  private createWatcherForFolder(folder: vscode.WorkspaceFolder): void {
+    const rootPath = folder.uri.fsPath;
+
+    // Skip if watcher already exists for this folder
+    if (this.fileWatchers.has(rootPath)) {
+      return;
     }
 
-    for (const folder of workspaceFolders) {
-      const rootPath = folder.uri.fsPath;
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(folder, '**/*'),
-      );
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(folder, '**/*'),
+    );
 
-      watcher.onDidCreate(() => {
-        this.invalidateFileSearchCache(rootPath);
-      });
+    const onFileAddOrDelete = () => this.clearFileSearchCache(rootPath);
+    watcher.onDidCreate(onFileAddOrDelete);
+    watcher.onDidDelete(onFileAddOrDelete);
+    // Note: onDidChange is not needed - file search is based on names, not content
 
-      watcher.onDidDelete(() => {
-        this.invalidateFileSearchCache(rootPath);
-      });
+    this.fileWatchers.set(rootPath, watcher);
+  }
 
-      watcher.onDidChange(() => {
-        this.invalidateFileSearchCache(rootPath);
-      });
+  private disposeWatcherForFolder(rootPath: string): void {
+    const watcher = this.fileWatchers.get(rootPath);
+    if (watcher) {
+      watcher.dispose();
+      this.fileWatchers.delete(rootPath);
+    }
+  }
 
-      this.fileWatchers.push(watcher);
+  setupFileWatchers(): vscode.Disposable {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders) {
+      for (const folder of workspaceFolders) {
+        this.createWatcherForFolder(folder);
+      }
     }
 
     const foldersChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(
       (e) => {
         for (const folder of e.removed) {
           const rootPath = folder.uri.fsPath;
-          this.invalidateFileSearchCache(rootPath);
+          this.clearFileSearchCache(rootPath);
+          this.disposeWatcherForFolder(rootPath);
         }
         for (const folder of e.added) {
-          this.invalidateFileSearchCache(folder.uri.fsPath);
+          const rootPath = folder.uri.fsPath;
+          this.clearFileSearchCache(rootPath);
+          this.createWatcherForFolder(folder);
         }
       },
     );
 
-    this.fileWatchers.push(foldersChangeListener);
-
     return {
       dispose: () => {
-        for (const watcher of this.fileWatchers) {
+        for (const watcher of this.fileWatchers.values()) {
           watcher.dispose();
         }
-        this.fileWatchers.length = 0;
+        this.fileWatchers.clear();
+        foldersChangeListener.dispose();
       },
     };
   }
