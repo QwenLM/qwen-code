@@ -299,7 +299,7 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for Kimi', () => {
-      expect(tokenLimit('kimi-k2.5', 'output')).toBe(32000);
+      expect(tokenLimit('kimi-k2.5', 'output')).toBe(32768);
     });
   });
 

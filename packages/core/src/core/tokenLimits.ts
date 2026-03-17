@@ -185,6 +185,19 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 ];
 
 /**
+ * Check if a model has an explicitly defined output token limit.
+ * This distinguishes between models with known limits in OUTPUT_PATTERNS
+ * and unknown models that would fallback to DEFAULT_OUTPUT_TOKEN_LIMIT.
+ *
+ * @param model - The model name to check
+ * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
+ */
+export function hasExplicitOutputLimit(model: Model): boolean {
+  const norm = normalize(model);
+  return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+}
+
+/**
  * Return the token limit for a model string based on the specified type.
  *
  * This function determines the maximum number of tokens for either input context

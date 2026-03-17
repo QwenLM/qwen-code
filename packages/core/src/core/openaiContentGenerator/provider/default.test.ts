@@ -209,7 +209,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result.max_tokens).toBe(16384);
     });
 
-    it('should cap max_tokens to DEFAULT_OUTPUT_TOKEN_LIMIT for unknown models', () => {
+    it('should respect user max_tokens for unknown models (deployment aliases, self-hosted)', () => {
+      // Unknown models: user config is respected entirely (backend may support larger limits)
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'unknown-model',
         messages: [{ role: 'user', content: 'Hello' }],
@@ -218,7 +219,35 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'prompt-id');
 
-      expect(result.max_tokens).toBe(32768);
+      // User's 100K setting is preserved for unknown models
+      expect(result.max_tokens).toBe(100000);
+    });
+
+    it('should use conservative default for unknown models when max_tokens not configured', () => {
+      // Unknown models without user config: use DEFAULT_OUTPUT_TOKEN_LIMIT
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'custom-deployment-alias',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(request, 'prompt-id');
+
+      // Uses conservative default (32K)
+      expect(result.max_tokens).toBe(32000);
+    });
+
+    it('should cap max_tokens for known models to avoid API errors', () => {
+      // Known models (GPT-4): user config is capped at model limit
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100000, // Exceeds GPT-4's 16K limit
+      };
+
+      const result = provider.buildRequest(request, 'prompt-id');
+
+      // Capped to GPT-4's output limit (16K)
+      expect(result.max_tokens).toBe(16384);
     });
 
     it('should treat null max_tokens as not configured', () => {
