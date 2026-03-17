@@ -92,8 +92,7 @@ function parseThinkingContent(text: string): {
 } {
   // Match <think>...</think> or <thinking>...</thinking> (case-insensitive)
   // Also handles variations like <Think>, </THINK>, etc.
-  const thinkPattern = /<think(?:ing)?[^>]*>([\s\S]*?)<\/think(?:ing)?[^>]*>/gi;
-
+  const thinkPattern = /<think(?:ing)?[^>]*>([\s\S]*?)<\/think(?:ing)?[^>]*>/;
   const matches = [...text.matchAll(thinkPattern)];
 
   if (matches.length === 0) {
