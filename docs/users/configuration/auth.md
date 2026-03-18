@@ -6,61 +6,6 @@ Qwen Code supports three authentication methods. Pick the one that matches how y
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
 - **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## Quick setup with `qwen auth`
-
-The `qwen auth` CLI command lets you configure authentication directly from your terminal — no need to start an interactive session first.
-
-### Interactive mode
-
-Run `qwen auth` without arguments to get an interactive menu:
-
-```bash
-qwen auth
-```
-
-You'll see a selector with arrow-key navigation:
-
-```
-Select authentication method:
-
-> Qwen OAuth - Free · Up to 1,000 requests/day · Qwen latest models
-  Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
-
-(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
-```
-
-### Direct subcommands
-
-You can also skip the menu and run a specific authentication method directly:
-
-| Command                                            | Description                                       |
-| -------------------------------------------------- | ------------------------------------------------- |
-| `qwen auth`                                        | Interactive authentication setup                  |
-| `qwen auth qwen-oauth`                             | Authenticate with Qwen OAuth                      |
-| `qwen auth code-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
-| `qwen auth code-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
-| `qwen auth status`                                 | Show current authentication status                |
-
-**Examples:**
-
-```bash
-# Authenticate with Qwen OAuth directly
-qwen auth qwen-oauth
-
-# Set up Coding Plan interactively (prompts for region and key)
-qwen auth code-plan
-
-# Set up Coding Plan non-interactively (useful for CI/scripting)
-qwen auth code-plan --region china --key sk-sp-xxxxxxxxx
-
-# Check your current auth configuration
-qwen auth status
-```
-
-> [!tip]
->
-> You can also use the `/auth` slash command within an active Qwen Code session to change authentication methods interactively.
-
 ## Option 1: Qwen OAuth (Free)
 
 Use this if you want the simplest setup and you're using Qwen models.
@@ -363,6 +308,55 @@ qwen --model "qwen3-coder-plus"
 # In another terminal
 
 qwen --model "qwen3.5-plus"
+```
+
+## `qwen auth` CLI command
+
+In addition to the in-session `/auth` slash command, Qwen Code provides a standalone `qwen auth` CLI command for managing authentication directly from the terminal — without starting an interactive session first.
+
+### Interactive mode
+
+Run `qwen auth` without arguments to get an interactive menu:
+
+```bash
+qwen auth
+```
+
+You'll see a selector with arrow-key navigation:
+
+```
+Select authentication method:
+
+> Qwen OAuth - Free · Up to 1,000 requests/day · Qwen latest models
+  Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
+
+(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
+```
+
+### Subcommands
+
+| Command                                            | Description                                       |
+| -------------------------------------------------- | ------------------------------------------------- |
+| `qwen auth`                                        | Interactive authentication setup                  |
+| `qwen auth qwen-oauth`                             | Authenticate with Qwen OAuth                      |
+| `qwen auth code-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
+| `qwen auth code-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth status`                                 | Show current authentication status                |
+
+**Examples:**
+
+```bash
+# Authenticate with Qwen OAuth directly
+qwen auth qwen-oauth
+
+# Set up Coding Plan interactively (prompts for region and key)
+qwen auth code-plan
+
+# Set up Coding Plan non-interactively (useful for CI/scripting)
+qwen auth code-plan --region china --key sk-sp-xxxxxxxxx
+
+# Check your current auth configuration
+qwen auth status
 ```
 
 ## Security notes
