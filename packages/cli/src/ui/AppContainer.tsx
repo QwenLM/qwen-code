@@ -52,6 +52,7 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -96,6 +97,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { useAgentViewState } from './contexts/AgentViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -470,6 +472,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isModelDialogOpen, openModelDialog, closeModelDialog } =
     useModelCommand();
+  const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
+    useArenaCommand();
 
   const {
     isResumeDialogOpen,
@@ -509,6 +513,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
@@ -533,6 +538,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
@@ -669,12 +675,15 @@ export const AppContainer = (props: AppContainerProps) => {
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
-  // Auto-accept indicator
+  const agentViewState = useAgentViewState();
+
+  // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
     shouldBlockTab: () => hasSuggestionsVisible,
+    disabled: agentViewState.activeView !== 'main',
   });
 
   const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
@@ -687,9 +696,26 @@ export const AppContainer = (props: AppContainerProps) => {
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {
+      // Route to active in-process agent if viewing a sub-agent tab.
+      if (agentViewState.activeView !== 'main') {
+        const agent = agentViewState.agents.get(agentViewState.activeView);
+        if (agent) {
+          agent.interactiveAgent.enqueueMessage(submittedValue.trim());
+          return;
+        }
+      }
       addMessage(submittedValue);
     },
-    [addMessage],
+    [addMessage, agentViewState],
+  );
+
+  const handleArenaModelsSelected = useCallback(
+    (models: string[]) => {
+      const value = models.join(',');
+      buffer.setText(`/arena start --models ${value} `);
+      closeArenaDialog();
+    },
+    [buffer, closeArenaDialog],
   );
 
   // Welcome back functionality (must be after handleFinalSubmit)
@@ -765,10 +791,17 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [buffer, terminalWidth, terminalHeight]);
 
-  // Compute available terminal height based on controls measurement
+  // agentViewState is declared earlier (before handleFinalSubmit) so it
+  // is available for input routing. Referenced here for layout computation.
+
+  // Compute available terminal height based on controls measurement.
+  // When in-process agents are present the AgentTabBar renders an extra
+  // row at the top of the layout; subtract it so downstream consumers
+  // (shell, transcript, etc.) don't overestimate available space.
+  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2,
+    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
   );
 
   config.setShellExecutionConfig({
@@ -1053,6 +1086,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    activeArenaDialog,
+    closeArenaDialog,
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
@@ -1310,6 +1345,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isModelDialogOpen ||
+    activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
     isAuthenticating ||
@@ -1360,6 +1396,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1455,6 +1492,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1553,6 +1591,9 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
       dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,
@@ -1602,6 +1643,9 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
       dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,

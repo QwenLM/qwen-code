@@ -225,7 +225,7 @@ describe('LoggingContentGenerator', () => {
 
   it('logs errors with status code and request id, then rethrows', async () => {
     const error = Object.assign(new Error('boom'), {
-      code: 429,
+      status: 429,
       request_id: 'req-99',
       type: 'rate_limit',
     });

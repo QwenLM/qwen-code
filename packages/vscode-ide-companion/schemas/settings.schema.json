@@ -564,6 +564,51 @@
       "type": "object",
       "additionalProperties": true
     },
+    "agents": {
+      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "type": "object",
+      "properties": {
+        "displayMode": {
+          "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
+          "enum": [
+            "in-process"
+          ]
+        },
+        "arena": {
+          "description": "Settings for Arena (multi-model competitive execution).",
+          "type": "object",
+          "properties": {
+            "worktreeBaseDir": {
+              "description": "Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.",
+              "type": "string"
+            },
+            "preserveArtifacts": {
+              "description": "When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.",
+              "type": "boolean",
+              "default": false
+            },
+            "maxRoundsPerAgent": {
+              "description": "Maximum number of rounds (turns) each agent can execute. No limit if unset.",
+              "type": "number"
+            },
+            "timeoutSeconds": {
+              "description": "Total timeout in seconds for the Arena session. No limit if unset.",
+              "type": "number"
+            }
+          }
+        },
+        "team": {
+          "description": "Settings for Agent Team (role-based collaborative execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "swarm": {
+          "description": "Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
     "hooksConfig": {
       "description": "Hook configurations for intercepting and customizing agent behavior.",
       "type": "object",
@@ -717,6 +762,11 @@
           }
         }
       }
+    },
+    "experimental": {
+      "description": "Setting to enable experimental features",
+      "type": "object",
+      "properties": {}
     },
     "$version": {
       "type": "number",
