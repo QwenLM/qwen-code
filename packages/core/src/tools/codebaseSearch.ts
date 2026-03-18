@@ -49,56 +49,36 @@ export interface CodebaseSearchToolParams {
 const MAX_TOP_K = 30;
 const DEFAULT_TOP_K = 10;
 
-const TOOL_DESCRIPTION = `Semantic code search over the codebase index using hybrid BM25 + vector retrieval with reranking and graph expansion.
+const TOOL_DESCRIPTION = `The PRIMARY search tool for exploring and understanding the codebase. Uses intelligent hybrid search (BM25 + vector/semantic) with reranking and graph expansion to find relevant code.
 
-Use this tool when:
-- You need to understand HOW something is implemented, not just find an exact string
-- You want to find code related to a concept, pattern, or functionality
-- You don't know the exact identifier name but can describe what you're looking for
+ALWAYS prefer this tool over grep_search when:
+- Understanding how a feature, module, or system is implemented
+- Finding code related to a concept, pattern, or functionality
+- Exploring unfamiliar areas of the codebase
+- Looking for usage patterns, architectural decisions, or design patterns
+- You can describe what you want but don't know exact identifiers
+- Starting a new task and need to understand the relevant code landscape
 
-Do NOT use this tool when:
-- You know the exact function/variable/string → use grep_search instead
-- You need to find files by name → use glob instead
+Only use grep_search instead when you need an exact string/regex match (e.g., a specific error message, a known variable name).
 
-## bm25Queries (keyword / full-text search)
-Provide 3-6 keyword queries. Each query is space-separated tokens.
+## Parameters
 
-1. **Exact identifiers** — Extract exact function, method, class, variable, type, and module names that likely appear in source code. Preserve casing conventions (camelCase, snake_case, PascalCase, SCREAMING_SNAKE_CASE). Include file path patterns and import paths if relevant.
-   Example: "handleUserAuth middleware express", "JwtTokenVerifier verify"
-2. **Query Decomposition (for complex queries)** — Break the original query into 2-4 focused sub-queries (3-8 words each, keyword style). Each sub-query targets a distinct aspect.
-   Example for "How does the auth middleware validate JWT tokens and handle expired sessions":
-   - "auth middleware JWT validate"
-   - "expired session handling"
-   - "token expiration error"
-3. **Step-Back query** — One abstract/general query (3-8 words) that captures the high-level concept behind the question.
-   Example: "authentication authorization middleware pattern"
+### bm25Queries (required)
+2-5 keyword queries (space-separated tokens each). Include:
+- Likely identifiers: function/class/variable names in camelCase, snake_case, PascalCase
+- Sub-queries breaking down different aspects of your search
+- One abstract/general query for the high-level concept
+Example: ["handleUserAuth middleware express", "JWT token verify", "auth middleware pattern"]
 
-## vectorQueries (semantic / embedding search)
-Provide 2-4 queries. The first should be a HyDE code snippet; the rest are semantic variations.
+### vectorQueries (required)
+1-3 semantic queries. The first should ideally be a hypothetical code snippet (5-15 lines) resembling what you expect to find; the rest are natural language descriptions.
+Example: ["async function verifyToken(token: string) {\\n  const decoded = jwt.verify(token, secret);\\n  return decoded;\\n}", "middleware that validates authentication tokens before processing requests"]
 
-1. **HyDE (Hypothetical Document Embedding)** — Write a REALISTIC 5-15 line code snippet that resembles code you expect to find in the codebase. Rules:
-   - NO comments, NO docstrings, NO explanatory text — just raw code
-   - Use realistic naming conventions that the codebase likely uses
-   - Include function signatures, class definitions, import statements, or implementation patterns
-   - Must look like actual source code, not pseudocode
-   Example:
-   \`\`\`
-   async function verifyJwtToken(token: string): Promise<TokenPayload> {
-     const decoded = jwt.verify(token, config.jwtSecret);
-     if (decoded.exp < Date.now() / 1000) {
-       throw new TokenExpiredError('Token has expired');
-     }
-     return decoded as TokenPayload;
-   }
-   \`\`\`
-2. **Semantic variations** — 1-3 alternative phrasings of the query (5-12 words each), using different vocabulary to describe the same concept.
-   Example: "middleware that checks authentication tokens before request processing"
+### topK (optional)
+Number of results (default 10, max 30).
 
-## topK
-Number of results to return (default 10, max 30).
-
-## isTestRelated
-Set to true when the query is specifically about test code (unit tests, integration tests, test utilities, mocks, fixtures). This ensures test files are not penalized in the results.
+### isTestRelated (optional)
+Set true when searching for test code to avoid penalizing test files.
 `;
 
 const PARAMETER_SCHEMA = {

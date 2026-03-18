@@ -1745,7 +1745,7 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
-    // registerCoreTool(CodebaseSearchTool, this);
+    registerCoreTool(CodebaseSearchTool, this);
     if (this.getExperimentalSkills()) {
       registerCoreTool(SkillTool, this);
     }
