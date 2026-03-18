@@ -1299,7 +1299,7 @@ export class CoreToolScheduler {
       }
 
       if (toolResult.error === undefined) {
-        const content = toolResult.llmContent;
+        let content = toolResult.llmContent;
         const contentLength =
           typeof content === 'string' ? content.length : undefined;
 
