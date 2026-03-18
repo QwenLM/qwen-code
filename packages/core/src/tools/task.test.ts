@@ -380,6 +380,7 @@ describe('TaskTool', () => {
         mockSubagents[0],
         config,
         expect.any(Object), // eventEmitter parameter
+        undefined, // runConfigOverrides (undefined when not provided in params)
       );
       expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledWith(
         mockContextState,
@@ -533,6 +534,35 @@ describe('TaskTool', () => {
       const description = invocation.getDescription();
 
       expect(description).toBe('file-search subagent: "Search files"');
+    });
+
+    it('should pass runConfig overrides to createSubagentScope', async () => {
+      const params: TaskParams = {
+        description: 'Search files with clean context',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        runConfig: {
+          useCleanContext: true,
+          maxContextTokens: 1000,
+          useStructuredOutput: true,
+        },
+      };
+
+      const invocation = (
+        taskTool as TaskToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockSubagentManager.createSubagentScope).toHaveBeenCalledWith(
+        mockSubagents[0],
+        config,
+        expect.any(Object),
+        expect.objectContaining({
+          useCleanContext: true,
+          maxContextTokens: 1000,
+          useStructuredOutput: true,
+        }),
+      );
     });
   });
 });

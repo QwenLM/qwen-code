@@ -240,8 +240,6 @@ export interface ToolConfig {
 export interface ModelConfig {
   /**
    * The name or identifier of the model to be used (e.g., 'qwen3-coder-plus').
-   *
-   * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
   model?: string;
   /**
@@ -258,8 +256,6 @@ export interface ModelConfig {
  * Configures the execution environment and constraints for the subagent.
  * This interface defines parameters that control the subagent's runtime behavior,
  * such as maximum execution time, to prevent infinite loops or excessive resource consumption.
- *
- * TODO: Consider adding max_tokens as a form of budgeting.
  */
 export interface RunConfig {
   /** The maximum execution time for the subagent in minutes. */
@@ -269,4 +265,39 @@ export interface RunConfig {
    * before the execution is terminated. Helps prevent infinite loops.
    */
   max_turns?: number;
+  /**
+   * When true, the subagent starts with a clean context window, not inheriting
+   * the main session's conversation history via getInitialChatHistory().
+   * Only environment context (working directory, date, OS) is provided.
+   * This prevents context bloat during long sessions.
+   */
+  useCleanContext?: boolean;
+  /**
+   * Maximum number of tokens allowed for context injection.
+   * When exceeded, context is truncated to fit within this budget.
+   * If not specified, no token budget is enforced.
+   */
+  maxContextTokens?: number;
+  /**
+   * When true, instructs the subagent to format its output using a structured
+   * summary schema (findings, files changed, conclusion). This ensures only
+   * distilled summaries are injected back into the main context.
+   */
+  useStructuredOutput?: boolean;
+}
+
+/**
+ * Structured summary of subagent output.
+ * When useStructuredOutput is enabled, the subagent should format its
+ * final output using this schema.
+ */
+export interface SubagentStructuredSummary {
+  /** Key findings discovered during subagent execution */
+  findings: string[];
+  /** List of files that were created or modified */
+  filesChanged?: string[];
+  /** Final conclusion or result of the subagent's work */
+  conclusion: string;
+  /** Optional: recommendations for next steps */
+  recommendations?: string[];
 }
