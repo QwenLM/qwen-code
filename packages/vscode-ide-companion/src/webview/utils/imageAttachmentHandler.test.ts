@@ -4,20 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockGetGlobalTempDir } = vi.hoisted(() => ({
-  mockGetGlobalTempDir: vi.fn(),
-}));
+const mockSaveImageBuffer = vi.hoisted(() =>
+  vi.fn<(buffer: Buffer, fileName: string) => Promise<string>>(),
+);
+const mockPruneClipboard = vi.hoisted(() =>
+  vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+);
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: {
-    getGlobalTempDir: mockGetGlobalTempDir,
-  },
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    saveImageBufferToClipboardDir: mockSaveImageBuffer,
+    pruneClipboardImages: mockPruneClipboard,
+  };
+});
 
 vi.mock('vscode', () => ({
   workspace: {
@@ -31,64 +36,63 @@ import {
 } from './imageAttachmentHandler.js';
 
 describe('imageAttachmentHandler', () => {
-  let tempRoot: string;
-
   beforeEach(() => {
-    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-image-'));
-    mockGetGlobalTempDir.mockReturnValue(tempRoot);
+    vi.clearAllMocks();
+    mockSaveImageBuffer.mockImplementation(
+      async (_buffer: Buffer, fileName: string) =>
+        `/mock/clipboard/${fileName}`,
+    );
   });
 
   afterEach(() => {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
-  it('stores clipboard images under the global temp clipboard directory', async () => {
+  it('decodes base64 data URL and delegates to shared save', async () => {
     const filePath = await saveImageToFile(
       'data:image/png;base64,YWJj',
       'image/png',
     );
 
     expect(filePath).toBeTruthy();
-    expect(filePath).toMatch(
-      new RegExp(
-        `${tempRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${path.sep}clipboard${path.sep}clipboard-\\d+-[a-f0-9-]+\\.png$`,
-      ),
-    );
-    expect(fs.existsSync(filePath as string)).toBe(true);
+    expect(mockSaveImageBuffer).toHaveBeenCalledOnce();
+
+    const [buffer, fileName] = mockSaveImageBuffer.mock.calls[0];
+    expect(buffer).toEqual(Buffer.from('abc'));
+    expect(fileName).toMatch(/^clipboard-\d+-[a-f0-9-]+\.png$/);
   });
 
-  it('prunes old clipboard images after saving a new one', async () => {
-    const clipboardDir = path.join(tempRoot, 'clipboard');
-    fs.mkdirSync(clipboardDir, { recursive: true });
+  it('decodes raw base64 (without data URL prefix)', async () => {
+    const filePath = await saveImageToFile('YWJj', 'image/png');
 
-    for (let i = 0; i < 101; i += 1) {
-      const filePath = path.join(clipboardDir, `clipboard-${i}.png`);
-      fs.writeFileSync(filePath, `image-${i}`);
-      const time = new Date(Date.now() - (101 - i) * 1000);
-      fs.utimesSync(filePath, time, time);
-    }
+    expect(filePath).toBeTruthy();
+    const [buffer] = mockSaveImageBuffer.mock.calls[0];
+    expect(buffer).toEqual(Buffer.from('abc'));
+  });
 
+  it('calls pruneClipboardImages after saving', async () => {
     await saveImageToFile('data:image/png;base64,YWJj', 'image/png');
-
-    const clipboardFiles = fs
-      .readdirSync(clipboardDir)
-      .filter((file) => file.startsWith('clipboard-') && file.endsWith('.png'));
-
-    expect(clipboardFiles.length).toBeLessThanOrEqual(100);
+    expect(mockPruneClipboard).toHaveBeenCalledOnce();
   });
 
-  it('generates unique clipboard file paths for multiple images saved in the same millisecond', async () => {
+  it('generates unique file names for images saved in the same millisecond', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1234567890);
 
-    const [firstPath, secondPath] = await Promise.all([
-      saveImageToFile('data:image/png;base64,YWJj', 'image/png'),
-      saveImageToFile('data:image/png;base64,ZGVm', 'image/png'),
-    ]);
+    await saveImageToFile('data:image/png;base64,YWJj', 'image/png');
+    await saveImageToFile('data:image/png;base64,ZGVm', 'image/png');
 
-    expect(firstPath).toBeTruthy();
-    expect(secondPath).toBeTruthy();
-    expect(firstPath).not.toBe(secondPath);
+    const firstName = mockSaveImageBuffer.mock.calls[0][1];
+    const secondName = mockSaveImageBuffer.mock.calls[1][1];
+    expect(firstName).not.toBe(secondName);
+  });
+
+  it('returns null when saveImageBufferToClipboardDir throws', async () => {
+    mockSaveImageBuffer.mockRejectedValueOnce(new Error('disk full'));
+    const result = await saveImageToFile(
+      'data:image/png;base64,YWJj',
+      'image/png',
+    );
+    expect(result).toBeNull();
   });
 
   it('returns saved prompt image metadata for validated attachments', async () => {
@@ -108,9 +112,7 @@ describe('imageAttachmentHandler', () => {
       expect.objectContaining({
         name: 'pasted.png',
         mimeType: 'image/png',
-        path: expect.stringContaining(
-          `${path.sep}clipboard${path.sep}clipboard-`,
-        ),
+        path: expect.stringContaining(`${path.sep}clipboard-`),
       }),
     ]);
     expect(result.formattedText).toContain('@');

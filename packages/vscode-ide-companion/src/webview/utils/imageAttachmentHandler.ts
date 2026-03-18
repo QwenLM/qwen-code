@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { randomUUID } from 'node:crypto';
-import { Storage, escapePath } from '@qwen-code/qwen-code-core';
+import {
+  escapePath,
+  saveImageBufferToClipboardDir,
+  pruneClipboardImages,
+} from '@qwen-code/qwen-code-core';
 import type {
   ImageAttachment,
   SavedImageAttachment,
@@ -18,9 +20,6 @@ import {
 } from '../../utils/imageAttachmentLimits.js';
 import { getImageExtensionForMimeType } from '../../utils/imageFormats.js';
 import { normalizeImageAttachment } from '../../utils/imageAttachmentValidation.js';
-
-const CLIPBOARD_DIR_NAME = 'clipboard';
-const MAX_CLIPBOARD_IMAGES = 100;
 
 export function appendImageReferences(
   text: string,
@@ -41,16 +40,6 @@ export async function saveImageToFile(
   mimeType: string,
 ): Promise<string | null> {
   try {
-    const tempDir = path.join(Storage.getGlobalTempDir(), CLIPBOARD_DIR_NAME);
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    const timestamp = Date.now();
-    const ext = getImageExtensionForMimeType(mimeType);
-    const tempFileName = `clipboard-${timestamp}-${randomUUID()}${ext}`;
-    const tempFilePath = path.join(tempDir, tempFileName);
-
     let pureBase64 = base64Data;
     const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
     if (dataUrlMatch) {
@@ -58,34 +47,17 @@ export async function saveImageToFile(
     }
 
     const buffer = Buffer.from(pureBase64, 'base64');
-    fs.writeFileSync(tempFilePath, buffer);
+    const timestamp = Date.now();
+    const ext = getImageExtensionForMimeType(mimeType);
+    const fileName = `clipboard-${timestamp}-${randomUUID()}${ext}`;
 
-    pruneClipboardImages(tempDir);
-
-    return tempFilePath;
+    const filePath = await saveImageBufferToClipboardDir(buffer, fileName);
+    await pruneClipboardImages();
+    return filePath;
   } catch (error) {
     console.error('[ImageAttachmentHandler] Failed to save image:', error);
     return null;
   }
-}
-
-function pruneClipboardImages(tempDir: string): void {
-  const clipboardImages = fs
-    .readdirSync(tempDir)
-    .filter((file) => file.startsWith('clipboard-'))
-    .map((file) => {
-      const filePath = path.join(tempDir, file);
-      const stats = fs.statSync(filePath);
-      return {
-        filePath,
-        mtimeMs: stats.mtimeMs,
-      };
-    })
-    .sort((left, right) => right.mtimeMs - left.mtimeMs);
-
-  clipboardImages
-    .slice(MAX_CLIPBOARD_IMAGES)
-    .forEach(({ filePath }) => fs.rmSync(filePath, { force: true }));
 }
 
 export async function processImageAttachments(

@@ -188,6 +188,7 @@ export * from './subagents/index.js';
 // ============================================================================
 
 export * from './utils/browser.js';
+export * from './utils/clipboardImageStorage.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';

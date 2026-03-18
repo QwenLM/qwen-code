@@ -8,7 +8,6 @@ import type { ChatRecord, TaskResultDisplay } from '@qwen-code/qwen-code-core';
 import type {
   Content,
   GenerateContentResponseUsageMetadata,
-  Part,
 } from '@google/genai';
 import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
@@ -51,7 +50,7 @@ export class HistoryReplayer {
     switch (record.type) {
       case 'user':
         if (record.message) {
-          await this.replayUserContent(record.message, record.timestamp);
+          await this.replayContent(record.message, 'user', record.timestamp);
         }
         break;
 
@@ -118,71 +117,6 @@ export class HistoryReplayer {
         });
       }
     }
-  }
-
-  /**
-   * Replays only the user-visible portion of a user message.
-   *
-   * User records may contain expanded file/image context after prompt
-   * resolution. During replay we should restore what the user originally saw
-   * in the UI, not the internal readManyFiles expansion.
-   */
-  private async replayUserContent(
-    content: Content,
-    timestamp?: string,
-  ): Promise<void> {
-    const text = this.extractReplayableUserText(
-      content.parts as Part[] | undefined,
-    );
-    if (!text) {
-      return;
-    }
-
-    await this.messageEmitter.emitUserMessage(text, timestamp);
-  }
-
-  private extractReplayableUserText(parts: Part[] | undefined): string {
-    if (!parts) {
-      return '';
-    }
-
-    const visibleTextParts: string[] = [];
-    let sawStructuredContext = false;
-
-    for (let index = 0; index < parts.length; index += 1) {
-      const part = parts[index];
-
-      if ('text' in part && part.text) {
-        if (index > 0 && this.isInternalExpansionText(part.text)) {
-          sawStructuredContext = true;
-          break;
-        }
-        visibleTextParts.push(part.text);
-        continue;
-      }
-
-      if (index > 0) {
-        sawStructuredContext = true;
-        break;
-      }
-    }
-
-    if (visibleTextParts.length === 0) {
-      return '';
-    }
-
-    return sawStructuredContext
-      ? visibleTextParts[0]
-      : visibleTextParts.join('');
-  }
-
-  private isInternalExpansionText(text: string): boolean {
-    return (
-      text.startsWith('\n--- Content from referenced files ---') ||
-      text.startsWith('\nContent from ') ||
-      text.startsWith('\n--- End of content ---') ||
-      text.startsWith('File: ')
-    );
   }
 
   /**

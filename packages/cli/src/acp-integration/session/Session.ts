@@ -34,7 +34,6 @@ import {
   TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
-  escapePath,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -212,6 +211,9 @@ export class Session implements SessionContext {
       ),
     );
 
+    // record user message for session management
+    this.config.getChatRecordingService()?.recordUserMessage(promptText);
+
     // Check if the input contains a slash command
     // Extract text from the first text block if present
     const firstTextBlock = params.prompt.find((block) => block.type === 'text');
@@ -242,10 +244,6 @@ export class Session implements SessionContext {
       // Normal processing for non-slash commands
       parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
     }
-
-    // Record the resolved prompt so resumed sessions preserve pasted images
-    // and other rich content exactly as they were sent to the model.
-    this.config.getChatRecordingService()?.recordUserMessage(parts);
 
     let nextMessage: Content | null = { role: 'user', parts };
 
@@ -938,16 +936,14 @@ export class Session implements SessionContext {
         initialQueryText += chunk.text;
       } else if ('fileData' in chunk) {
         const pathName = chunk.fileData!.fileUri;
-        if (!this.#hasPathReference(initialQueryText, pathName)) {
-          if (
-            i > 0 &&
-            initialQueryText.length > 0 &&
-            !initialQueryText.endsWith(' ')
-          ) {
-            initialQueryText += ' ';
-          }
-          initialQueryText += `@${pathName}`;
+        if (
+          i > 0 &&
+          initialQueryText.length > 0 &&
+          !initialQueryText.endsWith(' ')
+        ) {
+          initialQueryText += ' ';
         }
+        initialQueryText += `@${pathName}`;
       }
     }
 
@@ -1003,12 +999,6 @@ export class Session implements SessionContext {
     }
 
     return processedQueryParts;
-  }
-
-  #hasPathReference(text: string, pathName: string): boolean {
-    return (
-      text.includes(`@${pathName}`) || text.includes(`@${escapePath(pathName)}`)
-    );
   }
 
   debug(msg: string): void {
