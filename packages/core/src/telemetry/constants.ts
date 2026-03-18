@@ -39,6 +39,11 @@ export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 
+// Arena Events
+export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
+export const EVENT_ARENA_AGENT_COMPLETED = 'qwen-code.arena_agent_completed';
+export const EVENT_ARENA_SESSION_ENDED = 'qwen-code.arena_session_ended';
+
 // Performance Events
 export const EVENT_STARTUP_PERFORMANCE = 'qwen-code.startup.performance';
 export const EVENT_MEMORY_USAGE = 'qwen-code.memory.usage';

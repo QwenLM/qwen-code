@@ -1081,9 +1081,28 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
-        await this.executeSingleToolCall(toolCall, signal);
-      }
+      // Task tools are safe to run concurrently — they spawn independent
+      // sub-agents with no shared mutable state.  All other tools run
+      // sequentially in their original order to preserve any implicit
+      // ordering the model may rely on.
+      const taskCalls = callsToExecute.filter(
+        (call) => call.request.name === ToolNames.TASK,
+      );
+      const otherCalls = callsToExecute.filter(
+        (call) => call.request.name !== ToolNames.TASK,
+      );
+
+      const taskPromise = Promise.all(
+        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
+      );
+
+      const othersPromise = (async () => {
+        for (const toolCall of otherCalls) {
+          await this.executeSingleToolCall(toolCall, signal);
+        }
+      })();
+
+      await Promise.all([taskPromise, othersPromise]);
     }
   }
 
