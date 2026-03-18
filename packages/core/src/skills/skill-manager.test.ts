@@ -600,15 +600,6 @@ Skill 3 content`);
       expect(baseDirs).toContain(
         path.join('/test/project', '.agent', 'skills'),
       );
-      expect(baseDirs).toContain(
-        path.join('/test/project', '.cursor', 'skills'),
-      );
-      expect(baseDirs).toContain(
-        path.join('/test/project', '.codex', 'skills'),
-      );
-      expect(baseDirs).toContain(
-        path.join('/test/project', '.claude', 'skills'),
-      );
     });
 
     it('should return all user-level base dirs', () => {
@@ -617,9 +608,6 @@ Skill 3 content`);
       expect(baseDirs).toHaveLength(2);
       expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.agent', 'skills'));
-      expect(baseDirs).toContain(path.join('/home/user', '.cursor', 'skills'));
-      expect(baseDirs).toContain(path.join('/home/user', '.codex', 'skills'));
-      expect(baseDirs).toContain(path.join('/home/user', '.claude', 'skills'));
     });
 
     it('should return bundled-level base dir', () => {
