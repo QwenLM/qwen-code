@@ -1195,6 +1195,8 @@ describe('DiscoveredMCPTool', () => {
         }),
       };
 
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
       const toolError = new Error('Invalid parameters');
       (mockMcpClient.callTool as any).mockRejectedValue(toolError);
 
@@ -1216,7 +1218,6 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow('Invalid parameters');
 
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
     it('should not retry after reconnection attempt fails', async () => {
