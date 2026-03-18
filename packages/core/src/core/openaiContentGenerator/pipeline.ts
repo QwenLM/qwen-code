@@ -255,9 +255,23 @@ export class ContentGenerationPipeline {
         .candidates?.[0]?.finishReason;
 
     if (isFinishChunk) {
-      // This is a finish reason chunk
-      collectedGeminiResponses.push(response);
-      setPendingFinish(response);
+      if (hasPendingFinish) {
+        // Duplicate finish chunk (e.g. from OpenRouter providers that send two
+        // finish_reason chunks for tool calls). The streaming tool call parser
+        // was already reset after the first finish chunk, so the second one
+        // carries no functionCall parts. Merge only usageMetadata and keep the
+        // candidates (including functionCall parts) from the first finish chunk.
+        const lastResponse =
+          collectedGeminiResponses[collectedGeminiResponses.length - 1];
+        if (response.usageMetadata) {
+          lastResponse.usageMetadata = response.usageMetadata;
+        }
+        setPendingFinish(lastResponse);
+      } else {
+        // This is a finish reason chunk
+        collectedGeminiResponses.push(response);
+        setPendingFinish(response);
+      }
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
     } else if (hasPendingFinish) {
       // We have a pending finish chunk, merge this chunk's data into it
