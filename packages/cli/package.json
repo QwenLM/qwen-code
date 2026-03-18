@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.12.1",
+  "version": "0.12.6",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -33,7 +33,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.12.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.12.6"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
@@ -59,7 +59,6 @@
     "open": "^10.1.2",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",
-    "qrcode-terminal": "^0.12.0",
     "react": "^19.1.0",
     "read-package-up": "^11.0.0",
     "shell-quote": "^1.8.3",

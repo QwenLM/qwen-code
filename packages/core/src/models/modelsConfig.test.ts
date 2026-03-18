@@ -1506,4 +1506,130 @@ describe('ModelsConfig', () => {
       expect(allModels.some((m) => m.id === 'gemini-ultra')).toBe(true);
     });
   });
+
+  describe('max_tokens in modelsConfig', () => {
+    it('should not auto-fill max_tokens when samplingParams is undefined', async () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4',
+            name: 'GPT-4',
+            baseUrl: 'https://api.openai.example.com/v1',
+            // No generationConfig.samplingParams defined
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.samplingParams).toBeUndefined();
+    });
+
+    it('should not auto-fill max_tokens when samplingParams exists but max_tokens is missing', async () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4',
+            name: 'GPT-4',
+            baseUrl: 'https://api.openai.example.com/v1',
+            generationConfig: {
+              samplingParams: { temperature: 0.7 }, // max_tokens not defined
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      // Should preserve existing sampling params but not inject max_tokens
+      expect(gc.samplingParams?.temperature).toBe(0.7);
+      expect(gc.samplingParams?.max_tokens).toBeUndefined();
+
+      const sources = modelsConfig.getGenerationConfigSources();
+      expect(sources['samplingParams']?.kind).toBe('modelProviders');
+    });
+
+    it('should not override existing max_tokens from modelProviders', async () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4',
+            name: 'GPT-4',
+            baseUrl: 'https://api.openai.example.com/v1',
+            generationConfig: {
+              samplingParams: { temperature: 0.7, max_tokens: 4096 },
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      // Should preserve both values from provider
+      expect(gc.samplingParams?.temperature).toBe(0.7);
+      expect(gc.samplingParams?.max_tokens).toBe(4096);
+
+      const sources = modelsConfig.getGenerationConfigSources();
+      expect(sources['samplingParams']?.kind).toBe('modelProviders');
+    });
+
+    it('should not auto-fill max_tokens for different model families', async () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        anthropic: [
+          {
+            id: 'claude-3-opus',
+            name: 'Claude 3 Opus',
+            baseUrl: 'https://api.anthropic.example.com/v1',
+          },
+        ],
+        gemini: [
+          {
+            id: 'gemini-pro',
+            name: 'Gemini Pro',
+            baseUrl: 'https://api.gemini.example.com/v1',
+          },
+        ],
+      };
+
+      // Test Claude model without provider max_tokens
+      const claudeConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_ANTHROPIC,
+        modelProvidersConfig,
+      });
+
+      await claudeConfig.switchModel(AuthType.USE_ANTHROPIC, 'claude-3-opus');
+
+      let gc = currentGenerationConfig(claudeConfig);
+      expect(gc.samplingParams).toBeUndefined();
+
+      // Test Gemini model without provider max_tokens
+      const geminiConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_GEMINI,
+        modelProvidersConfig,
+      });
+
+      await geminiConfig.switchModel(AuthType.USE_GEMINI, 'gemini-pro');
+
+      gc = currentGenerationConfig(geminiConfig);
+      expect(gc.samplingParams).toBeUndefined();
+    });
+  });
 });

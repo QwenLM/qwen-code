@@ -28,6 +28,7 @@ import {
   ApprovalMode,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
+  SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -482,7 +483,7 @@ describe('useGeminiStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
-      { isContinuation: true },
+      { type: SendMessageType.ToolResult },
     );
   });
 
@@ -806,7 +807,7 @@ describe('useGeminiStream', () => {
         toolCallResponseParts,
         expect.any(AbortSignal),
         'prompt-id-4',
-        { isContinuation: true },
+        { type: SendMessageType.ToolResult },
       );
     });
 
@@ -1122,7 +1123,7 @@ describe('useGeminiStream', () => {
           'This is the actual prompt from the command file.',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
@@ -1149,7 +1150,7 @@ describe('useGeminiStream', () => {
           '',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1168,7 +1169,7 @@ describe('useGeminiStream', () => {
           '// This is a line comment',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1187,7 +1188,7 @@ describe('useGeminiStream', () => {
           '/* This is a block comment */',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -2091,7 +2092,7 @@ describe('useGeminiStream', () => {
       processedQueryParts, // Argument 1: The parts array directly
       expect.any(AbortSignal), // Argument 2: An AbortSignal
       expect.any(String), // Argument 3: The prompt_id string
-      undefined, // Argument 4: Options (undefined for normal prompts)
+      { type: SendMessageType.UserQuery }, // Argument 4: The options
     );
   });
 
@@ -2244,6 +2245,7 @@ describe('useGeminiStream', () => {
     it('should show a retry countdown and update pending history over time', async () => {
       vi.useFakeTimers();
       try {
+        let continueToRetryAttempt: (() => void) | undefined;
         let resolveStream: (() => void) | undefined;
         mockSendMessageStream.mockReturnValue(
           (async function* () {
@@ -2256,6 +2258,9 @@ describe('useGeminiStream', () => {
                 delayMs: 3000,
               },
             };
+            await new Promise<void>((resolve) => {
+              continueToRetryAttempt = resolve;
+            });
             yield {
               type: ServerGeminiEventType.Retry,
             };
@@ -2330,6 +2335,12 @@ describe('useGeminiStream', () => {
           '2s',
         );
 
+        continueToRetryAttempt?.();
+
+        await act(async () => {
+          await Promise.resolve();
+        });
+
         resolveStream?.();
 
         await act(async () => {
@@ -2338,6 +2349,103 @@ describe('useGeminiStream', () => {
         });
 
         // Error item (with hint) should be cleared after retry succeeds
+        const remainingError = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        );
+        expect(remainingError).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should clear retry errors after auto-retry succeeds once the countdown has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        let continueAfterCountdown: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Retry,
+              retryInfo: {
+                message: '[API Error: Rate limit exceeded]',
+                attempt: 1,
+                maxRetries: 3,
+                delayMs: 1000,
+              },
+            };
+            await new Promise<void>((resolve) => {
+              continueAfterCountdown = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+            };
+            yield {
+              type: ServerGeminiEventType.Text,
+              value: 'Success after retry',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        act(() => {
+          void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        let errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        ) as { hint?: string } | undefined;
+        for (let attempts = 0; attempts < 5 && !errorItem; attempts++) {
+          await act(async () => {
+            await Promise.resolve();
+          });
+          errorItem = result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        }
+        expect(errorItem?.hint).toContain('1s');
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        const staleErrorBeforeRetryCompletes =
+          result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        expect(staleErrorBeforeRetryCompletes?.hint).toContain('0s');
+
+        await act(async () => {
+          continueAfterCountdown?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
         const remainingError = result.current.pendingHistoryItems.find(
           (item) => item.type === MessageType.ERROR,
         );
@@ -2669,7 +2777,7 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
 
       // Verify only the first query was added to history
@@ -2721,14 +2829,14 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
       expect(mockSendMessageStream).toHaveBeenNthCalledWith(
         2,
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
 
@@ -2751,7 +2859,7 @@ describe('useGeminiStream', () => {
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
   });

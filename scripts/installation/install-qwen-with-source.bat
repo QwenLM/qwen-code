@@ -134,17 +134,19 @@ call :CheckCommandExists qwen
 if %ERRORLEVEL% EQU 0 (
     echo SUCCESS: Qwen Code is available as 'qwen' command.
     call qwen --version
+    echo.
+    echo INFO: Starting Qwen Code...
+    echo.
+    call qwen
 ) else (
     echo WARNING: Qwen Code may not be in PATH. Please check your npm global bin directory.
+    echo.
+    echo ===========================================
+    echo SUCCESS: Installation completed!
+    echo The source information is stored in %USERPROFILE%\.qwen\source.json
+    echo.
+    echo ===========================================
 )
-
-echo.
-echo ===========================================
-echo SUCCESS: Installation completed!
-echo The source information is stored in %USERPROFILE%\.qwen\source.json
-echo Tips: Please restart your terminal and run: qwen
-echo.
-echo ===========================================
 
 endlocal
 exit /b 0

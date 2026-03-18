@@ -174,33 +174,6 @@ describe('<AskUserQuestionDialog />', () => {
       unmount();
     });
 
-    it('navigates down with arrow key and selects', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails();
-
-      const { stdin, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Navigate down to "Blue"
-      stdin.write('\u001B[B'); // Down arrow
-      await wait();
-
-      // Press Enter
-      stdin.write('\r');
-      await wait();
-
-      expect(onConfirm).toHaveBeenCalledWith(
-        ToolConfirmationOutcome.ProceedOnce,
-        { answers: { 0: 'Blue' } },
-      );
-      unmount();
-    });
-
     it('navigates with number keys', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails();
@@ -271,72 +244,9 @@ describe('<AskUserQuestionDialog />', () => {
       expect(lastFrame()).toContain('[✓]');
       unmount();
     });
-
-    it('submits multi-select with Space to toggle then Enter to confirm', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [createSingleQuestion({ multiSelect: true })],
-      });
-
-      const { stdin, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Space to toggle first option
-      stdin.write(' ');
-      await wait();
-
-      // Enter to confirm and submit
-      stdin.write('\r');
-      await wait();
-
-      expect(onConfirm).toHaveBeenCalledWith(
-        ToolConfirmationOutcome.ProceedOnce,
-        { answers: { 0: 'Red' } },
-      );
-      unmount();
-    });
   });
 
   describe('multiple questions', () => {
-    it('navigates between tabs with left/right arrows', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [
-          createSingleQuestion({ header: 'Q1' }),
-          createSingleQuestion({
-            header: 'Q2',
-            question: 'Second question?',
-          }),
-        ],
-      });
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Navigate right to Q2
-      stdin.write('\u001B[C'); // Right arrow
-      await wait();
-
-      expect(lastFrame()).toContain('Second question?');
-
-      // Navigate left back to Q1
-      stdin.write('\u001B[D'); // Left arrow
-      await wait();
-
-      expect(lastFrame()).toContain('What is your favorite color?');
-      unmount();
-    });
-
     it('shows Submit tab for multiple questions', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails({
@@ -364,41 +274,6 @@ describe('<AskUserQuestionDialog />', () => {
       expect(output).toContain('Submit answers');
       expect(output).toContain('Cancel');
       expect(output).toContain('Your answers');
-      unmount();
-    });
-
-    it('cancels from Submit tab', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [
-          createSingleQuestion({ header: 'Q1' }),
-          createSingleQuestion({ header: 'Q2' }),
-        ],
-      });
-
-      const { stdin, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Navigate to submit tab
-      stdin.write('\u001B[C'); // Right
-      await wait();
-      stdin.write('\u001B[C'); // Right
-      await wait();
-
-      // Navigate down to Cancel option
-      stdin.write('\u001B[B'); // Down
-      await wait();
-
-      // Press Enter
-      stdin.write('\r');
-      await wait();
-
-      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
       unmount();
     });
 

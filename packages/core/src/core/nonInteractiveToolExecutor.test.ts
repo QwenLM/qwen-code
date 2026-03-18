@@ -104,7 +104,6 @@ describe('executeToolCall', () => {
       callId: 'call1',
       error: undefined,
       errorType: undefined,
-      outputFile: undefined,
       resultDisplay: 'Success!',
       contentLength:
         typeof toolResult.llmContent === 'string'
@@ -309,7 +308,6 @@ describe('executeToolCall', () => {
       callId: 'call6',
       error: undefined,
       errorType: undefined,
-      outputFile: undefined,
       resultDisplay: 'Image processed',
       contentLength: undefined,
       responseParts: [
