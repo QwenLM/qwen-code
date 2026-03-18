@@ -113,9 +113,9 @@ describe('gemini.tsx main function', () => {
 
   beforeEach(() => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
-    originalEnvGeminiSandbox = process.env['GEMINI_SANDBOX'];
+    originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
-    delete process.env['GEMINI_SANDBOX'];
+    delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
 
     initialUnhandledRejectionListeners =
@@ -125,9 +125,9 @@ describe('gemini.tsx main function', () => {
   afterEach(() => {
     // Restore original env variables
     if (originalEnvGeminiSandbox !== undefined) {
-      process.env['GEMINI_SANDBOX'] = originalEnvGeminiSandbox;
+      process.env['QWEN_SANDBOX'] = originalEnvGeminiSandbox;
     } else {
-      delete process.env['GEMINI_SANDBOX'];
+      delete process.env['QWEN_SANDBOX'];
     }
     if (originalEnvSandbox !== undefined) {
       process.env['SANDBOX'] = originalEnvSandbox;
@@ -190,6 +190,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     try {
       await main();
@@ -262,7 +263,7 @@ describe('gemini.tsx main function', () => {
       'isRaw',
     );
     Object.defineProperty(process.stdin, 'isTTY', {
-      value: true,
+      value: false, // 在 stream-json 模式下应为 false
       configurable: true,
     });
     Object.defineProperty(process.stdin, 'isRaw', {
@@ -322,6 +323,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -344,6 +346,9 @@ describe('gemini.tsx main function', () => {
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
       getWarnings: () => [],
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getOutputFormat: () => OutputFormat.TEXT,
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
@@ -442,6 +447,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      getUsageStatisticsEnabled: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -452,6 +458,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
@@ -460,6 +467,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       debug: undefined,
       prompt: undefined,
       promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
       query: undefined,
       yolo: undefined,
       approvalMode: undefined,
@@ -497,6 +506,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       authType: undefined,
       maxSessionTurns: undefined,
       experimentalLsp: undefined,
+      experimentalHooks: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,

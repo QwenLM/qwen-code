@@ -110,7 +110,11 @@ You can configure the behavior of the `run_shell_command` tool by modifying your
 
 ### Enabling Interactive Commands
 
-To enable interactive commands, you need to set the `tools.shell.enableInteractiveShell` setting to `true`. This will use `node-pty` for shell command execution, which allows for interactive sessions. If `node-pty` is not available, it will fall back to the `child_process` implementation, which does not support interactive commands.
+The `tools.shell.enableInteractiveShell` setting controls whether shell commands are executed via `node-pty` (interactive PTY) or the plain `child_process` backend. When enabled, interactive sessions such as `vim`, `git rebase -i`, and TUI programs work correctly.
+
+This setting defaults to `true` on most platforms. On Windows builds **<= 19041** (before Windows 10 version 2004), it defaults to `false` because older ConPTY implementations have known reliability issues (missing output, hangs). This matches the same cutoff used by VS Code ([microsoft/vscode#123725](https://github.com/microsoft/vscode/issues/123725)). If `node-pty` is not available at runtime, the tool falls back to `child_process` regardless of this setting.
+
+To explicitly override the default, set the value in `settings.json`:
 
 **Example `settings.json`:**
 

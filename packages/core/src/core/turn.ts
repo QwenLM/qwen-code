@@ -64,6 +64,7 @@ export enum GeminiEventType {
   LoopDetected = 'loop_detected',
   Citation = 'citation',
   Retry = 'retry',
+  HookSystemMessage = 'hook_system_message',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -108,7 +109,6 @@ export interface ToolCallResponseInfo {
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
-  outputFile?: string | undefined;
   contentLength?: number;
 }
 
@@ -202,6 +202,11 @@ export type ServerGeminiCitationEvent = {
   value: string;
 };
 
+export type ServerGeminiHookSystemMessageEvent = {
+  type: GeminiEventType.HookSystemMessage;
+  value: string;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
   | ServerGeminiChatCompressedEvent
@@ -209,6 +214,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiContentEvent
   | ServerGeminiErrorEvent
   | ServerGeminiFinishedEvent
+  | ServerGeminiHookSystemMessageEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiThoughtEvent

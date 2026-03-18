@@ -29,6 +29,7 @@ import { SubagentValidator } from './validation.js';
 import { SubAgentScope } from './subagent.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
@@ -908,9 +909,11 @@ function parseSubagentContent(
   validator: SubagentValidator,
 ): SubagentConfig {
   try {
+    const normalizedContent = normalizeContent(content);
+
     // Split frontmatter and content
     const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-    const match = content.match(frontmatterRegex);
+    const match = normalizedContent.match(frontmatterRegex);
 
     if (!match) {
       throw new Error('Invalid format: missing YAML frontmatter');

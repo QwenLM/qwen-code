@@ -117,8 +117,9 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Анализ проекта и создание адаптированного файла QWEN.md',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
+  'List available skills.': 'Показать доступные навыки.',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
@@ -380,7 +381,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
   'exit the cli': 'Выход из CLI',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'Открыть диалог управления MCP или авторизоваться на сервере с поддержкой OAuth',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Показать настроенные MCP-серверы и инструменты, или авторизоваться на серверах с поддержкой OAuth',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
@@ -396,6 +399,7 @@ export default {
     'В настоящее время поддерживаются следующие редакторы. Обратите внимание, что некоторые редакторы нельзя использовать в режиме песочницы.',
   'Your preferred editor is:': 'Ваш предпочитаемый редактор:',
   'Manage extensions': 'Управление расширениями',
+  'Manage installed extensions': 'Управлять установленными расширениями',
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
     'Обновить расширения. Использование: update <extension-names>|--all',
@@ -594,6 +598,38 @@ export default {
     'Не удалось настроить {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Ваш терминал уже настроен для оптимальной работы с многострочным вводом (Shift+Enter и Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
+  'List all configured hooks': 'Показать все настроенные хуки',
+  'Enable a disabled hook': 'Включить отключенный хук',
+  'Disable an active hook': 'Отключить активный хук',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Экспортировать историю сообщений текущей сессии в файл',
+  'Export session to HTML format': 'Экспортировать сессию в формат HTML',
+  'Export session to JSON format': 'Экспортировать сессию в формат JSON',
+  'Export session to JSONL format (one message per line)':
+    'Экспортировать сессию в формат JSONL (одно сообщение на строку)',
+  'Export session to markdown format':
+    'Экспортировать сессию в формат Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Создать персонализированные инсайты по программированию на основе истории чата',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Продолжить предыдущую сессию',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Восстановить вызов инструмента. Это вернет историю разговора и файлов к состоянию на момент, когда был предложен этот вызов инструмента',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Не удалось определить тип терминала. Поддерживаемые терминалы: VS Code, Cursor, Windsurf и Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -752,6 +788,15 @@ export default {
     "Не удалось авторизоваться на MCP-сервере '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Повторное обнаружение инструментов от '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "Обнаружено {{count}} инструмент(ов) от '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Аутентификация завершена. Возврат к деталям сервера...',
+  'Authentication successful.': 'Аутентификация успешна.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Если браузер не открылся, скопируйте этот URL и вставьте его в браузер:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Убедитесь, что скопировали ПОЛНЫЙ URL — он может занимать несколько строк.',
 
   // ============================================================================
   // Команды - Чат
@@ -889,9 +934,41 @@ export default {
   'Do you want to proceed?': 'Вы хотите продолжить?',
   'Yes, allow once': 'Да, разрешить один раз',
   'Allow always': 'Всегда разрешать',
+  Yes: 'Да',
   No: 'Нет',
   'No (esc)': 'Нет (esc)',
   'Yes, allow always for this session': 'Да, всегда разрешать для этой сессии',
+
+  // MCP Management - Core translations
+  Disable: 'Отключить',
+  Enable: 'Включить',
+  Authenticate: 'Аутентификация',
+  'Re-authenticate': 'Повторная аутентификация',
+  'Clear Authentication': 'Очистить аутентификацию',
+  disabled: 'отключен',
+  'Server:': 'Сервер:',
+  Reconnect: 'Переподключить',
+  'View tools': 'Просмотреть инструменты',
+  '(disabled)': '(отключен)',
+  'Error:': 'Ошибка:',
+  Extension: 'Расширение',
+  tool: 'инструмент',
+  connected: 'подключен',
+  connecting: 'подключение',
+  disconnected: 'отключен',
+  error: 'ошибка',
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} недействительных инструментов',
+  invalid: 'недействительный',
+  'invalid: {{reason}}': 'недействительно: {{reason}}',
+  'missing name': 'отсутствует имя',
+  'missing description': 'отсутствует описание',
+  '(unnamed)': '(без имени)',
+  'Warning: This tool cannot be called by the LLM':
+    'Предупреждение: Этот инструмент не может быть вызван LLM',
+  Reason: 'Причина',
+  'Tools must have both name and description to be used by the LLM.':
+    'Инструменты должны иметь как имя, так и описание, чтобы использоваться LLM.',
   'Modify in progress:': 'Идет изменение:',
   'Save and close external editor to continue':
     'Сохраните и закройте внешний редактор для продолжения',
@@ -1449,6 +1526,17 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
+  Custom: 'Пользовательский',
+  'More instructions about configuring `modelProviders` manually.':
+    'Дополнительные инструкции по ручной настройке `modelProviders`.',
+  'Select API-KEY configuration mode:': 'Выберите режим конфигурации API-KEY:',
+  '(Press Escape to go back)': '(Нажмите Escape для возврата)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Нажмите Enter для отправки, Escape для отмены)',
+  'More instructions please check:': 'Дополнительные инструкции см.:',
   'Select Region for Coding Plan': 'Выберите регион Coding Plan',
   'Choose based on where your account is registered':
     'Выберите в зависимости от места регистрации вашего аккаунта',
@@ -1486,4 +1574,113 @@ export default {
   Messages: 'Сообщения',
   'Show context window usage breakdown.':
     'Показать разбивку использования контекстного окна.',
+  // MCP Management Dialog
+  // ============================================================================
+  'MCP Management': 'Управление MCP',
+  'Server List': 'Список серверов',
+  'Server Detail': 'Детали сервера',
+  'Disable Server': 'Отключить сервер',
+  'Tool List': 'Список инструментов',
+  'Tool Detail': 'Детали инструмента',
+  'Loading...': 'Загрузка...',
+  'Unknown step': 'Неизвестный шаг',
+  'Esc to back': 'Esc для возврата',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ навигация · Enter выбрать · Esc закрыть',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ навигация · Enter выбрать · Esc назад',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ навигация · Enter подтвердить · Esc назад',
+  'User Settings (global)': 'Настройки пользователя (глобальные)',
+  'Workspace Settings (project-specific)':
+    'Настройки рабочего пространства (проектные)',
+  'Disable server:': 'Отключить сервер:',
+  'Select where to add the server to the exclude list:':
+    'Выберите, где добавить сервер в список исключений:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter для подтверждения, Esc для отмены',
+  'Status:': 'Статус:',
+  'Command:': 'Команда:',
+  'Working Directory:': 'Рабочий каталог:',
+  'Capabilities:': 'Возможности:',
+  'No server selected': 'Сервер не выбран',
+
+  // MCP Server List
+  'User MCPs': 'MCP пользователя',
+  'Project MCPs': 'MCP проекта',
+  'Extension MCPs': 'MCP расширений',
+  server: 'сервер',
+  servers: 'серверов',
+  'Add MCP servers to your settings to get started.':
+    'Добавьте серверы MCP в настройки, чтобы начать.',
+  'Run qwen --debug to see error logs':
+    'Запустите qwen --debug для просмотра журналов ошибок',
+
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-аутентификация',
+  'Press Enter to start authentication, Esc to go back':
+    'Нажмите Enter для начала аутентификации, Esc для возврата',
+  'Authenticating... Please complete the login in your browser.':
+    'Аутентификация... Пожалуйста, завершите вход в браузере.',
+  'Press Enter or Esc to go back': 'Нажмите Enter или Esc для возврата',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Для этого сервера нет доступных инструментов.',
+  destructive: 'деструктивный',
+  'read-only': 'только чтение',
+  'open-world': 'открытый мир',
+  idempotent: 'идемпотентный',
+  'Tools for {{name}}': 'Инструменты для {{name}}',
+  'Tools for {{serverName}}': 'Инструменты для {{serverName}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'обязательный',
+  Type: 'Тип',
+  Enum: 'Перечисление',
+  Parameters: 'Параметры',
+  'No tool selected': 'Инструмент не выбран',
+  Annotations: 'Аннотации',
+  Title: 'Заголовок',
+  'Read Only': 'Только чтение',
+  Destructive: 'Деструктивный',
+  Idempotent: 'Идемпотентный',
+  'Open World': 'Открытый мир',
+  Server: 'Сервер',
+  '{{region}} configuration updated successfully.':
+    'Конфигурация {{region}} успешно обновлена.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Совет: Используйте /model для переключения между доступными моделями Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Пожалуйста, ответьте на следующий(ие) вопрос(ы):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Невозможно задавать вопросы пользователю в неинтерактивном режиме. Пожалуйста, запустите в интерактивном режиме для использования этого инструмента.',
+  'User declined to answer the questions.':
+    'Пользователь отказался отвечать на вопросы.',
+  'User has provided the following answers:':
+    'Пользователь предоставил следующие ответы:',
+  'Failed to process user answers:':
+    'Не удалось обработать ответы пользователя:',
+  'Type something...': 'Введите что-то...',
+  Submit: 'Отправить',
+  'Submit answers': 'Отправить ответы',
+  Cancel: 'Отмена',
+  'Your answers:': 'Ваши ответы:',
+  '(not answered)': '(не отвечено)',
+  'Ready to submit your answers?': 'Готовы отправить свои ответы?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Enter: Выбор',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
 };

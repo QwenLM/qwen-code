@@ -68,7 +68,6 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
-  outputFile?: string;
 }
 
 export interface CompressionProps {

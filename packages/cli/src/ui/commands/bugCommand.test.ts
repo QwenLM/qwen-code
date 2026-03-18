@@ -150,7 +150,8 @@ Memory Usage: 100 MB`;
 Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
-Auth: ${AuthType.USE_OPENAI} (https://api.openai.com/v1)
+Auth: API Key - ${AuthType.USE_OPENAI}
+Base URL: https://api.openai.com/v1
 Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test

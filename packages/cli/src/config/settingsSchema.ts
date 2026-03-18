@@ -76,11 +76,97 @@ export interface SettingDefinition {
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Schema for array items when type is 'array' */
+  items?: SettingItemDefinition;
+}
+
+/**
+ * Schema definition for array item types.
+ * Supports simple types (string, number, boolean) and complex object types.
+ */
+export interface SettingItemDefinition {
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  properties?: Record<
+    string,
+    SettingItemDefinition & {
+      required?: boolean;
+      enum?: string[];
+      additionalProperties?: SettingItemDefinition;
+    }
+  >;
+  items?: SettingItemDefinition;
+  required?: boolean;
+  enum?: string[];
+  description?: string;
+  additionalProperties?: boolean | SettingItemDefinition;
 }
 
 export interface SettingsSchema {
   [key: string]: SettingDefinition;
 }
+
+/**
+ * Common items schema for hook definitions.
+ * Used by both UserPromptSubmit and Stop hooks.
+ */
+const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
+  type: 'object',
+  description:
+    'A hook definition with an optional matcher and a list of hook configurations.',
+  properties: {
+    matcher: {
+      type: 'string',
+      description:
+        'An optional matcher pattern to filter when this hook definition applies.',
+    },
+    sequential: {
+      type: 'boolean',
+      description:
+        'Whether the hooks should be executed sequentially instead of in parallel.',
+    },
+    hooks: {
+      type: 'array',
+      description: 'The list of hook configurations to execute.',
+      required: true,
+      items: {
+        type: 'object',
+        description:
+          'A hook configuration entry that defines a command to execute.',
+        properties: {
+          type: {
+            type: 'string',
+            description: 'The type of hook.',
+            enum: ['command'],
+            required: true,
+          },
+          command: {
+            type: 'string',
+            description: 'The command to execute when the hook is triggered.',
+            required: true,
+          },
+          name: {
+            type: 'string',
+            description: 'An optional name for the hook.',
+          },
+          description: {
+            type: 'string',
+            description: 'An optional description of what the hook does.',
+          },
+          timeout: {
+            type: 'number',
+            description: 'Timeout in milliseconds for the hook execution.',
+          },
+          env: {
+            type: 'object',
+            description:
+              'Environment variables to set when executing the hook command.',
+            additionalProperties: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+};
 
 export type MemoryImportFormat = 'tree' | 'flat';
 export type DnsResolutionOrder = 'ipv4first' | 'verbatim';
@@ -546,17 +632,6 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
-      summarizeToolOutput: {
-        type: 'object',
-        label: 'Summarize Tool Output',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as
-          | Record<string, { tokenBudget?: number }>
-          | undefined,
-        description: 'Settings for summarizing tool output.',
-        showInDialog: false,
-      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -589,7 +664,7 @@ const SETTINGS_SCHEMA = {
         label: 'Skip Loop Detection',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
@@ -822,9 +897,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: true,
             description:
-              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
             showInDialog: true,
           },
           pager: {
@@ -941,15 +1016,6 @@ const SETTINGS_SCHEMA = {
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
       },
-      enableToolOutputTruncation: {
-        type: 'boolean',
-        label: 'Enable Tool Output Truncation',
-        category: 'General',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable truncation of large tool outputs.',
-        showInDialog: false,
-      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',
@@ -998,6 +1064,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to allow.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
       excluded: {
         type: 'array',
@@ -1007,6 +1074,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to exclude.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
     },
   },
@@ -1175,6 +1243,77 @@ const SETTINGS_SCHEMA = {
       | undefined,
     description: 'Configuration for web search providers.',
     showInDialog: false,
+  },
+
+  hooksConfig: {
+    type: 'object',
+    label: 'Hooks Config',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook configurations for intercepting and customizing agent behavior.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Hooks',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
+        showInDialog: false,
+      },
+      disabled: {
+        type: 'array',
+        label: 'Disabled Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  hooks: {
+    type: 'object',
+    label: 'Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook event configurations for extending CLI behavior at various lifecycle points.',
+    showInDialog: false,
+    properties: {
+      UserPromptSubmit: {
+        type: 'array',
+        label: 'Before Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      Stop: {
+        type: 'array',
+        label: 'After Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+    },
   },
 } as const satisfies SettingsSchema;
 

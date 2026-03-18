@@ -72,7 +72,7 @@ describe('run_shell_command', () => {
     const rig = new TestRig();
     await rig.setup('should propagate environment variables');
 
-    const varName = 'GEMINI_CLI_TEST_VAR';
+    const varName = 'QWEN_CODE_TEST_VAR';
     const varValue = `test-value-${Math.random().toString(36).substring(7)}`;
     process.env[varName] = varValue;
 

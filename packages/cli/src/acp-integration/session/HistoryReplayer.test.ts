@@ -464,11 +464,11 @@ describe('HistoryReplayer', () => {
         content: { type: 'text', text: '' },
         _meta: {
           usage: {
-            promptTokens: 100,
-            completionTokens: 50,
-            thoughtsTokens: undefined,
+            inputTokens: 100,
+            outputTokens: 50,
             totalTokens: 150,
-            cachedTokens: undefined,
+            thoughtTokens: undefined,
+            cachedReadTokens: undefined,
           },
         },
       });

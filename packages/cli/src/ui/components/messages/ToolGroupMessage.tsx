@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import { useMemo } from 'react';
-import { Box, Text } from 'ink';
+import { Box } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
@@ -136,13 +136,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   contentWidth={innerWidth}
                 />
               )}
-            {tool.outputFile && (
-              <Box marginX={1}>
-                <Text color={theme.text.primary}>
-                  Output too long and was saved to: {tool.outputFile}
-                </Text>
-              </Box>
-            )}
           </Box>
         );
       })}

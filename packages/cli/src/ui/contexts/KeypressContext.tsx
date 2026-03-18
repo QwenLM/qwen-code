@@ -47,6 +47,42 @@ export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100m
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
+// Kitty keypad private-use keycodes (0xE000-0xE026)
+// Reference: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+const KITTY_KEYPAD_PRINTABLE_KEYCODE_TO_CHAR: Record<number, string> = {
+  57399: '0',
+  57400: '1',
+  57401: '2',
+  57402: '3',
+  57403: '4',
+  57404: '5',
+  57405: '6',
+  57406: '7',
+  57407: '8',
+  57408: '9',
+  57409: '.',
+  57410: '/',
+  57411: '*',
+  57412: '-',
+  57413: '+',
+  // 57414 is keypad Enter - handled separately via CSI~ sequence
+  57415: '=',
+  57416: ',',
+};
+
+const KITTY_KEYPAD_FUNCTIONAL_KEYCODE_TO_NAME: Record<number, string> = {
+  57417: 'left',
+  57418: 'right',
+  57419: 'up',
+  57420: 'down',
+  57421: 'pageup',
+  57422: 'pagedown',
+  57423: 'home',
+  57424: 'end',
+  57425: 'insert',
+  57426: 'delete',
+};
+
 export interface Key {
   name: string;
   ctrl: boolean;
@@ -141,6 +177,25 @@ export function KeypressProvider({
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+
+    const createPrintableKey = (char: string): Key => {
+      const printableName =
+        char === ' '
+          ? 'space'
+          : /^[A-Za-z]$/.test(char)
+            ? char.toLowerCase()
+            : char;
+
+      return {
+        name: printableName,
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: char,
+        kittyProtocol: true,
+      };
+    };
 
     // Parse a single complete kitty sequence from the start (prefix) of the
     // buffer and return both the Key and the number of characters consumed.
@@ -332,6 +387,63 @@ export function KeypressProvider({
           };
         }
 
+        if (!ctrl) {
+          const keypadChar = KITTY_KEYPAD_PRINTABLE_KEYCODE_TO_CHAR[keyCode];
+          if (keypadChar) {
+            return {
+              key: {
+                name: keypadChar,
+                ctrl: false,
+                meta: alt,
+                shift,
+                paste: false,
+                sequence: keypadChar,
+                kittyProtocol: true,
+              },
+              length: m[0].length,
+            };
+          }
+        }
+
+        const keypadName = KITTY_KEYPAD_FUNCTIONAL_KEYCODE_TO_NAME[keyCode];
+        if (keypadName) {
+          return {
+            key: {
+              name: keypadName,
+              ctrl,
+              meta: alt,
+              shift,
+              paste: false,
+              sequence: buffer.slice(0, m[0].length),
+              kittyProtocol: true,
+            },
+            length: m[0].length,
+          };
+        }
+
+        // Printable CSI-u keys (including space) should behave like regular
+        // character input so downstream text inputs receive the literal char.
+        // Kitty uses the Unicode private use area for some functional keys
+        // such as keypad events, so exclude that range from generic printable
+        // conversion and handle mapped keys explicitly above.
+        if (
+          terminator === 'u' &&
+          !ctrl &&
+          keyCode >= 32 &&
+          keyCode !== 127 &&
+          keyCode <= 0x10ffff &&
+          !(keyCode >= 0xe000 && keyCode <= 0xf8ff)
+        ) {
+          return {
+            key: {
+              ...createPrintableKey(String.fromCodePoint(keyCode)),
+              meta: alt,
+              shift,
+            },
+            length: m[0].length,
+          };
+        }
+
         // Ctrl+letters
         if (
           ctrl &&
@@ -384,6 +496,42 @@ export function KeypressProvider({
       }
 
       return null;
+    };
+
+    const getCompleteCsiSequenceLength = (buffer: string): number | null => {
+      if (!buffer.startsWith(`${ESC}[`)) {
+        return null;
+      }
+
+      for (let i = 2; i < buffer.length; i++) {
+        const code = buffer.charCodeAt(i);
+        if (code >= 0x40 && code <= 0x7e) {
+          return i + 1;
+        }
+        if (code < 0x20 || code > 0x3f) {
+          return 0;
+        }
+      }
+
+      return null;
+    };
+
+    const parsePlainTextPrefix = (
+      buffer: string,
+    ): { key: Key; length: number } | null => {
+      if (!buffer || buffer.startsWith(ESC)) {
+        return null;
+      }
+
+      const [char] = Array.from(buffer);
+      if (!char) {
+        return null;
+      }
+
+      return {
+        key: createPrintableKey(char),
+        length: char.length,
+      };
     };
 
     const broadcast = (key: Key) => {
@@ -549,47 +697,82 @@ export function KeypressProvider({
           // start of the buffer. This handles batched inputs cleanly. If the
           // prefix is incomplete or invalid, skip to the next CSI introducer
           // (ESC[) so that a following valid sequence can still be parsed.
-          let parsedAny = false;
+          let bufferedInputHandled = false;
           while (kittySequenceBuffer) {
             const parsed = parseKittyPrefix(kittySequenceBuffer);
-            if (!parsed) {
-              // Look for the next potential CSI start beyond index 0
-              const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
-              if (nextStart > 0) {
-                if (debugKeystrokeLogging) {
+            if (parsed) {
+              if (debugKeystrokeLogging) {
+                const parsedSequence = kittySequenceBuffer.slice(
+                  0,
+                  parsed.length,
+                );
+                if (kittySequenceBuffer.length > parsed.length) {
                   debugLogger.debug(
-                    '[DEBUG] Skipping incomplete/invalid CSI prefix:',
-                    kittySequenceBuffer.slice(0, nextStart),
+                    '[DEBUG] Kitty sequence parsed successfully (prefix):',
+                    parsedSequence,
+                  );
+                } else {
+                  debugLogger.debug(
+                    '[DEBUG] Kitty sequence parsed successfully:',
+                    parsedSequence,
                   );
                 }
-                kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
-                continue;
               }
-              break;
+              // Consume the parsed prefix and broadcast it.
+              kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
+              broadcast(parsed.key);
+              bufferedInputHandled = true;
+              continue;
             }
-            if (debugKeystrokeLogging) {
-              const parsedSequence = kittySequenceBuffer.slice(
-                0,
-                parsed.length,
+
+            const completeUnsupportedCsiLength =
+              getCompleteCsiSequenceLength(kittySequenceBuffer);
+            if (completeUnsupportedCsiLength) {
+              if (debugKeystrokeLogging) {
+                debugLogger.debug(
+                  '[DEBUG] Dropping unsupported complete CSI sequence:',
+                  kittySequenceBuffer.slice(0, completeUnsupportedCsiLength),
+                );
+              }
+              kittySequenceBuffer = kittySequenceBuffer.slice(
+                completeUnsupportedCsiLength,
               );
-              if (kittySequenceBuffer.length > parsed.length) {
+              bufferedInputHandled = true;
+              continue;
+            }
+
+            const plainTextPrefix = parsePlainTextPrefix(kittySequenceBuffer);
+            if (plainTextPrefix) {
+              if (debugKeystrokeLogging) {
                 debugLogger.debug(
-                  '[DEBUG] Kitty sequence parsed successfully (prefix):',
-                  parsedSequence,
-                );
-              } else {
-                debugLogger.debug(
-                  '[DEBUG] Kitty sequence parsed successfully:',
-                  parsedSequence,
+                  '[DEBUG] Recovered plain text after kitty sequence:',
+                  plainTextPrefix.key.sequence,
                 );
               }
+              kittySequenceBuffer = kittySequenceBuffer.slice(
+                plainTextPrefix.length,
+              );
+              broadcast(plainTextPrefix.key);
+              bufferedInputHandled = true;
+              continue;
             }
-            // Consume the parsed prefix and broadcast it.
-            kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
-            broadcast(parsed.key);
-            parsedAny = true;
+
+            // Look for the next potential CSI start beyond index 0
+            const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
+            if (nextStart > 0) {
+              if (debugKeystrokeLogging) {
+                debugLogger.debug(
+                  '[DEBUG] Skipping incomplete/invalid CSI prefix:',
+                  kittySequenceBuffer.slice(0, nextStart),
+                );
+              }
+              kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
+              bufferedInputHandled = true;
+              continue;
+            }
+            break;
           }
-          if (parsedAny) return;
+          if (bufferedInputHandled) return;
 
           if (config?.getDebugMode() || debugKeystrokeLogging) {
             const codes = Array.from(kittySequenceBuffer).map((ch) =>

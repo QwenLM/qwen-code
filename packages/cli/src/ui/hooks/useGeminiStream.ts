@@ -19,14 +19,17 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
+  SendMessageType,
   createDebugLogger,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
   logUserPrompt,
+  logUserRetry,
   GitService,
   UnauthorizedError,
   UserPromptEvent,
+  UserRetryEvent,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   ApprovalMode,
@@ -59,6 +62,7 @@ import {
   type TrackedToolCall,
   type TrackedCompletedToolCall,
   type TrackedCancelledToolCall,
+  type TrackedExecutingToolCall,
   type TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
 import { promises as fs } from 'node:fs';
@@ -356,6 +360,23 @@ export const useGeminiStream = (
 
   const streamingState = useMemo(() => {
     if (toolCalls.some((tc) => tc.status === 'awaiting_approval')) {
+      return StreamingState.WaitingForConfirmation;
+    }
+    // Check if any executing subagent task has a pending confirmation
+    if (
+      toolCalls.some((tc) => {
+        if (tc.status !== 'executing') return false;
+        const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
+        return (
+          typeof liveOutput === 'object' &&
+          liveOutput !== null &&
+          'type' in liveOutput &&
+          liveOutput.type === 'task_execution' &&
+          'pendingConfirmation' in liveOutput &&
+          liveOutput.pendingConfirmation != null
+        );
+      })
+    ) {
       return StreamingState.WaitingForConfirmation;
     }
     if (
@@ -1016,9 +1037,19 @@ export const useGeminiStream = (
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
-            } else if (!pendingRetryCountdownItemRef.current) {
+            } else {
+              // The retry attempt is starting now, so any prior retry UI is stale.
               clearRetryCountdown();
             }
+            break;
+          case ServerGeminiEventType.HookSystemMessage:
+            // Display system message from hooks (e.g., Ralph Loop iteration info)
+            // This is handled as a content event to show in the UI
+            geminiMessageBuffer = handleContentEvent(
+              event.value + '\n',
+              geminiMessageBuffer,
+              userMessageTimestamp,
+            );
             break;
           default: {
             // enforces exhaustive switch-case
@@ -1048,26 +1079,28 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
-      pendingRetryCountdownItemRef,
     ],
   );
 
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
-      options?: { isContinuation: boolean; skipPreparation?: boolean },
+      submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
     ) => {
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
-      if (isSubmittingQueryRef.current && !options?.isContinuation) {
+      if (
+        isSubmittingQueryRef.current &&
+        submitType !== SendMessageType.ToolResult
+      ) {
         return;
       }
 
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        !options?.isContinuation
+        submitType !== SendMessageType.ToolResult
       )
         return;
 
@@ -1077,11 +1110,16 @@ export const useGeminiStream = (
       const userMessageTimestamp = Date.now();
 
       // Reset quota error flag when starting a new query (not a continuation)
-      if (!options?.isContinuation) {
+      if (submitType !== SendMessageType.ToolResult) {
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
-        // user is starting a new conversation turn
-        if (pendingRetryCountdownItemRef.current) {
+        // user is starting a new conversation turn.
+        // Clear both countdown-based errors AND static errors (those without
+        // an active countdown timer, e.g. "Press Ctrl+Y to retry").
+        if (
+          pendingRetryCountdownItemRef.current ||
+          pendingRetryErrorItemRef.current
+        ) {
           clearRetryCountdown();
         }
       }
@@ -1095,14 +1133,15 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } = options?.skipPreparation
-          ? { queryToSend: query, shouldProceed: true }
-          : await prepareQueryForGemini(
-              query,
-              userMessageTimestamp,
-              abortSignal,
-              prompt_id!,
-            );
+        const { queryToSend, shouldProceed } =
+          submitType === SendMessageType.Retry
+            ? { queryToSend: query, shouldProceed: true }
+            : await prepareQueryForGemini(
+                query,
+                userMessageTimestamp,
+                abortSignal,
+                prompt_id!,
+              );
 
         if (!shouldProceed || queryToSend === null) {
           isSubmittingQueryRef.current = false;
@@ -1110,7 +1149,7 @@ export const useGeminiStream = (
         }
 
         // Check image format support for non-continuations
-        if (!options?.isContinuation) {
+        if (submitType === SendMessageType.UserQuery) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
             addItem(
@@ -1127,7 +1166,7 @@ export const useGeminiStream = (
         lastPromptRef.current = finalQueryToSend;
         lastPromptErroredRef.current = false;
 
-        if (!options?.isContinuation) {
+        if (submitType === SendMessageType.UserQuery) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
 
@@ -1148,6 +1187,10 @@ export const useGeminiStream = (
           setThought(null);
         }
 
+        if (submitType === SendMessageType.Retry) {
+          logUserRetry(config, new UserRetryEvent(prompt_id));
+        }
+
         setIsResponding(true);
         setInitError(null);
 
@@ -1156,7 +1199,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            options,
+            { type: submitType },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1176,7 +1219,8 @@ export const useGeminiStream = (
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
-          // remain visible until the user presses Ctrl+Y to retry.
+          // remain visible until the user presses Ctrl+Y to retry or starts
+          // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
           }
@@ -1223,6 +1267,7 @@ export const useGeminiStream = (
       handleLoopDetectedEvent,
       clearRetryCountdown,
       pendingRetryCountdownItemRef,
+      pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
     ],
   );
@@ -1242,7 +1287,7 @@ export const useGeminiStream = (
    *
    * When conditions are met:
    * - Clears any pending auto-retry countdown to avoid duplicate retries
-   * - Re-submits the last query with skipPreparation: true for faster retry
+   * - Re-submits the last query with isRetry: true, reusing the same prompt_id
    *
    * This function is exposed via UIActionsContext and triggered by InputPrompt
    * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
@@ -1267,24 +1312,10 @@ export const useGeminiStream = (
       return;
     }
 
-    // Commit the error to history (without hint) before clearing
-    const errorItem = pendingRetryErrorItemRef.current;
-    if (errorItem) {
-      addItem({ type: errorItem.type, text: errorItem.text }, Date.now());
-    }
     clearRetryCountdown();
 
-    await submitQuery(lastPrompt, {
-      isContinuation: false,
-      skipPreparation: true,
-    });
-  }, [
-    streamingState,
-    addItem,
-    clearRetryCountdown,
-    submitQuery,
-    pendingRetryErrorItemRef,
-  ]);
+    await submitQuery(lastPrompt, SendMessageType.Retry);
+  }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
@@ -1429,13 +1460,7 @@ export const useGeminiStream = (
         return;
       }
 
-      submitQuery(
-        responsesToSend,
-        {
-          isContinuation: true,
-        },
-        prompt_ids[0],
-      );
+      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
       isResponding,

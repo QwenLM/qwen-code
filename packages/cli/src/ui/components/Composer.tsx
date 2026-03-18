@@ -103,7 +103,9 @@ export const Composer = () => {
       )}
 
       {/* Exclusive area: only one component visible at a time */}
+      {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
       {!showSuggestions &&
+        uiState.streamingState !== StreamingState.WaitingForConfirmation &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (

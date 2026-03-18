@@ -118,6 +118,7 @@ vi.mock('../tools/memoryTool', () => ({
   MemoryTool: createToolMock('save_memory'),
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
+  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   QWEN_CONFIG_DIR: '.qwen',
 }));
@@ -245,6 +246,26 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  it('should store a system prompt override', () => {
+    const config = new Config({
+      ...baseParams,
+      systemPrompt: 'You are a custom system prompt.',
+    });
+
+    expect(config.getSystemPrompt()).toBe('You are a custom system prompt.');
+    expect(config.getAppendSystemPrompt()).toBeUndefined();
+  });
+
+  it('should store an appended system prompt', () => {
+    const config = new Config({
+      ...baseParams,
+      appendSystemPrompt: 'Be extra concise.',
+    });
+
+    expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
+    expect(config.getSystemPrompt()).toBeUndefined();
   });
 
   describe('initialize', () => {
@@ -1046,10 +1067,10 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(50000);
     });
 
-    it('should return infinity when truncation is disabled', () => {
+    it('should return infinity when threshold is zero or negative', () => {
       const customParams = {
         ...baseParams,
-        enableToolOutputTruncation: false,
+        truncateToolOutputThreshold: 0,
       };
       const config = new Config(customParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(
