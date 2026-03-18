@@ -41,12 +41,13 @@ export const MetadataSidebar = ({ metadata }: MetadataSidebarProps) => {
       <div className="metadata-section">
         <h3 className="metadata-section-title">Statistics</h3>
         <MetadataItem label="Prompts" value={metadata.promptCount} />
-        {metadata.contextUsagePercent !== undefined && (
-          <MetadataItem
-            label="Context"
-            value={`${metadata.contextUsagePercent}% of ${formatTokenLimit(metadata.contextWindowSize)}`}
-          />
-        )}
+        {metadata.contextUsagePercent !== undefined &&
+          metadata.contextWindowSize !== undefined && (
+            <MetadataItem
+              label="Context"
+              value={`${metadata.contextUsagePercent}% of ${formatTokenLimit(metadata.contextWindowSize)}`}
+            />
+          )}
         {metadata.totalTokens !== undefined && (
           <MetadataItem
             label="Tokens"

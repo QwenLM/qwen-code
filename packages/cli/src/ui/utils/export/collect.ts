@@ -28,10 +28,110 @@ interface FileOperationStats {
 }
 
 /**
+ * Tool call arguments index for matching tool_result records.
+ */
+interface ToolCallArgsIndex {
+  byId: Map<string, Record<string, unknown>>;
+  byName: Map<string, Array<Record<string, unknown>>>;
+}
+
+/**
+ * Extracts tool name from a ChatRecord's function response.
+ */
+function extractToolNameFromRecord(record: ChatRecord): string | undefined {
+  if (!record.message?.parts) {
+    return undefined;
+  }
+
+  for (const part of record.message.parts) {
+    if ('functionResponse' in part && part.functionResponse?.name) {
+      return part.functionResponse.name;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Extracts call ID from a ChatRecord's function response.
+ */
+function extractFunctionResponseId(record: ChatRecord): string | undefined {
+  if (!record.message?.parts) {
+    return undefined;
+  }
+
+  for (const part of record.message.parts) {
+    if ('functionResponse' in part && part.functionResponse?.id) {
+      return part.functionResponse.id;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Normalizes function call args into a plain object.
+ */
+function normalizeFunctionCallArgs(
+  args: unknown,
+): Record<string, unknown> | undefined {
+  if (args && typeof args === 'object') {
+    return args as Record<string, unknown>;
+  }
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Ignore parse errors and treat as unavailable args
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Builds an index of assistant tool calls for later tool_result arg resolution.
+ */
+function buildToolCallArgsIndex(records: ChatRecord[]): ToolCallArgsIndex {
+  const byId = new Map<string, Record<string, unknown>>();
+  const byName = new Map<string, Array<Record<string, unknown>>>();
+
+  for (const record of records) {
+    if (record.type !== 'assistant' || !record.message?.parts) continue;
+
+    for (const part of record.message.parts) {
+      if (!('functionCall' in part) || !part.functionCall?.name) continue;
+
+      const normalizedArgs = normalizeFunctionCallArgs(part.functionCall.args);
+      if (!normalizedArgs) continue;
+
+      const toolName = part.functionCall.name;
+      const callId =
+        typeof part.functionCall.id === 'string' ? part.functionCall.id : null;
+
+      if (callId) {
+        byId.set(callId, normalizedArgs);
+      }
+
+      const queue = byName.get(toolName) ?? [];
+      queue.push(normalizedArgs);
+      byName.set(toolName, queue);
+    }
+  }
+
+  return { byId, byName };
+}
+
+/**
  * Calculate file operation statistics from ChatRecords.
  * Uses toolCallResult from tool_result records for accurate statistics.
  */
 function calculateFileStats(records: ChatRecord[]): FileOperationStats {
+  const argsIndex = buildToolCallArgsIndex(records);
+  const byNameCursor = new Map<string, number>();
+
   const stats: FileOperationStats = {
     filesRead: 0,
     filesWritten: 0,
@@ -43,7 +143,34 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   for (const record of records) {
     if (record.type !== 'tool_result' || !record.toolCallResult) continue;
 
+    const toolName = extractToolNameFromRecord(record);
+    const callId =
+      record.toolCallResult.callId ?? extractFunctionResponseId(record);
+    const argsFromId =
+      callId && argsIndex.byId.has(callId)
+        ? argsIndex.byId.get(callId)
+        : undefined;
+    let args = argsFromId;
+    if (!args && toolName) {
+      const queue = argsIndex.byName.get(toolName);
+      if (queue && queue.length > 0) {
+        const cursor = byNameCursor.get(toolName) ?? 0;
+        args = queue[cursor];
+        byNameCursor.set(toolName, cursor + 1);
+      }
+    }
     const { resultDisplay } = record.toolCallResult;
+
+    // Handle read_file operations
+    if (
+      toolName === 'read_file' &&
+      (args?.['absolute_path'] || args?.['file_path'])
+    ) {
+      const filePath = String(args['absolute_path'] ?? args['file_path']);
+      stats.filesRead++;
+      stats.uniqueFiles.add(filePath);
+      continue;
+    }
 
     // Track file locations from resultDisplay
     if (
@@ -53,19 +180,26 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
     ) {
       const display = resultDisplay as {
         fileName: string;
+        fileDiff?: string;
         originalContent?: string | null;
         newContent?: string;
         diffStat?: { model_added_lines?: number; model_removed_lines?: number };
       };
 
-      // Track unique files
-      if (typeof display.fileName === 'string') {
-        stats.uniqueFiles.add(display.fileName);
-      }
-
       // Determine operation type based on content fields
       const hasOriginalContent = 'originalContent' in display;
       const hasNewContent = 'newContent' in display;
+
+      // For write/edit operations, use full path from args if available
+      let filePath: string;
+      if (typeof display.fileName === 'string') {
+        // Prefer args.file_path for full path, fallback to fileName (which may be basename)
+        filePath =
+          (args?.['file_path'] as string) ||
+          (args?.['absolute_path'] as string) ||
+          display.fileName;
+        stats.uniqueFiles.add(filePath);
+      }
 
       if (hasOriginalContent || hasNewContent) {
         // This is a write/edit operation
@@ -92,9 +226,6 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
           stats.linesAdded += newLines;
           stats.linesRemoved += oldLines;
         }
-      } else {
-        // This is likely a read operation (no content changes)
-        stats.filesRead++;
       }
     }
   }
@@ -103,8 +234,46 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
 }
 
 /**
+ * Extracts token usage from TaskResultDisplay executionSummary.
+ */
+function extractTaskToolTokens(record: ChatRecord): number {
+  if (record.type !== 'tool_result' || !record.toolCallResult?.resultDisplay) {
+    return 0;
+  }
+
+  const { resultDisplay } = record.toolCallResult;
+  if (
+    typeof resultDisplay === 'object' &&
+    'type' in resultDisplay &&
+    resultDisplay.type === 'task_execution' &&
+    'executionSummary' in resultDisplay
+  ) {
+    const summary = resultDisplay.executionSummary as {
+      totalTokens?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      thoughtTokens?: number;
+      cachedTokens?: number;
+    };
+    // Use totalTokens if available, otherwise sum individual token counts
+    if (typeof summary.totalTokens === 'number') {
+      return summary.totalTokens;
+    }
+    // Fallback: sum available token counts
+    return (
+      (summary.inputTokens ?? 0) +
+      (summary.outputTokens ?? 0) +
+      (summary.thoughtTokens ?? 0) +
+      (summary.cachedTokens ?? 0)
+    );
+  }
+
+  return 0;
+}
+
+/**
  * Calculate token statistics from ChatRecords.
- * Aggregates usageMetadata from assistant records to get total token usage.
+ * Aggregates usageMetadata from assistant records and TaskTool executionSummary to get total token usage.
  */
 function calculateTokenStats(
   records: ChatRecord[],
@@ -122,6 +291,12 @@ function calculateTokenStats(
       if (record.usageMetadata.totalTokenCount !== undefined) {
         lastTotalTokens = record.usageMetadata.totalTokenCount;
       }
+    }
+
+    // Include TaskTool token usage from executionSummary
+    const taskTokens = extractTaskToolTokens(record);
+    if (taskTokens > 0) {
+      totalTokens += taskTokens;
     }
   }
 

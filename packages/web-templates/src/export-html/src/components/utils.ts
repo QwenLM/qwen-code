@@ -82,8 +82,12 @@ export const formatRelativeTime = (startTime?: string | null) => {
 
   try {
     const date = new Date(startTime);
+    const startTimestamp = date.getTime();
+    if (Number.isNaN(startTimestamp)) {
+      return '-';
+    }
     const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
+    const diffMs = Math.max(0, now.getTime() - startTimestamp);
     const diffSeconds = Math.floor(diffMs / 1000);
     const diffMinutes = Math.floor(diffSeconds / 60);
     const diffHours = Math.floor(diffMinutes / 60);
@@ -122,9 +126,10 @@ export const formatPath = (path: string, maxLength: number = 40) => {
 
 /**
  * Format token limit for display (e.g., 128k, 200k, 1m)
+ * Returns undefined if tokens is not provided.
  */
-export const formatTokenLimit = (tokens?: number): string => {
-  if (tokens === undefined || tokens === null) return '128k';
+export const formatTokenLimit = (tokens?: number): string | undefined => {
+  if (tokens === undefined || tokens === null) return undefined;
   if (tokens >= 1000000) {
     return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}m`;
   }

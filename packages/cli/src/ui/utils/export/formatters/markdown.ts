@@ -17,11 +17,9 @@ export function toMarkdown(sessionData: ExportSessionData): string {
   lines.push('# Chat Session Export\n');
   lines.push(`- **Session ID**: \`${sanitizeText(sessionData.sessionId)}\``);
   lines.push(`- **Start Time**: ${sanitizeText(sessionData.startTime)}`);
-
-  // Add exportTime if available
-  if (metadata?.exportTime) {
-    lines.push(`- **Exported**: ${sanitizeText(metadata.exportTime)}`);
-  }
+  lines.push(
+    `- **Exported**: ${sanitizeText(metadata?.exportTime ?? new Date().toISOString())}`,
+  );
 
   // Add requestId if available
   if (metadata?.requestId) {
