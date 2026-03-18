@@ -12,13 +12,7 @@ import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 export const OAUTH_FILE = 'oauth_creds.json';
-export const SKILL_PROVIDER_CONFIG_DIRS = [
-  '.qwen',
-  '.agent',
-  '.claude',
-  '.cursor',
-  '.codex',
-];
+export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agent'];
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
