@@ -30,6 +30,7 @@ import {
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   substituteHookVariables,
+  performVariableReplacement,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -985,6 +986,11 @@ export class ExtensionManager {
 
         if (installMetadata.type !== 'link') {
           await copyExtension(localSourcePath, destinationPath);
+        }
+
+        // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
+        if (originSource === 'Claude') {
+          performVariableReplacement(destinationPath);
         }
 
         const metadataString = JSON.stringify(installMetadata, null, 2);

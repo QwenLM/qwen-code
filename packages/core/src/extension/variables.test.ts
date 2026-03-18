@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, describe, it } from 'vitest';
-import { hydrateString, substituteHookVariables } from './variables.js';
+import { expect, describe, it, beforeEach, afterEach } from 'vitest';
+import {
+  hydrateString,
+  substituteHookVariables,
+  performVariableReplacement,
+} from './variables.js';
 import { HookType } from '../hooks/types.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
 describe('hydrateString', () => {
   it('should replace a single variable', () => {
@@ -192,5 +199,214 @@ describe('substituteHookVariables', () => {
     expect(result).toBeDefined();
     expect(result).toEqual(hooks); // Should be equal but not the same object (deep clone)
     expect(result!['Stop']![0].hooks![0].command).toBe('echo "hello world"');
+  });
+});
+
+describe('performVariableReplacement', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'var-replace-test-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should replace ${CLAUDE_PLUGIN_ROOT} in markdown files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const mdContent = [
+      '# README',
+      '',
+      'Configuration file is at `${CLAUDE_PLUGIN_ROOT}/config.json`.',
+      'Run `${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh` to initialize.',
+    ]
+      .join('\n')
+      .replace(/`\${CLAUDE_PLUGIN_ROOT}/g, '`${CLAUDE_PLUGIN_ROOT}');
+    fs.writeFileSync(path.join(extDir, 'README.md'), mdContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'README.md'), 'utf-8');
+    expect(result).toContain(`${extDir}/config.json`);
+    expect(result).toContain(`${extDir}/scripts/setup.sh`);
+    expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+  });
+
+  it('should convert ```! syntax to !{} in markdown files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const mdContent = `## Commands
+
+      \`\`\`!
+      npm install
+      npm run build
+      \`\`\`
+
+      Some text.
+
+      \`\`\`!
+      echo "Hello World"
+      \`\`\`
+      `;
+    fs.writeFileSync(path.join(extDir, 'guide.md'), mdContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'guide.md'), 'utf-8');
+    expect(result).toContain('!{npm install\nnpm run build}');
+    expect(result).toContain('!{echo "Hello World"}');
+    expect(result).not.toContain('```!');
+  });
+
+  it('should replace "role":"assistant" with "type":"assistant" in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      # Process response
+      echo '{"role":"assistant","content":"Hello"}'
+      echo '{"role":"user","content":"Hi"}'
+      echo '{"role":"assistant","content":"How can I help?"}'
+      `;
+    fs.writeFileSync(path.join(extDir, 'process.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'process.sh'), 'utf-8');
+    expect(result).toContain('"type":"assistant"');
+    expect(result).not.toContain('"role":"assistant"');
+    // Should not affect other roles
+    expect(result).toContain('"role":"user"');
+  });
+
+  it('should update transcript parsing in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      # Parse transcript
+      jq '.message.content | map(select(.type == "text"))' <<< "$response"
+      `;
+    fs.writeFileSync(path.join(extDir, 'parse.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'parse.sh'), 'utf-8');
+    expect(result).toContain('.message.parts | map(select(has("text")))');
+    expect(result).not.toContain('.message.content');
+  });
+
+  it('should replace .claude with .qwen in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = [
+      '#!/bin/bash',
+      'HOME_CLAUDE="$HOME/.claude"',
+      'CACHE_DIR="~/.claude/cache"',
+      'LOCAL_DIR="./.claude/local"',
+      'CONFIG="${CLAUDE_PLUGIN_ROOT}/.claude/config"',
+      '# Not replaced: https://example.com/.claude/page',
+    ]
+      .join('\n')
+      .replace('${CLAUDE_PLUGIN_ROOT}', '${CLAUDE_PLUGIN_ROOT}');
+    fs.writeFileSync(path.join(extDir, 'setup.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'setup.sh'), 'utf-8');
+    expect(result).toContain('$HOME/.qwen');
+    expect(result).toContain('~/.qwen/cache');
+    expect(result).toContain('./.qwen/local');
+    expect(result).toContain('.qwen/config');
+    // URL should not be affected
+    expect(result).toContain('https://example.com/.claude/page');
+  });
+
+  it('should handle multiple markdown files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+    fs.mkdirSync(path.join(extDir, 'docs'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(extDir, 'README.md'),
+      'Path: `${CLAUDE_PLUGIN_ROOT}/readme`',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(extDir, 'docs', 'guide.md'),
+      'Path: `${CLAUDE_PLUGIN_ROOT}/docs/guide`',
+      'utf-8',
+    );
+
+    performVariableReplacement(extDir);
+
+    const readme = fs.readFileSync(path.join(extDir, 'README.md'), 'utf-8');
+    const guide = fs.readFileSync(
+      path.join(extDir, 'docs', 'guide.md'),
+      'utf-8',
+    );
+
+    expect(readme).toContain(`${extDir}/readme`);
+    expect(guide).toContain(`${extDir}/docs/guide`);
+  });
+
+  it('should handle multiple shell script files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+    fs.mkdirSync(path.join(extDir, 'scripts'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(extDir, 'setup.sh'),
+      'echo "${CLAUDE_PLUGIN_ROOT}/setup"',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(extDir, 'scripts', 'helper.sh'),
+      'echo "${CLAUDE_PLUGIN_ROOT}/scripts/helper"',
+      'utf-8',
+    );
+
+    performVariableReplacement(extDir);
+
+    const setup = fs.readFileSync(path.join(extDir, 'setup.sh'), 'utf-8');
+    const helper = fs.readFileSync(
+      path.join(extDir, 'scripts', 'helper.sh'),
+      'utf-8',
+    );
+
+    expect(setup).toContain(`${extDir}/setup`);
+    expect(helper).toContain(`${extDir}/scripts/helper`);
+  });
+
+  it('should handle empty directories gracefully', () => {
+    const extDir = path.join(testDir, 'empty-ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    // Should not throw
+    expect(() => performVariableReplacement(extDir)).not.toThrow();
+  });
+
+  it('should handle directories with no matching files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    // Create non-matching files
+    fs.writeFileSync(path.join(extDir, 'file.txt'), 'content', 'utf-8');
+    fs.writeFileSync(path.join(extDir, 'script.py'), 'print("hello")', 'utf-8');
+
+    // Should not throw
+    expect(() => performVariableReplacement(extDir)).not.toThrow();
+
+    // Files should remain unchanged
+    expect(fs.readFileSync(path.join(extDir, 'file.txt'), 'utf-8')).toBe(
+      'content',
+    );
   });
 });

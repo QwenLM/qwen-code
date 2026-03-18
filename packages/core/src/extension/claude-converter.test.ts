@@ -18,6 +18,7 @@ import {
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
 import { HookType } from '../hooks/types.js';
+import { performVariableReplacement } from './variables.js';
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -569,5 +570,83 @@ describe('convertClaudePluginPackage', () => {
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+});
+
+describe('performVariableReplacement for Claude extensions', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-var-test-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should replace ${CLAUDE_PLUGIN_ROOT} in markdown files', () => {
+    const extDir = path.join(testDir, 'ext-md');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const mdContent = `# Test Extension
+      Run \`\${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh\` to configure.`;
+    fs.writeFileSync(path.join(extDir, 'README.md'), mdContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'README.md'), 'utf-8');
+    expect(result).toContain(`${extDir}/scripts/setup.sh`);
+    expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+  });
+
+  it('should replace .claude with .qwen in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-sh');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      CONFIG_DIR="$HOME/.claude/config"
+      CACHE_DIR="~/.claude/cache"
+      LOCAL_DIR="./.claude/local"`;
+    fs.writeFileSync(path.join(extDir, 'setup.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'setup.sh'), 'utf-8');
+    expect(result).toContain('$HOME/.qwen/config');
+    expect(result).toContain('~/.qwen/cache');
+    expect(result).toContain('./.qwen/local');
+    expect(result).not.toContain('.claude');
+  });
+
+  it('should replace role with type in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-role');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      echo '{"role":"assistant","content":"hello"}'`;
+    fs.writeFileSync(path.join(extDir, 'process.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'process.sh'), 'utf-8');
+    expect(result).toContain('"type":"assistant"');
+    expect(result).not.toContain('"role":"assistant"');
+  });
+
+  it('should update transcript parsing logic in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-transcript');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      echo "$transcript" | jq '.message.content | map(select(.type == "text"))'`;
+    fs.writeFileSync(path.join(extDir, 'parse.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'parse.sh'), 'utf-8');
+    expect(result).toContain('.message.parts | map(select(has("text")))');
+    expect(result).not.toContain('.message.content');
   });
 });
