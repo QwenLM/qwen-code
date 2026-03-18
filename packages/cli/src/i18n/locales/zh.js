@@ -1519,6 +1519,10 @@ export default {
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
+  'Run /context detail for per-item breakdown.':
+    '运行 /context detail 查看详细分解。',
+  'body loaded': '内容已加载',
+  memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json。',

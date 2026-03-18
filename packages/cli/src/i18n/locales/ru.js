@@ -1574,6 +1574,11 @@ export default {
   Messages: 'Сообщения',
   'Show context window usage breakdown.':
     'Показать разбивку использования контекстного окна.',
+  'Run /context detail for per-item breakdown.':
+    'Выполните /context detail для детализации по элементам.',
+  active: 'активно',
+  'body loaded': 'содержимое загружено',
+  memory: 'память',
   // MCP Management Dialog
   // ============================================================================
   'MCP Management': 'Управление MCP',

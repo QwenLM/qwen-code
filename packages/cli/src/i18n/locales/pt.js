@@ -1639,6 +1639,11 @@ export default {
   Messages: 'Mensagens',
   'Show context window usage breakdown.':
     'Exibe a divisão de uso da janela de contexto.',
+  'Run /context detail for per-item breakdown.':
+    'Execute /context detail para detalhamento por item.',
+  active: 'ativo',
+  'body loaded': 'conteúdo carregado',
+  memory: 'memória',
   '{{region}} configuration updated successfully.':
     'Configuração do {{region}} atualizada com sucesso.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':

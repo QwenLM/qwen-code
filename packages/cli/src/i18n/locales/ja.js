@@ -1150,6 +1150,11 @@ export default {
   Messages: 'メッセージ',
   'Show context window usage breakdown.':
     'コンテキストウィンドウの使用状況を表示します。',
+  'Run /context detail for per-item breakdown.':
+    '/context detail を実行すると項目ごとの内訳を表示します。',
+  active: '有効',
+  'body loaded': '本文読み込み済み',
+  memory: 'メモリ',
   '{{region}} configuration updated successfully.':
     '{{region}} の設定が正常に更新されました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':

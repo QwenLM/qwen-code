@@ -1645,6 +1645,11 @@ export default {
   Messages: 'Nachrichten',
   'Show context window usage breakdown.':
     'Zeigt die Aufschlüsselung der Kontextfenster-Nutzung an.',
+  'Run /context detail for per-item breakdown.':
+    'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
+  active: 'aktiv',
+  'body loaded': 'Inhalt geladen',
+  memory: 'Speicher',
   '{{region}} configuration updated successfully.':
     '{{region}}-Konfiguration erfolgreich aktualisiert.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':

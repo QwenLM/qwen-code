@@ -1696,6 +1696,10 @@ export default {
   Messages: 'Messages',
   'Show context window usage breakdown.':
     'Show context window usage breakdown.',
+  'Run /context detail for per-item breakdown.':
+    'Run /context detail for per-item breakdown.',
+  'body loaded': 'body loaded',
+  memory: 'memory',
   '{{region}} configuration updated successfully.':
     '{{region}} configuration updated successfully.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
