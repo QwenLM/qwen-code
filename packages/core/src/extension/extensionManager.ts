@@ -29,6 +29,7 @@ import {
   EXTENSIONS_CONFIG_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
+  substituteHookVariables,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -730,31 +731,7 @@ export class ExtensionManager {
     hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
     extensionPath: string,
   ): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    if (!hooks) return hooks;
-
-    // Deep clone the hooks to avoid modifying the original
-    const clonedHooks = JSON.parse(JSON.stringify(hooks));
-
-    // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path in all command hooks
-    for (const eventName in clonedHooks) {
-      const eventHooks = clonedHooks[eventName as HookEventName];
-      if (eventHooks && Array.isArray(eventHooks)) {
-        for (const hookDef of eventHooks) {
-          if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
-            for (const hook of hookDef.hooks) {
-              if (hook.type === 'command' && hook.command) {
-                hook.command = hook.command.replace(
-                  /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-                  extensionPath,
-                );
-              }
-            }
-          }
-        }
-      }
-    }
-
-    return clonedHooks;
+    return substituteHookVariables(hooks, extensionPath);
   }
 
   /**

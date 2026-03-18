@@ -26,6 +26,7 @@ import {
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { substituteHookVariables } from './variables.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -498,27 +499,7 @@ export async function convertClaudePluginPackage(
           }
 
           // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-          // Replace ${CLAUDE_PLUGIN_ROOT} with the pluginSource path
-          const processedHooks = JSON.parse(JSON.stringify(hooksData));
-          for (const eventName in processedHooks) {
-            const eventHooks = processedHooks[eventName as HookEventName];
-            if (eventHooks && Array.isArray(eventHooks)) {
-              for (const hookDef of eventHooks) {
-                if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
-                  for (const hook of hookDef.hooks) {
-                    if (hook.type === 'command' && hook.command) {
-                      hook.command = hook.command.replace(
-                        /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-                        pluginSource,
-                      );
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          mergedConfig.hooks = processedHooks;
+          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
         } catch (error) {
           debugLogger.warn(
             `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
