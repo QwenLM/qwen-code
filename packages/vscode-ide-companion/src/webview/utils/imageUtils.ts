@@ -4,25 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core/src/utils/request-tokenizer/supportedImageFormats.js';
+import type { ImageAttachment } from '../../types/imageAttachment.js';
+import {
+  MAX_IMAGE_SIZE,
+  MAX_TOTAL_IMAGE_SIZE,
+} from '../../utils/imageAttachmentLimits.js';
+import {
+  getImageExtensionForMimeType,
+  isSupportedPastedImageMimeType,
+} from '../../utils/imageFormats.js';
 
-// Maximum file size in bytes (10MB)
-export const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
-// Maximum total size for all images in a single message (20MB)
-export const MAX_TOTAL_IMAGE_SIZE = 20 * 1024 * 1024;
+export type { ImageAttachment };
+export { MAX_IMAGE_SIZE, MAX_TOTAL_IMAGE_SIZE };
 
-export interface ImageAttachment {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  data: string; // base64 encoded
-  timestamp: number;
-}
-
-/**
- * Convert a File or Blob to base64 string
- */
 export async function fileToBase64(file: File | Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -35,30 +29,18 @@ export async function fileToBase64(file: File | Blob): Promise<string> {
   });
 }
 
-/**
- * Check if a file is a supported image type
- */
 export function isSupportedImage(file: File): boolean {
-  return isSupportedImageMimeType(file.type);
+  return isSupportedPastedImageMimeType(file.type);
 }
 
-/**
- * Check if a file size is within limits
- */
 export function isWithinSizeLimit(file: File): boolean {
   return file.size <= MAX_IMAGE_SIZE;
 }
 
-/**
- * Generate a unique ID for an image attachment
- */
 export function generateImageId(): string {
   return `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
-/**
- * Get a human-readable file size
- */
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) {
     return '0 B';
@@ -69,9 +51,6 @@ export function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-/**
- * Create an ImageAttachment from a File
- */
 export async function createImageAttachment(
   file: File,
 ): Promise<ImageAttachment | null> {
@@ -101,32 +80,12 @@ export async function createImageAttachment(
   }
 }
 
-/**
- * Get extension from MIME type
- * Aligned with Core's SUPPORTED_IMAGE_MIME_TYPES
- */
-export function getExtensionFromMimeType(mimeType: string): string {
-  const mimeMap: Record<string, string> = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/jpg': '.jpg',
-    'image/webp': '.webp',
-    'image/bmp': '.bmp',
-    'image/tiff': '.tiff',
-    'image/heic': '.heic',
-  };
-  return mimeMap[mimeType] || '.png';
-}
-
-/**
- * Generate a clean filename for pasted images
- */
 export function generatePastedImageName(mimeType: string): string {
   const now = new Date();
   const timeStr = `${now.getHours().toString().padStart(2, '0')}${now
     .getMinutes()
     .toString()
     .padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
-  const ext = getExtensionFromMimeType(mimeType);
+  const ext = getImageExtensionForMimeType(mimeType);
   return `pasted_image_${timeStr}${ext}`;
 }

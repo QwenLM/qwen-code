@@ -9,11 +9,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   mockCreateImagePathResolver,
   mockGetGlobalTempDir,
+  mockGetPanel,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
 } = vi.hoisted(() => ({
   mockCreateImagePathResolver: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
+  mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
+    () => null,
+  ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
 }));
@@ -81,7 +85,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
     PanelManager: class {
       constructor(_extensionUri: unknown, _onPanelDispose: () => void) {}
       getPanel() {
-        return null;
+        return mockGetPanel();
       }
     },
   };
@@ -126,6 +130,7 @@ import { WebViewProvider } from './WebViewProvider.js';
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetPanel.mockReturnValue(null);
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
         path: entry,
@@ -215,5 +220,70 @@ describe('WebViewProvider.attachToView', () => {
         requestId: 7,
       },
     });
+  });
+
+  it('routes resolved image paths back to the requesting attached webview even when a panel exists', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const attachedPostMessage = vi.fn();
+    const panelPostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: {
+        postMessage: panelPostMessage,
+      },
+    });
+
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage: attachedPostMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `attached:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    await messageHandler?.({
+      type: 'resolveImagePaths',
+      data: { paths: ['/global-temp/clipboard/example.png'], requestId: 8 },
+    });
+
+    expect(attachedPostMessage).toHaveBeenCalledWith({
+      type: 'imagePathsResolved',
+      data: {
+        resolved: [
+          {
+            path: '/global-temp/clipboard/example.png',
+            src: 'webview:/global-temp/clipboard/example.png',
+          },
+        ],
+        requestId: 8,
+      },
+    });
+    expect(panelPostMessage).not.toHaveBeenCalled();
   });
 });

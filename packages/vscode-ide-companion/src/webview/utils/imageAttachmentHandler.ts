@@ -7,8 +7,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
-import { Storage } from '@qwen-code/qwen-code-core';
-import { escapePath } from '../../utils/pathEscaping.js';
+import { Storage, escapePath } from '@qwen-code/qwen-code-core';
+import type {
+  ImageAttachment,
+  SavedImageAttachment,
+} from '../../types/imageAttachment.js';
+import {
+  MAX_IMAGE_SIZE,
+  MAX_TOTAL_IMAGE_SIZE,
+} from '../../utils/imageAttachmentLimits.js';
+import { getImageExtensionForMimeType } from '../../utils/imageFormats.js';
+import { normalizeImageAttachment } from '../../utils/imageAttachmentValidation.js';
 
 const CLIPBOARD_DIR_NAME = 'clipboard';
 const MAX_CLIPBOARD_IMAGES = 100;
@@ -27,15 +36,9 @@ export function appendImageReferences(
   return `${text}\n\n${imageText}`;
 }
 
-/**
- * Save base64 image to a temporary file
- * @param base64Data The base64 encoded image data (with or without data URL prefix)
- * @param fileName Original filename
- * @returns The path to the saved file or null if failed
- */
 export async function saveImageToFile(
   base64Data: string,
-  fileName: string,
+  mimeType: string,
 ): Promise<string | null> {
   try {
     const tempDir = path.join(Storage.getGlobalTempDir(), CLIPBOARD_DIR_NAME);
@@ -43,20 +46,17 @@ export async function saveImageToFile(
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    // Generate unique filename (same pattern as CLI)
     const timestamp = Date.now();
-    const ext = path.extname(fileName) || '.png';
+    const ext = getImageExtensionForMimeType(mimeType);
     const tempFileName = `clipboard-${timestamp}-${randomUUID()}${ext}`;
     const tempFilePath = path.join(tempDir, tempFileName);
 
-    // Extract base64 data if it's a data URL
     let pureBase64 = base64Data;
     const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
     if (dataUrlMatch) {
       pureBase64 = dataUrlMatch[1];
     }
 
-    // Write file
     const buffer = Buffer.from(pureBase64, 'base64');
     fs.writeFileSync(tempFilePath, buffer);
 
@@ -88,39 +88,48 @@ function pruneClipboardImages(tempDir: string): void {
     .forEach(({ filePath }) => fs.rmSync(filePath, { force: true }));
 }
 
-/**
- * Process image attachments and add them to message text
- */
 export async function processImageAttachments(
   text: string,
-  attachments?: Array<{
-    id: string;
-    name: string;
-    type: string;
-    size: number;
-    data: string;
-    timestamp: number;
-  }>,
+  attachments?: ImageAttachment[],
 ): Promise<{
   formattedText: string;
   displayText: string;
   savedImageCount: number;
+  promptImages: SavedImageAttachment[];
 }> {
   let formattedText = text;
   let displayText = text;
   let savedImageCount = 0;
+  let remainingBytes = MAX_TOTAL_IMAGE_SIZE;
+  const promptImages: SavedImageAttachment[] = [];
 
-  // Add image attachments - save to files and reference them
   if (attachments && attachments.length > 0) {
-    // Save images as files and add references to the text
     const imageReferences: string[] = [];
 
     for (const attachment of attachments) {
-      // Save image to file
-      const imagePath = await saveImageToFile(attachment.data, attachment.name);
+      const normalizedAttachment = normalizeImageAttachment(attachment, {
+        maxBytes: Math.min(MAX_IMAGE_SIZE, remainingBytes),
+      });
+      if (!normalizedAttachment) {
+        console.warn(
+          '[ImageAttachmentHandler] Rejected invalid image attachment:',
+          attachment.name,
+        );
+        continue;
+      }
+
+      const imagePath = await saveImageToFile(
+        normalizedAttachment.data,
+        normalizedAttachment.type,
+      );
       if (imagePath) {
-        // Add file reference to the message (like CLI does with @path)
         imageReferences.push(`@${escapePath(imagePath)}`);
+        promptImages.push({
+          path: imagePath,
+          name: normalizedAttachment.name,
+          mimeType: normalizedAttachment.type,
+        });
+        remainingBytes -= normalizedAttachment.size;
         savedImageCount += 1;
       } else {
         console.warn(
@@ -130,13 +139,11 @@ export async function processImageAttachments(
       }
     }
 
-    // Add image references to the text
     if (imageReferences.length > 0) {
-      // Update the formatted text with image references
       formattedText = appendImageReferences(formattedText, imageReferences);
       displayText = appendImageReferences(displayText, imageReferences);
     }
   }
 
-  return { formattedText, displayText, savedImageCount };
+  return { formattedText, displayText, savedImageCount, promptImages };
 }

@@ -17,7 +17,6 @@ export function useImageAttachments({
 }: UseImageAttachmentsProps = {}) {
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
 
-  // Image handling
   const handleAddImages = useCallback((newImages: ImageAttachment[]) => {
     if (newImages.length === 0) {
       return;
@@ -33,7 +32,6 @@ export function useImageAttachments({
     setAttachedImages([]);
   }, []);
 
-  // Initialize paste handler
   const { handlePaste } = usePasteHandler({
     onImagesAdded: handleAddImages,
     getCurrentTotalSize: () =>

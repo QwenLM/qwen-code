@@ -186,7 +186,6 @@ export const useMessageSubmit = ({
         inputFieldRef.current.setAttribute('data-empty', 'true');
       }
       fileContext.clearFileReferences();
-      // Clear attached images after sending
       if (clearImages) {
         clearImages();
       }

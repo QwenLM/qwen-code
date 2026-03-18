@@ -151,6 +151,64 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
+
+    it('replays only the user-visible text when a recorded prompt contains expanded image context', async () => {
+      const record: ChatRecord = {
+        ...createUserRecord(''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: 'Please inspect this screenshot.\n\n@/tmp/clipboard-image.png',
+            },
+            { text: '\n--- Content from referenced files ---' },
+            { text: '\nContent from /tmp/clipboard-image.png:\n' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'ZmFrZS1pbWFnZS1kYXRh',
+                displayName: 'clipboard-image.png',
+              },
+            },
+            { text: '\n--- End of content ---' },
+          ],
+        },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Please inspect this screenshot.\n\n@/tmp/clipboard-image.png',
+        },
+        _meta: { timestamp: toEpochMs(record.timestamp) },
+      });
+    });
+
+    it('preserves multi-part user text when no internal expansion content was recorded', async () => {
+      const record: ChatRecord = {
+        ...createUserRecord(''),
+        message: {
+          role: 'user',
+          parts: [{ text: 'First line.' }, { text: '\nSecond line.' }],
+        },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'text',
+          text: 'First line.\nSecond line.',
+        },
+        _meta: { timestamp: toEpochMs(record.timestamp) },
+      });
+    });
   });
 
   describe('assistant message replay', () => {

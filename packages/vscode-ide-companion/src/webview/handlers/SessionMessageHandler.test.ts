@@ -39,6 +39,7 @@ describe('SessionMessageHandler', () => {
       formattedText: '',
       displayText: '',
       savedImageCount: 0,
+      promptImages: [],
     });
   });
 
@@ -90,5 +91,69 @@ describe('SessionMessageHandler', () => {
         }),
       }),
     );
+  });
+
+  it('sends formatted prompt text so session restore can reconstruct pasted images', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: '这是什么内容\n\n@/tmp/clipboard/clipboard-123.png',
+      displayText: '这是什么内容\n\n@/tmp/clipboard/clipboard-123.png',
+      savedImageCount: 1,
+      promptImages: [
+        {
+          path: '/tmp/clipboard/clipboard-123.png',
+          name: 'clipboard-123.png',
+          mimeType: 'image/png',
+        },
+      ],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '这是什么内容',
+        attachments: [
+          {
+            id: 'img-1',
+            name: 'clipboard-123.png',
+            type: 'image/png',
+            size: 3,
+            data: 'data:image/png;base64,YWJj',
+            timestamp: Date.now(),
+          },
+        ],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      {
+        type: 'text',
+        text: '这是什么内容\n\n@/tmp/clipboard/clipboard-123.png',
+      },
+      {
+        type: 'resource_link',
+        name: 'clipboard-123.png',
+        mimeType: 'image/png',
+        uri: 'file:///tmp/clipboard/clipboard-123.png',
+      },
+    ]);
   });
 });

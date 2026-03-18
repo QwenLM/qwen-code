@@ -498,7 +498,7 @@ export class WebViewProvider {
           return;
         }
         if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data);
+          this.handleResolveImagePaths(message.data, webview);
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -655,7 +655,7 @@ export class WebViewProvider {
           return;
         }
         if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data);
+          this.handleResolveImagePaths(message.data, newPanel.webview);
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1237,8 +1237,11 @@ export class WebViewProvider {
     this.getActiveWebview()?.postMessage(message);
   }
 
-  private handleResolveImagePaths(data: unknown): void {
-    const webview = this.getActiveWebview();
+  private handleResolveImagePaths(
+    data: unknown,
+    targetWebview?: vscode.Webview,
+  ): void {
+    const webview = targetWebview ?? this.getActiveWebview();
     if (!webview) {
       return;
     }
@@ -1259,7 +1262,7 @@ export class WebViewProvider {
 
     const resolved = resolveImagePaths(paths);
 
-    this.sendMessageToWebView({
+    webview.postMessage({
       type: 'imagePathsResolved',
       data: { resolved, requestId: payload?.requestId },
     });
@@ -1413,7 +1416,7 @@ export class WebViewProvider {
           return;
         }
         if (message.type === 'resolveImagePaths') {
-          this.handleResolveImagePaths(message.data);
+          this.handleResolveImagePaths(message.data, panel.webview);
           return;
         }
         if (message.type === 'updatePanelTitle') {

@@ -25,7 +25,10 @@ vi.mock('vscode', () => ({
   },
 }));
 
-import { saveImageToFile } from './imageAttachmentHandler.js';
+import {
+  processImageAttachments,
+  saveImageToFile,
+} from './imageAttachmentHandler.js';
 
 describe('imageAttachmentHandler', () => {
   let tempRoot: string;
@@ -43,7 +46,7 @@ describe('imageAttachmentHandler', () => {
   it('stores clipboard images under the global temp clipboard directory', async () => {
     const filePath = await saveImageToFile(
       'data:image/png;base64,YWJj',
-      'pasted.png',
+      'image/png',
     );
 
     expect(filePath).toBeTruthy();
@@ -66,7 +69,7 @@ describe('imageAttachmentHandler', () => {
       fs.utimesSync(filePath, time, time);
     }
 
-    await saveImageToFile('data:image/png;base64,YWJj', 'latest.png');
+    await saveImageToFile('data:image/png;base64,YWJj', 'image/png');
 
     const clipboardFiles = fs
       .readdirSync(clipboardDir)
@@ -79,12 +82,37 @@ describe('imageAttachmentHandler', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1234567890);
 
     const [firstPath, secondPath] = await Promise.all([
-      saveImageToFile('data:image/png;base64,YWJj', 'first.png'),
-      saveImageToFile('data:image/png;base64,ZGVm', 'second.png'),
+      saveImageToFile('data:image/png;base64,YWJj', 'image/png'),
+      saveImageToFile('data:image/png;base64,ZGVm', 'image/png'),
     ]);
 
     expect(firstPath).toBeTruthy();
     expect(secondPath).toBeTruthy();
     expect(firstPath).not.toBe(secondPath);
+  });
+
+  it('returns saved prompt image metadata for validated attachments', async () => {
+    const result = await processImageAttachments('Inspect this image', [
+      {
+        id: 'img-1',
+        name: 'pasted.png',
+        type: 'image/png',
+        size: 3,
+        data: 'data:image/png;base64,YWJj',
+        timestamp: Date.now(),
+      },
+    ]);
+
+    expect(result.savedImageCount).toBe(1);
+    expect(result.promptImages).toEqual([
+      expect.objectContaining({
+        name: 'pasted.png',
+        mimeType: 'image/png',
+        path: expect.stringContaining(
+          `${path.sep}clipboard${path.sep}clipboard-`,
+        ),
+      }),
+    ]);
+    expect(result.formattedText).toContain('@');
   });
 });

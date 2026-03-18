@@ -291,16 +291,13 @@ export const App: React.FC = () => {
     completion.query,
   ]);
 
-  // Image handling
   const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
     useImageAttachments({
       onError: (error) => {
         console.error('Paste error:', error);
-        // You can show a toast/notification here if needed
       },
     });
 
-  // Message submission
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,

@@ -4,19 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { unescapePath } from '../../utils/pathEscaping.js';
-
-const IMAGE_EXTENSIONS = new Set([
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.webp',
-  '.bmp',
-  '.tiff',
-  '.heic',
-  '.heif',
-  '.gif',
-]);
+import { unescapePath } from '@qwen-code/qwen-code-core';
+import { isDisplayableImagePath } from '../../utils/imageFormats.js';
 
 export interface WebViewMessageBase {
   role: 'user' | 'assistant' | 'thinking';
@@ -46,13 +35,7 @@ interface ParsedImageReference {
 }
 
 function isImageReference(ref: string): boolean {
-  const lower = ref.toLowerCase();
-  for (const ext of IMAGE_EXTENSIONS) {
-    if (lower.endsWith(ext)) {
-      return true;
-    }
-  }
-  return false;
+  return isDisplayableImagePath(ref);
 }
 
 function normalizeWhitespace(value: string): string {

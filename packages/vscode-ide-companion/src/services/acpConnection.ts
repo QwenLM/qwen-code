@@ -13,6 +13,7 @@ import {
 import type {
   Client,
   Agent,
+  ContentBlock,
   SessionNotification,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -166,20 +167,22 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
-        sessionUpdate: (params: SessionNotification): Promise<void> => {
+        sessionUpdate(params: SessionNotification): Promise<void> {
           console.log(
             '[ACP] >>> Processing session_update:',
             JSON.stringify(params).substring(0, 300),
           );
-          this.onSessionUpdate(params as unknown as SessionNotification);
+          self.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
 
-        requestPermission: async (
+        async requestPermission(
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> => {
+        ): Promise<RequestPermissionResponse> {
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -195,7 +198,7 @@ export class AcpConnection {
               const metadata =
                 rawInput?.metadata as AskUserQuestionRequest['metadata'];
 
-              const response = await this.onAskUserQuestion({
+              const response = await self.onAskUserQuestion({
                 sessionId: permissionData.sessionId,
                 questions,
                 metadata,
@@ -228,7 +231,7 @@ export class AcpConnection {
             }
 
             // Handle regular permission request
-            const response = await this.onPermissionRequest(permissionData);
+            const response = await self.onPermissionRequest(permissionData);
             const optionId = response?.optionId;
             console.log('[ACP] Permission request:', optionId);
             let outcome: 'selected' | 'cancelled';
@@ -245,7 +248,7 @@ export class AcpConnection {
             if (outcome === 'cancelled') {
               return { outcome: { outcome: 'cancelled' } };
             }
-            const selectedOptionId = this.resolvePermissionOptionId(
+            const selectedOptionId = self.resolvePermissionOptionId(
               permissionData,
               optionId,
             );
@@ -263,11 +266,11 @@ export class AcpConnection {
           }
         },
 
-        readTextFile: async (
+        async readTextFile(
           params: ReadTextFileRequest,
-        ): Promise<ReadTextFileResponse> => {
+        ): Promise<ReadTextFileResponse> {
           try {
-            const result = await this.fileHandler.handleReadTextFile({
+            const result = await self.fileHandler.handleReadTextFile({
               path: params.path,
               sessionId: params.sessionId,
               line: params.line ?? null,
@@ -275,14 +278,14 @@ export class AcpConnection {
             });
             return { content: result.content };
           } catch (error) {
-            throw this.mapReadTextFileError(error, params.path);
+            throw self.mapReadTextFileError(error, params.path);
           }
         },
 
-        writeTextFile: async (
+        async writeTextFile(
           params: WriteTextFileRequest,
-        ): Promise<WriteTextFileResponse> => {
-          await this.fileHandler.handleWriteTextFile({
+        ): Promise<WriteTextFileResponse> {
+          await self.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
             sessionId: params.sessionId,
@@ -290,16 +293,16 @@ export class AcpConnection {
           return {};
         },
 
-        extNotification: async (
+        async extNotification(
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> => {
+        ): Promise<void> {
           if (method === 'authenticate/update') {
             console.log(
               '[ACP] >>> Processing authenticate_update:',
               JSON.stringify(params).substring(0, 300),
             );
-            this.onAuthenticateUpdate(
+            self.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
           } else {
@@ -408,14 +411,16 @@ export class AcpConnection {
     return response;
   }
 
-  async sendPrompt(prompt: string): Promise<PromptResponse> {
+  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
+    const promptBlocks =
+      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
     const response: PromptResponse = await conn.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text: prompt }],
+      prompt: promptBlocks,
     });
     // Emit end-of-turn from stopReason
     if (response.stopReason) {

@@ -9,7 +9,10 @@ import type {
   WebViewMessage,
   WebViewMessageBase,
 } from '../utils/imageMessageUtils.js';
-import { expandUserMessageWithImages } from '../utils/imageMessageUtils.js';
+import {
+  applyImageResolution,
+  expandUserMessageWithImages,
+} from '../utils/imageMessageUtils.js';
 
 export interface UseImageResolutionProps {
   vscode: {
@@ -47,6 +50,12 @@ export function useImageResolution({ vscode }: UseImageResolutionProps) {
     [],
   );
 
+  const applyCurrentImageResolutions = useCallback(
+    (messages: WebViewMessage[]): WebViewMessage[] =>
+      applyImageResolution(messages, imageResolutionRef.current),
+    [],
+  );
+
   const requestImageResolutions = useCallback(
     (imagePaths: string[]) => {
       if (imagePaths.length === 0) {
@@ -67,10 +76,6 @@ export function useImageResolution({ vscode }: UseImageResolutionProps) {
         pendingImagePathsRef.current.add(path);
       }
 
-      if (pending.length === 0) {
-        return;
-      }
-
       imageRequestIdRef.current += 1;
       vscode.postMessage({
         type: 'resolveImagePaths',
@@ -80,14 +85,35 @@ export function useImageResolution({ vscode }: UseImageResolutionProps) {
     [vscode],
   );
 
-  const applyImageResolutions = useCallback(() => {
-    // This function is called after image resolutions are received
-    // The actual application happens in the calling component
-    // by passing the current resolutions to applyImageResolution
-  }, []);
+  const materializeMessages = useCallback(
+    (messages: WebViewMessageBase[]): WebViewMessage[] => {
+      const expanded = expandMessages(messages);
+      requestImageResolutions(expanded.imagePaths);
+      return applyCurrentImageResolutions(expanded.messages);
+    },
+    [applyCurrentImageResolutions, expandMessages, requestImageResolutions],
+  );
 
-  const handleImagePathsResolved = useCallback(
-    (resolved: Array<{ path: string; src?: string | null }>) => {
+  const materializeMessage = useCallback(
+    (message: WebViewMessageBase): WebViewMessage[] => {
+      const expanded =
+        message.role === 'user'
+          ? expandUserMessageWithImages(message)
+          : {
+              messages: [message],
+              imagePaths: [] as string[],
+            };
+      requestImageResolutions(expanded.imagePaths);
+      return applyCurrentImageResolutions(expanded.messages);
+    },
+    [applyCurrentImageResolutions, requestImageResolutions],
+  );
+
+  const mergeResolvedImages = useCallback(
+    (
+      messages: WebViewMessage[],
+      resolved: Array<{ path: string; src?: string | null }>,
+    ): WebViewMessage[] => {
       for (const item of resolved) {
         pendingImagePathsRef.current.delete(item.path);
         imageResolutionRef.current.set(
@@ -95,10 +121,10 @@ export function useImageResolution({ vscode }: UseImageResolutionProps) {
           item.src === null || item.src === undefined ? null : item.src,
         );
       }
-      // Notify parent that resolutions have been updated
-      applyImageResolutions();
+
+      return applyCurrentImageResolutions(messages);
     },
-    [applyImageResolutions],
+    [applyCurrentImageResolutions],
   );
 
   const clearImageResolutions = useCallback(() => {
@@ -106,17 +132,10 @@ export function useImageResolution({ vscode }: UseImageResolutionProps) {
     pendingImagePathsRef.current.clear();
   }, []);
 
-  const getCurrentResolutions = useCallback(
-    () => imageResolutionRef.current,
-    [],
-  );
-
   return {
-    expandMessages,
-    requestImageResolutions,
-    applyImageResolutions,
-    handleImagePathsResolved,
+    materializeMessages,
+    materializeMessage,
+    mergeResolvedImages,
     clearImageResolutions,
-    getCurrentResolutions,
   };
 }

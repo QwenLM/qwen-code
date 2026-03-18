@@ -21,10 +21,6 @@ import type {
   WebViewMessage,
   WebViewMessageBase,
 } from '../utils/imageMessageUtils.js';
-import {
-  expandUserMessageWithImages,
-  applyImageResolution,
-} from '../utils/imageMessageUtils.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -164,11 +160,10 @@ export const useWebViewMessages = ({
 
   // Image resolution handling
   const {
-    expandMessages,
-    requestImageResolutions,
-    handleImagePathsResolved,
+    materializeMessages,
+    materializeMessage,
+    mergeResolvedImages,
     clearImageResolutions,
-    getCurrentResolutions,
   } = useImageResolution({
     vscode,
   });
@@ -432,15 +427,9 @@ export const useWebViewMessages = ({
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
           clearImageResolutions();
-          const expanded = expandMessages(
-            conversation.messages as WebViewMessageBase[],
+          handlers.messageHandling.setMessages(
+            materializeMessages(conversation.messages as WebViewMessageBase[]),
           );
-          const withImages = applyImageResolution(
-            expanded.messages,
-            getCurrentResolutions(),
-          );
-          handlers.messageHandling.setMessages(withImages);
-          requestImageResolutions(expanded.imagePaths);
           break;
         }
 
@@ -456,21 +445,9 @@ export const useWebViewMessages = ({
               endLine?: number;
             };
           };
-          if (msg.role === 'user') {
-            const expanded = expandUserMessageWithImages(
-              msg as WebViewMessageBase,
-            );
-            const withImages = applyImageResolution(
-              expanded.messages,
-              getCurrentResolutions(),
-            );
-            withImages.forEach((entry) =>
-              handlers.messageHandling.addMessage(entry),
-            );
-            requestImageResolutions(expanded.imagePaths);
-          } else {
-            handlers.messageHandling.addMessage(msg as WebViewMessage);
-          }
+          materializeMessage(msg as WebViewMessageBase).forEach((entry) =>
+            handlers.messageHandling.addMessage(entry),
+          );
           // Robustness: if an assistant message arrives outside the normal stream
           // pipeline (no explicit streamEnd), ensure we clear streaming/waiting states
           if (msg.role === 'assistant') {
@@ -899,15 +876,11 @@ export const useWebViewMessages = ({
           }
           if (message.data.messages) {
             clearImageResolutions();
-            const expanded = expandMessages(
-              message.data.messages as WebViewMessageBase[],
+            handlers.messageHandling.setMessages(
+              materializeMessages(
+                message.data.messages as WebViewMessageBase[],
+              ),
             );
-            const withImages = applyImageResolution(
-              expanded.messages,
-              getCurrentResolutions(),
-            );
-            handlers.messageHandling.setMessages(withImages);
-            requestImageResolutions(expanded.imagePaths);
           } else {
             handlers.messageHandling.clearMessages();
           }
@@ -1037,10 +1010,8 @@ export const useWebViewMessages = ({
                 | { resolved?: Array<{ path: string; src?: string | null }> }
                 | undefined
             )?.resolved ?? [];
-          handleImagePathsResolved(resolved);
-          // Apply updated resolutions to current messages
           handlers.messageHandling.setMessages((prevMessages) =>
-            applyImageResolution(prevMessages, getCurrentResolutions()),
+            mergeResolvedImages(prevMessages, resolved),
           );
           break;
         }
@@ -1062,11 +1033,10 @@ export const useWebViewMessages = ({
       setInputText,
       vscode,
       setEditMode,
-      expandMessages,
-      requestImageResolutions,
-      handleImagePathsResolved,
+      materializeMessages,
+      materializeMessage,
+      mergeResolvedImages,
       clearImageResolutions,
-      getCurrentResolutions,
     ],
   );
 

@@ -7,8 +7,10 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { ImageAttachment } from '../../types/imageAttachment.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { processImageAttachments } from '../utils/imageAttachmentHandler.js';
+import { buildPromptBlocks } from '../utils/acpPromptBuilder.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
@@ -68,16 +70,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
                 endLine?: number;
               }
             | undefined,
-          data?.attachments as
-            | Array<{
-                id: string;
-                name: string;
-                type: string;
-                size: number;
-                data: string;
-                timestamp: number;
-              }>
-            | undefined,
+          data?.attachments as ImageAttachment[] | undefined,
         );
         break;
 
@@ -291,14 +284,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       startLine?: number;
       endLine?: number;
     },
-    attachments?: Array<{
-      id: string;
-      name: string;
-      type: string;
-      size: number;
-      data: string;
-      timestamp: number;
-    }>,
+    attachments?: ImageAttachment[],
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
     // Guard: do not process empty or whitespace-only messages.
@@ -312,9 +298,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     }
 
     let displayText = trimmedText ? text : '';
-
-    // Format message with file context if present
-    let formattedText = text;
+    let promptText = text;
     if (context && context.length > 0) {
       const contextParts = context
         .map((ctx) => {
@@ -325,16 +309,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
         })
         .join('\n');
 
-      formattedText = `${contextParts}\n\n${text}`;
+      promptText = `${contextParts}\n\n${text}`;
     }
 
-    // Process image attachments
     const {
-      formattedText: updatedFormattedText,
+      formattedText,
       displayText: updatedDisplayText,
       savedImageCount,
-    } = await processImageAttachments(formattedText, attachments);
-    formattedText = updatedFormattedText;
+      promptImages,
+    } = await processImageAttachments(promptText, attachments);
+    promptText = formattedText;
     displayText = updatedDisplayText;
 
     if (hasAttachments && !trimmedText && savedImageCount === 0) {
@@ -420,13 +404,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: Date.now(),
     };
 
-    // Store the original message with just text
     await this.conversationStore.addMessage(
       this.currentConversationId,
       userMessage,
     );
 
-    // Send to WebView with file context
     this.sendToWebView({
       type: 'message',
       data: { ...userMessage, fileContext },
@@ -489,7 +471,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
         },
       });
 
-      await this.agentManager.sendMessage(formattedText);
+      await this.agentManager.sendMessage(
+        buildPromptBlocks(promptText, promptImages),
+      );
 
       // Save assistant message
       if (this.currentStreamContent && this.currentConversationId) {

@@ -34,6 +34,7 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let recordUserMessageSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
@@ -52,6 +53,7 @@ describe('Session', () => {
 
     const toolRegistry = { getTool: vi.fn() };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
+    recordUserMessageSpy = vi.fn();
 
     mockConfig = {
       setApprovalMode: vi.fn(),
@@ -62,7 +64,7 @@ describe('Session', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
-        recordUserMessage: vi.fn(),
+        recordUserMessage: recordUserMessageSpy,
         recordUiTelemetryEvent: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
@@ -237,6 +239,130 @@ describe('Session', () => {
           paths: [fileName],
           signal: expect.any(AbortSignal),
         });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('records resolved prompt parts so pasted images survive resume', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const fileName = 'clipboard-image.png';
+
+      try {
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts: [
+              { text: '\n--- Content from referenced files ---' },
+              { text: `\nContent from ${path.join(tempDir, fileName)}:\n` },
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: 'ZmFrZS1pbWFnZS1kYXRh',
+                  displayName: fileName,
+                },
+              },
+              { text: '\n--- End of content ---' },
+            ],
+            files: [],
+          });
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Please inspect this image.' },
+            {
+              type: 'resource_link',
+              name: fileName,
+              uri: `file://${fileName}`,
+              mimeType: 'image/png',
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalled();
+        expect(recordUserMessageSpy).toHaveBeenCalledWith([
+          { text: `Please inspect this image. @${fileName}` },
+          { text: '\n--- Content from referenced files ---' },
+          { text: `\nContent from ${path.join(tempDir, fileName)}:\n` },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'ZmFrZS1pbWFnZS1kYXRh',
+              displayName: fileName,
+            },
+          },
+          { text: '\n--- End of content ---' },
+        ]);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not duplicate image path markers when prompt text already includes the referenced file', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const fileName = 'clipboard-image.png';
+
+      try {
+        vi.spyOn(core, 'readManyFiles').mockResolvedValue({
+          contentParts: [
+            { text: '\n--- Content from referenced files ---' },
+            { text: `\nContent from ${path.join(tempDir, fileName)}:\n` },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'ZmFrZS1pbWFnZS1kYXRh',
+                displayName: fileName,
+              },
+            },
+            { text: '\n--- End of content ---' },
+          ],
+          files: [],
+        });
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: `Please inspect this image.\n\n@${fileName}`,
+            },
+            {
+              type: 'resource_link',
+              name: fileName,
+              uri: `file://${fileName}`,
+              mimeType: 'image/png',
+            },
+          ],
+        });
+
+        expect(recordUserMessageSpy).toHaveBeenCalledWith([
+          { text: `Please inspect this image.\n\n@${fileName}` },
+          { text: '\n--- Content from referenced files ---' },
+          { text: `\nContent from ${path.join(tempDir, fileName)}:\n` },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'ZmFrZS1pbWFnZS1kYXRh',
+              displayName: fileName,
+            },
+          },
+          { text: '\n--- End of content ---' },
+        ]);
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
