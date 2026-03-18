@@ -1562,8 +1562,8 @@ export default {
     '运行以下命令之一开始配置：\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
     '  qwen auth qwen-oauth     - 使用 Qwen OAuth 认证（免费）',
-  '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
-    '  qwen auth code-plan      - 使用阿里云百炼 Coding Plan 认证\n',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - 使用阿里云百炼 Coding Plan 认证\n',
   'Or simply run:': '或者直接运行：',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式认证配置\n',
@@ -1583,8 +1583,8 @@ export default {
     '⚠️  认证方式：阿里云百炼 Coding Plan（不完整）',
   '  Issue: API key not found in environment or settings\n':
     '  问题：在环境变量或设置中未找到 API 密钥\n',
-  '  Run `qwen auth code-plan` to re-configure.\n':
-    '  运行 `qwen auth code-plan` 重新配置。\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  运行 `qwen auth coding-plan` 重新配置。\n',
   '✓ Authentication Method: {{type}}': '✓ 认证方式：{{type}}',
   '  Status: Configured\n': '  状态：已配置\n',
   'Failed to check authentication status: {{error}}':

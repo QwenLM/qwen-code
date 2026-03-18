@@ -53,7 +53,7 @@ interface MergedSettingsWithCodingPlan {
  * Handles the authentication process based on the specified command and options
  */
 export async function handleQwenAuth(
-  command: 'qwen-oauth' | 'code-plan',
+  command: 'qwen-oauth' | 'coding-plan',
   options: QwenAuthOptions,
 ) {
   try {
@@ -120,7 +120,7 @@ export async function handleQwenAuth(
 
     if (command === 'qwen-oauth') {
       await handleQwenOAuth(config, settings);
-    } else if (command === 'code-plan') {
+    } else if (command === 'coding-plan') {
       await handleCodePlanAuth(config, settings, options);
     }
 
@@ -372,7 +372,7 @@ export async function runInteractiveAuth() {
         description: t('Free · Up to 1,000 requests/day · Qwen latest models'),
       },
       {
-        value: 'code-plan' as const,
+        value: 'coding-plan' as const,
         label: t('Alibaba Cloud Coding Plan'),
         description: t(
           'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models',
@@ -384,8 +384,8 @@ export async function runInteractiveAuth() {
 
   const choice = await selector.select();
 
-  if (choice === 'code-plan') {
-    await handleQwenAuth('code-plan', {});
+  if (choice === 'coding-plan') {
+    await handleQwenAuth('coding-plan', {});
   } else {
     await handleQwenAuth('qwen-oauth', {});
   }
@@ -414,7 +414,7 @@ export async function showAuthStatus(): Promise<void> {
       );
       writeStdoutLine(
         t(
-          '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
+          '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
         ),
       );
       writeStdoutLine(t('Or simply run:'));
@@ -478,7 +478,7 @@ export async function showAuthStatus(): Promise<void> {
         writeStdoutLine(
           t('  Issue: API key not found in environment or settings\n'),
         );
-        writeStdoutLine(t('  Run `qwen auth code-plan` to re-configure.\n'));
+        writeStdoutLine(t('  Run `qwen auth coding-plan` to re-configure.\n'));
       }
     } else {
       writeStdoutLine(

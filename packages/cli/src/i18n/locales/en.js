@@ -1747,8 +1747,8 @@ export default {
     'Run one of the following commands to get started:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
     '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
-  '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
-    '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Or simply run:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Interactive authentication setup\n',
@@ -1768,8 +1768,8 @@ export default {
     '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
   '  Issue: API key not found in environment or settings\n':
     '  Issue: API key not found in environment or settings\n',
-  '  Run `qwen auth code-plan` to re-configure.\n':
-    '  Run `qwen auth code-plan` to re-configure.\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Run `qwen auth coding-plan` to re-configure.\n',
   '✓ Authentication Method: {{type}}': '✓ Authentication Method: {{type}}',
   '  Status: Configured\n': '  Status: Configured\n',
   'Failed to check authentication status: {{error}}':

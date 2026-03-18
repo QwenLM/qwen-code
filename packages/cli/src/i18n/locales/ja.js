@@ -1199,8 +1199,8 @@ export default {
     '以下のコマンドのいずれかを実行して開始してください:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
     '  qwen auth qwen-oauth     - Qwen OAuth で認証（無料）',
-  '  qwen auth code-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
-    '  qwen auth code-plan      - Alibaba Cloud Coding Plan で認証\n',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Alibaba Cloud Coding Plan で認証\n',
   'Or simply run:': 'または以下を実行:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - インタラクティブ認証セットアップ\n',
@@ -1220,8 +1220,8 @@ export default {
     '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
   '  Issue: API key not found in environment or settings\n':
     '  問題: 環境変数または設定にAPIキーが見つかりません\n',
-  '  Run `qwen auth code-plan` to re-configure.\n':
-    '  `qwen auth code-plan` を実行して再設定してください。\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  `qwen auth coding-plan` を実行して再設定してください。\n',
   '✓ Authentication Method: {{type}}': '✓ 認証方法: {{type}}',
   '  Status: Configured\n': '  ステータス: 設定済み\n',
   'Failed to check authentication status: {{error}}':

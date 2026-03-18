@@ -60,7 +60,7 @@ describe('showAuthStatus', () => {
       expect.stringContaining('qwen auth qwen-oauth'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('qwen auth code-plan'),
+      expect.stringContaining('qwen auth coding-plan'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
   });

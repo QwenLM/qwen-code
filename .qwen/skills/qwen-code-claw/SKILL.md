@@ -41,10 +41,10 @@ echo $BAILIAN_CODING_PLAN_API_KEY
 **If `BAILIAN_CODING_PLAN_API_KEY` exists**, authenticate directly:
 
 ```bash
-qwen auth code-plan --region china --key $BAILIAN_CODING_PLAN_API_KEY
+qwen auth coding-plan --region china --key $BAILIAN_CODING_PLAN_API_KEY
 ```
 
-**If the environment variable does not exist**, interrupt and prompt the user to authenticate via `qwen-oauth` or `code-plan`:
+**If the environment variable does not exist**, interrupt and prompt the user to authenticate via `qwen-oauth` or `coding-plan`:
 
 ```bash
 qwen auth

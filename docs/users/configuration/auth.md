@@ -56,10 +56,10 @@ You can set up Coding Plan authentication in two ways:
 
 ```bash
 # Interactive — prompts for region and API key
-qwen auth code-plan
+qwen auth coding-plan
 
 # Or non-interactive — pass region and key directly
-qwen auth code-plan --region china --key sk-sp-xxxxxxxxx
+qwen auth coding-plan --region china --key sk-sp-xxxxxxxxx
 ```
 
 **Option B: Inside a Qwen Code session**
@@ -335,13 +335,13 @@ Select authentication method:
 
 ### Subcommands
 
-| Command                                            | Description                                       |
-| -------------------------------------------------- | ------------------------------------------------- |
-| `qwen auth`                                        | Interactive authentication setup                  |
-| `qwen auth qwen-oauth`                             | Authenticate with Qwen OAuth                      |
-| `qwen auth code-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
-| `qwen auth code-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
-| `qwen auth status`                                 | Show current authentication status                |
+| Command                                              | Description                                       |
+| ---------------------------------------------------- | ------------------------------------------------- |
+| `qwen auth`                                          | Interactive authentication setup                  |
+| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth                      |
+| `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
+| `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth status`                                   | Show current authentication status                |
 
 **Examples:**
 
@@ -350,10 +350,10 @@ Select authentication method:
 qwen auth qwen-oauth
 
 # Set up Coding Plan interactively (prompts for region and key)
-qwen auth code-plan
+qwen auth coding-plan
 
 # Set up Coding Plan non-interactively (useful for CI/scripting)
-qwen auth code-plan --region china --key sk-sp-xxxxxxxxx
+qwen auth coding-plan --region china --key sk-sp-xxxxxxxxx
 
 # Check your current auth configuration
 qwen auth status

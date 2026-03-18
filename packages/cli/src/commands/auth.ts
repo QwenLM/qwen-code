@@ -4,14 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CommandModule , Argv } from 'yargs';
+import type { CommandModule, Argv } from 'yargs';
 import {
   handleQwenAuth,
   runInteractiveAuth,
   showAuthStatus,
 } from './auth/handler.js';
 import { t } from '../i18n/index.js';
-
 
 // Define subcommands separately
 const qwenOauthCommand = {
@@ -23,7 +22,7 @@ const qwenOauthCommand = {
 };
 
 const codePlanCommand = {
-  command: 'code-plan',
+  command: 'coding-plan',
   describe: t('Authenticate using Alibaba Cloud Coding Plan'),
   builder: (yargs: Argv) =>
     yargs
@@ -43,10 +42,10 @@ const codePlanCommand = {
 
     // If region and key are provided, use them directly
     if (region && key) {
-      await handleQwenAuth('code-plan', { region, key });
+      await handleQwenAuth('coding-plan', { region, key });
     } else {
       // Otherwise, prompt interactively
-      await handleQwenAuth('code-plan', {});
+      await handleQwenAuth('coding-plan', {});
     }
   },
 };
