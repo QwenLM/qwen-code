@@ -717,5 +717,117 @@ describe('SessionService', () => {
         postCompressionRecord.message,
       ]);
     });
+
+    it('should reconstruct tool_result records from toolCallResult when message field is absent', () => {
+      // Create a tool_result record WITHOUT message field (new format)
+      // This simulates what chatRecordingService.recordToolResult() now stores
+      const toolResultRecord: ChatRecord = {
+        uuid: 't1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'tool_result',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        // NO message field - tool responses are reconstructed from toolCallResult
+        toolCallResult: {
+          callId: 'call_123',
+          status: 'success',
+          resultDisplay: 'file1.txt\nfile2.txt',
+        },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T03:00:00Z',
+        messages: [recordA1, recordB2, toolResultRecord],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      // Should have 3 messages: user, assistant, and reconstructed tool result
+      expect(history).toHaveLength(3);
+      expect(history[0]).toEqual(recordA1.message);
+      expect(history[1]).toEqual(recordB2.message);
+
+      // Tool result should be reconstructed with functionResponse format
+      const toolContent = history[2];
+      expect(toolContent.role).toBe('user');
+      expect(toolContent.parts).toHaveLength(1);
+      expect(toolContent.parts?.[0]).toMatchObject({
+        functionResponse: {
+          id: 'call_123',
+          response: {
+            output: 'file1.txt\nfile2.txt',
+          },
+        },
+      });
+    });
+
+    it('should handle tool_result records with error in toolCallResult', () => {
+      const toolResultRecord: ChatRecord = {
+        uuid: 't1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'tool_result',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        toolCallResult: {
+          callId: 'call_error',
+          status: 'error',
+          resultDisplay: undefined,
+          error: new Error('Command failed'),
+        },
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T03:00:00Z',
+        messages: [toolResultRecord],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toHaveLength(1);
+      const toolContent = history[0];
+      expect(
+        toolContent.parts?.[0]?.functionResponse?.response?.['output'],
+      ).toBe('Command failed');
+    });
+
+    it('should skip tool_result records without toolCallResult', () => {
+      const invalidToolResult: ChatRecord = {
+        uuid: 't1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'tool_result',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        // No toolCallResult - invalid record
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T03:00:00Z',
+        messages: [recordA1, invalidToolResult],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      // Should only have the user message, invalid tool result is skipped
+      expect(history).toHaveLength(1);
+      expect(history[0]).toEqual(recordA1.message);
+    });
   });
 });
