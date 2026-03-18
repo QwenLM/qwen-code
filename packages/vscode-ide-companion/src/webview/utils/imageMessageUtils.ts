@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { unescapePath } from '@qwen-code/qwen-code-core';
 import { isDisplayableImagePath } from '../../utils/imageFormats.js';
+import { unescapePath } from '../../utils/pathEscaping.js';
 
 export interface WebViewMessageBase {
   role: 'user' | 'assistant' | 'thinking';

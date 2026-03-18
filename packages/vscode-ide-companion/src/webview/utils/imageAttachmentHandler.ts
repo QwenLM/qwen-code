@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  escapePath,
   saveImageBufferToClipboardDir,
   pruneClipboardImages,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +18,7 @@ import {
   MAX_TOTAL_IMAGE_SIZE,
 } from '../../utils/imageAttachmentLimits.js';
 import { getImageExtensionForMimeType } from '../../utils/imageFormats.js';
+import { escapePath } from '../../utils/pathEscaping.js';
 import { normalizeImageAttachment } from '../../utils/imageAttachmentValidation.js';
 
 export function appendImageReferences(

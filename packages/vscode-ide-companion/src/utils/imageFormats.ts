@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core';
+import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core/src/utils/request-tokenizer/supportedImageFormats.js';
 
 const PASTED_IMAGE_MIME_TO_EXTENSION: Record<string, string> = {
   'image/bmp': '.bmp',

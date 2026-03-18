@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { escapePath } from '@qwen-code/qwen-code-core';
+import { escapePath } from '../../utils/pathEscaping.js';
 import { splitMessageContentForImages } from './imageMessageUtils.js';
 
 describe('splitMessageContentForImages', () => {
