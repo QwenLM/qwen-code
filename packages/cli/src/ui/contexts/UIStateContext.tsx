@@ -131,6 +131,8 @@ export interface UIState {
   isMcpDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
+  // Per-task token tracking
+  taskStartTokens: number;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

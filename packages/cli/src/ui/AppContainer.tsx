@@ -1022,10 +1022,16 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const { elapsedTime, currentLoadingPhrase } = useLoadingIndicator(
-    streamingState,
-    settings.merged.ui?.customWittyPhrases,
-  );
+  const currentCandidatesTokens = Object.values(
+    sessionStats.metrics?.models ?? {},
+  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+
+  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
+    useLoadingIndicator(
+      streamingState,
+      settings.merged.ui?.customWittyPhrases,
+      currentCandidatesTokens,
+    );
 
   useAttentionNotifications({
     isFocused,
@@ -1430,6 +1436,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     }),
     [
       isThemeDialogOpen,
@@ -1524,6 +1532,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     ],
   );
 
