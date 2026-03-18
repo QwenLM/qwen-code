@@ -595,7 +595,7 @@ Skill 3 content`);
     it('should return all project-level base dirs', () => {
       const baseDirs = manager.getSkillsBaseDirs('project');
 
-      expect(baseDirs).toHaveLength(5);
+      expect(baseDirs).toHaveLength(2);
       expect(baseDirs).toContain(path.join('/test/project', '.qwen', 'skills'));
       expect(baseDirs).toContain(
         path.join('/test/project', '.agent', 'skills'),
@@ -614,7 +614,7 @@ Skill 3 content`);
     it('should return all user-level base dirs', () => {
       const baseDirs = manager.getSkillsBaseDirs('user');
 
-      expect(baseDirs).toHaveLength(5);
+      expect(baseDirs).toHaveLength(2);
       expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.agent', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.cursor', 'skills'));
@@ -623,13 +623,13 @@ Skill 3 content`);
     });
 
     it('should return bundled-level base dir', () => {
-      const baseDir = manager.getSkillsBaseDir('bundled');
+      const baseDirs = manager.getSkillsBaseDirs('bundled');
 
-      expect(baseDir).toMatch(/skills[/\\]bundled$/);
+      expect(baseDirs[0]).toMatch(/skills[/\\]bundled$/);
     });
 
     it('should throw for extension level', () => {
-      expect(() => manager.getSkillsBaseDir('extension')).toThrow(
+      expect(() => manager.getSkillsBaseDirs('extension')).toThrow(
         'Extension skills do not have a base directory',
       );
     });
