@@ -215,6 +215,7 @@ export * from './utils/promptIdContext.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
+export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
 export * from './utils/schemaValidator.js';

@@ -262,6 +262,55 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+// --- Context Usage types ---
+
+export interface ContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ContextSkillDetail {
+  name: string;
+  /** Token cost of the skill listing (name+description) in the tool definition */
+  tokens: number;
+  /** Whether this skill has been invoked and its full body loaded into context */
+  loaded?: boolean;
+  /** Token cost of the loaded SKILL.md body (only set when loaded is true) */
+  bodyTokens?: number;
+}
+
+export type HistoryItemContextUsage = HistoryItemBase & {
+  type: 'context_usage';
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ContextCategoryBreakdown;
+  builtinTools: ContextToolDetail[];
+  mcpTools: ContextToolDetail[];
+  memoryFiles: ContextMemoryDetail[];
+  skills: ContextSkillDetail[];
+  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  isEstimated?: boolean;
+  /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
+  showDetails?: boolean;
+};
+
 /**
  * Arena agent completion card data.
  */
@@ -331,6 +380,7 @@ export type HistoryItemWithoutId =
   | HistoryItemToolsList
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
+  | HistoryItemContextUsage
   | HistoryItemArenaAgentComplete
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress;
@@ -357,6 +407,7 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  CONTEXT_USAGE = 'context_usage',
   ARENA_AGENT_COMPLETE = 'arena_agent_complete',
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',

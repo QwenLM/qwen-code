@@ -40,6 +40,7 @@ describe('clearCommand', () => {
               resetChat: mockResetChat,
             }) as unknown as GeminiClient,
           startNewSession: mockStartNewSession,
+          getToolRegistry: () => undefined,
         },
       },
       session: {
