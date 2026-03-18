@@ -24,7 +24,7 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 ## 2. `read_file` (ReadFile)
 
-`read_file` reads and returns the content of a specified file. This tool handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges. Other binary file types are generally skipped.
+`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Media files whose modality is not supported by the current model are rejected with a helpful error message. Other binary file types are generally skipped.
 
 - **Tool name:** `read_file`
 - **Display name:** ReadFile
@@ -35,11 +35,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
   - `limit` (number, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
 - **Behavior:**
   - For text files: Returns the content. If `offset` and `limit` are used, returns only that slice of lines. Indicates if content was truncated due to line limits or line length limits.
-  - For image and PDF files: Returns the file content as a base64-encoded data structure suitable for model consumption.
+  - For media files (images, PDFs, audio, video): If the current model supports the file's modality, returns the file content as a base64-encoded `inlineData` object. If the model does not support the modality, returns an error message with guidance (e.g., suggesting skills or external tools).
   - For other binary files: Attempts to identify and skip them, returning a message indicating it's a generic binary file.
 - **Output:** (`llmContent`):
   - For text files: The file content, potentially prefixed with a truncation message (e.g., `[File content truncated: showing lines 1-100 of 500 total lines...]\nActual file content...`).
-  - For image/PDF files: An object containing `inlineData` with `mimeType` and base64 `data` (e.g., `{ inlineData: { mimeType: 'image/png', data: 'base64encodedstring' } }`).
+  - For supported media files: An object containing `inlineData` with `mimeType` and base64 `data` (e.g., `{ inlineData: { mimeType: 'image/png', data: 'base64encodedstring' } }`).
+  - For unsupported media files: An error message string explaining that the current model does not support this modality, with suggestions for alternatives.
   - For other binary files: A message like `Cannot display content of binary file: /path/to/data.bin`.
 - **Confirmation:** No.
 
@@ -163,5 +164,64 @@ grep_search(pattern="function", glob="*.js", limit=10)
   - On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
   - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit because the text matches multiple locations...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
+
+## File encoding and platform-specific behavior
+
+### Encoding detection and preservation
+
+When reading files, Qwen Code detects the file's encoding using a multi-step strategy:
+
+1. **UTF-8** — tried first (most modern tooling outputs UTF-8)
+2. **chardet** — statistical detection for non-UTF-8 content
+3. **System encoding** — falls back to the OS code page (Windows `chcp` / Unix `LANG`)
+
+Both `write_file` and `edit` preserve the original encoding and BOM (byte order mark) of existing files. If a file was read as GBK with a UTF-8 BOM, it will be written back the same way.
+
+### Configuring default encoding for new files
+
+The `defaultFileEncoding` setting controls encoding for **newly created** files (not edits to existing files):
+
+| Value       | Behavior                                                                    |
+| ----------- | --------------------------------------------------------------------------- |
+| _(not set)_ | UTF-8 without BOM, with automatic platform-specific adjustments (see below) |
+| `utf-8`     | UTF-8 without BOM, no automatic adjustments                                 |
+| `utf-8-bom` | UTF-8 with BOM for all new files                                            |
+
+Set it in `.qwen/settings.json` or `~/.qwen/settings.json`:
+
+```json
+{
+  "general": {
+    "defaultFileEncoding": "utf-8-bom"
+  }
+}
+```
+
+### Windows: CRLF for batch files
+
+On Windows, `.bat` and `.cmd` files are automatically written with CRLF (`\r\n`) line endings. This is required because `cmd.exe` uses CRLF as its line delimiter — LF-only endings can break multi-line `if`/`else`, `goto` labels, and `for` loops. This applies regardless of encoding settings and only on Windows.
+
+### Windows: UTF-8 BOM for PowerShell scripts
+
+On Windows with a **non-UTF-8 system code page** (e.g. GBK/cp936, Big5/cp950, Shift_JIS/cp932), newly created `.ps1` files are automatically written with a UTF-8 BOM. This is necessary because Windows PowerShell 5.1 (the version built into Windows 10/11) reads BOM-less scripts using the system's ANSI code page. Without a BOM, any non-ASCII characters in the script will be misinterpreted.
+
+This automatic BOM only applies when:
+
+- The platform is Windows
+- The system code page is not UTF-8 (not code page 65001)
+- The file is a new `.ps1` file (existing files keep their original encoding)
+- The user has **not** explicitly set `defaultFileEncoding` in settings
+
+PowerShell 7+ (pwsh) defaults to UTF-8 and handles BOM transparently, so the BOM is harmless there.
+
+If you explicitly set `defaultFileEncoding` to `"utf-8"`, the automatic BOM is disabled — this is an intentional escape hatch for repositories or tooling that reject BOMs.
+
+### Summary
+
+| File type      | Platform                      | Automatic behavior          |
+| -------------- | ----------------------------- | --------------------------- |
+| `.bat`, `.cmd` | Windows                       | CRLF line endings           |
+| `.ps1`         | Windows (non-UTF-8 code page) | UTF-8 BOM on new files      |
+| All others     | All                           | UTF-8 without BOM (default) |
 
 These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.

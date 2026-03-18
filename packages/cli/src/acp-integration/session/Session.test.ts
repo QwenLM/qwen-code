@@ -262,7 +262,7 @@ describe('Session', () => {
         .fn()
         .mockResolvedValue((async function* () {})());
 
-      const promptRequest: acp.PromptRequest = {
+      const promptRequest: PromptRequest = {
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'hello' }],
       };

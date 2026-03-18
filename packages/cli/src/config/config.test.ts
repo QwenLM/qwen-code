@@ -242,6 +242,30 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('should parse --system-prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--system-prompt',
+      'You are a test system prompt.',
+    ];
+    const argv = await parseArguments();
+    expect(argv.systemPrompt).toBe('You are a test system prompt.');
+    expect(argv.appendSystemPrompt).toBeUndefined();
+  });
+
+  it('should parse --append-system-prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--append-system-prompt',
+      'Be extra concise.',
+    ];
+    const argv = await parseArguments();
+    expect(argv.appendSystemPrompt).toBe('Be extra concise.');
+    expect(argv.systemPrompt).toBeUndefined();
+  });
+
   it('should allow -r flag as alias for --resume', async () => {
     process.argv = [
       'node',
@@ -431,6 +455,21 @@ describe('parseArguments', () => {
     );
 
     mockExit.mockRestore();
+  });
+
+  it('should allow --system-prompt and --append-system-prompt together', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--system-prompt',
+      'Override prompt',
+      '--append-system-prompt',
+      'Append prompt',
+    ];
+
+    const argv = await parseArguments();
+    expect(argv.systemPrompt).toBe('Override prompt');
+    expect(argv.appendSystemPrompt).toBe('Append prompt');
   });
 
   it('should throw an error when include-partial-messages is used without stream-json output', async () => {

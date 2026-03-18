@@ -211,31 +211,31 @@ This tool is commonly used for visual verification during PR reviews. For the co
 
 ```typescript
 interface FlowStep {
-  type?: string;              // Input text
-  key?: string | string[];    // Key press(es)
-  capture?: string;           // Viewport screenshot filename
-  captureFull?: string;       // Full scrollback screenshot filename
+  type?: string; // Input text
+  key?: string | string[]; // Key press(es)
+  capture?: string; // Viewport screenshot filename
+  captureFull?: string; // Full scrollback screenshot filename
   streaming?: {
-    delayMs?: number;         // Delay before first capture (default: 0)
-    intervalMs: number;       // Interval between captures in ms
-    count: number;            // Maximum number of captures
-    gif?: boolean;            // Generate animated GIF (default: true)
+    delayMs?: number; // Delay before first capture (default: 0)
+    intervalMs: number; // Interval between captures in ms
+    count: number; // Maximum number of captures
+    gif?: boolean; // Generate animated GIF (default: true)
   };
 }
 
 interface ScenarioConfig {
-  name: string;               // Scenario name (also used as screenshot subdirectory name)
-  spawn: string[];            // Launch command ["node", "dist/cli.js", "--yolo"]
-  flow: FlowStep[];           // Interaction steps
+  name: string; // Scenario name (also used as screenshot subdirectory name)
+  spawn: string[]; // Launch command ["node", "dist/cli.js", "--yolo"]
+  flow: FlowStep[]; // Interaction steps
   terminal?: {
-    cols?: number;            // Number of columns, default 100
-    rows?: number;            // Number of rows, default 28
-    theme?: string;           // Theme: dracula|one-dark|github-dark|monokai|night-owl
-    chrome?: boolean;         // macOS window decorations, default true
-    title?: string;           // Window title, default "Terminal"
-    fontSize?: number;        // Font size
-    cwd?: string;             // Working directory (relative to config file)
+    cols?: number; // Number of columns, default 100
+    rows?: number; // Number of rows, default 28
+    theme?: string; // Theme: dracula|one-dark|github-dark|monokai|night-owl
+    chrome?: boolean; // macOS window decorations, default true
+    title?: string; // Window title, default "Terminal"
+    fontSize?: number; // Font size
+    cwd?: string; // Working directory (relative to config file)
   };
-  outputDir?: string;         // Screenshot output directory (relative to config file)
+  outputDir?: string; // Screenshot output directory (relative to config file)
 }
 ```

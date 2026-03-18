@@ -5,9 +5,11 @@ description: Draft and submit a GitHub issue based on a user-provided idea
 # Create Issue
 
 ## Overview
+
 Take the user's idea or bug description, investigate the codebase to understand the full context, draft a GitHub issue for review, and submit it once approved.
 
 ## Input
+
 The user provides a brief description of a feature request or bug report: {{args}}
 
 ## Steps

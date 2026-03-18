@@ -91,6 +91,14 @@ const debugLogger = createDebugLogger('SESSION');
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  /**
+   * Tracks the completion of the current prompt so that the next prompt
+   * can await it.  This prevents a new prompt from reading chat history
+   * before the previous prompt's tool results have been added —
+   * a race condition that causes malformed history on Windows where
+   * process termination is slow.
+   */
+  private pendingPromptCompletion: Promise<void> | null = null;
   private turn: number = 0;
   private readonly runtimeBaseDir: string;
 
@@ -146,14 +154,47 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    // Install this prompt's AbortController before awaiting the previous
+    // prompt, so that a session/cancel during the wait targets us.
+    this.pendingPrompt?.abort();
+    const pendingSend = new AbortController();
+    this.pendingPrompt = pendingSend;
+
+    // Wait for the previous prompt to finish so chat history is consistent.
+    if (this.pendingPromptCompletion) {
+      try {
+        await this.pendingPromptCompletion;
+      } catch {
+        // Expected: previous prompt was cancelled or errored
+      }
+    }
+
+    // Cancelled while waiting for the previous prompt to finish.
+    if (pendingSend.signal.aborted) {
+      return { stopReason: 'cancelled' };
+    }
+
+    // Track this prompt's completion for the next prompt to await
+    let resolveCompletion!: () => void;
+    this.pendingPromptCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      return await this.#executePrompt(params, pendingSend);
+    } finally {
+      resolveCompletion();
+    }
+  }
+
+  async #executePrompt(
+    params: PromptRequest,
+    pendingSend: AbortController,
+  ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
-        this.pendingPrompt?.abort();
-        const pendingSend = new AbortController();
-        this.pendingPrompt = pendingSend;
-
         // Increment turn counter for each user prompt
         this.turn += 1;
 

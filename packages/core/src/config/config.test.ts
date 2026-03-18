@@ -248,6 +248,26 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('should store a system prompt override', () => {
+    const config = new Config({
+      ...baseParams,
+      systemPrompt: 'You are a custom system prompt.',
+    });
+
+    expect(config.getSystemPrompt()).toBe('You are a custom system prompt.');
+    expect(config.getAppendSystemPrompt()).toBeUndefined();
+  });
+
+  it('should store an appended system prompt', () => {
+    const config = new Config({
+      ...baseParams,
+      appendSystemPrompt: 'Be extra concise.',
+    });
+
+    expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
+    expect(config.getSystemPrompt()).toBeUndefined();
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');
@@ -1047,10 +1067,10 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(50000);
     });
 
-    it('should return infinity when truncation is disabled', () => {
+    it('should return infinity when threshold is zero or negative', () => {
       const customParams = {
         ...baseParams,
-        enableToolOutputTruncation: false,
+        truncateToolOutputThreshold: 0,
       };
       const config = new Config(customParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(

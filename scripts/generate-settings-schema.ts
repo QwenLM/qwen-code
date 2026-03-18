@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 import type {
   SettingDefinition,
+  SettingItemDefinition,
   SettingsSchema,
 } from '../packages/cli/src/config/settingsSchema.js';
 import { getSettingsSchema } from '../packages/cli/src/config/settingsSchema.js';
@@ -37,6 +38,57 @@ interface JsonSchemaProperty {
   enum?: (string | number)[];
   default?: unknown;
   additionalProperties?: boolean | JsonSchemaProperty;
+  required?: string[];
+}
+
+function convertItemDefinitionToJsonSchema(
+  itemDef: SettingItemDefinition,
+): JsonSchemaProperty {
+  const schema: JsonSchemaProperty = {};
+
+  if (itemDef.description) {
+    schema.description = itemDef.description;
+  }
+
+  schema.type = itemDef.type;
+
+  if (itemDef.enum) {
+    schema.enum = itemDef.enum;
+  }
+
+  if (itemDef.type === 'object' && itemDef.properties) {
+    schema.properties = {};
+    const requiredFields: string[] = [];
+
+    for (const [key, childDef] of Object.entries(itemDef.properties)) {
+      const childSchema = convertItemDefinitionToJsonSchema(childDef);
+      schema.properties[key] = childSchema;
+      if (childDef.required) {
+        requiredFields.push(key);
+      }
+    }
+
+    if (requiredFields.length > 0) {
+      schema.required = requiredFields;
+    }
+  }
+
+  if (itemDef.type === 'object' && itemDef.additionalProperties !== undefined) {
+    if (typeof itemDef.additionalProperties === 'boolean') {
+      schema.additionalProperties = itemDef.additionalProperties;
+    } else {
+      schema.additionalProperties = convertItemDefinitionToJsonSchema(
+        itemDef.additionalProperties,
+      );
+    }
+  }
+
+  if (itemDef.items) {
+    schema.type = 'array';
+    schema.items = convertItemDefinitionToJsonSchema(itemDef.items);
+  }
+
+  return schema;
 }
 
 function convertSettingToJsonSchema(
@@ -60,7 +112,11 @@ function convertSettingToJsonSchema(
       break;
     case 'array':
       schema.type = 'array';
-      schema.items = { type: 'string' };
+      if (setting.items) {
+        schema.items = convertItemDefinitionToJsonSchema(setting.items);
+      } else {
+        schema.items = { type: 'string' };
+      }
       break;
     case 'enum':
       if (setting.options && setting.options.length > 0) {

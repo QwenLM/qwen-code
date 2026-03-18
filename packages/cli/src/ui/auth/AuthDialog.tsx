@@ -345,7 +345,7 @@ export function AuthDialog(): React.JSX.Element {
 
   return (
     <Box
-      borderStyle="round"
+      borderStyle="single"
       borderColor={theme?.border?.default}
       flexDirection="column"
       padding={1}
