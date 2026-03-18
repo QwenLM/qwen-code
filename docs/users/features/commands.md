@@ -94,6 +94,22 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
+### 1.7 CLI Auth Subcommands
+
+In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
+
+| Command                                            | Description                                       |
+| -------------------------------------------------- | ------------------------------------------------- |
+| `qwen auth`                                        | Interactive authentication setup                  |
+| `qwen auth qwen-oauth`                             | Authenticate with Qwen OAuth                      |
+| `qwen auth code-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
+| `qwen auth code-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth status`                                 | Show current authentication status                |
+
+> [!tip]
+>
+> These commands run outside of a Qwen Code session. Use them to configure authentication before starting a session, or in scripts and CI environments. See the [Authentication](../configuration/auth) page for full details.
+
 ## 2. @ Commands (Introducing Files)
 
 @ commands are used to quickly add local file or directory content to the conversation.

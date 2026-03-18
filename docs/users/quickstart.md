@@ -54,15 +54,27 @@ brew install qwen-code
 
 ## Step 2: Log in to your account
 
-Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll need to log in:
+Qwen Code requires an account to use. The quickest way is to run the `qwen auth` command directly:
 
 ```bash
-# You'll be prompted to log in on first use
+# Interactive auth setup — select a method and follow the prompts
+qwen auth
+```
+
+Or authenticate with Qwen OAuth directly:
+
+```bash
+qwen auth qwen-oauth
+```
+
+Alternatively, you can start a session first and authenticate from within:
+
+```bash
 qwen
 ```
 
 ```bash
-# Follow the prompts to log in with your account
+# Inside a Qwen Code session
 /auth
 ```
 
@@ -74,7 +86,7 @@ Select `Qwen OAuth`, log in to your account and follow the prompts to confirm. O
 
 > [!tip]
 >
-> If you need to log in again or switch accounts, use the `/auth` command within Qwen Code.
+> Use `qwen auth status` to check your current authentication configuration at any time. To switch accounts or methods, run `qwen auth` again or use the `/auth` command within a session.
 
 ## Step 3: Start your first session
 
@@ -216,7 +228,9 @@ Here are the most important commands for daily use:
 | Command               | What it does                                     | Example                       |
 | --------------------- | ------------------------------------------------ | ----------------------------- |
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
-| `/auth`               | Change authentication method                     | `/auth`                       |
+| `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
+| `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
+| `/auth`               | Change authentication method (in session)        | `/auth`                       |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |
