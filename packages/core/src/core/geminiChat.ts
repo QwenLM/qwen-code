@@ -649,10 +649,17 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
+        // Use || instead of ?? so that totalTokenCount=0 falls back to promptTokenCount.
+        // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
-          usageMetadata.totalTokenCount ?? usageMetadata.promptTokenCount;
+          usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
         if (lastPromptTokenCount) {
           uiTelemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+        }
+        if (usageMetadata.cachedContentTokenCount) {
+          uiTelemetryService.setLastCachedContentTokenCount(
+            usageMetadata.cachedContentTokenCount,
+          );
         }
       }
 

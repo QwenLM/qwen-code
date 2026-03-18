@@ -120,6 +120,10 @@ export const contextCommand: SlashCommand = {
 
     // Total prompt token count from API (most accurate)
     const apiTotalTokens = uiTelemetryService.getLastPromptTokenCount();
+    // Cached content token count — when available (e.g. DashScope prefix caching),
+    // represents the cached overhead (system prompt + tools). Using this gives a much
+    // more accurate "Messages" count: promptTokens - cachedTokens = actual history tokens.
+    const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
     // 1. System prompt tokens (without memory, as memory is counted separately)
     const systemPromptText = getCoreSystemPrompt(undefined, modelName);
@@ -302,7 +306,16 @@ export const contextCommand: SlashCommand = {
         scaledAllTools +
         displayMemoryFiles +
         Math.round(loadedBodiesTokens * overheadScale);
-      messagesTokens = Math.max(0, totalTokens - scaledOverhead);
+
+      // When the API reports cached content tokens (e.g. DashScope prefix caching),
+      // use them as the actual overhead indicator for a more accurate messages count.
+      // cachedTokens ≈ system prompt + tools tokens actually served from cache.
+      // This avoids the "messages = 0" problem caused by estimation overshoot.
+      if (apiCachedTokens > 0) {
+        messagesTokens = Math.max(0, totalTokens - apiCachedTokens);
+      } else {
+        messagesTokens = Math.max(0, totalTokens - scaledOverhead);
+      }
 
       freeSpace = Math.max(
         0,
