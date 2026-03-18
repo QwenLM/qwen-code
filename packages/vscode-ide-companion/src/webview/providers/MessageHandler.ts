@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type * as vscode from 'vscode';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
 import type {
@@ -85,5 +86,9 @@ export class MessageHandler {
    */
   appendStreamContent(chunk: string): void {
     this.router.appendStreamContent(chunk);
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    return this.router.setupFileWatchers();
   }
 }
