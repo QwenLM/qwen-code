@@ -93,14 +93,14 @@ describe('BaseSelectionList', () => {
       expect(mockRenderItem).toHaveBeenCalledWith(items[0], expect.any(Object));
     });
 
-    it('should render the selection indicator (● or space) and layout', () => {
+    it('should render the selection indicator (› or space) and layout', () => {
       const { lastFrame } = renderComponent({}, 0);
       const output = lastFrame();
 
-      // Use regex to assert the structure: Indicator + Whitespace + Number + Label
-      expect(output).toMatch(/●\s+1\.\s+Item A/);
-      expect(output).toMatch(/\s+2\.\s+Item B/);
-      expect(output).toMatch(/\s+3\.\s+Item C/);
+      // Use regex to assert the structure: Indicator + Number + Label
+      expect(output).toMatch(/› 1\.\s+Item A/);
+      expect(output).toMatch(/2\.\s+Item B/);
+      expect(output).toMatch(/3\.\s+Item C/);
     });
 
     it('should handle an empty list gracefully', () => {
@@ -264,12 +264,14 @@ describe('BaseSelectionList', () => {
 
     const renderScrollableList = (initialActiveIndex: number = 0) => {
       // Define the props used for the initial render and subsequent rerenders
+      // Note: showScrollArrows is false by default for backward-compatible scrolling behavior
       const componentProps: BaseSelectionListProps<
         string,
         { value: string; label: string; key: string }
       > = {
         items: longList,
         maxItemsToShow: MAX_ITEMS,
+        showScrollArrows: false, // Default: no centered scrolling
         onSelect: mockOnSelect,
         onHighlight: mockOnHighlight,
         renderItem: mockRenderItem,
@@ -451,8 +453,12 @@ describe('BaseSelectionList', () => {
       });
       const output = lastFrame();
 
-      expect(output).not.toContain('▲');
-      expect(output).not.toContain('▼');
+      // Without showScrollArrows, scroll indicators should not be shown
+      // But selected item should still show › prefix
+      expect(output).not.toContain('↑');
+      expect(output).not.toContain('↓');
+      // Selected item shows › prefix
+      expect(output).toContain('›');
     });
 
     it('should show arrows with correct colors when enabled (at the top)', async () => {
@@ -467,32 +473,42 @@ describe('BaseSelectionList', () => {
 
       await waitFor(() => {
         const output = lastFrame();
-        // At the top, should show first 3 items
+        // At the top (index 0), selected item should show › prefix
+        expect(output).toContain('›');
+        // First item should show ↓ since there are more items below
+        expect(output).toContain('↓');
+        // Should show first 3 items
         expect(output).toContain('Item 1');
         expect(output).toContain('Item 3');
         expect(output).not.toContain('Item 4');
-        // Both arrows should be visible
-        expect(output).toContain('▲');
-        expect(output).toContain('▼');
       });
     });
 
     it('should show arrows and correct items when scrolled to the middle', async () => {
       const { lastFrame } = renderComponent(
-        { items: longList, maxItemsToShow: MAX_ITEMS, showScrollArrows: true },
+        {
+          items: longList,
+          maxItemsToShow: MAX_ITEMS,
+          showScrollArrows: true,
+          centerSelection: true,
+        },
         5,
       );
 
       await waitFor(() => {
         const output = lastFrame();
-        // After scrolling to middle, should see items around index 5
-        expect(output).toContain('Item 4');
+        // With centered scrolling (activeIndex=5, maxItemsToShow=3, half=1):
+        // offset = 5 - 1 = 4, so visible items are 4,5,6 (Item 5, 6, 7)
+        expect(output).toContain('Item 5');
         expect(output).toContain('Item 6');
-        expect(output).not.toContain('Item 3');
-        expect(output).not.toContain('Item 7');
-        // Both scroll arrows should be visible
-        expect(output).toContain('▲');
-        expect(output).toContain('▼');
+        expect(output).toContain('Item 7');
+        expect(output).not.toContain('Item 4');
+        expect(output).not.toContain('Item 8');
+        // Selected item (index 5 in original, 1 in visible) shows › prefix
+        expect(output).toContain('›');
+        // Both scroll arrows visible (↑ on first visible, ↓ on last visible)
+        expect(output).toContain('↑');
+        expect(output).toContain('↓');
       });
     });
 
@@ -504,13 +520,17 @@ describe('BaseSelectionList', () => {
 
       await waitFor(() => {
         const output = lastFrame();
-        // At the end, should show last 3 items
+        // With centered scrolling (activeIndex=9, maxItemsToShow=3, half=1):
+        // offset = 9 - 1 = 8, clamped to 10-3=7, so visible items are 7,8,9 (Item 8, 9, 10)
         expect(output).toContain('Item 8');
+        expect(output).toContain('Item 9');
         expect(output).toContain('Item 10');
         expect(output).not.toContain('Item 7');
-        // Both arrows should be visible
-        expect(output).toContain('▲');
-        expect(output).toContain('▼');
+        // Selected item shows › prefix
+        expect(output).toContain('›');
+        // At the end, only ↑ visible (no more items below)
+        expect(output).toContain('↑');
+        expect(output).not.toContain('↓');
       });
     });
 
@@ -526,9 +546,11 @@ describe('BaseSelectionList', () => {
       expect(output).toContain('Item A');
       expect(output).toContain('Item B');
       expect(output).toContain('Item C');
-      // Both arrows should be visible but dimmed (this test doesn't need waitFor since no scrolling occurs)
-      expect(output).toContain('▲');
-      expect(output).toContain('▼');
+      // When list fits entirely (hasMoreThanOnePage = false), no scroll indicators shown
+      // But selected item should still show › prefix
+      expect(output).not.toContain('↑');
+      expect(output).not.toContain('↓');
+      expect(output).toContain('›');
     });
   });
 });

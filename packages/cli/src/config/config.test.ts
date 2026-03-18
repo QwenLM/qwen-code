@@ -282,6 +282,12 @@ describe('parseArguments', () => {
     expect(argv.continue).toBe(true);
   });
 
+  it('should parse --providerId', async () => {
+    process.argv = ['node', 'script.js', '--providerId', 'openai-custom'];
+    const argv = await parseArguments();
+    expect(argv.providerId).toBe('openai-custom');
+  });
+
   it('should convert positional query argument to prompt by default', async () => {
     process.argv = ['node', 'script.js', 'Hi Gemini'];
     const argv = await parseArguments();
@@ -1524,6 +1530,33 @@ describe('loadCliConfig model selection', () => {
     );
 
     expect(config.getModel()).toBe('qwen3-coder-plus');
+  });
+
+  it('prefers providerId from argvs for initial provider selection', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--providerId',
+      'openai-cli',
+      '--model',
+      'qwen3-coder-plus',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        model: {
+          name: 'qwen3-coder-plus',
+          providerId: 'openai-settings',
+        },
+      },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getModelsConfig().getCurrentProviderId()).toBe('openai-cli');
   });
 });
 

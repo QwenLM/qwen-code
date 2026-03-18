@@ -5,17 +5,27 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useMemo } from 'react';
 import { Text, Box } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useSelectionList } from '../../hooks/useSelectionList.js';
 
 import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
+// Prefix characters for scroll indicators (aligned with SessionPicker)
+const PREFIX_CHARS = {
+  selected: '› ',
+  scrollUp: '↑ ',
+  scrollDown: '↓ ',
+  normal: '  ',
+};
+
 export interface RenderItemContext {
   isSelected: boolean;
   titleColor: string;
   numberColor: string;
+  prefixChar: string;
+  prefixColor: string;
 }
 
 export interface BaseSelectionListProps<
@@ -29,6 +39,8 @@ export interface BaseSelectionListProps<
   isFocused?: boolean;
   showNumbers?: boolean;
   showScrollArrows?: boolean;
+  /** When true, keeps the selected item centered in the visible window */
+  centerSelection?: boolean;
   maxItemsToShow?: number;
   /** Gap (in rows) between each item. */
   itemGap?: number;
@@ -60,6 +72,7 @@ export function BaseSelectionList<
   isFocused = true,
   showNumbers = true,
   showScrollArrows = false,
+  centerSelection = false,
   maxItemsToShow = 10,
   itemGap = 0,
   renderItem,
@@ -73,38 +86,70 @@ export function BaseSelectionList<
     showNumbers,
   });
 
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const hasMoreThanOnePage = items.length > maxItemsToShow;
 
-  // Handle scrolling for long lists
-  useEffect(() => {
-    const newScrollOffset = Math.max(
+  // Calculate scroll offset - use centered selection when centerSelection is enabled
+  const scrollOffset = useMemo(() => {
+    if (centerSelection && hasMoreThanOnePage) {
+      // Center the selected item
+      const halfVisible = Math.floor(maxItemsToShow / 2);
+      let offset = activeIndex - halfVisible;
+      // Clamp to valid range
+      offset = Math.max(0, offset);
+      offset = Math.min(items.length - maxItemsToShow, offset);
+      return offset;
+    }
+    // Default: keep selection at the bottom of visible window (legacy behavior)
+    return Math.max(
       0,
       Math.min(activeIndex - maxItemsToShow + 1, items.length - maxItemsToShow),
     );
-    if (activeIndex < scrollOffset) {
-      setScrollOffset(activeIndex);
-    } else if (activeIndex >= scrollOffset + maxItemsToShow) {
-      setScrollOffset(newScrollOffset);
-    }
-  }, [activeIndex, items.length, scrollOffset, maxItemsToShow]);
+  }, [
+    activeIndex,
+    items.length,
+    maxItemsToShow,
+    centerSelection,
+    hasMoreThanOnePage,
+  ]);
 
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
   const numberColumnWidth = String(items.length).length;
 
+  // Scroll indicator state (aligned with SessionPicker logic)
+  const showScrollUp = scrollOffset > 0;
+  const showScrollDown = scrollOffset + maxItemsToShow < items.length;
+
   return (
     <Box flexDirection="column" gap={itemGap}>
-      {/* Use conditional coloring instead of conditional rendering */}
-      {showScrollArrows && (
-        <Text
-          color={scrollOffset > 0 ? theme.text.primary : theme.text.secondary}
-        >
-          ▲
-        </Text>
-      )}
-
       {visibleItems.map((item, index) => {
         const itemIndex = scrollOffset + index;
         const isSelected = activeIndex === itemIndex;
+        const isFirst = index === 0;
+        const isLast = index === visibleItems.length - 1;
+
+        // Keep a fixed-width prefix column for all items to preserve historical indentation.
+        let prefixChar = PREFIX_CHARS.normal;
+        let prefixColor = theme.text.primary;
+        if (isSelected) {
+          prefixChar = PREFIX_CHARS.selected;
+          prefixColor = theme.text.accent;
+        } else if (
+          showScrollArrows &&
+          hasMoreThanOnePage &&
+          isFirst &&
+          showScrollUp
+        ) {
+          prefixChar = PREFIX_CHARS.scrollUp;
+          prefixColor = theme.text.secondary;
+        } else if (
+          showScrollArrows &&
+          hasMoreThanOnePage &&
+          isLast &&
+          showScrollDown
+        ) {
+          prefixChar = PREFIX_CHARS.scrollDown;
+          prefixColor = theme.text.secondary;
+        }
 
         // Determine colors based on selection and disabled state
         let titleColor = theme.text.primary;
@@ -132,17 +177,11 @@ export function BaseSelectionList<
 
         return (
           <Box key={item.key} alignItems="flex-start">
-            {/* Radio button indicator */}
-            <Box minWidth={2} flexShrink={0}>
-              <Text
-                color={isSelected ? theme.status.success : theme.text.primary}
-                aria-hidden
-              >
-                {isSelected ? '●' : ' '}
-              </Text>
+            {/* Fixed prefix column keeps option indentation stable across states */}
+            <Box flexShrink={0} minWidth={2}>
+              <Text color={prefixColor}>{prefixChar}</Text>
             </Box>
 
-            {/* Item number */}
             {showNumbers && (
               <Box
                 marginRight={1}
@@ -160,23 +199,13 @@ export function BaseSelectionList<
                 isSelected,
                 titleColor,
                 numberColor,
+                prefixChar,
+                prefixColor,
               })}
             </Box>
           </Box>
         );
       })}
-
-      {showScrollArrows && (
-        <Text
-          color={
-            scrollOffset + maxItemsToShow < items.length
-              ? theme.text.primary
-              : theme.text.secondary
-          }
-        >
-          ▼
-        </Text>
-      )}
     </Box>
   );
 }

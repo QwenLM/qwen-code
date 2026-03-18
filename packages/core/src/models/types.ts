@@ -41,9 +41,23 @@ export type ModelGenerationConfig = Pick<
 >;
 
 /**
- * Model configuration for a single model within an authType
+ * Type relationship guide:
+ * - `ModelConfig`: model-only fields stored under `ProviderConfig.models[]` in settings.
+ * - `ProviderConfig`: provider-level fields (`authType`, `baseUrl`, `envKey`) + `models`.
+ * - `ModelProvidersConfig`: top-level settings map `{ [providerId]: ProviderConfig }`.
+ * - `ProviderModelConfig`: runtime working shape after provider fields are merged into one model.
+ * - `ResolvedModelConfig`: fully resolved runtime shape with defaults applied (non-optional core fields).
+ *
+ * Read order when tracing data flow:
+ * settings (`ModelProvidersConfig`) -> registry input (`ProviderConfig` + `ModelConfig`) ->
+ * runtime merge (`ProviderModelConfig`) -> runtime defaults (`ResolvedModelConfig`).
  */
-export interface ModelConfig {
+
+/**
+ * Runtime model entry used before defaults are applied.
+ * This includes provider-level fields (`baseUrl`, `envKey`) flattened onto one model.
+ */
+export interface ProviderModelConfig {
   /** Unique model ID within authType (e.g., "qwen-coder", "gpt-4-turbo") */
   id: string;
   /** Display name (defaults to id) */
@@ -61,16 +75,45 @@ export interface ModelConfig {
 }
 
 /**
- * Model providers configuration grouped by authType
+ * Settings model entry inside `ProviderConfig.models`.
+ * This is intentionally model-only: provider-scoped fields stay on `ProviderConfig`.
+ */
+export interface ModelConfig {
+  id: string;
+  name?: string;
+  description?: string;
+  generationConfig?: ModelGenerationConfig;
+  /** Model capabilities (e.g., vision). Optional; reserves for future use. */
+  capabilities?: ModelCapabilities;
+}
+
+/**
+ * Settings provider entry (value type in `ModelProvidersConfig`).
+ * Holds provider-scoped access fields and the list of model entries for that provider.
+ */
+export interface ProviderConfig {
+  authType: string;
+  baseUrl?: string;
+  envKey?: string;
+  /** When true, this provider is system-managed (e.g. Coding Plan) and can be replaced by template updates. */
+  managed?: boolean;
+  models: ModelConfig[];
+}
+
+/**
+ * Settings-level `modelProviders` object keyed by providerId.
+ * This is the canonical persisted shape consumed by runtime code.
  */
 export type ModelProvidersConfig = {
-  [authType: string]: ModelConfig[];
+  [providerId: string]: ProviderConfig;
 };
 
 /**
- * Resolved model config with all defaults applied
+ * Final runtime model config after defaults and normalization.
+ * Compared to `ProviderModelConfig`, fields like `name`, `baseUrl`,
+ * `generationConfig`, and `capabilities` are guaranteed to be present.
  */
-export interface ResolvedModelConfig extends ModelConfig {
+export interface ResolvedModelConfig extends ProviderModelConfig {
   /** AuthType this model belongs to (always present from map key) */
   authType: AuthType;
   /** Display name (always present, defaults to id) */
@@ -83,6 +126,8 @@ export interface ResolvedModelConfig extends ModelConfig {
   generationConfig: ModelGenerationConfig;
   /** Capabilities (always present, defaults to {}) */
   capabilities: ModelCapabilities;
+  /** Provider ID this model belongs to (if sourced from modelProviders). */
+  providerId?: string;
 }
 
 /**
@@ -99,6 +144,9 @@ export interface AvailableModel {
   modalities?: InputModalities;
   baseUrl?: string;
   envKey?: string;
+
+  /** Provider ID this model belongs to */
+  providerId?: string;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

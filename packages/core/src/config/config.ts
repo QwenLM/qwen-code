@@ -379,7 +379,7 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
-  /** Model providers configuration grouped by authType */
+  /** Model providers configuration keyed by providerId */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Enable hook system for lifecycle events */
   enableHooks?: boolean;
@@ -661,6 +661,7 @@ export class Config {
     // - generationConfig.authType may have a default value from resolvers
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
+      initialProviderId: params.generationConfig?.providerId,
       modelProvidersConfig: this.modelProvidersConfig,
       generationConfig: {
         model: params.model,
@@ -876,7 +877,8 @@ export class Config {
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
-    this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
+    const providerId = this.modelsConfig.getCurrentProviderId();
+    this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId, providerId);
 
     // Check and consume cached credentials flag
     const requireCached =
@@ -1004,11 +1006,13 @@ export class Config {
   async setModel(
     newModel: string,
     metadata?: { reason?: string; context?: string },
+    providerId?: string,
   ): Promise<void> {
-    await this.modelsConfig.setModel(newModel, metadata);
-    // Also update contentGeneratorConfig for hot-update compatibility
+    await this.modelsConfig.setModel(newModel, metadata, providerId);
     if (this.contentGeneratorConfig) {
-      this.contentGeneratorConfig.model = newModel;
+      const generationConfig = this.modelsConfig.getGenerationConfig();
+      this.contentGeneratorConfig.model = generationConfig.model ?? newModel;
+      this.contentGeneratorConfig.providerId = generationConfig.providerId;
     }
   }
 
@@ -1119,7 +1123,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; providerId?: string },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
   }

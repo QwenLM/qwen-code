@@ -9,7 +9,7 @@
       "additionalProperties": true
     },
     "modelProviders": {
-      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "description": "Model providers configuration. Current format is keyed by providerId, each value is a ProviderConfig with authType, baseUrl, envKey, managed flag, and models array. Legacy authType-keyed format (authType -> ModelConfig[]) is auto-migrated on startup.",
       "type": "object",
       "additionalProperties": true
     },
@@ -233,6 +233,10 @@
       "description": "Settings related to the generative model.",
       "type": "object",
       "properties": {
+        "providerId": {
+          "description": "The provider ID for the currently selected model. Used together with model.name to uniquely identify a model across providers.",
+          "type": "string"
+        },
         "name": {
           "description": "The model to use for conversations.",
           "type": "string"

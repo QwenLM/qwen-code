@@ -10,7 +10,9 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   type ModelConfig,
+  type ProviderModelConfig,
   type ModelProvidersConfig,
+  type ProviderConfig,
   type ResolvedModelConfig,
   type AvailableModel,
 } from './types.js';
@@ -28,21 +30,30 @@ export { QWEN_OAUTH_MODELS } from './constants.js';
  * @returns The validated AuthType or undefined if invalid
  */
 function validateAuthTypeKey(key: string): AuthType | undefined {
-  // Check if the key is a valid AuthType enum value
   if (Object.values(AuthType).includes(key as AuthType)) {
     return key as AuthType;
   }
-
-  // Invalid key
   return undefined;
+}
+
+function isProviderConfig(value: unknown): value is ProviderConfig {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    'models' in (value as Record<string, unknown>) &&
+    'authType' in (value as Record<string, unknown>)
+  );
 }
 
 /**
  * Central registry for managing model configurations.
- * Models are organized by authType.
+ * Expects provider-keyed format (providerId -> ProviderConfig).
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
+  private modelsByProviderId: Map<string, Map<string, ResolvedModelConfig>>;
+  private providerAuthTypes: Map<string, AuthType>;
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -57,44 +68,74 @@ export class ModelRegistry {
 
   constructor(modelProvidersConfig?: ModelProvidersConfig) {
     this.modelsByAuthType = new Map();
+    this.modelsByProviderId = new Map();
+    this.providerAuthTypes = new Map();
 
-    // Always register qwen-oauth models (hard-coded, cannot be overridden)
-    this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    this.registerBuiltinModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
 
-    // Register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
-        const authType = validateAuthTypeKey(rawKey);
+      this.loadConfig(modelProvidersConfig);
+    }
+  }
 
-        if (!authType) {
-          debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
-          );
-          continue;
-        }
+  private loadConfig(config: ModelProvidersConfig): void {
+    for (const [providerId, provider] of Object.entries(config)) {
+      if (!isProviderConfig(provider)) continue;
 
-        // Skip qwen-oauth as it uses hard-coded models
-        if (authType === AuthType.QWEN_OAUTH) {
-          continue;
-        }
-
-        this.registerAuthTypeModels(authType, models);
+      const authType = validateAuthTypeKey(provider.authType);
+      if (!authType) {
+        debugLogger.warn(
+          `Invalid authType "${provider.authType}" in provider "${providerId}". Skipping.`,
+        );
+        continue;
       }
+      if (authType === AuthType.QWEN_OAUTH) continue;
+
+      this.providerAuthTypes.set(providerId, authType);
+
+      const providerModelMap = new Map<string, ResolvedModelConfig>();
+      for (const model of provider.models) {
+        if (model.id === undefined || model.id === null) continue;
+
+        const modelConfig: ProviderModelConfig = {
+          id: model.id,
+          name: model.name,
+          description: model.description,
+          envKey: provider.envKey,
+          baseUrl: provider.baseUrl,
+          generationConfig: model.generationConfig,
+          capabilities: model.capabilities,
+        };
+        const resolved = this.resolveModelConfig(
+          modelConfig,
+          authType,
+          providerId,
+        );
+        providerModelMap.set(model.id, resolved);
+
+        if (!this.modelsByAuthType.has(authType)) {
+          this.modelsByAuthType.set(authType, new Map());
+        }
+        const authTypeMap = this.modelsByAuthType.get(authType)!;
+        if (!authTypeMap.has(model.id)) {
+          authTypeMap.set(model.id, resolved);
+        }
+      }
+      this.modelsByProviderId.set(providerId, providerModelMap);
     }
   }
 
   /**
-   * Register models for an authType.
-   * If multiple models have the same id, the first one takes precedence.
+   * Register built-in models for an authType (e.g., QWEN_OAUTH).
+   * These models are not associated with any provider and serve as system defaults.
    */
-  private registerAuthTypeModels(
+  private registerBuiltinModels(
     authType: AuthType,
     models: ModelConfig[],
   ): void {
     const modelMap = new Map<string, ResolvedModelConfig>();
 
     for (const config of models) {
-      // Skip if a model with the same id is already registered (first one wins)
       if (modelMap.has(config.id)) {
         debugLogger.warn(
           `Duplicate model id "${config.id}" for authType "${authType}". Using the first registered config.`,
@@ -108,15 +149,8 @@ export class ModelRegistry {
     this.modelsByAuthType.set(authType, modelMap);
   }
 
-  /**
-   * Get all models for a specific authType.
-   * This is used by /model command to show only relevant models.
-   */
   getModelsForAuthType(authType: AuthType): AvailableModel[] {
-    const models = this.modelsByAuthType.get(authType);
-    if (!models) return [];
-
-    return Array.from(models.values()).map((model) => ({
+    const toAvailableModel = (model: ResolvedModelConfig): AvailableModel => ({
       id: model.id,
       label: model.name,
       description: model.description,
@@ -129,12 +163,42 @@ export class ModelRegistry {
         model.generationConfig.modalities ?? defaultModalities(model.id),
       baseUrl: model.baseUrl,
       envKey: model.envKey,
-    }));
+      providerId: model.providerId,
+    });
+
+    const result: AvailableModel[] = [];
+    const seen = new Set<string>();
+
+    // Collect from providers matching this authType (preserves all
+    // models even when multiple providers share the same authType + modelId).
+    for (const [pid, providerModels] of this.modelsByProviderId) {
+      if (this.providerAuthTypes.get(pid) !== authType) continue;
+      for (const model of providerModels.values()) {
+        const key = `${pid}|${model.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(toAvailableModel(model));
+        }
+      }
+    }
+
+    // Collect built-in models (no providerId, e.g. QWEN_OAUTH) from authType map,
+    // skipping any that were already covered by the provider scan above.
+    const builtinModels = this.modelsByAuthType.get(authType);
+    if (builtinModels) {
+      for (const model of builtinModels.values()) {
+        if (model.providerId) continue;
+        const key = `_builtin|${model.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push(toAvailableModel(model));
+        }
+      }
+    }
+
+    return result;
   }
 
-  /**
-   * Get model configuration by authType and modelId
-   */
   getModel(
     authType: AuthType,
     modelId: string,
@@ -144,18 +208,81 @@ export class ModelRegistry {
   }
 
   /**
-   * Check if model exists for given authType
+   * Get model by providerId and modelId (provider-aware lookup).
    */
+  getModelByProviderId(
+    providerId: string,
+    modelId: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelsByProviderId.get(providerId)?.get(modelId);
+  }
+
+  /**
+   * Get the authType for a given providerId.
+   */
+  getProviderAuthType(providerId: string): AuthType | undefined {
+    return this.providerAuthTypes.get(providerId);
+  }
+
+  /**
+   * Resolve a model using provider-aware fallback:
+   * 1. Exact providerId + modelId
+   * 2. authType + modelId (first match by providerId lexicographic order)
+   * 3. undefined (caller should try runtime model / authType default)
+   *
+   * Returns the resolved model config and the effective authType.
+   */
+  resolveModelWithFallback(
+    providerId: string | undefined,
+    modelId: string,
+    fallbackAuthType?: AuthType,
+  ): { model: ResolvedModelConfig; authType: AuthType } | undefined {
+    // Step 1: exact providerId + modelId
+    if (providerId) {
+      const model = this.getModelByProviderId(providerId, modelId);
+      if (model) {
+        const authType =
+          this.providerAuthTypes.get(providerId) ?? model.authType;
+        return { model, authType };
+      }
+    }
+
+    // Step 2: fallbackAuthType + modelId with lexicographic tie-breaking
+    const authType = fallbackAuthType;
+    if (authType) {
+      const candidates: Array<{
+        providerId: string;
+        model: ResolvedModelConfig;
+      }> = [];
+
+      for (const [pid, models] of this.modelsByProviderId) {
+        if (this.providerAuthTypes.get(pid) !== authType) continue;
+        const model = models.get(modelId);
+        if (model) {
+          candidates.push({ providerId: pid, model });
+        }
+      }
+
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.providerId.localeCompare(b.providerId));
+        return { model: candidates[0]!.model, authType };
+      }
+
+      // Also check authType-based map (built-in models without providerId)
+      const builtinModel = this.modelsByAuthType.get(authType)?.get(modelId);
+      if (builtinModel) {
+        return { model: builtinModel, authType };
+      }
+    }
+
+    return undefined;
+  }
+
   hasModel(authType: AuthType, modelId: string): boolean {
     const models = this.modelsByAuthType.get(authType);
     return models?.has(modelId) ?? false;
   }
 
-  /**
-   * Get default model for an authType.
-   * For qwen-oauth, returns the coder model.
-   * For others, returns the first configured model.
-   */
   getDefaultModelForAuthType(
     authType: AuthType,
   ): ResolvedModelConfig | undefined {
@@ -167,12 +294,10 @@ export class ModelRegistry {
     return Array.from(models.values())[0];
   }
 
-  /**
-   * Resolve model config by applying defaults
-   */
   private resolveModelConfig(
-    config: ModelConfig,
+    config: ProviderModelConfig,
     authType: AuthType,
+    providerId?: string,
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
@@ -183,13 +308,14 @@ export class ModelRegistry {
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
       generationConfig: config.generationConfig ?? {},
       capabilities: config.capabilities || {},
+      providerId,
     };
   }
 
-  /**
-   * Validate model configuration
-   */
-  private validateModelConfig(config: ModelConfig, authType: AuthType): void {
+  private validateModelConfig(
+    config: ProviderModelConfig,
+    authType: AuthType,
+  ): void {
     if (!config.id) {
       throw new Error(
         `Model config in authType '${authType}' missing required field: id`,
@@ -199,36 +325,18 @@ export class ModelRegistry {
 
   /**
    * Reload models from updated configuration.
-   * Clears existing user-configured models and re-registers from new config.
-   * Preserves hard-coded qwen-oauth models.
    */
   reloadModels(modelProvidersConfig?: ModelProvidersConfig): void {
-    // Clear existing user-configured models (preserve qwen-oauth)
     for (const authType of this.modelsByAuthType.keys()) {
       if (authType !== AuthType.QWEN_OAUTH) {
         this.modelsByAuthType.delete(authType);
       }
     }
+    this.modelsByProviderId.clear();
+    this.providerAuthTypes.clear();
 
-    // Re-register user-configured models for other authTypes
     if (modelProvidersConfig) {
-      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
-        const authType = validateAuthTypeKey(rawKey);
-
-        if (!authType) {
-          debugLogger.warn(
-            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
-          );
-          continue;
-        }
-
-        // Skip qwen-oauth as it uses hard-coded models
-        if (authType === AuthType.QWEN_OAUTH) {
-          continue;
-        }
-
-        this.registerAuthTypeModels(authType, models);
-      }
+      this.loadConfig(modelProvidersConfig);
     }
   }
 }

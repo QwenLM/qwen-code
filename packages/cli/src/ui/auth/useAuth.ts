@@ -8,7 +8,6 @@ import type {
   Config,
   ContentGeneratorConfig,
   ModelProvidersConfig,
-  ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthEvent,
@@ -31,7 +30,6 @@ import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
   getCodingPlanConfig,
-  isCodingPlanConfig,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
 } from '../../constants/codingPlan.js';
@@ -190,18 +188,24 @@ export const useAuthCommand = (
       }
 
       const modelProviders = settings.merged.modelProviders as
-        | ModelProvidersConfig
+        | Record<string, unknown>
         | undefined;
       if (!modelProviders) {
         return false;
       }
-      const providerModels = modelProviders[authType];
-      if (!Array.isArray(providerModels)) {
-        return false;
+
+      for (const entry of Object.values(modelProviders)) {
+        const provider = entry as {
+          authType?: string;
+          models?: Array<{ id?: string }>;
+        };
+        if (!provider.models || provider.authType !== authType) continue;
+        if (provider.models.some((m) => m.id === modelId)) {
+          return true;
+        }
       }
-      return providerModels.some(
-        (providerModel) => providerModel.id === modelId,
-      );
+
+      return false;
     },
     [settings],
   );
@@ -299,92 +303,59 @@ export const useAuthCommand = (
         setIsAuthenticating(true);
         setAuthError(null);
 
-        // Get configuration based on region
-        const { template, version } = getCodingPlanConfig(region);
+        const { providerId, providerConfig, version } =
+          getCodingPlanConfig(region);
 
-        // Get persist scope
         const persistScope = getPersistScopeForModelSelection(settings);
 
-        // Backup settings file before modification
         const settingsFile = settings.forScope(persistScope);
         backupSettingsFile(settingsFile.path);
 
-        // Store api-key in settings.env (unified env key)
         settings.setValue(persistScope, `env.${CODING_PLAN_ENV_KEY}`, apiKey);
-
-        // Sync to process.env immediately so refreshAuth can read the apiKey
         process.env[CODING_PLAN_ENV_KEY] = apiKey;
 
-        // Generate model configs from template
-        const newConfigs: ProviderModelConfig[] = template.map(
-          (templateConfig) => ({
-            ...templateConfig,
-            envKey: CODING_PLAN_ENV_KEY,
-          }),
-        );
-
-        // Get existing configs
-        const existingConfigs =
-          (
-            settings.merged.modelProviders as ModelProvidersConfig | undefined
-          )?.[AuthType.USE_OPENAI] || [];
-
-        // Filter out all existing Coding Plan configs (mutually exclusive)
-        const nonCodingPlanConfigs = existingConfigs.filter(
-          (existing) => !isCodingPlanConfig(existing.baseUrl, existing.envKey),
-        );
-
-        // Add new Coding Plan configs at the beginning
-        const updatedConfigs = [...newConfigs, ...nonCodingPlanConfigs];
-
-        // Persist to modelProviders
+        // Write the Coding Plan provider keyed by providerId
         settings.setValue(
           persistScope,
-          `modelProviders.${AuthType.USE_OPENAI}`,
-          updatedConfigs,
+          `modelProviders.${providerId}`,
+          providerConfig,
         );
 
-        // Also persist authType
         settings.setValue(
           persistScope,
           'security.auth.selectedType',
           AuthType.USE_OPENAI,
         );
 
-        // Persist coding plan region
         settings.setValue(persistScope, 'codingPlan.region', region);
-
-        // Persist coding plan version (single field for backward compatibility)
         settings.setValue(persistScope, 'codingPlan.version', version);
 
-        // If there are configs, use the first one as the model
-        if (updatedConfigs.length > 0 && updatedConfigs[0]?.id) {
-          settings.setValue(persistScope, 'model.name', updatedConfigs[0].id);
+        // Persist model selection with providerId
+        if (providerConfig.models.length > 0 && providerConfig.models[0]?.id) {
+          settings.setValue(
+            persistScope,
+            'model.name',
+            providerConfig.models[0].id,
+          );
+          settings.setValue(persistScope, 'model.providerId', providerId);
         }
 
-        // Hot-reload model providers configuration before refreshAuth
-        // This ensures ModelsConfig has the latest configuration from settings.json
+        // Hot-reload model providers configuration
         const updatedModelProviders: ModelProvidersConfig = {
-          ...(settings.merged.modelProviders as
-            | ModelProvidersConfig
-            | undefined),
-          [AuthType.USE_OPENAI]: updatedConfigs,
+          ...(settings.merged.modelProviders as ModelProvidersConfig),
+          [providerId]: providerConfig,
         };
         config.reloadModelProvidersConfig(updatedModelProviders);
 
-        // Refresh auth with the new configuration
         await config.refreshAuth(AuthType.USE_OPENAI);
 
-        // Success handling
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
         setIsAuthDialogOpen(false);
         setIsAuthenticating(false);
 
-        // Trigger UI refresh
         onAuthChange?.();
 
-        // Add success message
         addItem(
           {
             type: MessageType.INFO,

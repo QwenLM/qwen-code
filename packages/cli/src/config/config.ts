@@ -158,6 +158,7 @@ export interface CliArgs {
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   authType: string | undefined;
+  providerId: string | undefined;
   channel: string | undefined;
 }
 
@@ -514,6 +515,11 @@ export async function parseArguments(): Promise<CliArgs> {
             AuthType.USE_VERTEX_AI,
           ],
           description: 'Authentication type',
+        })
+        .option('provider-id', {
+          alias: 'providerId',
+          type: 'string',
+          description: 'Model provider ID',
         })
         .deprecateOption(
           'sandbox-image',
@@ -907,6 +913,7 @@ export async function loadCliConfig(
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {
       model: argv.model,
+      providerId: argv.providerId,
       openaiApiKey: argv.openaiApiKey,
       openaiBaseUrl: argv.openaiBaseUrl,
       openaiLogging: argv.openaiLogging,

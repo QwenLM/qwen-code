@@ -28,6 +28,11 @@ describe('useCodingPlanUpdates', () => {
     isTrusted: true,
     workspace: { settings: {} },
     user: { settings: {} },
+    forScope: vi.fn().mockImplementation((scope: string) => ({
+      path: `/${scope}/settings.json`,
+      settings: {},
+      originalSettings: {},
+    })),
   };
 
   const mockConfig = {
@@ -173,7 +178,7 @@ describe('useCodingPlanUpdates', () => {
         [AuthType.USE_OPENAI]: [
           {
             id: 'test-model-china-1',
-            baseUrl: chinaConfig.baseUrl,
+            baseUrl: chinaConfig.providerConfig.baseUrl,
             envKey: CODING_PLAN_ENV_KEY,
           },
           {
@@ -243,7 +248,7 @@ describe('useCodingPlanUpdates', () => {
         [AuthType.USE_OPENAI]: [
           {
             id: 'test-model-global-1',
-            baseUrl: globalConfig.baseUrl,
+            baseUrl: globalConfig.providerConfig.baseUrl,
             envKey: CODING_PLAN_ENV_KEY,
           },
           {
@@ -329,34 +334,30 @@ describe('useCodingPlanUpdates', () => {
       expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
     });
 
-    it('should replace all Coding Plan configs during update (mutually exclusive)', async () => {
-      // Since regions are mutually exclusive, when updating one region,
-      // all Coding Plan configs should be replaced (not preserving other region configs)
+    it('should persist updated Coding Plan provider using providerId path', async () => {
       mockSettings.merged.codingPlan = {
         region: CodingPlanRegion.CHINA,
         version: 'old-version-hash',
       };
-      const chinaModelConfig = {
-        id: 'test-model-china-1',
-        baseUrl: chinaConfig.baseUrl,
-        envKey: CODING_PLAN_ENV_KEY,
-      };
-      const globalModelConfig = {
-        id: 'test-model-global-1',
-        baseUrl: globalConfig.baseUrl,
-        envKey: CODING_PLAN_ENV_KEY,
-      };
-      const customConfig = {
-        id: 'custom-model',
+      const {
+        providerId: chinaProviderId,
+        providerConfig: chinaProviderConfig,
+      } = getCodingPlanConfig(CodingPlanRegion.CHINA);
+      const {
+        providerId: globalProviderId,
+        providerConfig: globalProviderConfig,
+      } = getCodingPlanConfig(CodingPlanRegion.GLOBAL);
+      const customProviderId = 'custom-provider';
+      const customProviderConfig = {
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://custom.example.com',
         envKey: 'CUSTOM_API_KEY',
+        models: [{ id: 'custom-model', name: 'Custom Model' }],
       };
       mockSettings.merged.modelProviders = {
-        [AuthType.USE_OPENAI]: [
-          chinaModelConfig,
-          globalModelConfig,
-          customConfig,
-        ],
+        [chinaProviderId]: chinaProviderConfig,
+        [globalProviderId]: globalProviderConfig,
+        [customProviderId]: customProviderConfig,
       };
       mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -379,42 +380,30 @@ describe('useCodingPlanUpdates', () => {
         expect(mockSettings.setValue).toHaveBeenCalled();
       });
 
-      // Get the updated configs passed to setValue
+      // Get the updated provider passed to setValue(modelProviders.<providerId>, providerConfig)
       const setValueCalls = mockSettings.setValue.mock.calls;
-      const modelProvidersCall = setValueCalls.find((call: unknown[]) =>
-        (call[1] as string).includes('modelProviders'),
+      const modelProvidersCall = setValueCalls.find(
+        (call: unknown[]) => call[1] === `modelProviders.${chinaProviderId}`,
       );
 
       expect(modelProvidersCall).toBeDefined();
-      const updatedConfigs = modelProvidersCall![2] as Array<
+      const updatedProvider = modelProvidersCall![2] as Record<string, unknown>;
+      const updatedModels = updatedProvider['models'] as Array<
         Record<string, unknown>
       >;
+      expect(updatedProvider['authType']).toBe(AuthType.USE_OPENAI);
+      expect(updatedProvider['baseUrl']).toBe(
+        chinaConfig.providerConfig.baseUrl,
+      );
+      expect(updatedProvider['envKey']).toBe(CODING_PLAN_ENV_KEY);
+      expect(updatedModels.length).toBe(chinaProviderConfig.models.length);
 
-      // Should have new China configs + custom config only (global config removed since regions are mutually exclusive)
-      // The China template has 8 models, so we expect 8 (from template) + 1 (custom) = 9
-      // Note: description field has been removed, only name field contains the branding
-      expect(updatedConfigs.length).toBe(9);
-
-      // Should NOT contain the Global config (mutually exclusive)
-      expect(
-        updatedConfigs.some(
-          (c: Record<string, unknown>) => c['baseUrl'] === globalConfig.baseUrl,
-        ),
-      ).toBe(false);
-
-      // Should contain the custom config
-      expect(
-        updatedConfigs.some(
-          (c: Record<string, unknown>) => c['id'] === 'custom-model',
-        ),
-      ).toBe(true);
-
-      // All configs should use the unified env key
-      updatedConfigs.forEach((config) => {
-        if (config['envKey'] === CODING_PLAN_ENV_KEY) {
-          expect(config['baseUrl']).toBe(chinaConfig.baseUrl);
-        }
-      });
+      // Should only persist the target providerId
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        `modelProviders.${globalProviderId}`,
+        expect.anything(),
+      );
 
       // Should reload and refresh auth
       expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
@@ -426,20 +415,20 @@ describe('useCodingPlanUpdates', () => {
         region: CodingPlanRegion.CHINA,
         version: 'old-version-hash',
       };
-      const customConfig = {
-        id: 'custom-model',
+      const {
+        providerId: chinaProviderId,
+        providerConfig: chinaProviderConfig,
+      } = getCodingPlanConfig(CodingPlanRegion.CHINA);
+      const customProviderId = 'custom-provider';
+      const customProviderConfig = {
+        authType: AuthType.USE_OPENAI,
         baseUrl: 'https://custom.example.com',
         envKey: 'CUSTOM_API_KEY',
+        models: [{ id: 'custom-model', name: 'Custom Model' }],
       };
       mockSettings.merged.modelProviders = {
-        [AuthType.USE_OPENAI]: [
-          {
-            id: 'test-model-china-1',
-            baseUrl: chinaConfig.baseUrl,
-            envKey: CODING_PLAN_ENV_KEY,
-          },
-          customConfig,
-        ],
+        [chinaProviderId]: chinaProviderConfig,
+        [customProviderId]: customProviderConfig,
       };
       mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -463,22 +452,12 @@ describe('useCodingPlanUpdates', () => {
         expect(mockSettings.setValue).toHaveBeenCalled();
       });
 
-      // Get the updated configs passed to setValue
-      const setValueCalls = mockSettings.setValue.mock.calls;
-      const modelProvidersCall = setValueCalls.find((call: unknown[]) =>
-        (call[1] as string).includes('modelProviders'),
+      // Should preserve custom provider in in-memory merged config
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          [customProviderId]: customProviderConfig,
+        }),
       );
-
-      // Should preserve custom config
-      expect(modelProvidersCall).toBeDefined();
-      const updatedConfigs = modelProvidersCall![2] as Array<
-        Record<string, unknown>
-      >;
-      expect(
-        updatedConfigs.some(
-          (c: Record<string, unknown>) => c['id'] === 'custom-model',
-        ),
-      ).toBe(true);
     });
 
     it('should show "model preserved" message when current model exists in new template', async () => {
@@ -490,7 +469,7 @@ describe('useCodingPlanUpdates', () => {
         [AuthType.USE_OPENAI]: [
           {
             id: 'qwen3.5-plus',
-            baseUrl: chinaConfig.baseUrl,
+            baseUrl: chinaConfig.providerConfig.baseUrl,
             envKey: CODING_PLAN_ENV_KEY,
           },
         ],
@@ -546,7 +525,7 @@ describe('useCodingPlanUpdates', () => {
         [AuthType.USE_OPENAI]: [
           {
             id: 'removed-model',
-            baseUrl: chinaConfig.baseUrl,
+            baseUrl: chinaConfig.providerConfig.baseUrl,
             envKey: CODING_PLAN_ENV_KEY,
           },
         ],
@@ -595,7 +574,7 @@ describe('useCodingPlanUpdates', () => {
         [AuthType.USE_OPENAI]: [
           {
             id: 'test-model-china-1',
-            baseUrl: chinaConfig.baseUrl,
+            baseUrl: chinaConfig.providerConfig.baseUrl,
             envKey: CODING_PLAN_ENV_KEY,
           },
         ],

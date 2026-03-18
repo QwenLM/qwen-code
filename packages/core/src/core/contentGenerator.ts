@@ -78,6 +78,7 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  providerId?: string;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -234,6 +235,7 @@ export function validateModelConfig(
           config.authType,
           config.model,
           config.apiKeyEnvKey,
+          config.providerId,
         ),
       );
     } else {
@@ -245,6 +247,7 @@ export function validateModelConfig(
           model: config.model,
           baseUrl: config.baseUrl,
           envKey,
+          providerId: config.providerId,
         }),
       );
     }
@@ -253,10 +256,18 @@ export function validateModelConfig(
   // Model is required
   if (!config.model) {
     if (isStrictModelProvider) {
-      errors.push(new StrictMissingModelIdError(config.authType));
+      errors.push(
+        new StrictMissingModelIdError(config.authType, config.providerId),
+      );
     } else {
       const envKey = getDefaultModelEnvVar(config.authType);
-      errors.push(new MissingModelError({ authType: config.authType, envKey }));
+      errors.push(
+        new MissingModelError({
+          authType: config.authType,
+          envKey,
+          providerId: config.providerId,
+        }),
+      );
     }
   }
 
@@ -267,6 +278,7 @@ export function validateModelConfig(
         new MissingBaseUrlError({
           authType: config.authType,
           model: config.model,
+          providerId: config.providerId,
         }),
       );
     } else if (config.authType === AuthType.USE_ANTHROPIC) {

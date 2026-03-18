@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Each provider entry requires a unique `providerId` and must include `authType` (such as `openai`, `anthropic`, `gemini`). Within each provider, you configure `envKey` for API key retrieval and optionally `baseUrl`, along with a list of `models`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
@@ -14,13 +14,105 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
 >
 > **Duplicate model IDs within the same authType:** Defining multiple models with the same `id` under a single `authType` (e.g., two entries with `"id": "gpt-4o"` in `openai`) is currently not supported. If duplicates exist, **the first occurrence wins** and subsequent duplicates are skipped with a warning. Note that the `id` field is used both as the configuration identifier and as the actual model name sent to the API, so using unique IDs (e.g., `gpt-4o-creative`, `gpt-4o-balanced`) is not a viable workaround. This is a known limitation that we plan to address in a future release.
 
-## Configuration Examples by Auth Type
+## v4 Configuration Format (Current)
 
-Below are comprehensive configuration examples for different authentication types, showing the available parameters and their combinations.
+The current configuration format uses a provider-id structure where each provider is identified by a unique `providerId`:
 
-### Supported Auth Types
+```json
+{
+  "modelProviders": {
+    "openai": {
+      "authType": "openai",
+      "envKey": "OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "generationConfig": {
+            "timeout": 60000,
+            "samplingParams": {
+              "temperature": 0.2,
+              "max_tokens": 4096
+            }
+          }
+        }
+      ]
+    },
+    "anthropic": {
+      "authType": "anthropic",
+      "envKey": "ANTHROPIC_API_KEY",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "models": [
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet",
+          "generationConfig": {
+            "timeout": 120000,
+            "samplingParams": {
+              "temperature": 0.7,
+              "max_tokens": 8192
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
 
-The `modelProviders` object keys must be valid `authType` values. Currently supported auth types are:
+### Configuration Structure
+
+| Field        | Type    | Required | Description                                                                    |
+| ------------ | ------- | -------- | ------------------------------------------------------------------------------ |
+| `providerId` | string  | Yes      | Unique identifier for this provider (e.g., `openai`, `anthropic`, `_cp-china`) |
+| `authType`   | string  | Yes      | Authentication type: `openai`, `anthropic`, `gemini`, `qwen-oauth`             |
+| `envKey`     | string  | Yes\*    | Environment variable name for API key (e.g., `OPENAI_API_KEY`)                 |
+| `baseUrl`    | string  | No       | API endpoint override                                                          |
+| `managed`    | boolean | No       | Whether this is a system-managed provider (e.g., Coding Plan)                  |
+| `models`     | array   | Yes      | Array of model configurations                                                  |
+
+\*`envKey` is required unless using Qwen OAuth or managed providers.
+
+### Model Configuration Within Provider
+
+| Field              | Type   | Required | Description                                               |
+| ------------------ | ------ | -------- | --------------------------------------------------------- |
+| `id`               | string | Yes      | Unique model identifier (also used as the API model name) |
+| `name`             | string | No       | Display name in the `/model` picker                       |
+| `description`      | string | No       | Model description                                         |
+| `capabilities`     | object | No       | Model capabilities (e.g., `{ "vision": true }`)           |
+| `generationConfig` | object | No       | Generation parameters (timeout, sampling params, etc.)    |
+
+### Coding Plan Providers
+
+Alibaba Cloud Coding Plan uses special managed provider IDs:
+
+| Provider ID  | Region | Description             |
+| ------------ | ------ | ----------------------- |
+| `_cp-china`  | China  | Mainland China endpoint |
+| `_cp-global` | Global | International endpoint  |
+
+```json
+{
+  "modelProviders": {
+    "_cp-china": {
+      "authType": "openai",
+      "envKey": "BAILIAN_CODING_PLAN_API_KEY",
+      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+      "managed": true,
+      "models": [
+        {
+          "id": "qwen3-coder-plus",
+          "name": "qwen3-coder-plus"
+        }
+      ]
+    }
+  }
+}
+```
+
+## Supported Auth Types
 
 | Auth Type    | Description                                                                             |
 | ------------ | --------------------------------------------------------------------------------------- |
@@ -45,6 +137,8 @@ Qwen Code uses the following official SDKs to send requests to each provider:
 
 This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
 
+## Configuration Examples
+
 ### OpenAI-compatible providers (`openai`)
 
 This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter.
@@ -52,63 +146,74 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 ```json
 {
   "modelProviders": {
-    "openai": [
-      {
-        "id": "gpt-4o",
-        "name": "GPT-4o",
-        "envKey": "OPENAI_API_KEY",
-        "baseUrl": "https://api.openai.com/v1",
-        "generationConfig": {
-          "timeout": 60000,
-          "maxRetries": 3,
-          "enableCacheControl": true,
-          "contextWindowSize": 128000,
-          "modalities": {
-            "image": true
-          },
-          "customHeaders": {
-            "X-Client-Request-ID": "req-123"
-          },
-          "extra_body": {
-            "enable_thinking": true,
-            "service_tier": "priority"
-          },
-          "samplingParams": {
-            "temperature": 0.2,
-            "top_p": 0.8,
-            "max_tokens": 4096,
-            "presence_penalty": 0.1,
-            "frequency_penalty": 0.1
+    "openai": {
+      "authType": "openai",
+      "envKey": "OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "generationConfig": {
+            "timeout": 60000,
+            "maxRetries": 3,
+            "enableCacheControl": true,
+            "contextWindowSize": 128000,
+            "modalities": {
+              "image": true
+            },
+            "customHeaders": {
+              "X-Client-Request-ID": "req-123"
+            },
+            "extra_body": {
+              "enable_thinking": true,
+              "service_tier": "priority"
+            },
+            "samplingParams": {
+              "temperature": 0.2,
+              "top_p": 0.8,
+              "max_tokens": 4096,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            }
+          }
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "generationConfig": {
+            "timeout": 30000,
+            "samplingParams": {
+              "temperature": 0.5,
+              "max_tokens": 2048
+            }
+          }
+        },
+        {
+          "id": "openai/gpt-4o",
+          "name": "GPT-4o (via OpenRouter)",
+          "description": "GPT-4o routed through OpenRouter"
+        }
+      ]
+    },
+    "openrouter": {
+      "authType": "openai",
+      "envKey": "OPENROUTER_API_KEY",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "models": [
+        {
+          "id": "openai/gpt-4o",
+          "name": "GPT-4o (via OpenRouter)",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 3,
+            "samplingParams": {
+              "temperature": 0.7
+            }
           }
         }
-      },
-      {
-        "id": "gpt-4o-mini",
-        "name": "GPT-4o Mini",
-        "envKey": "OPENAI_API_KEY",
-        "baseUrl": "https://api.openai.com/v1",
-        "generationConfig": {
-          "timeout": 30000,
-          "samplingParams": {
-            "temperature": 0.5,
-            "max_tokens": 2048
-          }
-        }
-      },
-      {
-        "id": "openai/gpt-4o",
-        "name": "GPT-4o (via OpenRouter)",
-        "envKey": "OPENROUTER_API_KEY",
-        "baseUrl": "https://openrouter.ai/api/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 3,
-          "samplingParams": {
-            "temperature": 0.7
-          }
-        }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -118,37 +223,38 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 ```json
 {
   "modelProviders": {
-    "anthropic": [
-      {
-        "id": "claude-3-5-sonnet",
-        "name": "Claude 3.5 Sonnet",
-        "envKey": "ANTHROPIC_API_KEY",
-        "baseUrl": "https://api.anthropic.com/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 3,
-          "contextWindowSize": 200000,
-          "samplingParams": {
-            "temperature": 0.7,
-            "max_tokens": 8192,
-            "top_p": 0.9
+    "anthropic": {
+      "authType": "anthropic",
+      "envKey": "ANTHROPIC_API_KEY",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "models": [
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 3,
+            "contextWindowSize": 200000,
+            "samplingParams": {
+              "temperature": 0.7,
+              "max_tokens": 8192,
+              "top_p": 0.9
+            }
+          }
+        },
+        {
+          "id": "claude-3-opus",
+          "name": "Claude 3 Opus",
+          "generationConfig": {
+            "timeout": 180000,
+            "samplingParams": {
+              "temperature": 0.3,
+              "max_tokens": 4096
+            }
           }
         }
-      },
-      {
-        "id": "claude-3-opus",
-        "name": "Claude 3 Opus",
-        "envKey": "ANTHROPIC_API_KEY",
-        "baseUrl": "https://api.anthropic.com/v1",
-        "generationConfig": {
-          "timeout": 180000,
-          "samplingParams": {
-            "temperature": 0.3,
-            "max_tokens": 4096
-          }
-        }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -158,29 +264,32 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 ```json
 {
   "modelProviders": {
-    "gemini": [
-      {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini 2.0 Flash",
-        "envKey": "GEMINI_API_KEY",
-        "baseUrl": "https://generativelanguage.googleapis.com",
-        "capabilities": {
-          "vision": true
-        },
-        "generationConfig": {
-          "timeout": 60000,
-          "maxRetries": 2,
-          "contextWindowSize": 1000000,
-          "schemaCompliance": "auto",
-          "samplingParams": {
-            "temperature": 0.4,
-            "top_p": 0.95,
-            "max_tokens": 8192,
-            "top_k": 40
+    "gemini": {
+      "authType": "gemini",
+      "envKey": "GEMINI_API_KEY",
+      "baseUrl": "https://generativelanguage.googleapis.com",
+      "models": [
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "capabilities": {
+            "vision": true
+          },
+          "generationConfig": {
+            "timeout": 60000,
+            "maxRetries": 2,
+            "contextWindowSize": 1000000,
+            "schemaCompliance": "auto",
+            "samplingParams": {
+              "temperature": 0.4,
+              "top_p": 0.95,
+              "max_tokens": 8192,
+              "top_k": 40
+            }
           }
         }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -192,51 +301,64 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
 ```json
 {
   "modelProviders": {
-    "openai": [
-      {
-        "id": "qwen2.5-7b",
-        "name": "Qwen2.5 7B (Ollama)",
-        "envKey": "OLLAMA_API_KEY",
-        "baseUrl": "http://localhost:11434/v1",
-        "generationConfig": {
-          "timeout": 300000,
-          "maxRetries": 1,
-          "contextWindowSize": 32768,
-          "samplingParams": {
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "max_tokens": 4096
+    "ollama": {
+      "authType": "openai",
+      "envKey": "OLLAMA_API_KEY",
+      "baseUrl": "http://localhost:11434/v1",
+      "models": [
+        {
+          "id": "qwen2.5-7b",
+          "name": "Qwen2.5 7B (Ollama)",
+          "generationConfig": {
+            "timeout": 300000,
+            "maxRetries": 1,
+            "contextWindowSize": 32768,
+            "samplingParams": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "max_tokens": 4096
+            }
           }
         }
-      },
-      {
-        "id": "llama-3.1-8b",
-        "name": "Llama 3.1 8B (vLLM)",
-        "envKey": "VLLM_API_KEY",
-        "baseUrl": "http://localhost:8000/v1",
-        "generationConfig": {
-          "timeout": 120000,
-          "maxRetries": 2,
-          "contextWindowSize": 128000,
-          "samplingParams": {
-            "temperature": 0.6,
-            "max_tokens": 8192
+      ]
+    },
+    "vllm": {
+      "authType": "openai",
+      "envKey": "VLLM_API_KEY",
+      "baseUrl": "http://localhost:8000/v1",
+      "models": [
+        {
+          "id": "llama-3.1-8b",
+          "name": "Llama 3.1 8B (vLLM)",
+          "generationConfig": {
+            "timeout": 120000,
+            "maxRetries": 2,
+            "contextWindowSize": 128000,
+            "samplingParams": {
+              "temperature": 0.6,
+              "max_tokens": 8192
+            }
           }
         }
-      },
-      {
-        "id": "local-model",
-        "name": "Local Model (LM Studio)",
-        "envKey": "LMSTUDIO_API_KEY",
-        "baseUrl": "http://localhost:1234/v1",
-        "generationConfig": {
-          "timeout": 60000,
-          "samplingParams": {
-            "temperature": 0.5
+      ]
+    },
+    "lmstudio": {
+      "authType": "openai",
+      "envKey": "LMSTUDIO_API_KEY",
+      "baseUrl": "http://localhost:1234/v1",
+      "models": [
+        {
+          "id": "local-model",
+          "name": "Local Model (LM Studio)",
+          "generationConfig": {
+            "timeout": 60000,
+            "samplingParams": {
+              "temperature": 0.5
+            }
           }
         }
-      }
-    ]
+      ]
+    }
   }
 }
 ```
@@ -272,8 +394,8 @@ When you authenticate with an Alibaba Cloud Coding Plan API key using the `/auth
 ### Setup
 
 1. Obtain an Alibaba Cloud Coding Plan API key:
-   - **China**: <https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan>
-   - **International**: <https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan>
+   - **China**: <https://bailian.console.aliyun.com/?tab=/coding_plan>
+     model#/efm - **International**: <https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan>
 2. Run the `/auth` command in Qwen Code
 3. Select **Alibaba Cloud Coding Plan**
 4. Select your region
@@ -324,15 +446,18 @@ If you prefer to manually configure Coding Plan models, you can add them to your
 ```json
 {
   "modelProviders": {
-    "openai": [
-      {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus",
-        "description": "Qwen3-Coder via Alibaba Cloud Coding Plan",
-        "envKey": "YOUR_CUSTOM_ENV_KEY",
-        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
-      }
-    ]
+    "my-coding-plan": {
+      "authType": "openai",
+      "envKey": "MY_CODING_PLAN_KEY",
+      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+      "models": [
+        {
+          "id": "qwen3-coder-plus",
+          "name": "qwen3-coder-plus",
+          "description": "Qwen3-Coder via Alibaba Cloud Coding Plan"
+        }
+      ]
+    }
   }
 }
 ```
@@ -349,6 +474,74 @@ If you prefer to manually configure Coding Plan models, you can add them to your
 >
 > If you also use automatic Coding Plan configuration, automatic updates may overwrite your manual configurations if they use the same `envKey` and `baseUrl` as the automatic configuration. To avoid this, ensure your manual configuration uses a different `envKey` if possible.
 
+## Migrating from v3 to v4
+
+> [!important]
+>
+> When Qwen Code starts with a v3 settings file, it automatically migrates to v4 format. The original settings file is backed up to `~/.qwen/settings.json.orig` before the migration.
+
+### What Changed
+
+**v3 Format (Legacy):**
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "gpt-4o",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1"
+      }
+    ]
+  }
+}
+```
+
+**v4 Format (Current):**
+
+```json
+{
+  "modelProviders": {
+    "openai": {
+      "authType": "openai",
+      "envKey": "OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+      "models": [
+        {
+          "id": "gpt-4o"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Key Differences
+
+| Aspect              | v3                                              | v4                                                             |
+| ------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
+| Provider key        | `authType` directly (e.g., `openai`)            | Unique `providerId` (e.g., `openai`, `anthropic`, `_cp-china`) |
+| Model configuration | Direct array with `envKey`, `baseUrl` per model | Provider-level `authType`, `envKey`, `baseUrl` + model array   |
+| Coding Plan         | Detected by `envKey` and `baseUrl` matching     | Uses `_cp-china` or `_cp-global` as provider ID                |
+| Model selection     | Stored `model.name`                             | Stored `model.providerId` + `model.name`                       |
+
+### Automatic Migration
+
+When Qwen Code detects a v3 settings file:
+
+1. Creates a backup at `~/.qwen/settings.json.orig`
+2. Transforms the configuration:
+   - Groups models by `authType` + `baseUrl` + `envKey` combination
+   - Assigns deterministic `providerId` (first occurrence uses authType, subsequent use `-2`, `-3`, etc.)
+   - Coding Plan endpoints are assigned special IDs (`_cp-china`, `_cp-global`)
+   - Migrates model selection to include `providerId` when uniquely identifiable
+3. Writes the migrated v4 settings
+
+> [!warning]
+>
+> **v3 → v4 is a breaking change.** Older versions of Qwen Code cannot recognize the v4 format. If you need to roll back to an older version, you must manually restore from `~/.qwen/settings.json.orig`.
+
 ## Resolution Layers and Atomicity
 
 The effective auth/model/credential values are chosen per field using the following precedence (first present wins). You can combine `--auth-type` with `--model` to point directly at a provider entry; these CLI flags run before other layers.
@@ -359,7 +552,7 @@ The effective auth/model/credential values are chosen per field using the follow
 | Model provider selection   | —                                   | `modelProvider.id`                              | `env[modelProvider.envKey]`                         | `modelProvider.baseUrl`                              | `modelProvider.envKey` | —                                 |
 | CLI arguments              | `--auth-type`                       | `--model`                                       | `--openaiApiKey` (or provider-specific equivalents) | `--openaiBaseUrl` (or provider-specific equivalents) | —                      | —                                 |
 | Environment variables      | —                                   | Provider-specific mapping (e.g. `OPENAI_MODEL`) | Provider-specific mapping (e.g. `OPENAI_API_KEY`)   | Provider-specific mapping (e.g. `OPENAI_BASE_URL`)   | —                      | —                                 |
-| Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                              | `security.auth.baseUrl`                              | —                      | —                                 |
+| Settings (`settings.json`) | `security.auth.selectedType`        | `model.name` / `model.providerId`               | `security.auth.apiKey`                              | `security.auth.baseUrl`                              | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3-coder-plus`)  | —                                                   | —                                                    | —                      | `Config.getProxy()` if configured |
 
 \*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
@@ -388,12 +581,12 @@ The configuration resolution follows a strict layering model with one crucial ru
 
 ### Per-field precedence for `generationConfig`
 
-| Priority | Source                                        | Behavior                                                                                                 |
-| -------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| 1        | Programmatic overrides                        | Runtime `/model`, `/auth` changes                                                                        |
-| 2        | `modelProviders[authType][].generationConfig` | **Impermeable layer** - completely replaces all generationConfig fields; lower layers do not participate |
-| 3        | `settings.model.generationConfig`             | Only used for **Runtime Models** (when no provider model is selected)                                    |
-| 4        | Content-generator defaults                    | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
+| Priority | Source                                                 | Behavior                                                                                                 |
+| -------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| 1        | Programmatic overrides                                 | Runtime `/model`, `/auth` changes                                                                        |
+| 2        | `modelProviders[providerId].models[].generationConfig` | **Impermeable layer** - completely replaces all generationConfig fields; lower layers do not participate |
+| 3        | `settings.model.generationConfig`                      | Only used for **Runtime Models** (when no provider model is selected)                                    |
+| 4        | Content-generator defaults                             | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
 
 ### Atomic field treatment
 
@@ -419,14 +612,18 @@ The following fields are treated as atomic objects - provider values completely 
 // modelProviders configuration
 {
   "modelProviders": {
-    "openai": [{
-      "id": "gpt-4o",
+    "openai": {
+      "authType": "openai",
       "envKey": "OPENAI_API_KEY",
-      "generationConfig": {
-        "timeout": 60000,
-        "samplingParams": { "temperature": 0.2 }
-      }
-    }]
+      "baseUrl": "https://api.openai.com/v1",
+      "models": [{
+        "id": "gpt-4o",
+        "generationConfig": {
+          "timeout": 60000,
+          "samplingParams": { "temperature": 0.2 }
+        }
+      }]
+    }
   }
 }
 ```
@@ -502,5 +699,5 @@ The snapshot:
 >
 > Define `modelProviders` in the user-scope `~/.qwen/settings.json` whenever possible and avoid persisting credential overrides in any scope. Keeping the provider catalog in user settings prevents merge/override conflicts between project and user scopes and ensures `/auth` and `/model` updates always write back to a consistent scope.
 
-- `/model` and `/auth` persist `model.name` (where applicable) and `security.auth.selectedType` to the closest writable scope that already defines `modelProviders`; otherwise they fall back to the user scope. This keeps workspace/user files in sync with the active provider catalog.
+- `/model` and `/auth` persist `model.name` and `model.providerId` (where applicable) and `security.auth.selectedType` to the closest writable scope that already defines `modelProviders`; otherwise they fall back to the user scope. This keeps workspace/user files in sync with the active provider catalog.
 - Without `modelProviders`, the resolver mixes CLI/env/settings layers, creating Runtime Models. This is fine for single-provider setups but cumbersome when frequently switching. Define provider catalogs whenever multi-model workflows are common so that switches stay atomic, source-attributed, and debuggable.

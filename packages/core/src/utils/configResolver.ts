@@ -43,6 +43,8 @@ export interface ConfigSource {
   authType?: string;
   /** Model ID if relevant (for modelProviders) */
   modelId?: string;
+  /** Provider ID if relevant (for V4 modelProviders) */
+  providerId?: string;
   /** Indirect source - when a value is derived via another source */
   via?: Omit<ConfigSource, 'via'>;
 }

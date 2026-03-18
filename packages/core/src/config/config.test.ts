@@ -337,6 +337,46 @@ describe('Server Config (config.ts)', () => {
       expect(GeminiClient).toHaveBeenCalledWith(config);
     });
 
+    it('should preserve selected providerId when resolving duplicate model IDs', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'shared-model',
+        generationConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'shared-model',
+          providerId: 'openai-b',
+        },
+        modelProvidersConfig: {
+          'openai-a': {
+            authType: 'openai',
+            baseUrl: 'https://api-a.example.com/v1',
+            envKey: 'API_KEY_A',
+            models: [{ id: 'shared-model', name: 'Shared Model A' }],
+          },
+          'openai-b': {
+            authType: 'openai',
+            baseUrl: 'https://api-b.example.com/v1',
+            envKey: 'API_KEY_B',
+            models: [{ id: 'shared-model', name: 'Shared Model B' }],
+          },
+        },
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(resolveContentGeneratorConfigWithSources).toHaveBeenCalledWith(
+        config,
+        AuthType.USE_OPENAI,
+        expect.objectContaining({
+          model: 'shared-model',
+          providerId: 'openai-b',
+        }),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('should not strip thoughts when switching from Vertex to GenAI', async () => {
       const config = new Config(baseParams);
 
@@ -411,20 +451,18 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         authType: AuthType.USE_OPENAI,
         modelProvidersConfig: {
-          openai: [
-            {
-              id: 'model-a',
-              name: 'Model A',
-              baseUrl: 'https://api.example.com/v1',
-              envKey: 'API_KEY_A',
-            },
-            {
-              id: 'model-b',
-              name: 'Model B',
-              baseUrl: 'https://api.example.com/v1',
-              envKey: 'API_KEY_B',
-            },
-          ],
+          'openai-a': {
+            authType: 'openai',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_A',
+            models: [{ id: 'model-a', name: 'Model A' }],
+          },
+          'openai-b': {
+            authType: 'openai',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'API_KEY_B',
+            models: [{ id: 'model-b', name: 'Model B' }],
+          },
         },
       });
 
@@ -1517,5 +1555,42 @@ describe('Model Switching and Config Updates', () => {
     // Verify limits are now defined
     const updatedConfig = config.getContentGeneratorConfig();
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
+  });
+
+  it('should clear contentGeneratorConfig.providerId after raw setModel override', async () => {
+    const config = new Config({
+      ...baseParams,
+      authType: AuthType.USE_OPENAI,
+      model: 'provider-model',
+      modelProvidersConfig: {
+        openai: {
+          authType: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: 'API_KEY',
+          models: [{ id: 'provider-model', name: 'Provider Model' }],
+        },
+      },
+    });
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+      (_config, authType, generationConfig) => ({
+        config: {
+          authType,
+          model: generationConfig?.model || 'provider-model',
+          providerId: generationConfig?.providerId,
+          apiKey: 'test-key',
+          baseUrl: generationConfig?.baseUrl,
+        } as ContentGeneratorConfig,
+        sources: {},
+      }),
+    );
+
+    await config.refreshAuth(AuthType.USE_OPENAI);
+    expect(config.getContentGeneratorConfig().providerId).toBe('openai');
+
+    await config.setModel('runtime-like-model');
+
+    expect(config.getContentGeneratorConfig().model).toBe('runtime-like-model');
+    expect(config.getContentGeneratorConfig().providerId).toBeUndefined();
   });
 });
