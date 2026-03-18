@@ -26,9 +26,7 @@ import {
   Kind,
 } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { truncateAndSaveToFile } from '../utils/truncation.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -381,21 +379,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Truncate large output and save full content to a temp file.
-      const truncateThreshold = this.config.getTruncateToolOutputThreshold();
-      const truncateLines = this.config.getTruncateToolOutputLines();
-      if (
-        typeof llmContent === 'string' &&
-        truncateThreshold > 0 &&
-        truncateLines > 0
-      ) {
-        const originalContentLength = llmContent.length;
-        const fileName = `shell_${crypto.randomBytes(6).toString('hex')}`;
-        const truncatedResult = await truncateAndSaveToFile(
+      if (typeof llmContent === 'string') {
+        const truncatedResult = await truncateToolOutput(
+          this.config,
+          ShellTool.Name,
           llmContent,
-          fileName,
-          this.config.storage.getProjectTempDir(),
-          truncateThreshold,
-          truncateLines,
         );
 
         if (truncatedResult.outputFile) {
@@ -403,17 +391,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           returnDisplayMessage +=
             (returnDisplayMessage ? '\n' : '') +
             `Output too long and was saved to: ${truncatedResult.outputFile}`;
-
-          logToolOutputTruncated(
-            this.config,
-            new ToolOutputTruncatedEvent('', {
-              toolName: ShellTool.Name,
-              originalContentLength,
-              truncatedContentLength: truncatedResult.content.length,
-              threshold: truncateThreshold,
-              lines: truncateLines,
-            }),
-          );
         }
       }
 
