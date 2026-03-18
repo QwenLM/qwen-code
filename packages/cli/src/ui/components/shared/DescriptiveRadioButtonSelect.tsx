@@ -66,7 +66,11 @@ export function DescriptiveRadioButtonSelect<T>({
       renderItem={(item, { titleColor }) => (
         <Box flexDirection="column" key={item.key}>
           <Text color={titleColor}>{item.title}</Text>
-          <Text color={theme.text.secondary}>{item.description}</Text>
+          {typeof item.description === 'string' ? (
+            <Text color={theme.text.secondary}>{item.description}</Text>
+          ) : (
+            item.description
+          )}
         </Box>
       )}
     />

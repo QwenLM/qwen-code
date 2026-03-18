@@ -21,39 +21,39 @@ import {
   vi,
   type Mock,
 } from 'vitest';
-import { Config, type ConfigParameters } from '../config/config.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { Config, type ConfigParameters } from '../../config/config.js';
+import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import {
   createContentGenerator,
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
   AuthType,
-} from '../core/contentGenerator.js';
-import { GeminiChat } from '../core/geminiChat.js';
-import { executeToolCall } from '../core/nonInteractiveToolExecutor.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
-import { type AnyDeclarativeTool } from '../tools/tools.js';
-import { ContextState, SubAgentScope } from './subagent.js';
+} from '../../core/contentGenerator.js';
+import { GeminiChat } from '../../core/geminiChat.js';
+import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
+import { type AnyDeclarativeTool } from '../../tools/tools.js';
+import { ContextState, AgentHeadless } from './agent-headless.js';
 import {
-  SubAgentEventEmitter,
-  SubAgentEventType,
-  type SubAgentStreamTextEvent,
-  type SubAgentToolCallEvent,
-  type SubAgentToolResultEvent,
-} from './subagent-events.js';
+  AgentEventEmitter,
+  AgentEventType,
+  type AgentStreamTextEvent,
+  type AgentToolCallEvent,
+  type AgentToolResultEvent,
+} from './agent-events.js';
 import type {
   ModelConfig,
   PromptConfig,
   RunConfig,
   ToolConfig,
-} from './types.js';
-import { SubagentTerminateMode } from './types.js';
+} from './agent-types.js';
+import { AgentTerminateMode } from './agent-types.js';
 
-vi.mock('../core/geminiChat.js');
-vi.mock('../core/contentGenerator.js', async (importOriginal) => {
+vi.mock('../../core/geminiChat.js');
+vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../core/contentGenerator.js')>();
-  const { DEFAULT_QWEN_MODEL } = await import('../config/models.js');
+    await importOriginal<typeof import('../../core/contentGenerator.js')>();
+  const { DEFAULT_QWEN_MODEL } = await import('../../config/models.js');
   return {
     ...actual,
     createContentGenerator: vi.fn().mockResolvedValue({
@@ -77,7 +77,7 @@ vi.mock('../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../utils/environmentContext.js', () => ({
+vi.mock('../../utils/environmentContext.js', () => ({
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
     {
@@ -91,11 +91,11 @@ vi.mock('../utils/environmentContext.js', () => ({
     ...(extraHistory ?? []),
   ]),
 }));
-vi.mock('../core/nonInteractiveToolExecutor.js');
-vi.mock('../ide/ide-client.js');
-vi.mock('../core/client.js');
+vi.mock('../../core/nonInteractiveToolExecutor.js');
+vi.mock('../../ide/ide-client.js');
+vi.mock('../../core/client.js');
 
-vi.mock('../skills/skill-manager.js', () => {
+vi.mock('../../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
   SkillManagerMock.prototype.startWatching = vi
     .fn()
@@ -107,7 +107,7 @@ vi.mock('../skills/skill-manager.js', () => {
   return { SkillManager: SkillManagerMock };
 });
 
-vi.mock('./subagent-manager.js', () => {
+vi.mock('../../subagents/subagent-manager.js', () => {
   const SubagentManagerMock = vi.fn();
   SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
   SubagentManagerMock.prototype.addChangeListener = vi
@@ -226,7 +226,7 @@ describe('subagent.ts', () => {
     });
   });
 
-  describe('SubAgentScope', () => {
+  describe('AgentHeadless', () => {
     let mockSendMessageStream: Mock;
 
     const defaultModelConfig: ModelConfig = {
@@ -299,16 +299,16 @@ describe('subagent.ts', () => {
     describe('create (Tool Validation)', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Test prompt' };
 
-      it('should create a SubAgentScope successfully with minimal config', async () => {
+      it('should create a AgentHeadless successfully with minimal config', async () => {
         const { config } = await createMockConfig();
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
           defaultModelConfig,
           defaultRunConfig,
         );
-        expect(scope).toBeInstanceOf(SubAgentScope);
+        expect(scope).toBeInstanceOf(AgentHeadless);
       });
 
       it('should not block creation when a tool may require confirmation', async () => {
@@ -331,7 +331,7 @@ describe('subagent.ts', () => {
 
         const toolConfig: ToolConfig = { tools: ['risky_tool'] };
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -339,7 +339,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
           toolConfig,
         );
-        expect(scope).toBeInstanceOf(SubAgentScope);
+        expect(scope).toBeInstanceOf(AgentHeadless);
       });
 
       it('should succeed if tools do not require confirmation', async () => {
@@ -357,7 +357,7 @@ describe('subagent.ts', () => {
 
         const toolConfig: ToolConfig = { tools: ['safe_tool'] };
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -365,7 +365,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
           toolConfig,
         );
-        expect(scope).toBeInstanceOf(SubAgentScope);
+        expect(scope).toBeInstanceOf(AgentHeadless);
       });
 
       it('should allow creation regardless of tool parameter requirements', async () => {
@@ -390,7 +390,7 @@ describe('subagent.ts', () => {
 
         const toolConfig: ToolConfig = { tools: ['tool_with_params'] };
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -399,13 +399,13 @@ describe('subagent.ts', () => {
           toolConfig,
         );
 
-        expect(scope).toBeInstanceOf(SubAgentScope);
+        expect(scope).toBeInstanceOf(AgentHeadless);
         // Ensure build was not called during creation
         expect(mockToolWithParams.build).not.toHaveBeenCalled();
       });
     });
 
-    describe('runNonInteractive - Initialization and Prompting', () => {
+    describe('execute - Initialization and Prompting', () => {
       it('should correctly template the system prompt and initialize GeminiChat', async () => {
         const { config } = await createMockConfig();
 
@@ -421,7 +421,7 @@ describe('subagent.ts', () => {
         // Model stops immediately
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -429,7 +429,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         // Check if GeminiChat was initialized correctly by the subagent
         expect(GeminiChat).toHaveBeenCalledTimes(1);
@@ -473,7 +473,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -481,7 +481,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         expect(generationConfig.systemInstruction).toContain(
@@ -511,7 +511,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -519,7 +519,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
@@ -540,7 +540,7 @@ describe('subagent.ts', () => {
 
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -548,7 +548,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
@@ -568,7 +568,7 @@ describe('subagent.ts', () => {
         // Model stops immediately
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -576,7 +576,7 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(context);
+        await scope.execute(context);
 
         const callArgs = vi.mocked(GeminiChat).mock.calls[0];
         const generationConfig = getGenerationConfigFromMock();
@@ -602,7 +602,7 @@ describe('subagent.ts', () => {
         context.set('name', 'Agent');
         // 'missing' is not set
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -610,11 +610,11 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        // The error from templating causes the runNonInteractive to reject and the terminate_reason to be ERROR.
-        await expect(scope.runNonInteractive(context)).rejects.toThrow(
+        // The error from templating causes the execute to reject and the terminate_reason to be ERROR.
+        await expect(scope.execute(context)).rejects.toThrow(
           'Missing context values for the following keys: missing',
         );
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.ERROR);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
       });
 
       it('should validate that systemPrompt and initialMessages are mutually exclusive', async () => {
@@ -625,7 +625,7 @@ describe('subagent.ts', () => {
         };
         const context = new ContextState();
 
-        const agent = await SubAgentScope.create(
+        const agent = await AgentHeadless.create(
           'TestAgent',
           config,
           promptConfig,
@@ -633,14 +633,14 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await expect(agent.runNonInteractive(context)).rejects.toThrow(
+        await expect(agent.execute(context)).rejects.toThrow(
           'PromptConfig cannot have both `systemPrompt` and `initialMessages` defined.',
         );
-        expect(agent.getTerminateMode()).toBe(SubagentTerminateMode.ERROR);
+        expect(agent.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
       });
     });
 
-    describe('runNonInteractive - Execution and Tool Use', () => {
+    describe('execute - Execution and Tool Use', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
 
       it('should terminate with GOAL if no outputs are expected and model stops', async () => {
@@ -648,7 +648,7 @@ describe('subagent.ts', () => {
         // Model stops immediately
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -657,9 +657,9 @@ describe('subagent.ts', () => {
           // No ToolConfig, No OutputConfig
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         // Check the initial message
         expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
@@ -673,7 +673,7 @@ describe('subagent.ts', () => {
         // Model stops immediately with text response
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -681,9 +681,9 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
@@ -744,7 +744,7 @@ describe('subagent.ts', () => {
           name === 'list_files' ? listFilesTool : undefined,
         );
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -753,7 +753,7 @@ describe('subagent.ts', () => {
           toolConfig,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
         // Check the response sent back to the model (functionResponse part)
         const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
@@ -764,11 +764,11 @@ describe('subagent.ts', () => {
           'file1.txt\nfile2.ts',
         );
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
       });
     });
 
-    describe('runNonInteractive - Termination and Recovery', () => {
+    describe('execute - Termination and Recovery', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
 
       it('should terminate with MAX_TURNS if the limit is reached', async () => {
@@ -800,7 +800,7 @@ describe('subagent.ts', () => {
           ]),
         );
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -808,10 +808,10 @@ describe('subagent.ts', () => {
           runConfig,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.MAX_TURNS);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
       });
 
       it.skip('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
@@ -835,7 +835,7 @@ describe('subagent.ts', () => {
         // The LLM call will hang until we resolve the promise.
         mockSendMessageStream.mockReturnValue(streamPromise);
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -843,7 +843,7 @@ describe('subagent.ts', () => {
           runConfig,
         );
 
-        const runPromise = scope.runNonInteractive(new ContextState());
+        const runPromise = scope.execute(new ContextState());
 
         // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
         await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
@@ -854,7 +854,7 @@ describe('subagent.ts', () => {
 
         await runPromise;
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.TIMEOUT);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
 
         vi.useRealTimers();
@@ -864,7 +864,7 @@ describe('subagent.ts', () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -872,14 +872,14 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await expect(
-          scope.runNonInteractive(new ContextState()),
-        ).rejects.toThrow('API Failure');
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.ERROR);
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'API Failure',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
       });
     });
 
-    describe('runNonInteractive - Streaming and Thought Handling', () => {
+    describe('execute - Streaming and Thought Handling', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
 
       // Helper to create a mock stream that yields specific parts
@@ -913,13 +913,13 @@ describe('subagent.ts', () => {
             }) as unknown as GeminiChat,
         );
 
-        const eventEmitter = new SubAgentEventEmitter();
-        const events: SubAgentStreamTextEvent[] = [];
-        eventEmitter.on(SubAgentEventType.STREAM_TEXT, (...args: unknown[]) => {
-          events.push(args[0] as SubAgentStreamTextEvent);
+        const eventEmitter = new AgentEventEmitter();
+        const events: AgentStreamTextEvent[] = [];
+        eventEmitter.on(AgentEventType.STREAM_TEXT, (...args: unknown[]) => {
+          events.push(args[0] as AgentStreamTextEvent);
         });
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -929,7 +929,7 @@ describe('subagent.ts', () => {
           eventEmitter,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
         expect(events).toHaveLength(2);
         expect(events[0]!.text).toBe('Let me think...');
@@ -952,7 +952,7 @@ describe('subagent.ts', () => {
             }) as unknown as GeminiChat,
         );
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -960,9 +960,9 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         expect(scope.getFinalText()).toBe('The final answer.');
       });
 
@@ -1016,7 +1016,7 @@ describe('subagent.ts', () => {
             }) as unknown as GeminiChat,
         );
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -1024,16 +1024,16 @@ describe('subagent.ts', () => {
           defaultRunConfig,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
-        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         expect(scope.getFinalText()).toBe('Actual output.');
         // Should have been called twice: first with thought-only, then nudged
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
     });
 
-    describe('runNonInteractive - Tool Restriction Enforcement (Issue #1121)', () => {
+    describe('execute - Tool Restriction Enforcement (Issue #1121)', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
 
       it('should NOT execute tools that are not in the allowed tools list', async () => {
@@ -1142,19 +1142,19 @@ describe('subagent.ts', () => {
         );
 
         // Track emitted events
-        const toolCallEvents: SubAgentToolCallEvent[] = [];
-        const toolResultEvents: SubAgentToolResultEvent[] = [];
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
 
         // Create event emitter BEFORE the scope and subscribe to events
-        const eventEmitter = new SubAgentEventEmitter();
-        eventEmitter.on(SubAgentEventType.TOOL_CALL, (event: unknown) => {
-          toolCallEvents.push(event as SubAgentToolCallEvent);
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
         });
-        eventEmitter.on(SubAgentEventType.TOOL_RESULT, (event: unknown) => {
-          toolResultEvents.push(event as SubAgentToolResultEvent);
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
         });
 
-        const scope = await SubAgentScope.create(
+        const scope = await AgentHeadless.create(
           'test-agent',
           config,
           promptConfig,
@@ -1164,7 +1164,7 @@ describe('subagent.ts', () => {
           eventEmitter,
         );
 
-        await scope.runNonInteractive(new ContextState());
+        await scope.execute(new ContextState());
 
         // 1. Only allowed tool should be executed
         expect(executedTools).toContain('read_file');

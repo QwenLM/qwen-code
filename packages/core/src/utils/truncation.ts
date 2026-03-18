@@ -6,7 +6,11 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { ReadFileTool } from '../tools/read-file.js';
+import type { Config } from '../config/config.js';
+import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
 /**
  * Truncates large tool output and saves the full content to a temp file.
@@ -99,4 +103,51 @@ ${truncatedContent}`,
         truncatedContent + `\n[Note: Could not save full output to file]`,
     };
   }
+}
+
+/**
+ * High-level truncation helper that reads thresholds from Config,
+ * truncates if needed, saves full output to a temp file, and logs
+ * telemetry. Returns the (possibly truncated) content and an optional
+ * output file path.
+ *
+ * Callers no longer need to duplicate config extraction, file naming,
+ * or telemetry logging.
+ */
+export async function truncateToolOutput(
+  config: Config,
+  toolName: string,
+  content: string,
+): Promise<{ content: string; outputFile?: string }> {
+  const threshold = config.getTruncateToolOutputThreshold();
+  const lines = config.getTruncateToolOutputLines();
+
+  if (threshold <= 0 || lines <= 0) {
+    return { content };
+  }
+
+  const originalLength = content.length;
+  const fileName = `${toolName}_${crypto.randomBytes(6).toString('hex')}`;
+  const result = await truncateAndSaveToFile(
+    content,
+    fileName,
+    config.storage.getProjectTempDir(),
+    threshold,
+    lines,
+  );
+
+  if (result.outputFile) {
+    logToolOutputTruncated(
+      config,
+      new ToolOutputTruncatedEvent('', {
+        toolName,
+        originalContentLength: originalLength,
+        truncatedContentLength: result.content.length,
+        threshold,
+        lines,
+      }),
+    );
+  }
+
+  return result;
 }

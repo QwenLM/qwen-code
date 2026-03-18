@@ -24,6 +24,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  SuccessMessage,
 } from './messages/StatusMessages.js';
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
@@ -39,6 +40,7 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { ContextUsage } from './views/ContextUsage.js';
+import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
@@ -133,6 +135,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'info' && (
         <InfoMessage text={itemForDisplay.text} />
       )}
+      {itemForDisplay.type === 'success' && (
+        <SuccessMessage text={itemForDisplay.text} />
+      )}
       {itemForDisplay.type === 'warning' && (
         <WarningMessage text={itemForDisplay.text} />
       )}
@@ -204,6 +209,16 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
           showDetails={itemForDisplay.showDetails}
+      {itemForDisplay.type === 'arena_agent_complete' && (
+        <ArenaAgentCard agent={itemForDisplay.agent} width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'arena_session_complete' && (
+        <ArenaSessionCard
+          sessionStatus={itemForDisplay.sessionStatus}
+          task={itemForDisplay.task}
+          totalDurationMs={itemForDisplay.totalDurationMs}
+          agents={itemForDisplay.agents}
+          width={boxWidth}
         />
       )}
       {itemForDisplay.type === 'insight_progress' && (

@@ -14,7 +14,7 @@ export interface ToolUsageStats {
   averageDurationMs: number;
 }
 
-export interface SubagentStatsSummary {
+export interface AgentStatsSummary {
   rounds: number;
   totalDurationMs: number;
   totalToolCalls: number;
@@ -26,11 +26,10 @@ export interface SubagentStatsSummary {
   thoughtTokens: number;
   cachedTokens: number;
   totalTokens: number;
-  estimatedCost: number;
   toolUsage: ToolUsageStats[];
 }
 
-export class SubagentStatistics {
+export class AgentStatistics {
   private startTimeMs = 0;
   private rounds = 0;
   private totalToolCalls = 0;
@@ -40,6 +39,7 @@ export class SubagentStatistics {
   private outputTokens = 0;
   private thoughtTokens = 0;
   private cachedTokens = 0;
+  private apiTotalTokens = 0;
   private toolUsage = new Map<string, ToolUsageStats>();
 
   start(now = Date.now()) {
@@ -83,14 +83,16 @@ export class SubagentStatistics {
     output: number,
     thought: number = 0,
     cached: number = 0,
+    total: number = 0,
   ) {
     this.inputTokens += Math.max(0, input || 0);
     this.outputTokens += Math.max(0, output || 0);
     this.thoughtTokens += Math.max(0, thought || 0);
     this.cachedTokens += Math.max(0, cached || 0);
+    this.apiTotalTokens += Math.max(0, total || 0);
   }
 
-  getSummary(now = Date.now()): SubagentStatsSummary {
+  getSummary(now = Date.now()): AgentStatsSummary {
     const totalDurationMs = this.startTimeMs ? now - this.startTimeMs : 0;
     const totalToolCalls = this.totalToolCalls;
     const successRate =
@@ -98,11 +100,9 @@ export class SubagentStatistics {
         ? (this.successfulToolCalls / totalToolCalls) * 100
         : 0;
     const totalTokens =
-      this.inputTokens +
-      this.outputTokens +
-      this.thoughtTokens +
-      this.cachedTokens;
-    const estimatedCost = this.inputTokens * 3e-5 + this.outputTokens * 6e-5;
+      this.apiTotalTokens > 0
+        ? this.apiTotalTokens
+        : this.inputTokens + this.outputTokens + this.thoughtTokens;
     return {
       rounds: this.rounds,
       totalDurationMs,
@@ -115,7 +115,6 @@ export class SubagentStatistics {
       thoughtTokens: this.thoughtTokens,
       cachedTokens: this.cachedTokens,
       totalTokens,
-      estimatedCost,
       toolUsage: Array.from(this.toolUsage.values()),
     };
   }
@@ -217,7 +216,7 @@ export class SubagentStatistics {
     return `${h}h ${m}m`;
   }
 
-  private generatePerformanceTips(stats: SubagentStatsSummary): string[] {
+  private generatePerformanceTips(stats: AgentStatsSummary): string[] {
     const tips: string[] = [];
     const totalCalls = stats.totalToolCalls;
     const sr =
