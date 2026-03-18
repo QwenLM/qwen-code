@@ -838,6 +838,12 @@ export class GeminiClient {
   ): Promise<ChatCompressionInfo> {
     const compressionService = new ChatCompressionService();
 
+    // Reset failed compression flag when forcing compression
+    // This allows recovery from previous failed compression attempts
+    if (force) {
+      this.hasFailedCompressionAttempt = false;
+    }
+
     const { newHistory, info } = await compressionService.compress(
       this.getChat(),
       prompt_id,

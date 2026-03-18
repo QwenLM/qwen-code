@@ -260,6 +260,37 @@ export class ChatCompressionService {
         },
       };
     } else {
+      // Additional validation: check if compressed history is still over limit
+      // Use a conservative estimate with safety margin to account for token counting inaccuracies
+      const contextLimit =
+        config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT;
+      const compressionThreshold =
+        config.getChatCompression()?.contextPercentageThreshold ??
+        COMPRESSION_TOKEN_THRESHOLD;
+      const maxAllowedTokens = contextLimit * compressionThreshold;
+
+      // Add safety margin to newTokenCount for validation only (not for reporting)
+      // This prevents compression from succeeding when context is still over limit
+      // due to token estimation errors. Use 20% safety margin to account for
+      // inaccuracies in the token count formula.
+      const SAFETY_MARGIN_RATIO = 0.2;
+      const conservativeNewTokenCount =
+        newTokenCount * (1 + SAFETY_MARGIN_RATIO);
+
+      if (conservativeNewTokenCount > maxAllowedTokens) {
+        // Compression didn't reduce enough, still over limit
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_STILL_OVER_LIMIT,
+          },
+        };
+      }
+
       uiTelemetryService.setLastPromptTokenCount(newTokenCount);
       return {
         newHistory: extraHistory,

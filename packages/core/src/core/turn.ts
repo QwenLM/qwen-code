@@ -166,6 +166,9 @@ export enum CompressionStatus {
 
   /** The compression was not necessary and no action was taken */
   NOOP,
+
+  /** The compression failed as the compressed history is still over the token limit */
+  COMPRESSION_FAILED_STILL_OVER_LIMIT,
 }
 
 export interface ChatCompressionInfo {

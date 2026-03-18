@@ -307,6 +307,22 @@ export class Session implements SessionContext {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
 
+        // Check for context limit exceeded errors and provide actionable message
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const lowerMessage = errorMessage.toLowerCase();
+        if (
+          lowerMessage.includes('context') &&
+          (lowerMessage.includes('exceed') ||
+            lowerMessage.includes('limit') ||
+            lowerMessage.includes('too long'))
+        ) {
+          throw new RequestError(
+            400,
+            'Context limit exceeded. Please use /compress to reduce context or start a new session.',
+          );
+        }
+
         throw error;
       }
 
