@@ -330,8 +330,12 @@ export class ChatRecordingService {
    * Records tool results (function responses) sent back to the model.
    * Writes immediately to disk.
    *
-   * @param message The raw PartListUnion object with functionResponse parts
-   * @param toolCallResult Optional tool call result info for UI recovery
+   * NOTE: Does not store a message field. Tool responses are reconstructed
+   * from toolCallResult at API time to ensure provider-agnostic storage
+   * and proper OpenAI format (role: "tool" with tool_call_id).
+   *
+   * @param message The raw PartListUnion object with functionResponse parts (used for extraction)
+   * @param toolCallResult Optional tool call result info for UI recovery and API reconstruction
    */
   recordToolResult(
     message: PartListUnion,
@@ -340,7 +344,7 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
-        message: createUserContent(message),
+        // No message field - tool responses are reconstructed from toolCallResult at API time
       };
 
       if (toolCallResult) {
