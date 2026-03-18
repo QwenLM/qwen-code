@@ -301,14 +301,17 @@ export function useCompletionTrigger(
       const lastAtMatch = textBeforeCursor.lastIndexOf('@');
       const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
 
+      // Check if we're in a trigger context
       let triggerPos = -1;
       let triggerChar: '@' | '/' | null = null;
 
-      // Check if we're in a trigger context
-      if (lastAtMatch > lastSlashMatch) {
+      // Priority: @ trigger takes precedence over / trigger
+      // This allows path-like queries (e.g., "src/components/Button") in @ mentions
+      // But skip if the trigger is inside a file tag
+      if (lastAtMatch >= 0) {
         triggerPos = lastAtMatch;
         triggerChar = '@';
-      } else if (lastSlashMatch > lastAtMatch) {
+      } else if (lastSlashMatch >= 0) {
         triggerPos = lastSlashMatch;
         triggerChar = '/';
       }
@@ -318,6 +321,7 @@ export function useCompletionTrigger(
         const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
         const isValidTrigger =
           charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
+
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
