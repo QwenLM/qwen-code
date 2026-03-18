@@ -41,6 +41,9 @@ import {
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_UPDATE,
   EVENT_USER_FEEDBACK,
+  EVENT_ARENA_SESSION_STARTED,
+  EVENT_ARENA_AGENT_COMPLETED,
+  EVENT_ARENA_SESSION_ENDED,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -54,6 +57,9 @@ import {
   recordSubagentExecutionMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
+  recordArenaSessionStartedMetrics,
+  recordArenaAgentCompletedMetrics,
+  recordArenaSessionEndedMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -92,6 +98,9 @@ import type {
   AuthEvent,
   SkillLaunchEvent,
   UserFeedbackEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
 } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
@@ -967,4 +976,87 @@ export function logUserFeedback(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logArenaSessionStarted(
+  config: Config,
+  event: ArenaSessionStartedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logArenaSessionStartedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    model_ids: JSON.stringify(event.model_ids),
+    'event.name': EVENT_ARENA_SESSION_STARTED,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Arena session started. Agents: ${event.model_ids.length}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordArenaSessionStartedMetrics(config);
+}
+
+export function logArenaAgentCompleted(
+  config: Config,
+  event: ArenaAgentCompletedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logArenaAgentCompletedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_ARENA_AGENT_COMPLETED,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Arena agent ${event.agent_model_id} ${event.status}. Duration: ${event.duration_ms}ms. Tokens: ${event.total_tokens}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordArenaAgentCompletedMetrics(
+    config,
+    event.agent_model_id,
+    event.status,
+    event.duration_ms,
+    event.input_tokens,
+    event.output_tokens,
+  );
+}
+
+export function logArenaSessionEnded(
+  config: Config,
+  event: ArenaSessionEndedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logArenaSessionEndedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_ARENA_SESSION_ENDED,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Arena session ended: ${event.status}.${event.winner_model_id ? ` Winner: ${event.winner_model_id}.` : ''}`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordArenaSessionEndedMetrics(
+    config,
+    event.status,
+    event.display_backend,
+    event.duration_ms,
+    event.winner_model_id,
+  );
 }

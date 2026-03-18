@@ -19,6 +19,8 @@ export interface UseAutoAcceptIndicatorArgs {
   addItem?: (item: HistoryItemWithoutId, timestamp: number) => void;
   onApprovalModeChange?: (mode: ApprovalMode) => void;
   shouldBlockTab?: () => boolean;
+  /** When true, the keyboard handler is disabled (e.g. agent tab is active). */
+  disabled?: boolean;
 }
 
 export function useAutoAcceptIndicator({
@@ -26,6 +28,7 @@ export function useAutoAcceptIndicator({
   addItem,
   onApprovalModeChange,
   shouldBlockTab,
+  disabled,
 }: UseAutoAcceptIndicatorArgs): ApprovalMode {
   const currentConfigValue = config.getApprovalMode();
   const [showAutoAcceptIndicator, setShowAutoAcceptIndicator] =
@@ -78,7 +81,7 @@ export function useAutoAcceptIndicator({
         }
       }
     },
-    { isActive: true },
+    { isActive: !disabled },
   );
 
   return showAutoAcceptIndicator;

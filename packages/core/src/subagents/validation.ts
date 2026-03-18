@@ -5,12 +5,8 @@
  */
 
 import { SubagentError, SubagentErrorCode } from './types.js';
-import type {
-  ModelConfig,
-  RunConfig,
-  SubagentConfig,
-  ValidationResult,
-} from './types.js';
+import type { SubagentConfig, ValidationResult } from './types.js';
+import type { ModelConfig, RunConfig } from '../agents/runtime/agent-types.js';
 
 /**
  * Validates subagent configurations to ensure they are well-formed

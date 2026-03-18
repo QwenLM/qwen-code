@@ -34,7 +34,7 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -235,12 +235,16 @@ export class GeminiChat {
    * @param history - Optional initial conversation history.
    * @param chatRecordingService - Optional recording service. If provided, chat
    *   messages will be recorded.
+   * @param telemetryService - Optional UI telemetry service. When provided,
+   *   prompt token counts are reported on each API response. Pass `undefined`
+   *   for sub-agent chats to avoid overwriting the main agent's context usage.
    */
   constructor(
     private readonly config: Config,
     private readonly generationConfig: GenerateContentConfig = {},
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
+    private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
   }
@@ -652,8 +656,8 @@ export class GeminiChat {
         usageMetadata = chunk.usageMetadata;
         const lastPromptTokenCount =
           usageMetadata.totalTokenCount ?? usageMetadata.promptTokenCount;
-        if (lastPromptTokenCount) {
-          uiTelemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+        if (lastPromptTokenCount && this.telemetryService) {
+          this.telemetryService.setLastPromptTokenCount(lastPromptTokenCount);
         }
       }
 

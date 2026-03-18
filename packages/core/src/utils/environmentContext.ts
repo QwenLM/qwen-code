@@ -69,6 +69,8 @@ ${directoryContext}
   return [{ text: context }];
 }
 
+const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
+
 export async function getInitialChatHistory(
   config: Config,
   extraHistory?: Content[],
@@ -87,8 +89,26 @@ export async function getInitialChatHistory(
     },
     {
       role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
+      parts: [{ text: STARTUP_CONTEXT_MODEL_ACK }],
     },
     ...(extraHistory ?? []),
   ];
+}
+
+/**
+ * Strip the leading startup context (env-info user message + model ack)
+ * from a chat history. Used when forwarding a parent session's history
+ * to a child agent that will generate its own startup context for its
+ * own working directory.
+ */
+export function stripStartupContext(history: Content[]): Content[] {
+  if (history.length < 2) return history;
+
+  const secondEntry = history[1];
+  const ackText = secondEntry?.parts?.[0]?.text;
+  if (secondEntry?.role === 'model' && ackText === STARTUP_CONTEXT_MODEL_ACK) {
+    return history.slice(2);
+  }
+
+  return history;
 }

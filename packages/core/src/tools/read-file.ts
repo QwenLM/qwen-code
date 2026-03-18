@@ -188,18 +188,21 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const globalTempDir = Storage.getGlobalTempDir();
     const projectTempDir = this.config.storage.getProjectTempDir();
     const userSkillsDir = this.config.storage.getUserSkillsDir();
+    const arenaDir = Storage.getGlobalArenaDir();
     const resolvedFilePath = path.resolve(filePath);
     const osTempDir = os.tmpdir();
     const isWithinTempDir =
       isSubpath(projectTempDir, resolvedFilePath) ||
       isSubpath(globalTempDir, resolvedFilePath) ||
       isSubpath(osTempDir, resolvedFilePath);
+    const isWithinArenaDir = isSubpath(arenaDir, resolvedFilePath);
     const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
 
     if (
       !workspaceContext.isPathWithinWorkspace(filePath) &&
       !isWithinTempDir &&
-      !isWithinUserSkills
+      !isWithinUserSkills &&
+      !isWithinArenaDir
     ) {
       const directories = workspaceContext.getDirectories();
       return `File path must be within one of the workspace directories: ${directories.join(
