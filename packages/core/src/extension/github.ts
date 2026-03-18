@@ -75,9 +75,12 @@ export async function cloneFromGit(
         // We let git handle the source as is.
       }
     }
+    // On Windows, symlinks require elevated privileges by default, so we
+    // disable them to avoid "Permission denied" errors during checkout.
+    const symlinkValue = os.platform() === 'win32' ? 'false' : 'true';
     await git.clone(sourceUrl, './', [
       '-c',
-      'core.symlinks=true',
+      `core.symlinks=${symlinkValue}`,
       '--depth',
       '1',
     ]);
@@ -172,6 +175,7 @@ export async function checkForExtensionUpdate(
   }
   if (
     !installMetadata ||
+    installMetadata.originSource === 'Claude' ||
     (installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release')
   ) {

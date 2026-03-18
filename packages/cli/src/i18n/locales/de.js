@@ -99,6 +99,7 @@ export default {
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
+  'List available skills.': 'Verfügbare Skills auflisten.',
   'Available Qwen Code CLI tools:': 'Verfügbare Qwen Code CLI-Werkzeuge:',
   'No tools available': 'Keine Werkzeuge verfügbar',
   'View or change the approval mode for tool usage':
@@ -376,6 +377,7 @@ export default {
     'Diese Editoren werden derzeit unterstützt. Bitte beachten Sie, dass einige Editoren nicht im Sandbox-Modus verwendet werden können.',
   'Your preferred editor is:': 'Ihr bevorzugter Editor ist:',
   'Manage extensions': 'Erweiterungen verwalten',
+  'Manage installed extensions': 'Installierte Erweiterungen verwalten',
   'List active extensions': 'Aktive Erweiterungen auflisten',
   'Update extensions. Usage: update <extension-names>|--all':
     'Erweiterungen aktualisieren. Verwendung: update <Erweiterungsnamen>|--all',
@@ -585,6 +587,38 @@ export default {
     'Fehler beim Konfigurieren von {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Ihr Terminal ist bereits für optimale Erfahrung mit mehrzeiliger Eingabe konfiguriert (Umschalt+Enter und Strg+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Qwen Code-Hooks verwalten',
+  'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
+  'Enable a disabled hook': 'Einen deaktivierten Hook aktivieren',
+  'Disable an active hook': 'Einen aktiven Hook deaktivieren',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Den Nachrichtenverlauf der aktuellen Sitzung in eine Datei exportieren',
+  'Export session to HTML format': 'Sitzung in das HTML-Format exportieren',
+  'Export session to JSON format': 'Sitzung in das JSON-Format exportieren',
+  'Export session to JSONL format (one message per line)':
+    'Sitzung in das JSONL-Format exportieren (eine Nachricht pro Zeile)',
+  'Export session to markdown format':
+    'Sitzung in das Markdown-Format exportieren',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Personalisierte Programmier-Einblicke aus Ihrem Chatverlauf generieren',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurückgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Terminal-Typ konnte nicht erkannt werden. Unterstützte Terminals: VS Code, Cursor, Windsurf und Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -745,6 +779,15 @@ export default {
     "Authentifizierung mit MCP-Server '{{name}}' fehlgeschlagen: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Werkzeuge von '{{name}}' werden neu erkannt...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "{{count}} Werkzeug(e) von '{{name}}' entdeckt.",
+  'Authentication complete. Returning to server details...':
+    'Authentifizierung abgeschlossen. Zurück zu den Serverdetails...',
+  'Authentication successful.': 'Authentifizierung erfolgreich.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Falls der Browser sich nicht öffnet, kopieren Sie diese URL und fügen Sie sie in Ihren Browser ein:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Stellen Sie sicher, dass Sie die VOLLSTÄNDIGE URL kopieren – sie kann über mehrere Zeilen gehen.',
 
   // ============================================================================
   // Commands - Chat
@@ -915,6 +958,11 @@ export default {
     'Enter zum Bestätigen, Esc zum Abbrechen',
   Disable: 'Deaktivieren',
   Enable: 'Aktivieren',
+  Authenticate: 'Authentifizieren',
+  'Re-authenticate': 'Erneut authentifizieren',
+  'Clear Authentication': 'Authentifizierung löschen',
+  disabled: 'deaktiviert',
+  'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
   'Status:': 'Status:',
@@ -943,6 +991,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Führen Sie qwen --debug aus, um Fehlerprotokolle anzuzeigen',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-Authentifizierung',
+  'Press Enter to start authentication, Esc to go back':
+    'Drücken Sie Enter, um die Authentifizierung zu starten, Esc zum Zurückgehen',
+  'Authenticating... Please complete the login in your browser.':
+    'Authentifizierung läuft... Bitte schließen Sie die Anmeldung in Ihrem Browser ab.',
+  'Press Enter or Esc to go back': 'Drücken Sie Enter oder Esc zum Zurückgehen',
+
   // MCP Tool List
   'No tools available for this server.':
     'Keine Werkzeuge für diesen Server verfügbar.',
@@ -951,6 +1007,7 @@ export default {
   'open-world': 'offene Welt',
   idempotent: 'idempotent',
   'Tools for {{name}}': 'Werkzeuge für {{name}}',
+  'Tools for {{serverName}}': 'Werkzeuge für {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
@@ -1539,6 +1596,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  Custom: 'Benutzerdefiniert',
+  'More instructions about configuring `modelProviders` manually.':
+    'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
+  'Select API-KEY configuration mode:':
+    'API-KEY-Konfigurationsmodus auswählen:',
+  '(Press Escape to go back)': '(Escape drücken zum Zurückgehen)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enter zum Absenden, Escape zum Abbrechen)',
+  'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
   'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
   'Choose based on where your account is registered':
     'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
@@ -1557,4 +1626,33 @@ export default {
     'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Tipp: Verwenden Sie /model, um zwischen verfügbaren Coding Plan-Modellen zu wechseln.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Bitte beantworten Sie die folgende(n) Frage(n):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Benutzerfragen können im nicht-interaktiven Modus nicht gestellt werden. Bitte führen Sie das Tool im interaktiven Modus aus.',
+  'User declined to answer the questions.':
+    'Benutzer hat die Beantwortung der Fragen abgelehnt.',
+  'User has provided the following answers:':
+    'Benutzer hat die folgenden Antworten bereitgestellt:',
+  'Failed to process user answers:':
+    'Fehler beim Verarbeiten der Benutzerantworten:',
+  'Type something...': 'Etwas eingeben...',
+  Submit: 'Senden',
+  'Submit answers': 'Antworten senden',
+  Cancel: 'Abbrechen',
+  'Your answers:': 'Ihre Antworten:',
+  '(not answered)': '(nicht beantwortet)',
+  'Ready to submit your answers?': 'Bereit, Ihre Antworten zu senden?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Enter: Auswählen',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
 };

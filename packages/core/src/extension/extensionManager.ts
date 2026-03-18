@@ -624,7 +624,10 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
-        version: config.version,
+        version:
+          config.version ||
+          installMetadata?.marketplaceConfig?.metadata?.version ||
+          '1.0.0',
         path: effectiveExtensionPath,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),

@@ -502,3 +502,10 @@ Always follow these standards:
 - **Access Control**: Project and user-level separation provides appropriate boundaries
 - **Sensitive Information**: Avoid including secrets or credentials in agent configurations
 - **Production Environments**: Consider separate agents for production vs development environments
+
+## Limits
+
+The following soft warnings apply to Subagent configurations (no hard limits are enforced):
+
+- **Description Field**: A warning is shown for descriptions exceeding 1,000 characters
+- **System Prompt**: A warning is shown for system prompts exceeding 10,000 characters

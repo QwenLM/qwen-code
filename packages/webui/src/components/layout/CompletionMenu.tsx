@@ -123,6 +123,7 @@ export const CompletionMenu: FC<CompletionMenuProps> = ({
           setSelected((prev) => Math.max(prev - 1, 0));
           break;
         case 'Enter':
+        case 'Tab':
           event.preventDefault();
           if (items[selected]) {
             onSelect(items[selected]);

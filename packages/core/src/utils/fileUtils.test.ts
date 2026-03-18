@@ -33,6 +33,7 @@ import {
   fileExists,
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -52,10 +53,17 @@ describe('fileUtils', () => {
   let nonexistentFilePath: string;
   let directoryPath: string;
 
+  const fsService = new StandardFileSystemService();
+
   const mockConfig = {
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getTargetDir: () => tempRootDir,
+    getModel: () => 'qwen3.5-plus',
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, video: true },
+    }),
+    getFileSystemService: () => fsService,
   } as unknown as Config;
 
   beforeEach(() => {
@@ -838,7 +846,7 @@ describe('fileUtils', () => {
     it('should handle read errors for text files', async () => {
       actualNodeFs.writeFileSync(testTextFilePath, 'content'); // File must exist for initial statSync
       const readError = new Error('Simulated read error');
-      vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(readError);
 
       const result = await processSingleFileContent(
         testTextFilePath,
@@ -887,29 +895,73 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
 
-    it('should process a PDF file', async () => {
+    it('should reject image files when model does not support image', async () => {
+      const fakePngData = Buffer.from('fake png data');
+      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const mockConfigNoImage = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfigNoImage,
+      );
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Unsupported image file');
+      expect(result.llmContent).toContain('does not support image input');
+      expect(result.returnDisplay).toContain('Skipped image file');
+    });
+
+    it('should reject PDF files when model does not support PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
+
+      const mockConfigNoPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true },
+        }),
+      } as unknown as Config;
+
       const result = await processSingleFileContent(
         testPdfFilePath,
-        mockConfig,
+        mockConfigNoPdf,
       );
-      expect(
-        (result.llmContent as { inlineData: unknown }).inlineData,
-      ).toBeDefined();
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Unsupported pdf file');
+      expect(result.llmContent).toContain(
+        'does not support PDF input directly',
+      );
+      expect(result.llmContent).toContain('/extensions install');
+      expect(result.returnDisplay).toContain('Skipped pdf file');
+    });
+
+    it('should accept PDF files when model supports PDF', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const mockConfigWithPdf = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { image: true, pdf: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        testPdfFilePath,
+        mockConfigWithPdf,
+      );
+      expect(result.llmContent).toHaveProperty('inlineData');
       expect(
         (result.llmContent as { inlineData: { mimeType: string } }).inlineData
           .mimeType,
       ).toBe('application/pdf');
-      expect(
-        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
-      ).toBe(fakePdfData.toString('base64'));
-      expect(
-        (result.llmContent as { inlineData: { displayName?: string } })
-          .inlineData.displayName,
-      ).toBe('document.pdf');
-      expect(result.returnDisplay).toContain('Read pdf file: document.pdf');
+      expect(result.returnDisplay).toContain('Read pdf file');
     });
 
     it('should read an SVG file as text when under 1MB', async () => {

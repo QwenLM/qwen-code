@@ -128,6 +128,7 @@ describe('Permission Control (E2E)', () => {
         prompt: 'Write a js hello world to file.',
         options: {
           ...SHARED_TEST_OPTIONS,
+          permissionMode: 'default',
           cwd: testDir,
           canUseTool: async (toolName, input) => {
             toolCalls.push({ toolName, input });
@@ -762,8 +763,15 @@ describe('Permission Control (E2E)', () => {
       it(
         'should execute read-only tools without confirmation',
         async () => {
+          // Create a file so the model has something to read
+          await helper.createFile(
+            'read-only-test.txt',
+            'content for read-only test',
+          );
+
           const q = query({
-            prompt: 'List files in the current directory',
+            prompt:
+              'Use the read_file tool to read the file read-only-test.txt in the current directory.',
             options: {
               ...SHARED_TEST_OPTIONS,
               permissionMode: 'default',

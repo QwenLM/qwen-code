@@ -139,16 +139,16 @@ Logs are timestamped records of specific events. The following events are logged
 - `qwen-code.config`: This event occurs once at startup with the CLI's configuration.
   - **Attributes**:
     - `model` (string)
-    - `embedding_model` (string)
     - `sandbox_enabled` (boolean)
     - `core_tools_enabled` (string)
     - `approval_mode` (string)
-    - `api_key_enabled` (boolean)
-    - `vertex_ai_enabled` (boolean)
-    - `code_assist_enabled` (boolean)
-    - `log_prompts_enabled` (boolean)
     - `file_filtering_respect_git_ignore` (boolean)
     - `debug_mode` (boolean)
+    - `truncate_tool_output_threshold` (number)
+    - `truncate_tool_output_lines` (number)
+    - `hooks` (string, comma-separated hook event types, omitted if hooks disabled)
+    - `ide_enabled` (boolean)
+    - `interactive_shell_enabled` (boolean)
     - `mcp_servers` (string)
     - `output_format` (string: "text" or "json")
 

@@ -9,8 +9,9 @@
  * - 'project': Stored in `.qwen/skills/` within the project directory
  * - 'user': Stored in `~/.qwen/skills/` in the user's home directory
  * - 'extension': Provided by an installed extension
+ * - 'bundled': Built-in skills shipped with qwen-code
  */
-export type SkillLevel = 'project' | 'user' | 'extension';
+export type SkillLevel = 'project' | 'user' | 'extension' | 'bundled';
 
 /**
  * Core configuration for a skill as stored in SKILL.md files.

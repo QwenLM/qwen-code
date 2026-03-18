@@ -25,12 +25,8 @@ import {
   ToolConfirmationOutcome,
   ApprovalMode,
   logToolCall,
-  ReadFileTool,
   ToolErrorType,
   ToolCallEvent,
-  ShellTool,
-  logToolOutputTruncated,
-  ToolOutputTruncatedEvent,
   InputFormat,
   Kind,
   SkillTool,
@@ -49,8 +45,6 @@ import {
   modifyWithEditor,
 } from '../tools/modifiable-tool.js';
 import * as Diff from 'diff';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
@@ -306,67 +300,6 @@ const createErrorResponse = (
   contentLength: error.message.length,
 });
 
-export async function truncateAndSaveToFile(
-  content: string,
-  callId: string,
-  projectTempDir: string,
-  threshold: number,
-  truncateLines: number,
-): Promise<{ content: string; outputFile?: string }> {
-  if (content.length <= threshold) {
-    return { content };
-  }
-
-  let lines = content.split('\n');
-  let fileContent = content;
-
-  // If the content is long but has few lines, wrap it to enable line-based truncation.
-  if (lines.length <= truncateLines) {
-    const wrapWidth = 120; // A reasonable width for wrapping.
-    const wrappedLines: string[] = [];
-    for (const line of lines) {
-      if (line.length > wrapWidth) {
-        for (let i = 0; i < line.length; i += wrapWidth) {
-          wrappedLines.push(line.substring(i, i + wrapWidth));
-        }
-      } else {
-        wrappedLines.push(line);
-      }
-    }
-    lines = wrappedLines;
-    fileContent = lines.join('\n');
-  }
-
-  const head = Math.floor(truncateLines / 5);
-  const beginning = lines.slice(0, head);
-  const end = lines.slice(-(truncateLines - head));
-  const truncatedContent =
-    beginning.join('\n') + '\n... [CONTENT TRUNCATED] ...\n' + end.join('\n');
-
-  // Sanitize callId to prevent path traversal.
-  const safeFileName = `${path.basename(callId)}.output`;
-  const outputFile = path.join(projectTempDir, safeFileName);
-  try {
-    await fs.writeFile(outputFile, fileContent);
-
-    return {
-      content: `Tool output was too large and has been truncated.
-The full output has been saved to: ${outputFile}
-To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
-The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
-This allows you to efficiently examine different parts of the output without loading the entire file.
-Truncated part of the output:
-${truncatedContent}`,
-      outputFile,
-    };
-  } catch (_error) {
-    return {
-      content:
-        truncatedContent + `\n[Note: Could not save full output to file]`,
-    };
-  }
-}
-
 interface CoreToolSchedulerOptions {
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
@@ -509,6 +442,7 @@ export class CoreToolScheduler {
             : undefined;
 
           // Preserve diff for cancelled edit operations
+          // Preserve plan content for cancelled plan operations
           let resultDisplay: ToolResultDisplay | undefined = undefined;
           if (currentCall.status === 'awaiting_approval') {
             const waitingCall = currentCall as WaitingToolCall;
@@ -519,6 +453,13 @@ export class CoreToolScheduler {
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
+              };
+            } else if (waitingCall.confirmationDetails.type === 'plan') {
+              resultDisplay = {
+                type: 'plan_summary',
+                message: 'Plan was rejected. Remaining in plan mode.',
+                plan: waitingCall.confirmationDetails.plan,
+                rejected: true,
               };
             }
           } else if (currentCall.status === 'executing') {
@@ -873,7 +814,13 @@ export class CoreToolScheduler {
             this.config.getApprovalMode() === ApprovalMode.PLAN;
           const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
 
-          if (isPlanMode && !isExitPlanModeTool) {
+          // ask_user_question needs the confirmation flow even in plan mode
+          // so the user can actually answer the questions
+          const isAskUserQuestionTool =
+            confirmationDetails &&
+            confirmationDetails.type === 'ask_user_question';
+
+          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
             if (confirmationDetails) {
               this.setStatusInternal(reqInfo.callId, 'error', {
                 callId: reqInfo.callId,
@@ -890,8 +837,14 @@ export class CoreToolScheduler {
               this.setStatusInternal(reqInfo.callId, 'scheduled');
             }
           } else if (
-            this.config.getApprovalMode() === ApprovalMode.YOLO ||
-            doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
+            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
+              doesToolInvocationMatch(
+                toolCall.tool,
+                invocation,
+                allowedTools,
+              )) &&
+            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
+            confirmationDetails.type !== 'ask_user_question'
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
@@ -1201,43 +1154,9 @@ export class CoreToolScheduler {
       }
 
       if (toolResult.error === undefined) {
-        let content = toolResult.llmContent;
-        let outputFile: string | undefined = undefined;
+        const content = toolResult.llmContent;
         const contentLength =
           typeof content === 'string' ? content.length : undefined;
-        if (
-          typeof content === 'string' &&
-          toolName === ShellTool.Name &&
-          this.config.getEnableToolOutputTruncation() &&
-          this.config.getTruncateToolOutputThreshold() > 0 &&
-          this.config.getTruncateToolOutputLines() > 0
-        ) {
-          const originalContentLength = content.length;
-          const threshold = this.config.getTruncateToolOutputThreshold();
-          const lines = this.config.getTruncateToolOutputLines();
-          const truncatedResult = await truncateAndSaveToFile(
-            content,
-            callId,
-            this.config.storage.getProjectTempDir(),
-            threshold,
-            lines,
-          );
-          content = truncatedResult.content;
-          outputFile = truncatedResult.outputFile;
-
-          if (outputFile) {
-            logToolOutputTruncated(
-              this.config,
-              new ToolOutputTruncatedEvent(scheduledCall.request.prompt_id, {
-                toolName,
-                originalContentLength,
-                truncatedContentLength: content.length,
-                threshold,
-                lines,
-              }),
-            );
-          }
-        }
 
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
@@ -1246,7 +1165,6 @@ export class CoreToolScheduler {
           resultDisplay: toolResult.returnDisplay,
           error: undefined,
           errorType: undefined,
-          outputFile,
           contentLength,
         };
         this.setStatusInternal(callId, 'success', successResponse);

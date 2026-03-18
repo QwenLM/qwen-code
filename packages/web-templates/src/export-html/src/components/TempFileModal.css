@@ -48,7 +48,9 @@
   padding: 4px 8px;
   border-radius: 6px;
   line-height: 1;
-  transition: background-color 0.15s, color 0.15s;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
 }
 
 .modal-close:hover {

@@ -111,6 +111,7 @@ export default {
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
+  'List available skills.': 'Listar habilidades disponíveis.',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
@@ -401,6 +402,7 @@ export default {
     'Estes editores são suportados atualmente. Note que alguns editores não podem ser usados no modo sandbox.',
   'Your preferred editor is:': 'Seu editor preferido é:',
   'Manage extensions': 'Gerenciar extensões',
+  'Manage installed extensions': 'Gerenciar extensões instaladas',
   'List active extensions': 'Listar extensões ativas',
   'Update extensions. Usage: update <extension-names>|--all':
     'Atualizar extensões. Uso: update <nomes-das-extensoes>|--all',
@@ -590,6 +592,38 @@ export default {
     'Falha ao configurar {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Seu terminal já está configurado para uma experiência ideal com entrada multilinhas (Shift+Enter e Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Gerenciar hooks do Qwen Code',
+  'List all configured hooks': 'Listar todos os hooks configurados',
+  'Enable a disabled hook': 'Ativar um hook desativado',
+  'Disable an active hook': 'Desativar um hook ativo',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Exportar o histórico de mensagens da sessão atual para um arquivo',
+  'Export session to HTML format': 'Exportar a sessão para o formato HTML',
+  'Export session to JSON format': 'Exportar a sessão para o formato JSON',
+  'Export session to JSONL format (one message per line)':
+    'Exportar a sessão para o formato JSONL (uma mensagem por linha)',
+  'Export session to markdown format':
+    'Exportar a sessão para o formato Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Gerar insights personalizados de programação a partir do seu histórico de chat',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Retomar uma sessão anterior',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Restaurar uma chamada de ferramenta. Isso redefinirá o histórico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Não foi possível detectar o tipo de terminal. Terminais suportados: VS Code, Cursor, Windsurf e Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -751,6 +785,15 @@ export default {
     "Falha ao autenticar com o servidor MCP '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Redescobrindo ferramentas de '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "{{count}} ferramenta(s) descoberta(s) de '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Autenticação concluída. Retornando aos detalhes do servidor...',
+  'Authentication successful.': 'Autenticação bem-sucedida.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Se o navegador não abrir, copie e cole esta URL no seu navegador:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Certifique-se de copiar a URL COMPLETA – ela pode ocupar várias linhas.',
 
   // ============================================================================
   // Commands - Chat
@@ -921,6 +964,11 @@ export default {
     'Enter para confirmar, Esc para cancelar',
   Disable: 'Desativar',
   Enable: 'Ativar',
+  Authenticate: 'Autenticar',
+  'Re-authenticate': 'Reautenticar',
+  'Clear Authentication': 'Limpar autenticação',
+  disabled: 'desativado',
+  'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
   'Status:': 'Status:',
@@ -950,6 +998,14 @@ export default {
   'Run qwen --debug to see error logs':
     'Execute qwen --debug para ver os logs de erro',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'Autenticação OAuth',
+  'Press Enter to start authentication, Esc to go back':
+    'Pressione Enter para iniciar a autenticação, Esc para voltar',
+  'Authenticating... Please complete the login in your browser.':
+    'Autenticando... Por favor, conclua o login no seu navegador.',
+  'Press Enter or Esc to go back': 'Pressione Enter ou Esc para voltar',
+
   // MCP Tool List
   'No tools available for this server.':
     'Nenhuma ferramenta disponível para este servidor.',
@@ -958,6 +1014,7 @@ export default {
   'open-world': 'mundo aberto',
   idempotent: 'idempotente',
   'Tools for {{name}}': 'Ferramentas para {{name}}',
+  'Tools for {{serverName}}': 'Ferramentas para {{serverName}}',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
@@ -1534,6 +1591,18 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Cole sua chave de API do Bailian Coding Plan e pronto!',
+  Custom: 'Personalizado',
+  'More instructions about configuring `modelProviders` manually.':
+    'Mais instruções sobre como configurar `modelProviders` manualmente.',
+  'Select API-KEY configuration mode:':
+    'Selecione o modo de configuração da API-KEY:',
+  '(Press Escape to go back)': '(Pressione Escape para voltar)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Pressione Enter para enviar, Escape para cancelar)',
+  'More instructions please check:': 'Mais instruções, consulte:',
   'Select Region for Coding Plan': 'Selecionar região do Coding Plan',
   'Choose based on where your account is registered':
     'Escolha com base em onde sua conta está registrada',
@@ -1552,4 +1621,33 @@ export default {
     'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json.',
   'Tip: Use /model to switch between available Coding Plan models.':
     'Dica: Use /model para alternar entre os modelos disponíveis do Coding Plan.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Por favor, responda à(s) seguinte(s) pergunta(s):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Não é possível fazer perguntas ao usuário no modo não interativo. Por favor, execute no modo interativo para usar esta ferramenta.',
+  'User declined to answer the questions.':
+    'O usuário recusou responder às perguntas.',
+  'User has provided the following answers:':
+    'O usuário forneceu as seguintes respostas:',
+  'Failed to process user answers:':
+    'Falha ao processar as respostas do usuário:',
+  'Type something...': 'Digite algo...',
+  Submit: 'Enviar',
+  'Submit answers': 'Enviar respostas',
+  Cancel: 'Cancelar',
+  'Your answers:': 'Suas respostas:',
+  '(not answered)': '(não respondido)',
+  'Ready to submit your answers?': 'Pronto para enviar suas respostas?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navegar | ←/→: Alternar abas | Enter: Selecionar',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | ←/→: Alternar abas | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
 };

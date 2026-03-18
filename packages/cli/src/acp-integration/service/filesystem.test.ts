@@ -7,26 +7,30 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
-import { ACP_ERROR_CODES } from '../errorCodes.js';
+import type { AgentSideConnection } from '@agentclientprotocol/sdk';
+
+const RESOURCE_NOT_FOUND_CODE = -32002;
+const INTERNAL_ERROR_CODE = -32603;
 
 const createFallback = (): FileSystemService => ({
-  readTextFile: vi.fn(),
-  readTextFileWithInfo: vi
-    .fn()
-    .mockResolvedValue({ content: '', encoding: 'utf-8', bom: false }),
-  writeTextFile: vi.fn(),
-  detectFileBOM: vi.fn().mockResolvedValue(false),
+  readTextFile: vi.fn().mockResolvedValue({
+    content: '',
+    _meta: { bom: false, encoding: 'utf-8' },
+  }),
+  writeTextFile: vi.fn().mockResolvedValue({ _meta: undefined }),
   findFiles: vi.fn().mockReturnValue([]),
 });
 
 describe('AcpFileSystemService', () => {
-  describe('detectFileBOM', () => {
-    it('detects BOM through ACP client when content starts with U+FEFF', async () => {
+  describe('readTextFile', () => {
+    it('reads through ACP and returns response', async () => {
+      const mockResponse = {
+        content: 'hello',
+        _meta: { bom: false, encoding: 'utf-8' },
+      };
       const client = {
-        readTextFile: vi
-          .fn()
-          .mockResolvedValue({ content: '\ufeff// BOM file' }),
-      } as unknown as import('../acp.js').Client;
+        readTextFile: vi.fn().mockResolvedValue(mockResponse),
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -35,87 +39,23 @@ describe('AcpFileSystemService', () => {
         createFallback(),
       );
 
-      const result = await svc.detectFileBOM('/test/file.txt');
-      expect(result).toBe(true);
+      const result = await svc.readTextFile({ path: '/some/file.txt' });
+
+      expect(result).toEqual(mockResponse);
       expect(client.readTextFile).toHaveBeenCalledWith({
-        path: '/test/file.txt',
+        path: '/some/file.txt',
         sessionId: 'session-1',
-        line: null,
-        limit: 1,
       });
     });
 
-    it('detects no BOM through ACP client when content does not start with U+FEFF', async () => {
-      const client = {
-        readTextFile: vi.fn().mockResolvedValue({ content: '// No BOM file' }),
-      } as unknown as import('../acp.js').Client;
-
-      const svc = new AcpFileSystemService(
-        client,
-        'session-2',
-        { readTextFile: true, writeTextFile: true },
-        createFallback(),
-      );
-
-      const result = await svc.detectFileBOM('/test/file.txt');
-      expect(result).toBe(false);
-    });
-
-    it('falls back to local filesystem when ACP client fails', async () => {
-      const client = {
-        readTextFile: vi.fn().mockRejectedValue(new Error('Network error')),
-      } as unknown as import('../acp.js').Client;
-
-      const fallback = createFallback();
-      (fallback.detectFileBOM as ReturnType<typeof vi.fn>).mockResolvedValue(
-        true,
-      );
-
-      const svc = new AcpFileSystemService(
-        client,
-        'session-3',
-        { readTextFile: true, writeTextFile: true },
-        fallback,
-      );
-
-      const result = await svc.detectFileBOM('/test/file.txt');
-      expect(result).toBe(true);
-      expect(fallback.detectFileBOM).toHaveBeenCalledWith('/test/file.txt');
-    });
-
-    it('falls back to local filesystem when readTextFile capability is disabled', async () => {
-      const client = {
-        readTextFile: vi.fn(),
-      } as unknown as import('../acp.js').Client;
-
-      const fallback = createFallback();
-      (fallback.detectFileBOM as ReturnType<typeof vi.fn>).mockResolvedValue(
-        false,
-      );
-
-      const svc = new AcpFileSystemService(
-        client,
-        'session-4',
-        { readTextFile: false, writeTextFile: true },
-        fallback,
-      );
-
-      const result = await svc.detectFileBOM('/test/file.txt');
-      expect(result).toBe(false);
-      expect(fallback.detectFileBOM).toHaveBeenCalledWith('/test/file.txt');
-      expect(client.readTextFile).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('readTextFile ENOENT handling', () => {
     it('converts RESOURCE_NOT_FOUND error to ENOENT', async () => {
       const resourceNotFoundError = {
-        code: ACP_ERROR_CODES.RESOURCE_NOT_FOUND,
+        code: RESOURCE_NOT_FOUND_CODE,
         message: 'File not found',
       };
       const client = {
         readTextFile: vi.fn().mockRejectedValue(resourceNotFoundError),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -124,7 +64,9 @@ describe('AcpFileSystemService', () => {
         createFallback(),
       );
 
-      await expect(svc.readTextFile('/some/file.txt')).rejects.toMatchObject({
+      await expect(
+        svc.readTextFile({ path: '/some/file.txt' }),
+      ).rejects.toMatchObject({
         code: 'ENOENT',
         errno: -2,
         path: '/some/file.txt',
@@ -133,12 +75,12 @@ describe('AcpFileSystemService', () => {
 
     it('re-throws other errors unchanged', async () => {
       const otherError = {
-        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+        code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       };
       const client = {
         readTextFile: vi.fn().mockRejectedValue(otherError),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const svc = new AcpFileSystemService(
         client,
@@ -147,8 +89,10 @@ describe('AcpFileSystemService', () => {
         createFallback(),
       );
 
-      await expect(svc.readTextFile('/some/file.txt')).rejects.toMatchObject({
-        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+      await expect(
+        svc.readTextFile({ path: '/some/file.txt' }),
+      ).rejects.toMatchObject({
+        code: INTERNAL_ERROR_CODE,
         message: 'Internal error',
       });
     });
@@ -156,11 +100,15 @@ describe('AcpFileSystemService', () => {
     it('uses fallback when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
-      } as unknown as import('../acp.js').Client;
+      } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
+      const fallbackResponse = {
+        content: 'fallback content',
+        _meta: { bom: false, encoding: 'utf-8' },
+      };
       (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
-        'fallback content',
+        fallbackResponse,
       );
 
       const svc = new AcpFileSystemService(
@@ -170,10 +118,12 @@ describe('AcpFileSystemService', () => {
         fallback,
       );
 
-      const result = await svc.readTextFile('/some/file.txt');
+      const result = await svc.readTextFile({ path: '/some/file.txt' });
 
-      expect(result).toBe('fallback content');
-      expect(fallback.readTextFile).toHaveBeenCalledWith('/some/file.txt');
+      expect(result).toEqual(fallbackResponse);
+      expect(fallback.readTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+      });
       expect(client.readTextFile).not.toHaveBeenCalled();
     });
   });

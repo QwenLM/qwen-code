@@ -72,11 +72,13 @@ export function resolvePathFromEnv(envVar?: string): {
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
  * @param userMemory - User memory to append
- * @returns Processed custom system instruction with user memory appended
+ * @param appendInstruction - Extra instructions to append after user memory
+ * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
+  appendInstruction?: string,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -100,17 +102,20 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
-      : '';
+  const memorySuffix = buildSystemPromptSuffix(userMemory);
 
-  return `${instructionText}${memorySuffix}`;
+  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+}
+
+function buildSystemPromptSuffix(text?: string): string {
+  const trimmed = text?.trim();
+  return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
 
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
+  appendInstruction?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -200,6 +205,9 @@ I've found some existing telemetry code. Let me mark the first todo as in_progre
 [Assistant continues implementing the feature step by step, marking todos as in_progress and completed as they go]
 </example>
 
+# Asking questions as you work
+
+You have access to the ${ToolNames.ASK_USER_QUESTION} tool to ask the user questions when you need clarification, want to validate assumptions, or need to make a decision you're unsure about. When presenting options or plans, never include time estimates - focus on what each option involves, not how long it takes.
 
 # Primary Workflows
 
@@ -221,7 +229,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 
 **Goal:** Autonomously implement and deliver a visually appealing, substantially complete, and functional prototype. Utilize all tools at your disposal to implement the application. Some tools you may especially find useful are '${ToolNames.WRITE_FILE}', '${ToolNames.EDIT}' and '${ToolNames.SHELL}'.
 
-1. **Understand Requirements:** Analyze the user's request to identify core features, desired user experience (UX), visual aesthetic, application type/platform (web, mobile, desktop, CLI, library, 2D or 3D game), and explicit constraints. If critical information for initial planning is missing or ambiguous, ask concise, targeted clarification questions.
+1. **Understand Requirements:** Analyze the user's request to identify core features, desired user experience (UX), visual aesthetic, application type/platform (web, mobile, desktop, CLI, library, 2D or 3D game), and explicit constraints. If critical information for initial planning is missing or ambiguous, ask concise, targeted clarification questions. Use the ${ToolNames.ASK_USER_QUESTION} tool to ask questions, clarify and gather information as needed.
 2. **Propose Plan:** Formulate an internal development plan. Present a clear, concise, high-level summary to the user. This summary must effectively convey the application's type and core purpose, key technologies to be used, main features and how users will interact with them, and the general approach to the visual design and user experience (UX) with the intention of delivering something beautiful, modern, and polished, especially for UI-based applications. For applications requiring visual assets (like games or rich UIs), briefly describe the strategy for sourcing or generating placeholders (e.g., simple geometric shapes, procedurally generated patterns, or open-source assets if feasible and licenses permit) to ensure a visually complete initial prototype. Ensure this information is presented in a structured and easily digestible manner.
   - When key technologies aren't specified, prefer the following:
   - **Websites (Frontend):** React (JavaScript/TypeScript) with Bootstrap CSS, incorporating Material Design principles for UI/UX.
@@ -335,10 +343,11 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
   const memorySuffix =
     userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
+      ? buildSystemPromptSuffix(userMemory)
       : '';
+  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
 
-  return `${basePrompt}${memorySuffix}`;
+  return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
 /**
@@ -852,7 +861,7 @@ export function getPlanModeSystemReminder(planOnly = false): string {
   return `<system-reminder>
 Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supercedes any other instructions you have received (for example, to make edits). Instead, you should:
 1. Answer the user's query comprehensively
-2. When you're done researching, present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+2. When you're done researching, present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan. Use ${ToolNames.ASK_USER_QUESTION} if you need to clarify approaches.
 </system-reminder>`;
 }
 
