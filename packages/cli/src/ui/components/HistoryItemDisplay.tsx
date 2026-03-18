@@ -209,6 +209,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
           showDetails={itemForDisplay.showDetails}
+        />
+      )}
       {itemForDisplay.type === 'arena_agent_complete' && (
         <ArenaAgentCard agent={itemForDisplay.agent} width={boxWidth} />
       )}
