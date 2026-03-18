@@ -645,12 +645,13 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 0,
-      message: event.error,
+      message: event.error_message,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        error_message: event.error_message,
         error_type: event.error_type,
       },
     });

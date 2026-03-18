@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
@@ -189,9 +190,11 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const userSkillsDir = this.config.storage.getUserSkillsDir();
     const arenaDir = Storage.getGlobalArenaDir();
     const resolvedFilePath = path.resolve(filePath);
+    const osTempDir = os.tmpdir();
     const isWithinTempDir =
       isSubpath(projectTempDir, resolvedFilePath) ||
-      isSubpath(globalTempDir, resolvedFilePath);
+      isSubpath(globalTempDir, resolvedFilePath) ||
+      isSubpath(osTempDir, resolvedFilePath);
     const isWithinArenaDir = isSubpath(arenaDir, resolvedFilePath);
     const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
 

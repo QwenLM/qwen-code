@@ -282,12 +282,12 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    if (lastBlock.type === 'text') {
-      const index = state.blocks.length - 1;
-      this.onBlockClosed(state, index, actualParentToolUseId);
-      this.closeBlock(state, index);
-    } else if (lastBlock.type === 'thinking') {
-      const index = state.blocks.length - 1;
+    const index = state.blocks.length - 1;
+    if (!state.openBlocks.has(index)) {
+      return;
+    }
+
+    if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
       this.onBlockClosed(state, index, actualParentToolUseId);
       this.closeBlock(state, index);
     }
@@ -392,7 +392,9 @@ export abstract class BaseJsonOutputAdapter {
     }
 
     const message = this.buildMessage(parentToolUseId);
-    this.emitMessageImpl(message);
+    if (state.messageStarted) {
+      this.emitMessageImpl(message);
+    }
     return message;
   }
 
@@ -656,12 +658,7 @@ export abstract class BaseJsonOutputAdapter {
     parentToolUseId: string,
   ): CLIAssistantMessage {
     const state = this.getMessageState(parentToolUseId);
-    const message = this.finalizeAssistantMessageInternal(
-      state,
-      parentToolUseId,
-    );
-    this.updateLastAssistantMessage(message);
-    return message;
+    return this.finalizeAssistantMessageInternal(state, parentToolUseId);
   }
 
   /**

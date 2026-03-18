@@ -110,6 +110,8 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
+  systemPrompt: string | undefined;
+  appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -288,6 +290,16 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description:
             'Execute the provided prompt and continue in interactive mode',
+        })
+        .option('system-prompt', {
+          type: 'string',
+          description:
+            'Override the main session system prompt for this run. Can be combined with --append-system-prompt.',
+        })
+        .option('append-system-prompt', {
+          type: 'string',
+          description:
+            'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
         })
         .option('sandbox', {
           alias: 's',
@@ -964,6 +976,8 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
+    systemPrompt: argv.systemPrompt,
+    appendSystemPrompt: argv.appendSystemPrompt,
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools,

@@ -196,6 +196,84 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('should pass systemPrompt through --system-prompt', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        systemPrompt: 'You are a test system prompt.',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--system-prompt',
+          'You are a test system prompt.',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should pass appendSystemPrompt through --append-system-prompt', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        appendSystemPrompt: 'Be extra concise.',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining(['--append-system-prompt', 'Be extra concise.']),
+        expect.any(Object),
+      );
+    });
+
+    it('should pass both systemPrompt and appendSystemPrompt when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        systemPrompt: 'Override prompt',
+        appendSystemPrompt: 'Append prompt',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--system-prompt',
+          'Override prompt',
+          '--append-system-prompt',
+          'Append prompt',
+        ]),
+        expect.any(Object),
+      );
+    });
+
     it('should include --resume argument when provided', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

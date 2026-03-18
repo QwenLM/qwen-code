@@ -17,7 +17,8 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent } from '@google/genai';
-import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff } from '../utils/retry.js';
+import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';

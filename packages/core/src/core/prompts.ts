@@ -72,11 +72,13 @@ export function resolvePathFromEnv(envVar?: string): {
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
  * @param userMemory - User memory to append
- * @returns Processed custom system instruction with user memory appended
+ * @param appendInstruction - Extra instructions to append after user memory
+ * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
+  appendInstruction?: string,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -100,17 +102,20 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
-      : '';
+  const memorySuffix = buildSystemPromptSuffix(userMemory);
 
-  return `${instructionText}${memorySuffix}`;
+  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+}
+
+function buildSystemPromptSuffix(text?: string): string {
+  const trimmed = text?.trim();
+  return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
 
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
+  appendInstruction?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -338,10 +343,11 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
   const memorySuffix =
     userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
+      ? buildSystemPromptSuffix(userMemory)
       : '';
+  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
 
-  return `${basePrompt}${memorySuffix}`;
+  return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
 /**

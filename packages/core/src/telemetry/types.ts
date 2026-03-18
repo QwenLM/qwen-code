@@ -254,33 +254,36 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.timestamp': string; // ISO 8601
   response_id?: string;
   model: string;
-  error: string;
-  error_type?: string;
-  status_code?: number | string;
   duration_ms: number;
   prompt_id: string;
   auth_type?: string;
+  // Human-readable error message (e.g. "Request failed with status 429")
+  error_message: string;
+  // Error class or category (e.g. "RateLimitError", "invalid_request_error")
+  error_type?: string;
+  // HTTP status code from the API response (e.g. 429, 500)
+  status_code?: number | string;
 
-  constructor(
-    response_id: string | undefined,
-    model: string,
-    error: string,
-    duration_ms: number,
-    prompt_id: string,
-    auth_type?: string,
-    error_type?: string,
-    status_code?: number | string,
-  ) {
+  constructor(opts: {
+    responseId?: string;
+    model: string;
+    durationMs: number;
+    promptId: string;
+    authType?: string;
+    errorMessage: string;
+    errorType?: string;
+    statusCode?: number | string;
+  }) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
-    this.response_id = response_id;
-    this.model = model;
-    this.error = error;
-    this.error_type = error_type;
-    this.status_code = status_code;
-    this.duration_ms = duration_ms;
-    this.prompt_id = prompt_id;
-    this.auth_type = auth_type;
+    this.response_id = opts.responseId;
+    this.model = opts.model;
+    this.duration_ms = opts.durationMs;
+    this.prompt_id = opts.promptId;
+    this.auth_type = opts.authType;
+    this.error_message = opts.errorMessage;
+    this.error_type = opts.errorType;
+    this.status_code = opts.statusCode;
   }
 }
 

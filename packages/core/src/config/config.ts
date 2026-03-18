@@ -315,6 +315,8 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
@@ -468,6 +470,8 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
+  private readonly systemPrompt: string | undefined;
+  private readonly appendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -580,6 +584,8 @@ export class Config {
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
+    this.systemPrompt = params.systemPrompt;
+    this.appendSystemPrompt = params.appendSystemPrompt;
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
@@ -1227,6 +1233,14 @@ export class Config {
 
   getQuestion(): string | undefined {
     return this.question;
+  }
+
+  getSystemPrompt(): string | undefined {
+    return this.systemPrompt;
+  }
+
+  getAppendSystemPrompt(): string | undefined {
+    return this.appendSystemPrompt;
   }
 
   getCoreTools(): string[] | undefined {
