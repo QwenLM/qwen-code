@@ -17,6 +17,7 @@ import {
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
+import { HookType } from '../hooks/types.js';
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -431,6 +432,142 @@ describe('convertClaudePluginPackage', () => {
     expect(convertedContent).toContain('name: cool-agent');
 
     // Clean up
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('should convert hooks from Claude plugin format to Qwen format with variable substitution', async () => {
+    // Setup: Create a plugin with hooks in Claude format
+    const pluginSourceDir = path.join(testDir, 'plugin-with-hooks');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+
+    // Create hooks directory with hooks.json in Claude format
+    const hooksDir = path.join(pluginSourceDir, 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+
+    const hooksJson = {
+      hooks: {
+        PostToolUse: [
+          {
+            matcher: 'post-install-matcher', // Part of HookDefinition
+            sequential: true, // Part of HookDefinition
+            description: 'Run after installation',
+            hooks: [
+              // HookConfig[] array inside HookDefinition
+              {
+                type: HookType.Command,
+                command: '${CLAUDE_PLUGIN_ROOT}/scripts/post-install.sh',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(hooksDir, 'hooks.json'),
+      JSON.stringify(hooksJson),
+      'utf-8',
+    );
+
+    // Create marketplace.json
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: './hooks/hooks.json', // Reference hooks from file
+        },
+      ],
+    };
+
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Execute: Convert the plugin
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // Verify: The converted config should contain processed hooks
+    expect(result.config.hooks).toBeDefined();
+    expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
+    // Check that the variable was substituted
+    expect(result.config.hooks!['PostToolUse']![0].hooks![0].command).toBe(
+      `${pluginSourceDir}/scripts/post-install.sh`,
+    );
+
+    // Clean up converted directory
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('should handle hooks defined directly in marketplace config', async () => {
+    // Setup: Create a plugin with hooks defined directly in marketplace config
+    const pluginSourceDir = path.join(testDir, 'direct-hooks-plugin');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+
+    // Create marketplace.json with hooks defined directly
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'direct-hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: '*', // Part of HookDefinition
+                sequential: true, // Part of HookDefinition
+                hooks: [
+                  // HookConfig[] array inside HookDefinition
+                  {
+                    type: HookType.Command,
+                    command: 'npm install',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    // Execute: Convert the plugin
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'direct-hooks-plugin',
+    );
+
+    // Verify: The converted config should contain the hooks
+    expect(result.config.hooks).toBeDefined();
+    expect(result.config.hooks!['PreToolUse']).toHaveLength(1);
+    expect(result.config.hooks!['PreToolUse']![0].hooks![0].command).toBe(
+      'npm install',
+    );
+
+    // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 });

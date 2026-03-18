@@ -18,6 +18,7 @@ const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
 const IDE_DIR_NAME = 'ide';
 const DEBUG_DIR_NAME = 'debug';
+const ARENA_DIR_NAME = 'arena';
 
 export class Storage {
   private readonly targetDir: string;
@@ -76,6 +77,10 @@ export class Storage {
 
   static getGlobalBinDir(): string {
     return path.join(Storage.getGlobalQwenDir(), BIN_DIR_NAME);
+  }
+
+  static getGlobalArenaDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
   }
 
   getQwenDir(): string {
