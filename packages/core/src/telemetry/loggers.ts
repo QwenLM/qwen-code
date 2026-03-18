@@ -375,7 +375,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     ...event,
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
-    ['error.message']: event.error,
+    ['error.message']: event.error_message,
     model_name: event.model,
     duration: event.duration_ms,
   };
@@ -389,7 +389,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
 
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
-    body: `API error for ${event.model}. Error: ${event.error}. Duration: ${event.duration_ms}ms.`,
+    body: `API error for ${event.model}. Error: ${event.error_message}. Duration: ${event.duration_ms}ms.`,
     attributes,
   };
   logger.emit(logRecord);
