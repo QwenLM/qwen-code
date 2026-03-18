@@ -80,15 +80,13 @@ export interface ExportMetadata {
   contextWindowSize?: number;
   /** Total tokens used (prompt + completion) */
   totalTokens?: number;
-  /** Number of files read */
-  filesRead?: number;
   /** Number of files written/edited */
   filesWritten?: number;
   /** Lines of code added */
   linesAdded?: number;
   /** Lines of code removed */
   linesRemoved?: number;
-  /** Unique files referenced in the session */
+  /** Unique files referenced in the session (written files only) */
   uniqueFiles: string[];
   /** Last response ID from the LLM API (request ID) */
   requestId?: string;

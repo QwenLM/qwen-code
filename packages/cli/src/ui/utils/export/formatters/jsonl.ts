@@ -52,9 +52,6 @@ export function toJsonl(sessionData: ExportSessionData): string {
   if (sourceMetadata?.totalTokens !== undefined) {
     metadata['totalTokens'] = sourceMetadata.totalTokens;
   }
-  if (sourceMetadata?.filesRead !== undefined) {
-    metadata['filesRead'] = sourceMetadata.filesRead;
-  }
   if (sourceMetadata?.filesWritten !== undefined) {
     metadata['filesWritten'] = sourceMetadata.filesWritten;
   }

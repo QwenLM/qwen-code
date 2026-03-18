@@ -274,6 +274,10 @@ body {
   cursor: pointer;
 }
 
+.metadata-content .metadata-value.multiline {
+  white-space: pre-wrap;
+}
+
 .metadata-content .metadata-value.text-green {
   color: #22c55e;
 }

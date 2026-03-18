@@ -20,11 +20,10 @@ import type {
  * File operation statistics extracted from tool calls.
  */
 interface FileOperationStats {
-  filesRead: number;
   filesWritten: number;
   linesAdded: number;
   linesRemoved: number;
-  uniqueFiles: Set<string>;
+  writtenFilePaths: Set<string>;
 }
 
 /**
@@ -133,11 +132,10 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   const byNameCursor = new Map<string, number>();
 
   const stats: FileOperationStats = {
-    filesRead: 0,
     filesWritten: 0,
     linesAdded: 0,
     linesRemoved: 0,
-    uniqueFiles: new Set(),
+    writtenFilePaths: new Set(),
   };
 
   for (const record of records) {
@@ -160,17 +158,6 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
       }
     }
     const { resultDisplay } = record.toolCallResult;
-
-    // Handle read_file operations
-    if (
-      toolName === 'read_file' &&
-      (args?.['absolute_path'] || args?.['file_path'])
-    ) {
-      const filePath = String(args['absolute_path'] ?? args['file_path']);
-      stats.filesRead++;
-      stats.uniqueFiles.add(filePath);
-      continue;
-    }
 
     // Track file locations from resultDisplay
     if (
@@ -198,12 +185,15 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
           (args?.['file_path'] as string) ||
           (args?.['absolute_path'] as string) ||
           display.fileName;
-        stats.uniqueFiles.add(filePath);
+      } else {
+        // Fallback if fileName is not a string
+        filePath = 'unknown';
       }
 
       if (hasOriginalContent || hasNewContent) {
         // This is a write/edit operation
         stats.filesWritten++;
+        stats.writtenFilePaths.add(filePath);
 
         // Calculate line changes
         if (display.diffStat) {
@@ -386,11 +376,10 @@ async function extractMetadata(
     contextUsagePercent: tokenStats.contextUsagePercent,
     contextWindowSize,
     totalTokens: tokenStats.totalTokens,
-    filesRead: fileStats.filesRead,
-    filesWritten: fileStats.filesWritten,
+    filesWritten: fileStats.writtenFilePaths.size,
     linesAdded: fileStats.linesAdded,
     linesRemoved: fileStats.linesRemoved,
-    uniqueFiles: Array.from(fileStats.uniqueFiles),
+    uniqueFiles: Array.from(fileStats.writtenFilePaths),
     requestId,
   };
 }

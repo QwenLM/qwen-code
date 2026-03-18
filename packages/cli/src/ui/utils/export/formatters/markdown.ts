@@ -68,9 +68,6 @@ export function toMarkdown(sessionData: ExportSessionData): string {
   lines.push('');
 
   // Add file operation stats
-  if (metadata?.filesRead !== undefined) {
-    lines.push(`- **Files Read**: ${metadata.filesRead}`);
-  }
   if (metadata?.filesWritten !== undefined) {
     lines.push(`- **Files Written**: ${metadata.filesWritten}`);
   }

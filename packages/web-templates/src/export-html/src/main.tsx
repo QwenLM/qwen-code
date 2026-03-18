@@ -3,11 +3,7 @@ import logoSvg from './favicon.svg';
 import { TempFileModal } from './components/TempFileModal.js';
 import { usePlatformContext } from './components/hooks.js';
 import { MetadataSidebar } from './components/MetadataSidebar.js';
-import {
-  parseChatData,
-  isChatViewerMessage,
-  formatSessionDate,
-} from './components/utils.js';
+import { parseChatData, isChatViewerMessage } from './components/utils.js';
 
 declare global {
   interface Window {
@@ -52,8 +48,6 @@ const App = () => {
   const messages = rawMessages
     .filter(isChatViewerMessage)
     .filter((record) => record.type !== 'system');
-  const sessionId = chatData.sessionId ?? '-';
-  const sessionDate = formatSessionDate(chatData.startTime);
   const metadata = chatData.metadata;
   const { platformContext, modalState, closeModal } = usePlatformContext();
 
@@ -70,16 +64,6 @@ const App = () => {
             <div className="logo-text" data-text="QWEN">
               <span className="logo-text-inner">QWEN</span>
             </div>
-          </div>
-        </div>
-        <div className="meta">
-          <div className="meta-item">
-            <span className="meta-label">Session Id</span>
-            <span className="font-mono">{sessionId}</span>
-          </div>
-          <div className="meta-item">
-            <span className="meta-label">Export Time</span>
-            <span>{sessionDate}</span>
           </div>
         </div>
       </header>
