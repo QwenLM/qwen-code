@@ -73,12 +73,21 @@ export const Onboarding: FC<OnboardingProps> = ({
     });
   };
 
-  const trustedIconUrl =
-    iconUrl?.startsWith('data:') ||
-    iconUrl?.startsWith('http') ||
-    iconUrl?.startsWith('vscode-webview-resource:')
-      ? iconUrl
-      : undefined;
+  const isSafeIcon = (url?: string) => {
+    if (!url) return false;
+    try {
+      if (url.startsWith('data:') || url.startsWith('vscode-webview-resource:'))
+        return true;
+      const parsed = new URL(url);
+      return ['http:', 'https:'].includes(parsed.protocol);
+    } catch {
+      return false;
+    }
+  };
+
+  const trustedIconUrl = isSafeIcon(iconUrl)
+    ? encodeURI(iconUrl as string)
+    : undefined;
 
   return (
     <div className="flex flex-col items-center justify-center min-h-full p-5 md:p-10">
