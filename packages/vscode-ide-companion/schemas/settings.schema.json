@@ -553,6 +553,10 @@
           "type": "object",
           "additionalProperties": true
         },
+        "runtimeOutputDir": {
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
+          "type": "string"
+        },
         "tavilyApiKey": {
           "description": "⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.",
           "type": "string"

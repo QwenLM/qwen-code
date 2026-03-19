@@ -323,8 +323,15 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker
+  // Handle --resume without a session ID by showing the session picker.
+  // Set the runtime output dir early so the picker can find sessions stored
+  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
+  // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
