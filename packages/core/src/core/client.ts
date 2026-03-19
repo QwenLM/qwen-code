@@ -67,6 +67,7 @@ import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
 // Hook types and utilities
@@ -683,8 +684,11 @@ export class GeminiClient {
     generationConfig: GenerateContentConfig,
     abortSignal: AbortSignal,
     model: string,
+    promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
     let currentAttemptModel: string = model;
+    const promptId =
+      promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
     try {
       const userMemory = this.config.getUserMemory();
@@ -707,7 +711,7 @@ export class GeminiClient {
             config: requestConfig,
             contents,
           },
-          this.lastPromptId!,
+          promptId,
         );
       };
       const result = await retryWithBackoff(apiCall, {
