@@ -1734,4 +1734,77 @@ export default {
     '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigate | Enter: Select | Esc: Cancel',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan',
+  'Authenticate using Qwen OAuth': 'Authenticate using Qwen OAuth',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Authenticate using Alibaba Cloud Coding Plan',
+  'Region for Coding Plan (china/global)':
+    'Region for Coding Plan (china/global)',
+  'API key for Coding Plan': 'API key for Coding Plan',
+  'Show current authentication status': 'Show current authentication status',
+  'Authentication completed successfully.':
+    'Authentication completed successfully.',
+  'Starting Qwen OAuth authentication...':
+    'Starting Qwen OAuth authentication...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Successfully authenticated with Qwen OAuth.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Failed to authenticate with Qwen OAuth: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Processing Alibaba Cloud Coding Plan authentication...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Successfully authenticated with Alibaba Cloud Coding Plan.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Failed to authenticate with Coding Plan: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Global',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Select region for Coding Plan:',
+  'Enter your Coding Plan API key: ': 'Enter your Coding Plan API key: ',
+  'Select authentication method:': 'Select authentication method:',
+  '\n=== Authentication Status ===\n': '\n=== Authentication Status ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  No authentication method configured.\n',
+  'Run one of the following commands to get started:\n':
+    'Run one of the following commands to get started:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
+  'Or simply run:': 'Or simply run:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Interactive authentication setup\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
+  '  Type: Free tier': '  Type: Free tier',
+  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Authentication Method: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
+  '  Region: {{region}}': '  Region: {{region}}',
+  '  Current Model: {{model}}': '  Current Model: {{model}}',
+  '  Config Version: {{version}}': '  Config Version: {{version}}',
+  '  Status: API key configured\n': '  Status: API key configured\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Issue: API key not found in environment or settings\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Run `qwen auth coding-plan` to re-configure.\n',
+  '✓ Authentication Method: {{type}}': '✓ Authentication Method: {{type}}',
+  '  Status: Configured\n': '  Status: Configured\n',
+  'Failed to check authentication status: {{error}}':
+    'Failed to check authentication status: {{error}}',
+  'Select an option:': 'Select an option:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw mode not available. Please run in an interactive terminal.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
 };

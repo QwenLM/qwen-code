@@ -33,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { authCommand } from '../commands/auth.js';
 import type { Settings } from './settings.js';
 import {
   resolveCliGenerationConfig,
@@ -584,6 +585,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
+    // Register Auth subcommands
+    .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand);
 

@@ -1685,4 +1685,80 @@ export default {
     '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Qwen-Authentifizierung mit Qwen-OAuth oder Alibaba Cloud Coding Plan konfigurieren',
+  'Authenticate using Qwen OAuth': 'Mit Qwen OAuth authentifizieren',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Mit Alibaba Cloud Coding Plan authentifizieren',
+  'Region for Coding Plan (china/global)':
+    'Region für Coding Plan (china/global)',
+  'API key for Coding Plan': 'API-Schlüssel für Coding Plan',
+  'Show current authentication status':
+    'Aktuellen Authentifizierungsstatus anzeigen',
+  'Authentication completed successfully.':
+    'Authentifizierung erfolgreich abgeschlossen.',
+  'Starting Qwen OAuth authentication...':
+    'Qwen OAuth-Authentifizierung wird gestartet...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Erfolgreich mit Qwen OAuth authentifiziert.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Authentifizierung mit Qwen OAuth fehlgeschlagen: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Alibaba Cloud Coding Plan-Authentifizierung wird verarbeitet...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Erfolgreich mit Alibaba Cloud Coding Plan authentifiziert.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Authentifizierung mit Coding Plan fehlgeschlagen: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Global',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Region für Coding Plan auswählen:',
+  'Enter your Coding Plan API key: ':
+    'Geben Sie Ihren Coding Plan API-Schlüssel ein: ',
+  'Select authentication method:': 'Authentifizierungsmethode auswählen:',
+  '\n=== Authentication Status ===\n': '\n=== Authentifizierungsstatus ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  Keine Authentifizierungsmethode konfiguriert.\n',
+  'Run one of the following commands to get started:\n':
+    'Führen Sie einen der folgenden Befehle aus, um zu beginnen:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Mit Qwen OAuth authentifizieren (kostenlos)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Mit Alibaba Cloud Coding Plan authentifizieren\n',
+  'Or simply run:': 'Oder einfach ausführen:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Interaktive Authentifizierungseinrichtung\n',
+  '✓ Authentication Method: Qwen OAuth':
+    '✓ Authentifizierungsmethode: Qwen OAuth',
+  '  Type: Free tier': '  Typ: Kostenlos',
+  '  Limit: Up to 1,000 requests/day': '  Limit: Bis zu 1.000 Anfragen/Tag',
+  '  Models: Qwen latest models\n': '  Modelle: Qwen neueste Modelle\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Authentifizierungsmethode: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
+  '  Region: {{region}}': '  Region: {{region}}',
+  '  Current Model: {{model}}': '  Aktuelles Modell: {{model}}',
+  '  Config Version: {{version}}': '  Konfigurationsversion: {{version}}',
+  '  Status: API key configured\n': '  Status: API-Schlüssel konfiguriert\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Authentifizierungsmethode: Alibaba Cloud Coding Plan (Unvollständig)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Problem: API-Schlüssel nicht in Umgebung oder Einstellungen gefunden\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Führen Sie `qwen auth coding-plan` aus, um neu zu konfigurieren.\n',
+  '✓ Authentication Method: {{type}}': '✓ Authentifizierungsmethode: {{type}}',
+  '  Status: Configured\n': '  Status: Konfiguriert\n',
+  'Failed to check authentication status: {{error}}':
+    'Authentifizierungsstatus konnte nicht überprüft werden: {{error}}',
+  'Select an option:': 'Option auswählen:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
 };
