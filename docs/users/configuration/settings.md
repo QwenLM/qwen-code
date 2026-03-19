@@ -291,6 +291,12 @@ Provider-specific fields:
 - `google`: `apiKey`, `searchEngineId`
 - `dashscope`: no extra fields required
 
+**Choosing a provider:**
+
+- **DashScope**: Recommended for Qwen OAuth users. Automatically available without additional configuration. Best for users already authenticated with Qwen.
+- **Tavily**: General-purpose search API with good results. Requires an API key from [tavily.com](https://tavily.com). Good for users who need reliable web search across different authentication types.
+- **Google**: Uses Google Custom Search. Requires both an API key and a search engine ID from [Google Cloud Console](https://console.cloud.google.com). Best for users who want Google's search results.
+
 Example:
 
 ```json
@@ -334,8 +340,36 @@ Example:
 
 #### hooks
 
-Defines hook events and the commands that should run when those events fire. At
-the settings level, Qwen Code currently documents these event keys:
+Defines hook events and the commands that should run when those ev
+ents fire. At
+the settings level, Qwen Code currently documents these event keys
+:
+
+> [!tip]
+>
+> **Quick Start:** To get started with hooks quickly, add this minimal
+> configuration to your `settings.json`:
+>
+> ```json
+> {
+>   "hooks": {
+>     "Stop": [
+>       {
+>         "hooks": [
+>           {
+>             "type": "command",
+>             "command": "echo 'Session ended' >> ~/.qwen/session.log"
+>           }
+>         ]
+>       }
+>     ]
+>   }
+> }
+> ```
+>
+> This logs a message each time Qwen Code finishes a response. See the
+> detailed field reference below for more options.
+
 
 | Setting                  | Type             | Description                                                                                        | Default |
 | ------------------------ | ---------------- | -------------------------------------------------------------------------------------------------- | ------- |

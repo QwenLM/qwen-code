@@ -11,6 +11,13 @@ include a `SKILL.md` file with YAML frontmatter plus Markdown instructions.
 Skills package domain knowledge, workflow instructions, and optional helper
 files into a discoverable unit that the model can load when it is relevant.
 
+### Benefits
+
+- **Consistency**: Ensure Qwen Code follows the same procedures every time for repetitive tasks
+- **Reusability**: Share skills across projects and with team members
+- **Discoverability**: Skills are automatically loaded when relevant to your request
+- **Customization**: Tailor Qwen Code's behavior to your specific workflows and conventions
+
 A skill directory can include:
 
 ```text

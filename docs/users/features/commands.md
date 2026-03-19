@@ -55,6 +55,14 @@ Qwen Code supports three command styles:
 - `ui <language>` to change the CLI language
 - `output <language>` to change the model output language
 
+`/language` accepts language codes in these formats:
+
+- **ISO 639-1 codes**: `en`, `zh`, `ja`, `de`, `fr`, etc.
+- **ISO 639-1 with region**: `zh-CN`, `zh-TW`, `en-US`, `en-GB`, etc.
+- **Native names**: `Chinese`, `English`, `Japanese` (will be mapped to codes)
+
+Examples: `/language ui zh-CN` (Chinese Simplified), `/language output ja` (Japanese)
+
 ### 1.3 Tools, Skills, Models, and Automation
 
 | Command          | Description                                                            | Usage Examples                                   |
