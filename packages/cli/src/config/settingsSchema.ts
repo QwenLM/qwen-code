@@ -864,6 +864,55 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  permissions: {
+    type: 'object',
+    label: 'Permissions',
+    category: 'Tools',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.',
+    showInDialog: false,
+    properties: {
+      allow: {
+        type: 'array',
+        label: 'Allow Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that are auto-approved without confirmation. ' +
+          'Examples: "ShellTool", "Bash(git *)", "ReadFileTool".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      ask: {
+        type: 'array',
+        label: 'Ask Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that always require user confirmation. ' +
+          'Takes precedence over allow rules.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      deny: {
+        type: 'array',
+        label: 'Deny Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that are always blocked. Highest priority rule. ' +
+          'Examples: "ShellTool", "Bash(rm -rf *)".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   tools: {
     type: 'object',
     label: 'Tools',
@@ -923,32 +972,33 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      // Legacy tool permission fields – kept for backward compatibility.
+      // Use permissions.{allow,ask,deny} instead.
       core: {
         type: 'array',
-        label: 'Core Tools',
+        label: 'Core Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Paths to core tool definitions.',
+        description: 'Deprecated. Use permissions.allow instead.',
         showInDialog: false,
       },
       allowed: {
         type: 'array',
-        label: 'Allowed Tools',
+        label: 'Allowed Tools (deprecated)',
         category: 'Advanced',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description:
-          'A list of tool names that will bypass the confirmation dialog.',
+        description: 'Deprecated. Use permissions.allow instead.',
         showInDialog: false,
       },
       exclude: {
         type: 'array',
-        label: 'Exclude Tools',
+        label: 'Exclude Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Tool names to exclude from discovery.',
+        description: 'Deprecated. Use permissions.deny instead.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

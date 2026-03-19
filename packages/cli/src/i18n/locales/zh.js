@@ -1043,6 +1043,8 @@ export default {
   'No, suggest changes (esc)': '否，建议更改 (esc)',
   "Allow execution of: '{{command}}'?": "允许执行：'{{command}}'？",
   'Yes, allow always ...': '是，总是允许 ...',
+  'Always allow in this project': '在本项目中总是允许',
+  'Always allow for this user': '对该用户总是允许',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1196,6 +1198,71 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': '管理文件夹信任设置',
+  'Manage permission rules': '管理权限规则',
+  Allow: '允许',
+  Ask: '询问',
+  Deny: '拒绝',
+  Workspace: '工作区',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code 使用已允许的工具前不会询问。',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code 使用这些工具前会先询问。',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code 不允许使用被拒绝的工具。',
+  'Manage trusted directories for this workspace.':
+    '管理此工作区的受信任目录。',
+  'Any use of the {{tool}} tool': '{{tool}} 工具的任何使用',
+  "{{tool}} commands matching '{{pattern}}'":
+    "匹配 '{{pattern}}' 的 {{tool}} 命令",
+  'From user settings': '来自用户设置',
+  'From project settings': '来自项目设置',
+  'From session': '来自会话',
+  'Project settings (local)': '项目设置（本地）',
+  'Saved in .qwen/settings.local.json': '保存在 .qwen/settings.local.json',
+  'Project settings': '项目设置',
+  'Checked in at .qwen/settings.json': '保存在 .qwen/settings.json',
+  'User settings': '用户设置',
+  'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
+  'Add a new rule…': '添加新规则…',
+  'Add {{type}} permission rule': '添加{{type}}权限规则',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    '权限规则是一个工具名称，可选地后跟括号中的限定符。',
+  'e.g.,': '例如',
+  or: '或',
+  'Enter permission rule…': '输入权限规则…',
+  'Enter to submit · Esc to cancel': '回车提交 · Esc 取消',
+  'Where should this rule be saved?': '此规则应保存在哪里？',
+  'Enter to confirm · Esc to cancel': '回车确认 · Esc 取消',
+  'Delete {{type}} rule?': '删除{{type}}规则？',
+  'Are you sure you want to delete this permission rule?':
+    '确定要删除此权限规则吗？',
+  'Permissions:': '权限：',
+  '(←/→ or tab to cycle)': '（←/→ 或 tab 切换）',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '按 ↑↓ 导航 · 回车选择 · 输入搜索 · Esc 取消',
+  'Search…': '搜索…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    '使用 /trust 管理此工作区的文件夹信任设置。',
+  // Workspace directory management
+  'Add directory…': '添加目录…',
+  'Add directory to workspace': '添加工作区目录',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code 可以读取工作区中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code 将能够读取此目录中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Enter the path to the directory:': '输入目录路径：',
+  'Enter directory path…': '输入目录路径…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab 补全 · 回车添加 · Esc 取消',
+  'Remove directory?': '删除目录？',
+  'Are you sure you want to remove this directory from the workspace?':
+    '确定要将此目录从工作区中移除吗？',
+  '  (Original working directory)': '  （原始工作目录）',
+  '  (from settings)': '  （来自设置）',
+  'Directory does not exist.': '目录不存在。',
+  'Path is not a directory.': '路径不是目录。',
+  'This directory is already in the workspace.': '此目录已在工作区中。',
+  'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
 
   // ============================================================================
   // Status Bar

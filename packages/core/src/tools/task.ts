@@ -410,6 +410,8 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
               ToolConfirmationOutcome.ProceedAlways,
               ToolConfirmationOutcome.ProceedAlwaysServer,
               ToolConfirmationOutcome.ProceedAlwaysTool,
+              ToolConfirmationOutcome.ProceedAlwaysProject,
+              ToolConfirmationOutcome.ProceedAlwaysUser,
             ]);
 
             if (proceedOutcomes.has(outcome)) {
@@ -453,11 +455,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
 
   getDescription(): string {
     return `${this.params.subagent_type} subagent: "${this.params.description}"`;
-  }
-
-  override async shouldConfirmExecute(): Promise<false> {
-    // Task delegation should execute automatically without user confirmation
-    return false;
   }
 
   async execute(

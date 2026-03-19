@@ -42,7 +42,7 @@ function getInitialTrustState(
   };
 }
 
-export const usePermissionsModifyTrust = (
+export const useTrustModify = (
   onExit: () => void,
   addItem: UseHistoryManagerReturn['addItem'],
 ) => {

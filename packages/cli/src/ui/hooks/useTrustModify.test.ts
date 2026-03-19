@@ -16,7 +16,7 @@ import {
   type Mock,
 } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { usePermissionsModifyTrust } from './usePermissionsModifyTrust.js';
+import { useTrustModify } from './useTrustModify.js';
 import { TrustLevel } from '../../config/trustedFolders.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { LoadedTrustedFolders } from '../../config/trustedFolders.js';
@@ -46,7 +46,7 @@ vi.mock('../contexts/SettingsContext.js', () => ({
   useSettings: mockedUseSettings,
 }));
 
-describe('usePermissionsModifyTrust', () => {
+describe('useTrustModify', () => {
   let mockOnExit: Mock;
   let mockAddItem: Mock;
 
@@ -84,7 +84,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     expect(result.current.currentTrustLevel).toBe(TrustLevel.TRUST_FOLDER);
@@ -101,7 +101,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     expect(result.current.isInheritedTrustFromParent).toBe(true);
@@ -118,7 +118,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     expect(result.current.isInheritedTrustFromIde).toBe(true);
@@ -137,7 +137,7 @@ describe('usePermissionsModifyTrust', () => {
       .mockReturnValueOnce({ isTrusted: true, source: 'file' });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     act(() => {
@@ -161,7 +161,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     act(() => {
@@ -188,7 +188,7 @@ describe('usePermissionsModifyTrust', () => {
       .mockReturnValueOnce({ isTrusted: true, source: 'file' });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     act(() => {
@@ -218,7 +218,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     act(() => {
@@ -245,7 +245,7 @@ describe('usePermissionsModifyTrust', () => {
     });
 
     const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+      useTrustModify(mockOnExit, mockAddItem),
     );
 
     act(() => {

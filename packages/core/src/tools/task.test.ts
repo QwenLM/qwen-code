@@ -31,7 +31,6 @@ type TaskToolWithProtectedMethods = TaskTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
-    shouldConfirmExecute: () => Promise<boolean>;
   };
 };
 
@@ -519,9 +518,9 @@ describe('TaskTool', () => {
       const invocation = (
         taskTool as TaskToolWithProtectedMethods
       ).createInvocation(params);
-      const shouldConfirm = await invocation.shouldConfirmExecute();
+      const permission = await invocation.getDefaultPermission();
 
-      expect(shouldConfirm).toBe(false);
+      expect(permission).toBe('allow');
     });
 
     it('should provide correct description', async () => {
