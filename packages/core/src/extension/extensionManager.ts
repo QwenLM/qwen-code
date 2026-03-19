@@ -989,7 +989,8 @@ export class ExtensionManager {
         }
 
         // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
-        if (originSource === 'Claude') {
+        const hooksDir = path.join(destinationPath, 'hooks');
+        if (originSource === 'Claude' || fs.existsSync(hooksDir)) {
           performVariableReplacement(destinationPath);
         }
 

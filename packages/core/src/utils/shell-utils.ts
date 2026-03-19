@@ -913,3 +913,45 @@ export function isCommandNeedsPermission(command: string): {
     reason: 'Command requires permission to execute.',
   };
 }
+
+/**
+ * Checks user arguments for potentially dangerous shell characters.
+ * This is used to validate arguments before they are substituted into
+ * shell command templates (e.g., $ARGUMENTS placeholder).
+ *
+ * Note: This does NOT remove outer quotes - it validates the raw input.
+ * Use escapeShellArg() for safe shell argument escaping.
+ *
+ * @param args - The raw user arguments string
+ * @returns Object with isSafe flag and list of dangerous patterns found
+ */
+export function checkArgumentSafety(args: string): {
+  isSafe: boolean;
+  dangerousPatterns: string[];
+} {
+  const dangerousPatterns: string[] = [];
+
+  // Command substitution patterns
+  if (/\$\(/.test(args)) dangerousPatterns.push('$() command substitution');
+  if (/`/.test(args)) dangerousPatterns.push('backtick command substitution');
+  if (/<\(/.test(args)) dangerousPatterns.push('<() process substitution');
+  if (/>\(/.test(args)) dangerousPatterns.push('>() process substitution');
+
+  // Command separators (outside of quotes)
+  if (/;/.test(args)) dangerousPatterns.push('; command separator');
+  if (/\|/.test(args)) dangerousPatterns.push('| pipe');
+  if (/&&/.test(args)) dangerousPatterns.push('&& AND operator');
+  if (/\|\|/.test(args)) dangerousPatterns.push('|| OR operator');
+
+  // Background execution (space + &, with optional surrounding)
+  if (/\s+&/.test(args)) dangerousPatterns.push('& background operator');
+
+  // Input/Output redirection
+  if (/>\s+|\d*>/.test(args)) dangerousPatterns.push('> output redirection');
+  if (/<\s+|\d*</.test(args)) dangerousPatterns.push('< input redirection');
+
+  return {
+    isSafe: dangerousPatterns.length === 0,
+    dangerousPatterns,
+  };
+}

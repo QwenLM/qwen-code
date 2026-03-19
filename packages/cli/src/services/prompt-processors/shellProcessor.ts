@@ -12,6 +12,7 @@ import {
   getShellConfiguration,
   ShellExecutionService,
   flatMapTextParts,
+  checkArgumentSafety,
 } from '@qwen-code/qwen-code-core';
 import type { AnyToolInvocation } from '@qwen-code/qwen-code-core';
 
@@ -101,6 +102,16 @@ export class ShellProcessor implements IPromptProcessor {
     const { shell } = getShellConfiguration();
     const userArgsEscaped = escapeShellArg(userArgsRaw, shell);
 
+    // Check safety of the value that will be used for $ARGUMENTS (after removing outer quotes)
+    let userArgsForArgumentsPlaceholder = userArgsRaw.replace(
+      /^'([\s\S]*?)'$/,
+      '$1',
+    );
+    const argumentSafety = checkArgumentSafety(userArgsForArgumentsPlaceholder);
+    if (!argumentSafety.isSafe) {
+      userArgsForArgumentsPlaceholder = userArgsEscaped;
+    }
+
     const resolvedInjections: ResolvedShellInjection[] = injections.map(
       (injection) => {
         const command = injection.content;
@@ -111,10 +122,7 @@ export class ShellProcessor implements IPromptProcessor {
 
         const resolvedCommand = command
           .replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsEscaped) // Replace {{args}}
-          .replaceAll(
-            '$ARGUMENTS',
-            userArgsRaw.replace(/^'([\s\S]*?)'$/, '$1'),
-          );
+          .replaceAll('$ARGUMENTS', userArgsForArgumentsPlaceholder);
         return { ...injection, resolvedCommand };
       },
     );

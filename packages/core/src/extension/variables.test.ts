@@ -406,4 +406,53 @@ describe('performVariableReplacement', () => {
       'content',
     );
   });
+
+  describe('regex boundary cases', () => {
+    it('should not replace incomplete variable syntax (missing brace) in markdown', () => {
+      const extDir = path.join(testDir, 'ext-incomplete');
+      fs.mkdirSync(extDir, { recursive: true });
+
+      // Note: performVariableReplacement only processes .md files
+      const content = 'Path: $CLAUDE_PLUGIN_ROOT/config.json';
+      fs.writeFileSync(path.join(extDir, 'test.md'), content, 'utf-8');
+
+      performVariableReplacement(extDir);
+
+      const result = fs.readFileSync(path.join(extDir, 'test.md'), 'utf-8');
+      // Should remain unchanged (no braces)
+      expect(result).toBe('Path: $CLAUDE_PLUGIN_ROOT/config.json');
+    });
+
+    it('should replace double dollar sign but keep first dollar', () => {
+      const extDir = path.join(testDir, 'ext-double-dollar');
+      fs.mkdirSync(extDir, { recursive: true });
+
+      // Note: performVariableReplacement only processes .md files
+      // The regex matches ${CLAUDE_PLUGIN_ROOT}, leaving first $ intact
+      const content = 'Path: $${CLAUDE_PLUGIN_ROOT}/config.json';
+      fs.writeFileSync(path.join(extDir, 'test.md'), content, 'utf-8');
+
+      performVariableReplacement(extDir);
+
+      const result = fs.readFileSync(path.join(extDir, 'test.md'), 'utf-8');
+      // First $ is preserved, variable is replaced
+      expect(result).toBe(`Path: $${extDir}/config.json`);
+    });
+
+    it('should replace variable in markdown comments', () => {
+      const extDir = path.join(testDir, 'ext-comment');
+      fs.mkdirSync(extDir, { recursive: true });
+
+      // Comments in markdown files should be processed
+      const content = '# TODO: Update ${CLAUDE_PLUGIN_ROOT} later';
+      fs.writeFileSync(path.join(extDir, 'test.md'), content, 'utf-8');
+
+      performVariableReplacement(extDir);
+
+      const result = fs.readFileSync(path.join(extDir, 'test.md'), 'utf-8');
+      // Should be replaced (comments in markdown are still processed)
+      expect(result).toContain(extDir);
+      expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+    });
+  });
 });

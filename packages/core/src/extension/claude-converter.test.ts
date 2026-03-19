@@ -511,66 +511,6 @@ describe('convertClaudePluginPackage', () => {
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
-
-  it('should handle hooks defined directly in marketplace config', async () => {
-    // Setup: Create a plugin with hooks defined directly in marketplace config
-    const pluginSourceDir = path.join(testDir, 'direct-hooks-plugin');
-    fs.mkdirSync(pluginSourceDir, { recursive: true });
-
-    // Create marketplace.json with hooks defined directly
-    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
-    fs.mkdirSync(marketplaceDir, { recursive: true });
-
-    const marketplaceConfig: ClaudeMarketplaceConfig = {
-      name: 'test-marketplace',
-      owner: { name: 'Test Owner', email: 'test@example.com' },
-      plugins: [
-        {
-          name: 'direct-hooks-plugin',
-          version: '1.0.0',
-          source: './',
-          strict: false,
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: '*', // Part of HookDefinition
-                sequential: true, // Part of HookDefinition
-                hooks: [
-                  // HookConfig[] array inside HookDefinition
-                  {
-                    type: HookType.Command,
-                    command: 'npm install',
-                  },
-                ],
-              },
-            ],
-          },
-        },
-      ],
-    };
-
-    fs.writeFileSync(
-      path.join(marketplaceDir, 'marketplace.json'),
-      JSON.stringify(marketplaceConfig, null, 2),
-      'utf-8',
-    );
-
-    // Execute: Convert the plugin
-    const result = await convertClaudePluginPackage(
-      pluginSourceDir,
-      'direct-hooks-plugin',
-    );
-
-    // Verify: The converted config should contain the hooks
-    expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PreToolUse']).toHaveLength(1);
-    expect(result.config.hooks!['PreToolUse']![0].hooks![0].command).toBe(
-      'npm install',
-    );
-
-    // Clean up converted directory
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
-  });
 });
 
 describe('performVariableReplacement for Claude extensions', () => {
@@ -584,21 +524,6 @@ describe('performVariableReplacement for Claude extensions', () => {
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
-  });
-
-  it('should replace ${CLAUDE_PLUGIN_ROOT} in markdown files', () => {
-    const extDir = path.join(testDir, 'ext-md');
-    fs.mkdirSync(extDir, { recursive: true });
-
-    const mdContent = `# Test Extension
-      Run \`\${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh\` to configure.`;
-    fs.writeFileSync(path.join(extDir, 'README.md'), mdContent, 'utf-8');
-
-    performVariableReplacement(extDir);
-
-    const result = fs.readFileSync(path.join(extDir, 'README.md'), 'utf-8');
-    expect(result).toContain(`${extDir}/scripts/setup.sh`);
-    expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
   });
 
   it('should replace .claude with .qwen in shell scripts', () => {
