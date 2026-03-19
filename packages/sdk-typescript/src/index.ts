@@ -55,6 +55,8 @@ export type {
   PermissionMode,
   CanUseTool,
   PermissionResult,
+  QuerySystemPrompt,
+  QuerySystemPromptPreset,
   CLIMcpServerConfig,
   McpServerConfig,
   McpOAuthConfig,

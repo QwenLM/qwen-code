@@ -119,6 +119,7 @@ export default {
     'Анализ проекта и создание адаптированного файла QWEN.md',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Просмотр доступных инструментов Qwen Code. Использование: /tools [desc]',
+  'List available skills.': 'Показать доступные навыки.',
   'Available Qwen Code CLI tools:': 'Доступные инструменты Qwen Code CLI:',
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
@@ -398,6 +399,7 @@ export default {
     'В настоящее время поддерживаются следующие редакторы. Обратите внимание, что некоторые редакторы нельзя использовать в режиме песочницы.',
   'Your preferred editor is:': 'Ваш предпочитаемый редактор:',
   'Manage extensions': 'Управление расширениями',
+  'Manage installed extensions': 'Управлять установленными расширениями',
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
     'Обновить расширения. Использование: update <extension-names>|--all',
@@ -596,6 +598,38 @@ export default {
     'Не удалось настроить {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Ваш терминал уже настроен для оптимальной работы с многострочным вводом (Shift+Enter и Ctrl+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
+  'List all configured hooks': 'Показать все настроенные хуки',
+  'Enable a disabled hook': 'Включить отключенный хук',
+  'Disable an active hook': 'Отключить активный хук',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Экспортировать историю сообщений текущей сессии в файл',
+  'Export session to HTML format': 'Экспортировать сессию в формат HTML',
+  'Export session to JSON format': 'Экспортировать сессию в формат JSON',
+  'Export session to JSONL format (one message per line)':
+    'Экспортировать сессию в формат JSONL (одно сообщение на строку)',
+  'Export session to markdown format':
+    'Экспортировать сессию в формат Markdown',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Создать персонализированные инсайты по программированию на основе истории чата',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Продолжить предыдущую сессию',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Восстановить вызов инструмента. Это вернет историю разговора и файлов к состоянию на момент, когда был предложен этот вызов инструмента',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Не удалось определить тип терминала. Поддерживаемые терминалы: VS Code, Cursor, Windsurf и Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -754,6 +788,15 @@ export default {
     "Не удалось авторизоваться на MCP-сервере '{{name}}': {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Повторное обнаружение инструментов от '{{name}}'...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "Обнаружено {{count}} инструмент(ов) от '{{name}}'.",
+  'Authentication complete. Returning to server details...':
+    'Аутентификация завершена. Возврат к деталям сервера...',
+  'Authentication successful.': 'Аутентификация успешна.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Если браузер не открылся, скопируйте этот URL и вставьте его в браузер:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Убедитесь, что скопировали ПОЛНЫЙ URL — он может занимать несколько строк.',
 
   // ============================================================================
   // Команды - Чат
@@ -900,6 +943,8 @@ export default {
   Disable: 'Отключить',
   Enable: 'Включить',
   Authenticate: 'Аутентификация',
+  'Re-authenticate': 'Повторная аутентификация',
+  'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
@@ -1508,6 +1553,32 @@ export default {
     'Успешная аутентификация с {{region}}. API-ключ и конфигурации моделей сохранены в settings.json (резервная копия создана).',
 
   // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Использование контекста',
+  'No API response yet. Send a message to see actual usage.':
+    'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated pre-conversation overhead':
+    'Оценочные накладные расходы перед беседой',
+  'Context window': 'Контекстное окно',
+  tokens: 'токенов',
+  Used: 'Использовано',
+  Free: 'Свободно',
+  'Autocompact buffer': 'Буфер автоупаковки',
+  'Usage by category': 'Использование по категориям',
+  'System prompt': 'Системная подсказка',
+  'Built-in tools': 'Встроенные инструменты',
+  'MCP tools': 'Инструменты MCP',
+  'Memory files': 'Файлы памяти',
+  Skills: 'Навыки',
+  Messages: 'Сообщения',
+  'Show context window usage breakdown.':
+    'Показать разбивку использования контекстного окна.',
+  'Run /context detail for per-item breakdown.':
+    'Выполните /context detail для детализации по элементам.',
+  active: 'активно',
+  'body loaded': 'содержимое загружено',
+  memory: 'память',
   // MCP Management Dialog
   // ============================================================================
   'MCP Management': 'Управление MCP',
@@ -1617,4 +1688,77 @@ export default {
     '↑/↓: Навигация | Space/Enter: Переключить | Esc: Отмена',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Навигация | Enter: Выбор | Esc: Отмена',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Настроить аутентификацию Qwen через Qwen-OAuth или Alibaba Cloud Coding Plan',
+  'Authenticate using Qwen OAuth': 'Аутентификация через Qwen OAuth',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Аутентификация через Alibaba Cloud Coding Plan',
+  'Region for Coding Plan (china/global)':
+    'Регион для Coding Plan (china/global)',
+  'API key for Coding Plan': 'API-ключ для Coding Plan',
+  'Show current authentication status':
+    'Показать текущий статус аутентификации',
+  'Authentication completed successfully.': 'Аутентификация успешно завершена.',
+  'Starting Qwen OAuth authentication...':
+    'Запуск аутентификации Qwen OAuth...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Успешная аутентификация через Qwen OAuth.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Ошибка аутентификации через Qwen OAuth: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Обработка аутентификации Alibaba Cloud Coding Plan...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Успешная аутентификация через Alibaba Cloud Coding Plan.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Ошибка аутентификации через Coding Plan: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Глобальный',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Выберите регион для Coding Plan:',
+  'Enter your Coding Plan API key: ': 'Введите ваш API-ключ Coding Plan: ',
+  'Select authentication method:': 'Выберите метод аутентификации:',
+  '\n=== Authentication Status ===\n': '\n=== Статус аутентификации ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  Метод аутентификации не настроен.\n',
+  'Run one of the following commands to get started:\n':
+    'Выполните одну из следующих команд для начала:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (бесплатно)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Аутентификация через Alibaba Cloud Coding Plan\n',
+  'Or simply run:': 'Или просто выполните:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Интерактивная настройка аутентификации\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
+  '  Type: Free tier': '  Тип: Бесплатный',
+  '  Limit: Up to 1,000 requests/day': '  Лимит: До 1 000 запросов/день',
+  '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Метод аутентификации: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Глобальный - Alibaba Cloud',
+  '  Region: {{region}}': '  Регион: {{region}}',
+  '  Current Model: {{model}}': '  Текущая модель: {{model}}',
+  '  Config Version: {{version}}': '  Версия конфигурации: {{version}}',
+  '  Status: API key configured\n': '  Статус: API-ключ настроен\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Метод аутентификации: Alibaba Cloud Coding Plan (Не завершён)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Проблема: API-ключ не найден в окружении или настройках\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Выполните `qwen auth coding-plan` для повторной настройки.\n',
+  '✓ Authentication Method: {{type}}': '✓ Метод аутентификации: {{type}}',
+  '  Status: Configured\n': '  Статус: Настроено\n',
+  'Failed to check authentication status: {{error}}':
+    'Не удалось проверить статус аутентификации: {{error}}',
+  'Select an option:': 'Выберите вариант:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
 };

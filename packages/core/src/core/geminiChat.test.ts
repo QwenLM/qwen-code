@@ -124,7 +124,13 @@ describe('GeminiChat', async () => {
     // Disable 429 simulation for tests
     setSimulate429(false);
     // Reset history for each test by creating a new instance
-    chat = new GeminiChat(mockConfig, config, []);
+    chat = new GeminiChat(
+      mockConfig,
+      config,
+      [],
+      undefined,
+      uiTelemetryService,
+    );
   });
 
   afterEach(() => {
@@ -1716,6 +1722,75 @@ describe('GeminiChat', async () => {
           parts: [{ text: 'hi' }, { text: 'hidden metadata' }],
         },
       ]);
+    });
+  });
+
+  describe('stripOrphanedUserEntriesFromHistory', () => {
+    it('should pop a single trailing user entry', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first message' }] },
+        { role: 'model', parts: [{ text: 'first response' }] },
+        { role: 'user', parts: [{ text: 'orphaned message' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'first message' }] },
+        { role: 'model', parts: [{ text: 'first response' }] },
+      ]);
+    });
+
+    it('should pop multiple trailing user entries', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+        { role: 'user', parts: [{ text: 'IDE context' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+      ]);
+    });
+
+    it('should be a no-op when last entry is a model response', () => {
+      const history = [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      chat.setHistory([...history]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual(history);
+    });
+
+    it('should handle empty history', () => {
+      chat.setHistory([]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([]);
     });
   });
 });

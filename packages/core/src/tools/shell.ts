@@ -26,7 +26,7 @@ import {
   Kind,
 } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { summarizeToolOutput } from '../utils/summarizer.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -34,7 +34,7 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import {
   getCommandRoots,
   isCommandAllowed,
@@ -378,7 +378,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const summarizeConfig = this.config.getSummarizeToolOutputConfig();
+      // Truncate large output and save full content to a temp file.
+      if (typeof llmContent === 'string') {
+        const truncatedResult = await truncateToolOutput(
+          this.config,
+          ShellTool.Name,
+          llmContent,
+        );
+
+        if (truncatedResult.outputFile) {
+          llmContent = truncatedResult.content;
+          returnDisplayMessage +=
+            (returnDisplayMessage ? '\n' : '') +
+            `Output too long and was saved to: ${truncatedResult.outputFile}`;
+        }
+      }
+
       const executionError = result.error
         ? {
             error: {
@@ -387,20 +402,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
             },
           }
         : {};
-
-      if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
-        const summary = await summarizeToolOutput(
-          llmContent,
-          this.config.getGeminiClient(),
-          signal,
-          summarizeConfig[ShellTool.Name].tokenBudget,
-        );
-        return {
-          llmContent: summary,
-          returnDisplay: returnDisplayMessage,
-          ...executionError,
-        };
-      }
 
       return {
         llmContent,
@@ -621,10 +622,10 @@ export class ShellTool extends BaseDeclarativeTool<
         return 'Directory must be an absolute path.';
       }
 
-      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
       const resolvedDirectoryPath = path.resolve(params.directory);
-      const isWithinUserSkills = isSubpath(
-        userSkillsDir,
+      const isWithinUserSkills = isSubpaths(
+        userSkillsDirs,
         resolvedDirectoryPath,
       );
       if (isWithinUserSkills) {

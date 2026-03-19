@@ -8,6 +8,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import type {
@@ -21,6 +22,7 @@ import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 
@@ -39,8 +41,14 @@ export class SkillManager {
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
+  private readonly bundledSkillsDir: string;
 
-  constructor(private readonly config: Config) {}
+  constructor(private readonly config: Config) {
+    this.bundledSkillsDir = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'bundled',
+    );
+  }
 
   /**
    * Adds a listener that will be called when skills change.
@@ -89,7 +97,7 @@ export class SkillManager {
 
     const levelsToCheck: SkillLevel[] = options.level
       ? [options.level]
-      : ['project', 'user', 'extension'];
+      : ['project', 'user', 'extension', 'bundled'];
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.skillsCache !== null;
@@ -102,7 +110,7 @@ export class SkillManager {
       debugLogger.debug('Using cached skills');
     }
 
-    // Collect skills from each level (project takes precedence over user over extension)
+    // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
       const levelSkills = this.skillsCache?.get(level) || [];
       debugLogger.debug(
@@ -110,7 +118,7 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
-        // Skip if we've already seen this name (precedence: project > user > extension)
+        // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
             `Skipping duplicate skill: ${skill.name} (${level})`,
@@ -133,7 +141,7 @@ export class SkillManager {
   /**
    * Loads a skill configuration by name.
    * If level is specified, only searches that level.
-   * If level is omitted, searches project-level first, then user-level.
+   * If level is omitted, searches in precedence order: project > user > extension > bundled.
    *
    * @param name - Name of the skill to load
    * @param level - Optional level to limit search to
@@ -164,7 +172,7 @@ export class SkillManager {
       return projectSkill;
     }
 
-    // Try user level first
+    // Try user level
     const userSkill = await this.findSkillByNameAtLevel(name, 'user');
     if (userSkill) {
       debugLogger.debug(`Found skill ${name} at user level`);
@@ -175,10 +183,19 @@ export class SkillManager {
     const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
     if (extensionSkill) {
       debugLogger.debug(`Found skill ${name} at extension level`);
-    } else {
-      debugLogger.debug(`Skill ${name} not found at any level`);
+      return extensionSkill;
     }
-    return extensionSkill;
+
+    // Try bundled level (lowest precedence)
+    const bundledSkill = await this.findSkillByNameAtLevel(name, 'bundled');
+    if (bundledSkill) {
+      debugLogger.debug(`Found skill ${name} at bundled level`);
+    } else {
+      debugLogger.debug(
+        `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
+      );
+    }
+    return bundledSkill;
   }
 
   /**
@@ -226,7 +243,7 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
 
-    const levels: SkillLevel[] = ['project', 'user', 'extension'];
+    const levels: SkillLevel[] = ['project', 'user', 'extension', 'bundled'];
     let totalSkills = 0;
 
     for (const level of levels) {
@@ -412,19 +429,27 @@ export class SkillManager {
    * Gets the base directory for skills at a specific level.
    *
    * @param level - Storage level
-   * @returns Absolute directory path
+   * @returns Absolute directory paths
    */
-  getSkillsBaseDir(level: SkillLevel): string {
-    const baseDir =
-      level === 'project'
-        ? path.join(
-            this.config.getProjectRoot(),
-            QWEN_CONFIG_DIR,
-            SKILLS_CONFIG_DIR,
-          )
-        : path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
-
-    return baseDir;
+  getSkillsBaseDirs(level: SkillLevel): string[] {
+    switch (level) {
+      case 'project':
+        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
+        );
+      case 'user':
+        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+          path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+        );
+      case 'bundled':
+        return [this.bundledSkillsDir];
+      case 'extension':
+        throw new Error(
+          'Extension skills do not have a base directory; they are loaded from active extensions.',
+        );
+      default:
+        throw new Error(`Unknown skill level: ${level as string}`);
+    }
   }
 
   /**
@@ -461,9 +486,40 @@ export class SkillManager {
       return skills;
     }
 
-    const baseDir = this.getSkillsBaseDir(level);
-    debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
-    const skills = await this.loadSkillsFromDir(baseDir, level);
+    if (level === 'bundled') {
+      const bundledDir = this.bundledSkillsDir;
+      if (!fsSync.existsSync(bundledDir)) {
+        debugLogger.warn(
+          `Bundled skills directory not found: ${bundledDir}. This may indicate an incomplete installation.`,
+        );
+        return [];
+      }
+      debugLogger.debug(`Loading bundled skills from: ${bundledDir}`);
+      const skills = await this.loadSkillsFromDir(bundledDir, 'bundled');
+      debugLogger.debug(`Loaded ${skills.length} bundled skills`);
+      return skills;
+    }
+
+    // Iterate provider directories in PROVIDER_CONFIG_DIRS order.
+    // The first directory that contains a skill with a given name wins,
+    // so the order defines implicit precedence (.qwen > .agent > .cursor > ...).
+    const baseDirs = this.getSkillsBaseDirs(level);
+    const skills: SkillConfig[] = [];
+    const seenNames = new Set<string>();
+    for (const baseDir of baseDirs) {
+      debugLogger.debug(`Loading ${level} level skills from: ${baseDir}`);
+      const skillsFromDir = await this.loadSkillsFromDir(baseDir, level);
+      for (const skill of skillsFromDir) {
+        if (seenNames.has(skill.name)) {
+          debugLogger.debug(
+            `Skipping duplicate skill at ${level} level: ${skill.name} from ${baseDir}`,
+          );
+          continue;
+        }
+        seenNames.add(skill.name);
+        skills.push(skill);
+      }
+    }
     debugLogger.debug(`Loaded ${skills.length} ${level} level skills`);
     return skills;
   }
@@ -580,10 +636,14 @@ export class SkillManager {
     }
   }
 
+  // Only watch project and user skill directories for changes.
+  // Bundled skills are immutable (shipped with the package) and extension
+  // skills are managed by the extension system, so neither needs watching.
   private updateWatchersFromCache(): void {
     const watchTargets = new Set<string>(
       (['project', 'user'] as const)
-        .map((level) => this.getSkillsBaseDir(level))
+        .map((level) => this.getSkillsBaseDirs(level))
+        .reduce((acc, baseDirs) => acc.concat(baseDirs), [])
         .filter((baseDir) => fsSync.existsSync(baseDir)),
     );
 
@@ -639,7 +699,7 @@ export class SkillManager {
   }
 
   private async ensureUserSkillsDir(): Promise<void> {
-    const baseDir = this.getSkillsBaseDir('user');
+    const baseDir = path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
     try {
       await fs.mkdir(baseDir, { recursive: true });
     } catch (error) {

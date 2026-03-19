@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RequestError } from '@agentclientprotocol/sdk';
+
+// AcpConnection imports AcpFileHandler which imports vscode.
+// Mock vscode so it can be resolved without the actual VS Code runtime.
+vi.mock('vscode', () => ({}));
+
 import { AcpConnection } from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 

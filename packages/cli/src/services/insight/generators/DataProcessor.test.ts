@@ -24,6 +24,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
       info: vi.fn(),
       error: vi.fn(),
       warn: vi.fn(),
+      debug: vi.fn(),
     })),
   };
 });
@@ -1134,6 +1135,102 @@ describe('DataProcessor', () => {
       const hasNonEmptyFrictionDetail =
         frictionSection.trim().length > 0 && frictionSection.includes('-');
       expect(hasNonEmptyFrictionDetail).toBe(false);
+    });
+  });
+
+  describe('generateQualitativeInsights', () => {
+    const mockMetrics = {
+      totalSessions: 5,
+      totalMessages: 50,
+      totalHours: 2,
+      heatmap: { '2025-01-15': 3 },
+      topTools: [['read_file', 10]] as Array<[string, number]>,
+      activeDays: 1,
+      activeHours: { '10': 5 },
+      totalLinesAdded: 100,
+      totalLinesRemoved: 50,
+      totalFiles: 10,
+      streak: { currentStreak: 1, longestStreak: 1, dates: [] },
+    } as unknown as Omit<InsightData, 'facets' | 'qualitative'>;
+
+    const mockFacets: SessionFacets[] = [
+      {
+        session_id: 'test-1',
+        underlying_goal: 'Fix bug',
+        goal_categories: { debugging: 1 },
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: { satisfied: 1 },
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'single_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'correct_code_edits',
+        brief_summary: 'Fixed a bug',
+      },
+    ];
+
+    it('should return partial qualitative data when some LLM calls fail', async () => {
+      let callIndex = 0;
+      mockGenerateJson.mockImplementation(() => {
+        callIndex++;
+        if (callIndex % 2 === 0) {
+          return Promise.reject(new Error('LLM timeout'));
+        }
+        return Promise.resolve({ intro: 'test', areas: [], opportunities: [] });
+      });
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateQualitativeInsights(
+            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
+            facets: SessionFacets[],
+          ): Promise<
+            | import('../types/QualitativeInsightTypes.js').QualitativeInsights
+            | undefined
+          >;
+        }
+      ).generateQualitativeInsights(mockMetrics, mockFacets);
+
+      expect(result).toBeDefined();
+      expect(result!.impressiveWorkflows).toBeDefined();
+      expect(result!.projectAreas).toBeUndefined();
+      expect(result!.futureOpportunities).toBeDefined();
+      expect(result!.frictionPoints).toBeUndefined();
+    });
+
+    it('should return undefined when facets are empty', async () => {
+      const result = await (
+        dataProcessor as unknown as {
+          generateQualitativeInsights(
+            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
+            facets: SessionFacets[],
+          ): Promise<
+            | import('../types/QualitativeInsightTypes.js').QualitativeInsights
+            | undefined
+          >;
+        }
+      ).generateQualitativeInsights(mockMetrics, []);
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return full qualitative data when all LLM calls succeed', async () => {
+      mockGenerateJson.mockResolvedValue({ intro: 'test', areas: [] });
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateQualitativeInsights(
+            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
+            facets: SessionFacets[],
+          ): Promise<
+            | import('../types/QualitativeInsightTypes.js').QualitativeInsights
+            | undefined
+          >;
+        }
+      ).generateQualitativeInsights(mockMetrics, mockFacets);
+
+      expect(result).toBeDefined();
+      expect(mockGenerateJson).toHaveBeenCalledTimes(8);
     });
   });
 

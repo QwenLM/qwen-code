@@ -408,12 +408,14 @@ export class HookRunner {
       // Success - treat as system message or additional context
       return {
         decision: 'allow',
+        reason: 'Hook executed successfully',
         systemMessage: text,
       };
     } else if (exitCode === EXIT_CODE_NON_BLOCKING_ERROR) {
       // Non-blocking error (EXIT_CODE_NON_BLOCKING_ERROR = 1)
       return {
         decision: 'allow',
+        reason: `Non-blocking error: ${text}`,
         systemMessage: `Warning: ${text}`,
       };
     } else {

@@ -48,6 +48,17 @@ vi.mock('../ui/commands/permissionsCommand.js', async () => {
   };
 });
 
+vi.mock('../ui/commands/hooksCommand.js', async () => {
+  const { CommandKind } = await import('../ui/commands/types.js');
+  return {
+    hooksCommand: {
+      name: 'hooks',
+      description: 'Hooks command',
+      kind: CommandKind.BUILT_IN,
+    },
+  };
+});
+
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { BuiltinCommandLoader } from './BuiltinCommandLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -100,6 +111,7 @@ describe('BuiltinCommandLoader', () => {
     mockConfig = {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
+      getEnableHooks: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
@@ -183,5 +195,20 @@ describe('BuiltinCommandLoader', () => {
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
     expect(modelCmd?.name).toBe('model');
+  });
+
+  it('should include hooks command when enableHooks is true', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const hooksCmd = commands.find((c) => c.name === 'hooks');
+    expect(hooksCmd).toBeDefined();
+  });
+
+  it('should exclude hooks command when enableHooks is false', async () => {
+    (mockConfig.getEnableHooks as Mock).mockReturnValue(false);
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const hooksCmd = commands.find((c) => c.name === 'hooks');
+    expect(hooksCmd).toBeUndefined();
   });
 });

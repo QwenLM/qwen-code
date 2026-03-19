@@ -22,6 +22,7 @@ import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -87,6 +88,10 @@ export class WebViewProvider {
     this.messageHandler.setLoginHandler(async () => {
       await this.forceReLogin();
     });
+
+    // Setup file watchers for cache invalidation
+    const fileWatcherDisposable = this.messageHandler.setupFileWatchers();
+    this.disposables.push(fileWatcherDisposable);
 
     // Setup agent callbacks
     this.agentManager.onMessage((message) => {
@@ -878,9 +883,10 @@ export class WebViewProvider {
           );
         }
       } catch (_error) {
+        const errorMsg = getErrorMessage(_error);
         console.error('[WebViewProvider] Agent connection error:', _error);
         vscode.window.showWarningMessage(
-          `Failed to connect to Qwen CLI: ${_error}\nYou can still use the chat UI, but messages won't be sent to AI.`,
+          `Failed to connect to Qwen CLI: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
         );
         // Fallback to empty conversation
         await this.initializeEmptyConversation();
@@ -889,7 +895,7 @@ export class WebViewProvider {
         this.sendMessageToWebView({
           type: 'agentConnectionError',
           data: {
-            message: _error instanceof Error ? _error.message : String(_error),
+            message: errorMsg,
           },
         });
       }
@@ -944,6 +950,7 @@ export class WebViewProvider {
             data: { message: 'Successfully logged in!' },
           });
         } catch (_error) {
+          const errorMsg = getErrorMessage(_error);
           console.error('[WebViewProvider] Force re-login failed:', _error);
           console.error(
             '[WebViewProvider] Error stack:',
@@ -954,7 +961,7 @@ export class WebViewProvider {
           this.sendMessageToWebView({
             type: 'loginError',
             data: {
-              message: `Login failed: ${_error instanceof Error ? _error.message : String(_error)}`,
+              message: `Login failed: ${errorMsg}`,
             },
           });
 
@@ -998,13 +1005,14 @@ export class WebViewProvider {
         data: {},
       });
     } catch (_error) {
+      const errorMsg = getErrorMessage(_error);
       console.error('[WebViewProvider] Connection refresh failed:', _error);
 
       // Notify webview that agent connection failed after refresh
       this.sendMessageToWebView({
         type: 'agentConnectionError',
         data: {
-          message: _error instanceof Error ? _error.message : String(_error),
+          message: errorMsg,
         },
       });
 
@@ -1057,12 +1065,13 @@ export class WebViewProvider {
                 data: { authenticated: false },
               });
             } else {
+              const errorMsg = getErrorMessage(sessionError);
               console.error(
                 '[WebViewProvider] Failed to create ACP session:',
                 sessionError,
               );
               vscode.window.showWarningMessage(
-                `Failed to create ACP session: ${sessionError}. You may need to authenticate first.`,
+                `Failed to create ACP session: ${errorMsg}. You may need to authenticate first.`,
               );
             }
           }
@@ -1076,12 +1085,13 @@ export class WebViewProvider {
 
       await this.initializeEmptyConversation();
     } catch (_error) {
+      const errorMsg = getErrorMessage(_error);
       console.error(
         '[WebViewProvider] Failed to load session messages:',
         _error,
       );
       vscode.window.showErrorMessage(
-        `Failed to load session messages: ${_error}`,
+        `Failed to load session messages: ${errorMsg}`,
       );
       await this.initializeEmptyConversation();
       return false;
@@ -1585,7 +1595,9 @@ export class WebViewProvider {
       });
     } catch (_error) {
       console.error('[WebViewProvider] Failed to create new session:', _error);
-      vscode.window.showErrorMessage(`Failed to create new session: ${_error}`);
+      vscode.window.showErrorMessage(
+        `Failed to create new session: ${getErrorMessage(_error)}`,
+      );
     }
   }
 

@@ -164,21 +164,12 @@ describe('SubagentValidator', () => {
       );
     });
 
-    it('should reject prompts that are too long', () => {
-      const longPrompt = 'a'.repeat(10001);
-      const result = validator.validateSystemPrompt(longPrompt);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
-        'System prompt is too long (>10,000 characters)',
-      );
-    });
-
     it('should warn about long prompts', () => {
-      const longPrompt = 'a'.repeat(5001);
+      const longPrompt = 'a'.repeat(10001);
       const result = validator.validateSystemPrompt(longPrompt);
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain(
-        'System prompt is quite long (>5,000 characters), consider shortening',
+        'System prompt is quite long (>10,000 characters), consider shortening',
       );
     });
   });
@@ -372,7 +363,7 @@ describe('SubagentValidator', () => {
       const configWithWarnings: SubagentConfig = {
         ...validConfig,
         name: 'TestAgent', // Will generate warning about case
-        description: 'A'.repeat(501), // Will generate warning about long description
+        description: 'A'.repeat(1001), // Will generate warning about long description
       };
 
       const result = validator.validateConfig(configWithWarnings);

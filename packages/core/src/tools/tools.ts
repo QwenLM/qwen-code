@@ -9,7 +9,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 /**
@@ -447,7 +447,7 @@ export interface TaskResultDisplay {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   terminateReason?: string;
   result?: string;
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -525,6 +525,7 @@ export interface PlanResultDisplay {
   type: 'plan_summary';
   message: string;
   plan: string;
+  rejected?: boolean;
 }
 
 export interface ToolEditConfirmationDetails {

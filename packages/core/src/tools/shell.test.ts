@@ -21,7 +21,6 @@ vi.mock('../services/shellExecutionService.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
-vi.mock('../utils/summarizer.js');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
@@ -35,7 +34,6 @@ import * as os from 'node:os';
 import { EOL } from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import * as summarizer from '../utils/summarizer.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
@@ -55,13 +53,15 @@ describe('ShellTool', () => {
       getExcludeTools: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
-      getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
+      getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
+      getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -474,42 +474,6 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should summarize output when configured', async () => {
-      (mockConfig.getSummarizeToolOutputConfig as Mock).mockReturnValue({
-        [shellTool.name]: { tokenBudget: 1000 },
-      });
-      vi.mocked(summarizer.summarizeToolOutput).mockResolvedValue(
-        'summarized output',
-      );
-
-      const invocation = shellTool.build({
-        command: 'ls',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveExecutionPromise({
-        output: 'long output',
-        rawOutput: Buffer.from('long output'),
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      const result = await promise;
-
-      expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
-        expect.any(String),
-        mockConfig.getGeminiClient(),
-        expect.any(AbortSignal),
-        1000,
-      );
-      expect(result.llmContent).toBe('summarized output');
-      expect(result.returnDisplay).toBe('long output');
     });
 
     it('should clean up the temp file on synchronous execution error', async () => {

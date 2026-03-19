@@ -19,18 +19,25 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  generateToolUseId,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
+  fireNotificationHook,
+  firePermissionRequestHook,
+  appendAdditionalContext,
+} from './toolHookTriggers.js';
+import { NotificationType } from '../hooks/types.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
   logToolCall,
-  ReadFileTool,
   ToolErrorType,
   ToolCallEvent,
-  ShellTool,
-  logToolOutputTruncated,
-  ToolOutputTruncatedEvent,
   InputFormat,
   Kind,
   SkillTool,
@@ -49,8 +56,6 @@ import {
   modifyWithEditor,
 } from '../tools/modifiable-tool.js';
 import * as Diff from 'diff';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
@@ -306,67 +311,6 @@ const createErrorResponse = (
   contentLength: error.message.length,
 });
 
-export async function truncateAndSaveToFile(
-  content: string,
-  callId: string,
-  projectTempDir: string,
-  threshold: number,
-  truncateLines: number,
-): Promise<{ content: string; outputFile?: string }> {
-  if (content.length <= threshold) {
-    return { content };
-  }
-
-  let lines = content.split('\n');
-  let fileContent = content;
-
-  // If the content is long but has few lines, wrap it to enable line-based truncation.
-  if (lines.length <= truncateLines) {
-    const wrapWidth = 120; // A reasonable width for wrapping.
-    const wrappedLines: string[] = [];
-    for (const line of lines) {
-      if (line.length > wrapWidth) {
-        for (let i = 0; i < line.length; i += wrapWidth) {
-          wrappedLines.push(line.substring(i, i + wrapWidth));
-        }
-      } else {
-        wrappedLines.push(line);
-      }
-    }
-    lines = wrappedLines;
-    fileContent = lines.join('\n');
-  }
-
-  const head = Math.floor(truncateLines / 5);
-  const beginning = lines.slice(0, head);
-  const end = lines.slice(-(truncateLines - head));
-  const truncatedContent =
-    beginning.join('\n') + '\n... [CONTENT TRUNCATED] ...\n' + end.join('\n');
-
-  // Sanitize callId to prevent path traversal.
-  const safeFileName = `${path.basename(callId)}.output`;
-  const outputFile = path.join(projectTempDir, safeFileName);
-  try {
-    await fs.writeFile(outputFile, fileContent);
-
-    return {
-      content: `Tool output was too large and has been truncated.
-The full output has been saved to: ${outputFile}
-To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
-The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
-This allows you to efficiently examine different parts of the output without loading the entire file.
-Truncated part of the output:
-${truncatedContent}`,
-      outputFile,
-    };
-  } catch (_error) {
-    return {
-      content:
-        truncatedContent + `\n[Note: Could not save full output to file]`,
-    };
-  }
-}
-
 interface CoreToolSchedulerOptions {
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
@@ -509,6 +453,7 @@ export class CoreToolScheduler {
             : undefined;
 
           // Preserve diff for cancelled edit operations
+          // Preserve plan content for cancelled plan operations
           let resultDisplay: ToolResultDisplay | undefined = undefined;
           if (currentCall.status === 'awaiting_approval') {
             const waitingCall = currentCall as WaitingToolCall;
@@ -519,6 +464,13 @@ export class CoreToolScheduler {
                 originalContent:
                   waitingCall.confirmationDetails.originalContent,
                 newContent: waitingCall.confirmationDetails.newContent,
+              };
+            } else if (waitingCall.confirmationDetails.type === 'plan') {
+              resultDisplay = {
+                type: 'plan_summary',
+                message: 'Plan was rejected. Remaining in plan mode.',
+                plan: waitingCall.confirmationDetails.plan,
+                rejected: true,
               };
             }
           } else if (currentCall.status === 'executing') {
@@ -960,6 +912,71 @@ export class CoreToolScheduler {
               });
             }
 
+            // Fire PermissionRequest hook before showing the permission dialog.
+            const messageBus = this.config.getMessageBus() as
+              | MessageBus
+              | undefined;
+            const hooksEnabled = this.config.getEnableHooks();
+
+            if (hooksEnabled && messageBus) {
+              const permissionMode = String(this.config.getApprovalMode());
+              const hookResult = await firePermissionRequestHook(
+                messageBus,
+                reqInfo.name,
+                (reqInfo.args as Record<string, unknown>) || {},
+                permissionMode,
+              );
+
+              if (hookResult.hasDecision) {
+                if (hookResult.shouldAllow) {
+                  // Hook granted permission - apply updated input if provided and proceed
+                  if (
+                    hookResult.updatedInput &&
+                    typeof reqInfo.args === 'object'
+                  ) {
+                    this.setArgsInternal(
+                      reqInfo.callId,
+                      hookResult.updatedInput,
+                    );
+                  }
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setStatusInternal(reqInfo.callId, 'scheduled');
+                } else {
+                  // Hook denied permission - cancel with optional message
+                  const cancelPayload = hookResult.denyMessage
+                    ? { cancelMessage: hookResult.denyMessage }
+                    : undefined;
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                    cancelPayload,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        hookResult.denyMessage ||
+                          `Permission denied by hook for "${reqInfo.name}"`,
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                    ),
+                  );
+                }
+                continue;
+              }
+            }
+
             const originalOnConfirm = confirmationDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -980,6 +997,20 @@ export class CoreToolScheduler {
               'awaiting_approval',
               wrappedConfirmationDetails,
             );
+
+            // Fire permission_prompt notification hook
+            if (hooksEnabled && messageBus) {
+              fireNotificationHook(
+                messageBus,
+                `Qwen Code needs your permission to use ${reqInfo.name}`,
+                NotificationType.PermissionPrompt,
+                'Permission needed',
+              ).catch((error) => {
+                debugLogger.warn(
+                  `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+            }
           }
         } catch (error) {
           if (signal.aborted) {
@@ -1140,9 +1171,28 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
-        await this.executeSingleToolCall(toolCall, signal);
-      }
+      // Task tools are safe to run concurrently — they spawn independent
+      // sub-agents with no shared mutable state.  All other tools run
+      // sequentially in their original order to preserve any implicit
+      // ordering the model may rely on.
+      const taskCalls = callsToExecute.filter(
+        (call) => call.request.name === ToolNames.TASK,
+      );
+      const otherCalls = callsToExecute.filter(
+        (call) => call.request.name !== ToolNames.TASK,
+      );
+
+      const taskPromise = Promise.all(
+        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
+      );
+
+      const othersPromise = (async () => {
+        for (const toolCall of otherCalls) {
+          await this.executeSingleToolCall(toolCall, signal);
+        }
+      })();
+
+      await Promise.all([taskPromise, othersPromise]);
     }
   }
 
@@ -1155,6 +1205,41 @@ export class CoreToolScheduler {
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
     const invocation = scheduledCall.invocation;
+    const toolInput = scheduledCall.request.args as Record<string, unknown>;
+
+    // Generate unique tool_use_id for hook tracking
+    const toolUseId = generateToolUseId();
+
+    // Get MessageBus for hook execution
+    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
+    const hooksEnabled = this.config.getEnableHooks();
+
+    // PreToolUse Hook
+    if (hooksEnabled && messageBus) {
+      // Convert ApprovalMode to permission_mode string for hooks
+      const permissionMode = this.config.getApprovalMode();
+      const preHookResult = await firePreToolUseHook(
+        messageBus,
+        toolName,
+        toolInput,
+        toolUseId,
+        permissionMode,
+      );
+
+      if (!preHookResult.shouldProceed) {
+        // Hook blocked the execution
+        const blockMessage =
+          preHookResult.blockReason || 'Tool execution blocked by hook';
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          new Error(blockMessage),
+          ToolErrorType.EXECUTION_DENIED,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+        return;
+      }
+    }
+
     this.setStatusInternal(callId, 'executing');
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
@@ -1204,50 +1289,74 @@ export class CoreToolScheduler {
     try {
       const toolResult: ToolResult = await promise;
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
-        return;
+        // PostToolUseFailure Hook
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
+        }
+        return; // Both code paths should return here
       }
 
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
-        let outputFile: string | undefined = undefined;
         const contentLength =
           typeof content === 'string' ? content.length : undefined;
-        if (
-          typeof content === 'string' &&
-          toolName === ShellTool.Name &&
-          this.config.getEnableToolOutputTruncation() &&
-          this.config.getTruncateToolOutputThreshold() > 0 &&
-          this.config.getTruncateToolOutputLines() > 0
-        ) {
-          const originalContentLength = content.length;
-          const threshold = this.config.getTruncateToolOutputThreshold();
-          const lines = this.config.getTruncateToolOutputLines();
-          const truncatedResult = await truncateAndSaveToFile(
-            content,
-            callId,
-            this.config.storage.getProjectTempDir(),
-            threshold,
-            lines,
-          );
-          content = truncatedResult.content;
-          outputFile = truncatedResult.outputFile;
 
-          if (outputFile) {
-            logToolOutputTruncated(
-              this.config,
-              new ToolOutputTruncatedEvent(scheduledCall.request.prompt_id, {
-                toolName,
-                originalContentLength,
-                truncatedContentLength: content.length,
-                threshold,
-                lines,
-              }),
+        // PostToolUse Hook
+        if (hooksEnabled && messageBus) {
+          const toolResponse = {
+            llmContent: content,
+            returnDisplay: toolResult.returnDisplay,
+          };
+          const permissionMode = this.config.getApprovalMode();
+          const postHookResult = await firePostToolUseHook(
+            messageBus,
+            toolName,
+            toolInput,
+            toolResponse,
+            toolUseId,
+            permissionMode,
+          );
+
+          // Append additional context from hook if provided
+          if (postHookResult.additionalContext) {
+            content = appendAdditionalContext(
+              content,
+              postHookResult.additionalContext,
             );
+          }
+
+          // Check if hook requested to stop execution
+          if (postHookResult.shouldStop) {
+            const stopMessage =
+              postHookResult.stopReason || 'Execution stopped by hook';
+            const errorResponse = createErrorResponse(
+              scheduledCall.request,
+              new Error(stopMessage),
+              ToolErrorType.EXECUTION_DENIED,
+            );
+            this.setStatusInternal(callId, 'error', errorResponse);
+            return;
           }
         }
 
@@ -1258,13 +1367,31 @@ export class CoreToolScheduler {
           resultDisplay: toolResult.returnDisplay,
           error: undefined,
           errorType: undefined,
-          outputFile,
           contentLength,
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {
         // It is a failure
-        const error = new Error(toolResult.error.message);
+        // PostToolUseFailure Hook
+        let errorMessage = toolResult.error.message;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            toolResult.error.message,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            errorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
+
+        const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
@@ -1273,20 +1400,64 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'error', errorResponse);
       }
     } catch (executionError: unknown) {
+      const errorMessage =
+        executionError instanceof Error
+          ? executionError.message
+          : String(executionError);
+
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
+        // PostToolUseFailure Hook (user interrupt)
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
+        }
+        return;
       } else {
+        // PostToolUseFailure Hook
+        let exceptionErrorMessage = errorMessage;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            errorMessage,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
         this.setStatusInternal(
           callId,
           'error',
           createErrorResponse(
             scheduledCall.request,
             executionError instanceof Error
-              ? executionError
+              ? new Error(exceptionErrorMessage)
               : new Error(String(executionError)),
             ToolErrorType.UNHANDLED_EXCEPTION,
           ),
