@@ -111,8 +111,10 @@ export interface InputFormProps {
   completionIsOpen: boolean;
   /** Completion items */
   completionItems?: CompletionItem[];
-  /** Completion select callback */
+  /** Completion select callback (Enter / click) */
   onCompletionSelect?: (item: CompletionItem) => void;
+  /** Completion fill callback (Tab — fill without executing). Falls back to onCompletionSelect. */
+  onCompletionFill?: (item: CompletionItem) => void;
   /** Completion close callback */
   onCompletionClose?: () => void;
   /** Optional paste handler for the contentEditable input */
@@ -176,6 +178,7 @@ export const InputForm: FC<InputFormProps> = ({
   completionIsOpen,
   completionItems,
   onCompletionSelect,
+  onCompletionFill,
   onCompletionClose,
   onPaste,
   extraContent,
@@ -253,6 +256,7 @@ export const InputForm: FC<InputFormProps> = ({
               <CompletionMenu
                 items={completionItemsResolved}
                 onSelect={onCompletionSelect}
+                onFill={onCompletionFill}
                 onClose={onCompletionClose}
                 title={undefined}
               />

@@ -8,13 +8,13 @@ import { Box, Text } from 'ink';
 import type React from 'react';
 import { TrustLevel } from '../../config/trustedFolders.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { usePermissionsModifyTrust } from '../hooks/usePermissionsModifyTrust.js';
+import { useTrustModify } from '../hooks/useTrustModify.js';
 import { theme } from '../semantic-colors.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { relaunchApp } from '../../utils/processUtils.js';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 
-interface PermissionsModifyTrustDialogProps {
+interface TrustDialogProps {
   onExit: () => void;
   addItem: UseHistoryManagerReturn['addItem'];
 }
@@ -37,10 +37,10 @@ const TRUST_LEVEL_ITEMS = [
   },
 ];
 
-export function PermissionsModifyTrustDialog({
+export function TrustDialog({
   onExit,
   addItem,
-}: PermissionsModifyTrustDialogProps): React.JSX.Element {
+}: TrustDialogProps): React.JSX.Element {
   const {
     cwd,
     currentTrustLevel,
@@ -49,7 +49,7 @@ export function PermissionsModifyTrustDialog({
     needsRestart,
     updateTrustLevel,
     commitTrustLevelChange,
-  } = usePermissionsModifyTrust(onExit, addItem);
+  } = useTrustModify(onExit, addItem);
 
   useKeypress(
     (key) => {

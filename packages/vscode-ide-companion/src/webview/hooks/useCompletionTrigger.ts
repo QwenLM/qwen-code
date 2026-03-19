@@ -305,10 +305,13 @@ export function useCompletionTrigger(
       let triggerPos = -1;
       let triggerChar: '@' | '/' | null = null;
 
-      if (lastAtMatch > lastSlashMatch) {
+      // Priority: @ trigger takes precedence over / trigger
+      // This allows path-like queries (e.g., "src/components/Button") in @ mentions
+      // But skip if the trigger is inside a file tag
+      if (lastAtMatch >= 0) {
         triggerPos = lastAtMatch;
         triggerChar = '@';
-      } else if (lastSlashMatch > lastAtMatch) {
+      } else if (lastSlashMatch >= 0) {
         triggerPos = lastSlashMatch;
         triggerChar = '/';
       }

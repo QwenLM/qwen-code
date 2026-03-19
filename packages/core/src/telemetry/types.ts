@@ -63,10 +63,11 @@ export class StartSessionEvent implements BaseTelemetryEvent {
     this.model = config.getModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    const coreTools = (config.getCoreTools() ?? []).join(',');
-    if (coreTools) {
-      this.core_tools_enabled = coreTools;
-    }
+    this.core_tools_enabled = (
+      config.getPermissionManager?.()?.getAllowRawStrings() ??
+      config.getCoreTools() ??
+      []
+    ).join(',');
     this.approval_mode = config.getApprovalMode();
     this.debug_enabled = config.getDebugMode();
     this.truncate_tool_output_threshold =

@@ -351,6 +351,7 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
+      settings,
     );
 
     // Register cleanup for MCP clients as early as possible

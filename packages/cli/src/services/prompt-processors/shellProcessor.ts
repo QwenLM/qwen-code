@@ -7,13 +7,11 @@
 import {
   ApprovalMode,
   checkCommandPermissions,
-  doesToolInvocationMatch,
   escapeShellArg,
   getShellConfiguration,
   ShellExecutionService,
   flatMapTextParts,
 } from '@qwen-code/qwen-code-core';
-import type { AnyToolInvocation } from '@qwen-code/qwen-code-core';
 
 import type { CommandContext } from '../../ui/commands/types.js';
 import type { IPromptProcessor, PromptPipelineContent } from './types.js';
@@ -125,15 +123,12 @@ export class ShellProcessor implements IPromptProcessor {
       // Security check on the final, escaped command string.
       const { allAllowed, disallowedCommands, blockReason, isHardDenial } =
         checkCommandPermissions(command, config, sessionShellAllowlist);
-      const allowedTools = config.getAllowedTools() || [];
-      const invocation = {
-        params: { command },
-      } as AnyToolInvocation;
-      const isAllowedBySettings = doesToolInvocationMatch(
-        'run_shell_command',
-        invocation,
-        allowedTools,
-      );
+
+      // Determine if this command is explicitly auto-approved via PermissionManager
+      const pm = config.getPermissionManager?.();
+      const isAllowedBySettings = pm
+        ? pm.isCommandAllowed(command) === 'allow'
+        : false;
 
       if (!allAllowed) {
         if (isHardDenial) {

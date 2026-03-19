@@ -87,9 +87,6 @@ describe('DiscoveredMCPTool', () => {
       baseDescription,
       inputSchema,
     );
-    // Clear allowlist before each relevant test, especially for shouldConfirmExecute
-    const invocation = tool.build({ param: 'mock' }) as any;
-    invocation.constructor.allowlist.clear();
   });
 
   afterEach(() => {
@@ -738,8 +735,8 @@ describe('DiscoveredMCPTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
-    it('should return false if trust is true', async () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
+    it('should return ask even if trust is true and folder is trusted (trust logic moved to PM)', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -751,159 +748,67 @@ describe('DiscoveredMCPTool', () => {
         { isTrustedFolder: () => true } as any,
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
-    it('should return false if server is allowlisted', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      invocation.constructor.allowlist.add(serverName);
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
-    });
-
-    it('should return false if tool is allowlisted', async () => {
-      const toolAllowlistKey = `${serverName}.${serverToolName}`;
-      const invocation = tool.build({ param: 'mock' }) as any;
-      invocation.constructor.allowlist.add(toolAllowlistKey);
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
-    });
-
-    it('should return confirmation details if not trusted and not allowlisted', async () => {
+    it('should return ask if not trusted', async () => {
       const invocation = tool.build({ param: 'mock' });
-      const confirmation = await invocation.shouldConfirmExecute(
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
+    it('should return confirmation details when permission is ask', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
-      if (confirmation && confirmation.type === 'mcp') {
-        // Type guard for ToolMcpConfirmationDetails
-        expect(confirmation.type).toBe('mcp');
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
         expect(confirmation.serverName).toBe(serverName);
         expect(confirmation.toolName).toBe(serverToolName);
-      } else if (confirmation) {
-        // Handle other possible confirmation types if necessary, or strengthen test if only MCP is expected
-        throw new Error(
-          'Confirmation was not of expected type MCP or was false',
-        );
-      } else {
-        throw new Error(
-          'Confirmation details not in expected format or was false',
-        );
       }
     });
 
-    it('should add server to allowlist on ProceedAlwaysServer', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
+    it('should have onConfirm as a no-op', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
+      expect(confirmation).toHaveProperty('onConfirm');
       if (
-        confirmation &&
-        typeof confirmation === 'object' &&
         'onConfirm' in confirmation &&
         typeof confirmation.onConfirm === 'function'
       ) {
+        // onConfirm should not throw for any outcome
         await confirmation.onConfirm(
-          ToolConfirmationOutcome.ProceedAlwaysServer,
+          ToolConfirmationOutcome.ProceedAlwaysProject,
         );
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(true);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
-      }
-    });
-
-    it('should add tool to allowlist on ProceedAlwaysTool', async () => {
-      const toolAllowlistKey = `${serverName}.${serverToolName}`;
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlwaysTool);
-        expect(invocation.constructor.allowlist.has(toolAllowlistKey)).toBe(
-          true,
-        );
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
-      }
-    });
-
-    it('should handle Cancel confirmation outcome', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        // Cancel should not add anything to allowlist
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlwaysUser);
         await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(false);
-        expect(
-          invocation.constructor.allowlist.has(
-            `${serverName}.${serverToolName}`,
-          ),
-        ).toBe(false);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
       }
     });
 
-    it('should handle ProceedOnce confirmation outcome', async () => {
-      const invocation = tool.build({ param: 'mock' }) as any;
-      const confirmation = await invocation.shouldConfirmExecute(
+    it('should include permissionRules with mcp__server__tool format', async () => {
+      const invocation = tool.build({ param: 'mock' });
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-      expect(confirmation).not.toBe(false);
-      if (
-        confirmation &&
-        typeof confirmation === 'object' &&
-        'onConfirm' in confirmation &&
-        typeof confirmation.onConfirm === 'function'
-      ) {
-        // ProceedOnce should not add anything to allowlist
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-        expect(invocation.constructor.allowlist.has(serverName)).toBe(false);
-        expect(
-          invocation.constructor.allowlist.has(
-            `${serverName}.${serverToolName}`,
-          ),
-        ).toBe(false);
-      } else {
-        throw new Error(
-          'Confirmation details or onConfirm not in expected format',
-        );
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
+        expect(confirmation.permissionRules).toEqual([
+          `mcp__${serverName}__${serverToolName}`,
+        ]);
       }
     });
   });
 
-  describe('shouldConfirmExecute with folder trust', () => {
+  describe('getDefaultPermission with folder trust', () => {
     const mockConfig = (isTrusted: boolean | undefined) => ({
       isTrustedFolder: () => isTrusted,
     });
 
-    it('should return false if trust is true and folder is trusted', async () => {
+    it('should return ask even if trust is true and folder is trusted (trust logic moved to PM)', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -915,12 +820,10 @@ describe('DiscoveredMCPTool', () => {
         mockConfig(true) as any, // isTrustedFolder = true
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      expect(
-        await invocation.shouldConfirmExecute(new AbortController().signal),
-      ).toBe(false);
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
-    it('should return confirmation details if trust is true but folder is not trusted', async () => {
+    it('should return ask if trust is true but folder is not trusted', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -932,14 +835,10 @@ describe('DiscoveredMCPTool', () => {
         mockConfig(false) as any, // isTrustedFolder = false
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      expect(confirmation).toHaveProperty('type', 'mcp');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
-    it('should return confirmation details if trust is false, even if folder is trusted', async () => {
+    it('should return ask if trust is false, even if folder is trusted', async () => {
       const untrustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -951,11 +850,7 @@ describe('DiscoveredMCPTool', () => {
         mockConfig(true) as any, // isTrustedFolder = true
       );
       const invocation = untrustedTool.build({ param: 'mock' });
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).not.toBe(false);
-      expect(confirmation).toHaveProperty('type', 'mcp');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
     });
   });
 

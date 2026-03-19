@@ -150,6 +150,7 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'trust'
     | 'permissions'
     | 'approval-mode'
     | 'resume'

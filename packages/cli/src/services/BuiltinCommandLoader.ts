@@ -15,6 +15,7 @@ import { authCommand } from '../ui/commands/authCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
+import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
@@ -30,6 +31,7 @@ import { mcpCommand } from '../ui/commands/mcpCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
+import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
@@ -68,6 +70,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       bugCommand,
       clearCommand,
       compressCommand,
+      contextCommand,
       copyCommand,
       docsCommand,
       directoryCommand,
@@ -75,14 +78,15 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
-      hooksCommand,
+      ...(this.config?.getEnableHooks() ? [hooksCommand] : []),
       await ideCommand(),
       initCommand,
       languageCommand,
       mcpCommand,
       memoryCommand,
       modelCommand,
-      ...(this.config?.getFolderTrust() ? [permissionsCommand] : []),
+      permissionsCommand,
+      ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       restoreCommand(this.config),
       resumeCommand,

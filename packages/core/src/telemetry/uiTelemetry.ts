@@ -119,6 +119,7 @@ const createInitialMetrics = (): SessionMetrics => ({
 export class UiTelemetryService extends EventEmitter {
   #metrics: SessionMetrics = createInitialMetrics();
   #lastPromptTokenCount = 0;
+  #lastCachedContentTokenCount = 0;
 
   addEvent(event: UiEvent) {
     switch (event['event.name']) {
@@ -158,12 +159,21 @@ export class UiTelemetryService extends EventEmitter {
     });
   }
 
+  getLastCachedContentTokenCount(): number {
+    return this.#lastCachedContentTokenCount;
+  }
+
+  setLastCachedContentTokenCount(count: number): void {
+    this.#lastCachedContentTokenCount = count;
+  }
+
   /**
    * Resets metrics to the initial state (used when resuming a session).
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
     this.#lastPromptTokenCount = 0;
+    this.#lastCachedContentTokenCount = 0;
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,

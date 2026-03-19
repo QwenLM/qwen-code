@@ -13,6 +13,7 @@ import type {
   ToolInvocation,
   ToolResult,
 } from '../tools/tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -25,10 +26,10 @@ interface MockToolOptions {
   description?: string;
   canUpdateOutput?: boolean;
   isOutputMarkdown?: boolean;
-  shouldConfirmExecute?: (
-    params: { [key: string]: unknown },
+  getDefaultPermission?: () => Promise<PermissionDecision>;
+  getConfirmationDetails?: (
     signal: AbortSignal,
-  ) => Promise<ToolCallConfirmationDetails | false>;
+  ) => Promise<ToolCallConfirmationDetails>;
   execute?: (
     params: { [key: string]: unknown },
     signal?: AbortSignal,
@@ -59,10 +60,14 @@ class MockToolInvocation extends BaseToolInvocation<
     }
   }
 
-  override shouldConfirmExecute(
+  override getDefaultPermission(): Promise<PermissionDecision> {
+    return this.tool.getDefaultPermission();
+  }
+
+  override getConfirmationDetails(
     abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    return this.tool.shouldConfirmExecute(this.params, abortSignal);
+  ): Promise<ToolCallConfirmationDetails> {
+    return this.tool.getConfirmationDetails(abortSignal);
   }
 
   getDescription(): string {
@@ -77,10 +82,10 @@ export class MockTool extends BaseDeclarativeTool<
   { [key: string]: unknown },
   ToolResult
 > {
-  shouldConfirmExecute: (
-    params: { [key: string]: unknown },
+  getDefaultPermission: () => Promise<PermissionDecision>;
+  getConfirmationDetails: (
     signal: AbortSignal,
-  ) => Promise<ToolCallConfirmationDetails | false>;
+  ) => Promise<ToolCallConfirmationDetails>;
   execute: (
     params: { [key: string]: unknown },
     signal?: AbortSignal,
@@ -98,10 +103,22 @@ export class MockTool extends BaseDeclarativeTool<
       options.canUpdateOutput ?? false,
     );
 
-    if (options.shouldConfirmExecute) {
-      this.shouldConfirmExecute = options.shouldConfirmExecute;
+    if (options.getDefaultPermission) {
+      this.getDefaultPermission = options.getDefaultPermission;
     } else {
-      this.shouldConfirmExecute = () => Promise.resolve(false);
+      this.getDefaultPermission = () =>
+        Promise.resolve('allow' as PermissionDecision);
+    }
+
+    if (options.getConfirmationDetails) {
+      this.getConfirmationDetails = options.getConfirmationDetails;
+    } else {
+      this.getConfirmationDetails = () => {
+        throw new Error(
+          `${this.name} returned 'ask' from getDefaultPermission() ` +
+            `but does not implement getConfirmationDetails().`,
+        );
+      };
     }
 
     if (options.execute) {
@@ -122,7 +139,10 @@ export class MockTool extends BaseDeclarativeTool<
   }
 }
 
-export const MOCK_TOOL_SHOULD_CONFIRM_EXECUTE = () =>
+export const MOCK_TOOL_GET_DEFAULT_PERMISSION = () =>
+  Promise.resolve('ask' as PermissionDecision);
+
+export const MOCK_TOOL_GET_CONFIRMATION_DETAILS = () =>
   Promise.resolve({
     type: 'exec' as const,
     title: 'Confirm mockTool',
@@ -152,22 +172,23 @@ export class MockModifiableToolInvocation extends BaseToolInvocation<
     );
   }
 
-  override async shouldConfirmExecute(
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return this.tool.shouldConfirm ? 'ask' : 'allow';
+  }
+
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.tool.shouldConfirm) {
-      return {
-        type: 'edit',
-        title: 'Confirm Mock Tool',
-        fileName: 'test.txt',
-        filePath: 'test.txt',
-        fileDiff: 'diff',
-        originalContent: 'originalContent',
-        newContent: 'newContent',
-        onConfirm: async () => {},
-      };
-    }
-    return false;
+  ): Promise<ToolCallConfirmationDetails> {
+    return {
+      type: 'edit',
+      title: 'Confirm Mock Tool',
+      fileName: 'test.txt',
+      filePath: 'test.txt',
+      fileDiff: 'diff',
+      originalContent: 'originalContent',
+      newContent: 'newContent',
+      onConfirm: async () => {},
+    };
   }
 
   getDescription(): string {

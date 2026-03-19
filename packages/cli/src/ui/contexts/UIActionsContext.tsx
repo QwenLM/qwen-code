@@ -59,6 +59,7 @@ export interface UIActions {
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
   dismissCodingPlanUpdate: () => void;
+  closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;

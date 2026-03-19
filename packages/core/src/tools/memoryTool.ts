@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolEditConfirmationDetails, ToolResult } from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
+import type {
+  ToolEditConfirmationDetails,
+  ToolResult,
+  ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { FunctionDeclaration } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -207,8 +208,6 @@ class MemoryToolInvocation extends BaseToolInvocation<
   SaveMemoryParams,
   ToolResult
 > {
-  private static readonly allowlist: Set<string> = new Set();
-
   getDescription(): string {
     if (!this.params.scope) {
       const globalPath = tildeifyPath(getMemoryFilePath('global'));
@@ -220,12 +219,21 @@ class MemoryToolInvocation extends BaseToolInvocation<
     return `${tildeifyPath(memoryFilePath)} (${scope})`;
   }
 
-  override async shouldConfirmExecute(
+  /**
+   * Memory save always needs user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  /**
+   * Constructs the memory save confirmation dialog.
+   */
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolEditConfirmationDetails | false> {
+  ): Promise<ToolCallConfirmationDetails> {
     // When scope is not specified, show a choice dialog defaulting to global
     if (!this.params.scope) {
-      // Show preview of what would be added to global by default
       const defaultScope = 'global';
       const currentContent = await readMemoryFileContent(defaultScope);
       const newContent = computeNewContent(currentContent, this.params.fact);
@@ -270,14 +278,9 @@ Preview of changes to be made to GLOBAL memory:
       return confirmationDetails;
     }
 
-    // Only check allowlist when scope is specified
+    // Scope is specified
     const scope = this.params.scope;
     const memoryFilePath = getMemoryFilePath(scope);
-    const allowlistKey = `${memoryFilePath}_${scope}`;
-
-    if (MemoryToolInvocation.allowlist.has(allowlistKey)) {
-      return false;
-    }
 
     // Read current content of the memory file
     const currentContent = await readMemoryFileContent(scope);
@@ -303,10 +306,8 @@ Preview of changes to be made to GLOBAL memory:
       fileDiff,
       originalContent: currentContent,
       newContent,
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          MemoryToolInvocation.allowlist.add(allowlistKey);
-        }
+      onConfirm: async (_outcome: ToolConfirmationOutcome) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;

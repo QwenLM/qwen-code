@@ -134,18 +134,11 @@ export const App: React.FC = () => {
           }),
         );
 
-        if (query && query.length >= 1) {
-          const lowerQuery = query.toLowerCase();
-          return allItems.filter(
-            (item) =>
-              item.label.toLowerCase().includes(lowerQuery) ||
-              (item.description &&
-                item.description.toLowerCase().includes(lowerQuery)),
-          );
-        }
+        // Fuzzy search is handled by the backend (FileSearchFactory)
+        // No client-side filtering needed - results are already fuzzy-matched
 
         // If first time and still loading, show a placeholder
-        if (allItems.length === 0) {
+        if (allItems.length === 0 && query && query.length >= 1) {
           return [
             {
               id: 'loading-files',
@@ -189,6 +182,7 @@ export const App: React.FC = () => {
             description: cmd.description,
             type: 'command' as const,
             group: 'Slash Commands',
+            value: cmd.name,
           }),
         );
 
@@ -533,9 +527,11 @@ export const App: React.FC = () => {
     setAskUserQuestionRequest(null);
   }, [vscode]);
 
-  // Handle completion selection
+  // Handle completion selection.
+  // When fillOnly is true (Tab), slash commands are inserted into the input
+  // instead of being sent immediately, so users can append arguments.
   const handleCompletionSelect = useCallback(
-    (item: CompletionItem) => {
+    (item: CompletionItem, fillOnly?: boolean) => {
       // Handle completion selection by inserting the value into the input field
       const inputElement = inputFieldRef.current;
       if (!inputElement) {
@@ -608,13 +604,13 @@ export const App: React.FC = () => {
           }
         };
 
-        // Handle special commands by id
         if (itemId === 'login') {
           clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
           completion.closeCompletion();
           return;
         }
+
         if (itemId === 'model') {
           clearTriggerText();
           setShowModelSelector(true);
@@ -622,10 +618,11 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Handle server-provided slash commands by sending them as messages
-        // CLI will detect slash commands in session/prompt and execute them
+        // Handle server-provided slash commands by sending them as messages.
+        // Skip when fillOnly (Tab) — let the generic insertion path fill the
+        // command text so the user can keep typing arguments.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd) {
+        if (serverCmd && !fillOnly) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
@@ -693,7 +690,9 @@ export const App: React.FC = () => {
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
       const atPos = textBeforeCursor.lastIndexOf('@');
-      const slashPos = textBeforeCursor.lastIndexOf('/');
+      // Only consider slash as trigger if we're in slash command mode
+      const slashPos =
+        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {
@@ -1057,6 +1056,7 @@ export const App: React.FC = () => {
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionFill={(item) => handleCompletionSelect(item, true)}
           onCompletionClose={completion.closeCompletion}
           canSubmit={canSubmit}
           extraContent={

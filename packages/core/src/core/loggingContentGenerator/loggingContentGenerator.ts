@@ -34,6 +34,7 @@ import {
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
@@ -49,12 +50,15 @@ import {
 export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
+  private modalities?: InputModalities;
 
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
     generatorConfig: ContentGeneratorConfig,
   ) {
+    this.modalities = generatorConfig.modalities;
+
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
     if (generatorConfig.enableOpenAILogging) {
@@ -240,6 +244,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       request.model,
       this.schemaCompliance,
     );
+    converter.setModalities(this.modalities ?? {});
     const messages = converter.convertGeminiRequestToOpenAI(request, {
       cleanOrphanToolCalls: false,
     });

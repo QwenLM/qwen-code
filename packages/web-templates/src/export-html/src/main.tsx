@@ -1,6 +1,9 @@
 import './styles.css';
 import logoSvg from './favicon.svg';
-import { TempFileModal, useModalState } from './components/TempFileModal';
+import { TempFileModal } from './components/TempFileModal.js';
+import { usePlatformContext } from './components/hooks.js';
+import { MetadataSidebar } from './components/MetadataSidebar.js';
+import { parseChatData, isChatViewerMessage } from './components/utils.js';
 
 declare global {
   interface Window {
@@ -10,6 +13,7 @@ declare global {
 }
 
 const ReactDOM = window.ReactDOM;
+const React = window.React;
 
 declare const QwenCodeWebUI: {
   ChatViewer: (props: {
@@ -25,27 +29,6 @@ declare const QwenCodeWebUI: {
 
 const { ChatViewer, PlatformProvider } = QwenCodeWebUI;
 
-type ChatData = {
-  messages?: unknown[];
-  sessionId?: string;
-  startTime?: string;
-};
-
-type PlatformContextValue = {
-  platform: 'web';
-  postMessage: (message: unknown) => void;
-  onMessage: (handler: (event: MessageEvent) => void) => () => void;
-  openFile: (path: string) => void;
-  openTempFile?: (content: string, fileName?: string) => void;
-  getResourceUrl: () => string | undefined;
-  features: {
-    canOpenFile: boolean;
-    canOpenTempFile?: boolean;
-    canCopy: boolean;
-  };
-};
-type ChatViewerMessage = { type?: string } & Record<string, unknown>;
-
 const logoSvgWithGradient = (() => {
   if (!logoSvg) {
     return logoSvg;
@@ -59,87 +42,13 @@ const logoSvgWithGradient = (() => {
   return withDefs.replace(/fill="[^"]*"/, 'fill="url(#qwen-logo-gradient)"');
 })();
 
-const React = window.React;
-
-const usePlatformContext = () => {
-  const { modalState, openModal, closeModal } = useModalState();
-
-  const platformContext = React.useMemo(
-    () =>
-      ({
-        platform: 'web' as PlatformContextValue['platform'],
-        postMessage: (message: unknown) => {
-          console.log('Posted message:', message);
-        },
-        onMessage: (handler: (event: MessageEvent) => void) => {
-          window.addEventListener('message', handler);
-          return () => window.removeEventListener('message', handler);
-        },
-        openFile: (path: string) => {
-          console.log('Opening file:', path);
-        },
-        openTempFile: openModal,
-        getResourceUrl: () => undefined,
-        features: {
-          canOpenFile: false,
-          canOpenTempFile: true,
-          canCopy: true,
-        },
-      }) satisfies PlatformContextValue,
-    [openModal],
-  );
-
-  return { platformContext, modalState, closeModal };
-};
-
-const isChatViewerMessage = (value: unknown): value is ChatViewerMessage =>
-  Boolean(value) && typeof value === 'object';
-
-const parseChatData = (): ChatData => {
-  const chatDataElement = document.getElementById('chat-data');
-  if (!chatDataElement?.textContent) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(chatDataElement.textContent) as unknown;
-    if (parsed && typeof parsed === 'object') {
-      return parsed as ChatData;
-    }
-    return {};
-  } catch (error) {
-    console.error('Failed to parse chat data.', error);
-    return {};
-  }
-};
-
-const formatSessionDate = (startTime?: string | null) => {
-  if (!startTime) {
-    return '-';
-  }
-
-  try {
-    const date = new Date(startTime);
-    return date.toLocaleString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return startTime;
-  }
-};
-
 const App = () => {
   const chatData = parseChatData();
   const rawMessages = Array.isArray(chatData.messages) ? chatData.messages : [];
   const messages = rawMessages
     .filter(isChatViewerMessage)
     .filter((record) => record.type !== 'system');
-  const sessionId = chatData.sessionId ?? '-';
-  const sessionDate = formatSessionDate(chatData.startTime);
+  const metadata = chatData.metadata;
   const { platformContext, modalState, closeModal } = usePlatformContext();
 
   return (
@@ -157,21 +66,14 @@ const App = () => {
             </div>
           </div>
         </div>
-        <div className="meta">
-          <div className="meta-item">
-            <span className="meta-label">Session Id</span>
-            <span className="font-mono">{sessionId}</span>
-          </div>
-          <div className="meta-item">
-            <span className="meta-label">Export Time</span>
-            <span>{sessionDate}</span>
-          </div>
-        </div>
       </header>
-      <div className="chat-container">
-        <PlatformProvider value={platformContext}>
-          <ChatViewer messages={messages} autoScroll={false} theme="dark" />
-        </PlatformProvider>
+      <div className="content-wrapper">
+        <div className="chat-container">
+          <PlatformProvider value={platformContext}>
+            <ChatViewer messages={messages} autoScroll={false} theme="dark" />
+          </PlatformProvider>
+        </div>
+        {metadata && <MetadataSidebar metadata={metadata} />}
       </div>
       <TempFileModal state={modalState} onClose={closeModal} />
     </div>
