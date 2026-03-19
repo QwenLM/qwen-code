@@ -43,7 +43,9 @@ describe('QwenConnectionHandler', () => {
     it('passes --proxy argument when http.proxy is set', async () => {
       mockGetConfiguration.mockReturnValue({
         get: (key: string) => {
-          if (key === 'proxy') return 'http://proxy.example.com:8080';
+          if (key === 'proxy') {
+            return 'http://proxy.example.com:8080';
+          }
           return undefined;
         },
       });
@@ -60,9 +62,12 @@ describe('QwenConnectionHandler', () => {
     it('passes --proxy argument when https.proxy is set (fallback)', async () => {
       mockGetConfiguration.mockReturnValue({
         get: (key: string) => {
-          if (key === 'proxy') return undefined;
-          if (key === 'https.proxy')
+          if (key === 'proxy') {
+            return undefined;
+          }
+          if (key === 'https.proxy') {
             return 'http://https-proxy.example.com:8080';
+          }
           return undefined;
         },
       });
@@ -79,9 +84,12 @@ describe('QwenConnectionHandler', () => {
     it('prefers http.proxy over https.proxy', async () => {
       mockGetConfiguration.mockReturnValue({
         get: (key: string) => {
-          if (key === 'proxy') return 'http://http-proxy.example.com:8080';
-          if (key === 'https.proxy')
+          if (key === 'proxy') {
+            return 'http://http-proxy.example.com:8080';
+          }
+          if (key === 'https.proxy') {
             return 'http://https-proxy.example.com:8080';
+          }
           return undefined;
         },
       });
@@ -111,7 +119,9 @@ describe('QwenConnectionHandler', () => {
     it('does not pass --proxy argument when proxy is empty string', async () => {
       mockGetConfiguration.mockReturnValue({
         get: (key: string) => {
-          if (key === 'proxy') return '';
+          if (key === 'proxy') {
+            return '';
+          }
           return undefined;
         },
       });
