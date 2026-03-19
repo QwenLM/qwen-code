@@ -88,7 +88,8 @@ export class QwenAgentManager {
   private sessionManager: QwenSessionManager;
   private connectionHandler: QwenConnectionHandler;
   private sessionUpdateHandler: QwenSessionUpdateHandler;
-  public currentWorkingDir: string = process.cwd();
+  currentWorkingDir: string = process.cwd();
+  availableAuthMethods: Array<Record<string, unknown>> | undefined;
   // When loading a past session via ACP, the CLI replays history through
   // session/update notifications. We set this flag to route message chunks
   // (user/assistant) as discrete chat messages instead of live streaming.
@@ -272,6 +273,9 @@ export class QwenAgentManager {
     this.connection.onInitialized = (init: unknown) => {
       try {
         const obj = (init || {}) as Record<string, unknown>;
+        if (Array.isArray(obj['authMethods'])) {
+          this.availableAuthMethods = obj['authMethods'];
+        }
         const modes = obj['modes'] as
           | {
               currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
@@ -1153,7 +1157,10 @@ export class QwenAgentManager {
    * @param workingDir - Working directory
    * @returns Newly created session ID
    */
-  async authenticate(methodId?: string, _meta?: any): Promise<void> {
+  async authenticate(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
     await this.connection.authenticate(methodId, _meta);
   }
 

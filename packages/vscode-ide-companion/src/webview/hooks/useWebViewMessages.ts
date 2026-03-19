@@ -129,7 +129,10 @@ interface UseWebViewMessagesProps {
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
-  setIsAuthenticated?: (authenticated: boolean | null, authMethods?: any[]) => void;
+  setIsAuthenticated?: (
+    authenticated: boolean | null,
+    authMethods?: Array<Record<string, unknown>>,
+  ) => void;
   // Login error state setter
   setLoginErrorMessage?: (errorMessage: string) => void;
   // Usage stats setter
@@ -401,9 +404,10 @@ export const useWebViewMessages = ({
           // Clear loading state and show error notice
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
-            (message?.data?.message as string) ||
-            'Login failed. Please try again.';
-            
+            typeof message?.data?.message === 'string'
+              ? message.data.message
+              : 'Login failed. Please try again.';
+
           // Set error to Onboarding component rather than appending it into the chat messages
           handlers.setLoginErrorMessage?.(errorMsg);
           handlers.setIsAuthenticated?.(false);
@@ -411,7 +415,12 @@ export const useWebViewMessages = ({
         }
 
         case 'authState': {
-          const payload = message?.data as { authenticated?: boolean | null, authMethods?: any[] } | undefined;
+          const payload = message?.data as
+            | {
+                authenticated?: boolean | null;
+                authMethods?: Array<Record<string, unknown>>;
+              }
+            | undefined;
           const state = payload?.authenticated;
           if (typeof state === 'boolean') {
             handlers.setIsAuthenticated?.(state, payload?.authMethods);

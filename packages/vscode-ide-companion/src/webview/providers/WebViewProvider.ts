@@ -85,9 +85,11 @@ export class WebViewProvider {
     );
 
     // Set login handler for /login command - direct force re-login
-    this.messageHandler.setLoginHandler(async (methodId?: string, _meta?: any) => {
-      await this.forceReLogin(methodId, _meta);
-    });
+    this.messageHandler.setLoginHandler(
+      async (methodId?: string, _meta?: Record<string, unknown>) => {
+        await this.forceReLogin(methodId, _meta);
+      },
+    );
 
     // Setup agent callbacks
     this.agentManager.onMessage((message) => {
@@ -850,9 +852,9 @@ export class WebViewProvider {
           );
           this.sendMessageToWebView({
             type: 'authState',
-            data: { 
+            data: {
               authenticated: false,
-              authMethods: connectResult.authMethods
+              authMethods: connectResult.authMethods,
             },
           });
           // Initialize empty conversation to allow browsing history
@@ -863,9 +865,9 @@ export class WebViewProvider {
         if (connectResult.requiresAuth) {
           this.sendMessageToWebView({
             type: 'authState',
-            data: { 
+            data: {
               authenticated: false,
-              authMethods: connectResult.authMethods
+              authMethods: connectResult.authMethods,
             },
           });
         }
@@ -910,7 +912,10 @@ export class WebViewProvider {
    * Force re-login by clearing auth cache and reconnecting
    * Called when user explicitly uses /login command
    */
-  async forceReLogin(methodId?: string, _meta?: any): Promise<void> {
+  async forceReLogin(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
     console.log('[WebViewProvider] Force re-login requested', methodId);
 
     return vscode.window.withProgress(
@@ -943,25 +948,44 @@ export class WebViewProvider {
           // Reinitialize connection with explicit authentication disabled
           await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
-          progress.report({
-            message: 'Authenticating...',
-          });
+          if (methodId && methodId !== 'default') {
+            progress.report({
+              message: 'Authenticating...',
+            });
 
-          await this.agentManager.authenticate(methodId, _meta);
-          
-          await this.agentManager.createNewSession(
-            this.agentManager.currentWorkingDir,
-          );
+            await this.agentManager.authenticate(methodId, _meta);
 
-          console.log(
-            '[WebViewProvider] Force re-login completed successfully',
-          );
+            await this.agentManager.createNewSession(
+              this.agentManager.currentWorkingDir,
+            );
 
-          // Send success notification to WebView
-          this.sendMessageToWebView({
-            type: 'loginSuccess',
-            data: { message: 'Successfully logged in!' },
-          });
+            console.log(
+              '[WebViewProvider] Force re-login completed successfully',
+            );
+
+            // Send success notification to WebView
+            this.sendMessageToWebView({
+              type: 'loginSuccess',
+              data: { message: 'Successfully logged in!' },
+            });
+          } else {
+            console.log(
+              '[WebViewProvider] Force re-login clear session and wait for prompt selection',
+            );
+            // Clear any lingering error message on the frontend since user intentionally triggered /login
+            this.sendMessageToWebView({
+              type: 'loginError',
+              data: { message: '' },
+            });
+            // Force the unauthenticated view and provide available auth methods from backend initialization
+            this.sendMessageToWebView({
+              type: 'authState',
+              data: {
+                authenticated: false,
+                authMethods: this.agentManager.availableAuthMethods,
+              },
+            });
+          }
         } catch (_error) {
           const errorMsg = getErrorMessage(_error);
           console.error('[WebViewProvider] Force re-login failed:', _error);
