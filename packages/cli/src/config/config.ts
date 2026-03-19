@@ -35,6 +35,7 @@ import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import type { Settings, LoadedSettings } from './settings.js';
 import { SettingScope } from './settings.js';
+import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -586,6 +587,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
+    // Register Auth subcommands
+    .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand);
 

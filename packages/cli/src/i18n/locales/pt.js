@@ -1749,4 +1749,78 @@ export default {
     '↑/↓: Navegar | Space/Enter: Alternar | Esc: Cancelar',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navegar | Enter: Selecionar | Esc: Cancelar',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Configurar autenticação Qwen com Qwen-OAuth ou Alibaba Cloud Coding Plan',
+  'Authenticate using Qwen OAuth': 'Autenticar usando Qwen OAuth',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Autenticar usando Alibaba Cloud Coding Plan',
+  'Region for Coding Plan (china/global)':
+    'Região para Coding Plan (china/global)',
+  'API key for Coding Plan': 'Chave de API para Coding Plan',
+  'Show current authentication status': 'Mostrar status atual de autenticação',
+  'Authentication completed successfully.':
+    'Autenticação concluída com sucesso.',
+  'Starting Qwen OAuth authentication...':
+    'Iniciando autenticação Qwen OAuth...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Autenticado com sucesso via Qwen OAuth.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Falha ao autenticar com Qwen OAuth: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Processando autenticação Alibaba Cloud Coding Plan...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Autenticado com sucesso via Alibaba Cloud Coding Plan.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Falha ao autenticar com Coding Plan: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Global',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Selecione a região para Coding Plan:',
+  'Enter your Coding Plan API key: ':
+    'Insira sua chave de API do Coding Plan: ',
+  'Select authentication method:': 'Selecione o método de autenticação:',
+  '\n=== Authentication Status ===\n': '\n=== Status de Autenticação ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  Nenhum método de autenticação configurado.\n',
+  'Run one of the following commands to get started:\n':
+    'Execute um dos seguintes comandos para começar:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Autenticar com Qwen OAuth (gratuito)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Autenticar com Alibaba Cloud Coding Plan\n',
+  'Or simply run:': 'Ou simplesmente execute:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Configuração interativa de autenticação\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ Método de autenticação: Qwen OAuth',
+  '  Type: Free tier': '  Tipo: Gratuito',
+  '  Limit: Up to 1,000 requests/day': '  Limite: Até 1.000 solicitações/dia',
+  '  Models: Qwen latest models\n': '  Modelos: Modelos Qwen mais recentes\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Método de autenticação: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
+  '  Region: {{region}}': '  Região: {{region}}',
+  '  Current Model: {{model}}': '  Modelo atual: {{model}}',
+  '  Config Version: {{version}}': '  Versão da configuração: {{version}}',
+  '  Status: API key configured\n': '  Status: Chave de API configurada\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Método de autenticação: Alibaba Cloud Coding Plan (Incompleto)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Problema: Chave de API não encontrada no ambiente ou configurações\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Execute `qwen auth coding-plan` para reconfigurar.\n',
+  '✓ Authentication Method: {{type}}': '✓ Método de autenticação: {{type}}',
+  '  Status: Configured\n': '  Status: Configurado\n',
+  'Failed to check authentication status: {{error}}':
+    'Falha ao verificar status de autenticação: {{error}}',
+  'Select an option:': 'Selecione uma opção:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Modo raw não disponível. Execute em um terminal interativo.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
 };

@@ -54,7 +54,7 @@ brew install qwen-code
 
 ## Step 2: Log in to your account
 
-Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll need to log in:
+Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll be prompted to log in:
 
 ```bash
 # You'll be prompted to log in on first use
@@ -74,7 +74,7 @@ Select `Qwen OAuth`, log in to your account and follow the prompts to confirm. O
 
 > [!tip]
 >
-> If you need to log in again or switch accounts, use the `/auth` command within Qwen Code.
+> You can also configure authentication directly from the terminal without starting a session by running `qwen auth`. Use `qwen auth status` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
 
 ## Step 3: Start your first session
 
@@ -216,7 +216,9 @@ Here are the most important commands for daily use:
 | Command               | What it does                                     | Example                       |
 | --------------------- | ------------------------------------------------ | ----------------------------- |
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
-| `/auth`               | Change authentication method                     | `/auth`                       |
+| `/auth`               | Change authentication method (in session)        | `/auth`                       |
+| `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
+| `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |

@@ -1257,4 +1257,76 @@ export default {
     '↑/↓: ナビゲート | Space/Enter: 切り替え | Esc: キャンセル',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: ナビゲート | Enter: 選択 | Esc: キャンセル',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Qwen-OAuth または Alibaba Cloud Coding Plan で Qwen 認証情報を設定する',
+  'Authenticate using Qwen OAuth': 'Qwen OAuth で認証する',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Alibaba Cloud Coding Plan で認証する',
+  'Region for Coding Plan (china/global)':
+    'Coding Plan のリージョン (china/global)',
+  'API key for Coding Plan': 'Coding Plan の API キー',
+  'Show current authentication status': '現在の認証ステータスを表示',
+  'Authentication completed successfully.': '認証が正常に完了しました。',
+  'Starting Qwen OAuth authentication...': 'Qwen OAuth 認証を開始しています...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Qwen OAuth での認証に成功しました。',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Qwen OAuth での認証に失敗しました: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Alibaba Cloud Coding Plan 認証を処理しています...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Alibaba Cloud Coding Plan での認証に成功しました。',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Coding Plan での認証に失敗しました: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'グローバル',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Coding Plan のリージョンを選択:',
+  'Enter your Coding Plan API key: ':
+    'Coding Plan の API キーを入力してください: ',
+  'Select authentication method:': '認証方法を選択:',
+  '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  認証方法が設定されていません。\n',
+  'Run one of the following commands to get started:\n':
+    '以下のコマンドのいずれかを実行して開始してください:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Qwen OAuth で認証（無料）',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Alibaba Cloud Coding Plan で認証\n',
+  'Or simply run:': 'または以下を実行:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - インタラクティブ認証セットアップ\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
+  '  Type: Free tier': '  タイプ: 無料プラン',
+  '  Limit: Up to 1,000 requests/day': '  制限: 1日最大1,000リクエスト',
+  '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ 認証方法: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'グローバル - Alibaba Cloud',
+  '  Region: {{region}}': '  リージョン: {{region}}',
+  '  Current Model: {{model}}': '  現在のモデル: {{model}}',
+  '  Config Version: {{version}}': '  設定バージョン: {{version}}',
+  '  Status: API key configured\n': '  ステータス: APIキー設定済み\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
+  '  Issue: API key not found in environment or settings\n':
+    '  問題: 環境変数または設定にAPIキーが見つかりません\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  `qwen auth coding-plan` を実行して再設定してください。\n',
+  '✓ Authentication Method: {{type}}': '✓ 認証方法: {{type}}',
+  '  Status: Configured\n': '  ステータス: 設定済み\n',
+  'Failed to check authentication status: {{error}}':
+    '認証ステータスの確認に失敗しました: {{error}}',
+  'Select an option:': 'オプションを選択:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
 };
