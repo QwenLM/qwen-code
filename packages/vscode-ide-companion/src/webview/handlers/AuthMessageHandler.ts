@@ -13,16 +13,24 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  * Handles all authentication-related messages
  */
 export class AuthMessageHandler extends BaseMessageHandler {
-  private loginHandler: ((methodId?: string, _meta?: any) => Promise<void>) | null = null;
+  private loginHandler:
+    | ((methodId?: string, _meta?: Record<string, unknown>) => Promise<void>)
+    | null = null;
 
   canHandle(messageType: string): boolean {
     return ['login'].includes(messageType);
   }
 
-  async handle(message: { type: string; data?: any }): Promise<void> {
+  async handle(message: {
+    type: string;
+    data?: Record<string, unknown>;
+  }): Promise<void> {
     switch (message.type) {
       case 'login':
-        await this.handleLogin(message.data?.methodId, message.data?._meta);
+        await this.handleLogin(
+          message.data?.methodId as string | undefined,
+          message.data?._meta as Record<string, unknown> | undefined,
+        );
         break;
 
       default:
@@ -37,14 +45,22 @@ export class AuthMessageHandler extends BaseMessageHandler {
   /**
    * Set login handler
    */
-  setLoginHandler(handler: (methodId?: string, _meta?: any) => Promise<void>): void {
+  setLoginHandler(
+    handler: (
+      methodId?: string,
+      _meta?: Record<string, unknown>,
+    ) => Promise<void>,
+  ): void {
     this.loginHandler = handler;
   }
 
   /**
    * Handle login request
    */
-  private async handleLogin(methodId?: string, _meta?: any): Promise<void> {
+  private async handleLogin(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
     try {
       console.log('[AuthMessageHandler] Login requested');
       console.log(

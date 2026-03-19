@@ -11,7 +11,10 @@
  */
 
 import type { AcpConnection } from './acpConnection.js';
-import { isAuthenticationRequiredError, extractAuthMethodsFromError } from '../utils/authErrors.js';
+import {
+  isAuthenticationRequiredError,
+  extractAuthMethodsFromError,
+} from '../utils/authErrors.js';
 import {
   extractModelInfoFromNewSessionResult,
   extractSessionModeState,
@@ -32,7 +35,7 @@ export interface QwenConnectionResult {
     name: string;
     description: string;
   }>;
-  authMethods?: any[];
+  authMethods?: Array<Record<string, unknown>>;
 }
 
 /**
@@ -60,7 +63,7 @@ export class QwenConnectionHandler {
     const autoAuthenticate = options?.autoAuthenticate ?? true;
     let sessionCreated = false;
     let requiresAuth = false;
-    let authMethods: any[] | undefined;
+    let authMethods: Array<Record<string, unknown>> | undefined;
     let modelInfo: ModelInfo | undefined;
     let availableModels: ModelInfo[] | undefined;
     let currentModeId: ApprovalModeValue | undefined;

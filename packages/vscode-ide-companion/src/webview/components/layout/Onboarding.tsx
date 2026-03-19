@@ -13,7 +13,7 @@ import { generateIconUrl } from '../../utils/resourceUrl.js';
 
 interface OnboardingPageProps {
   onLogin: (methodId?: string, _meta?: Record<string, unknown>) => void;
-  authMethods?: any[];
+  authMethods?: Array<Record<string, unknown>>;
   errorMessage?: string;
 }
 
@@ -21,8 +21,20 @@ interface OnboardingPageProps {
  * VSCode Onboarding wrapper
  * Provides platform-specific icon URL to the webui Onboarding component
  */
-export const Onboarding: FC<OnboardingPageProps> = ({ onLogin, authMethods, errorMessage }) => {
+export const Onboarding: FC<OnboardingPageProps> = ({
+  onLogin,
+  authMethods,
+  errorMessage,
+}) => {
   const iconUri = generateIconUrl('icon.png');
 
-  return <BaseOnboarding iconUrl={iconUri} onGetStarted={onLogin} authMethods={authMethods} errorMessage={errorMessage} />;
+  // @ts-expect-error AuthMethodInfo is not exported from @qwen-code/webui causing type mismatch here
+  return (
+    <BaseOnboarding
+      iconUrl={iconUri}
+      onGetStarted={onLogin}
+      authMethods={authMethods}
+      errorMessage={errorMessage}
+    />
+  );
 };
