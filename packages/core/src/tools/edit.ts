@@ -172,6 +172,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       }
     }
 
+    // Normalize line endings in edit strings to match the LF-normalized file content.
+    // This prevents CRLF/LF mismatch when old_string comes from a Windows environment.
+    finalOldString = finalOldString.replace(/\r\n/g, '\n');
+    finalNewString = finalNewString.replace(/\r\n/g, '\n');
+
     const normalizedStrings = normalizeEditStrings(
       currentContent,
       finalOldString,

@@ -647,6 +647,27 @@ describe('EditTool', () => {
       });
     });
 
+    it('should match CRLF old_string against LF-normalized file content', async () => {
+      // File on disk has CRLF line endings (Windows-style)
+      fs.writeFileSync(filePath, 'line1\r\nline2\r\nline3', 'utf8');
+      const params: EditToolParams = {
+        file_path: filePath,
+        // old_string from LLM or IDE may contain CRLF
+        old_string: 'line1\r\nline2',
+        new_string: 'replaced1\nreplaced2',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file/,
+      );
+      const content = fs.readFileSync(filePath, 'utf8');
+      expect(content).toContain('replaced1');
+      expect(content).toContain('replaced2');
+    });
+
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
       fs.writeFileSync(filePath, 'Existing content', 'utf8');
       const params: EditToolParams = {
