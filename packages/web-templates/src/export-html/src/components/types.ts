@@ -12,7 +12,6 @@ export type ChatData = {
 export type ExportMetadata = {
   sessionId: string;
   startTime: string;
-  relativeTime: string;
   exportTime: string;
   cwd: string;
   gitRepo?: string;
@@ -28,7 +27,6 @@ export type ExportMetadata = {
   linesAdded?: number;
   linesRemoved?: number;
   uniqueFiles: string[];
-  requestId?: string;
 };
 
 export type PlatformContextValue = {

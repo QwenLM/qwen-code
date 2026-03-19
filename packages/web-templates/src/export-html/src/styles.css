@@ -254,6 +254,13 @@ body {
   gap: 2px;
 }
 
+.metadata-item-empty {
+  font-size: 12px;
+  color: #71717a;
+  margin: 0;
+  padding: 4px 0;
+}
+
 .metadata-content {
   display: flex;
   flex-direction: column;

@@ -21,11 +21,6 @@ export function toMarkdown(sessionData: ExportSessionData): string {
     `- **Exported**: ${sanitizeText(metadata?.exportTime ?? new Date().toISOString())}`,
   );
 
-  // Add requestId if available
-  if (metadata?.requestId) {
-    lines.push(`- **Request ID**: \`${sanitizeText(metadata.requestId)}\``);
-  }
-
   lines.push('');
 
   // Add context info
@@ -101,9 +96,6 @@ export function toMarkdown(sessionData: ExportSessionData): string {
       lines.push(formatMessageContent(message));
     } else if (message.type === 'assistant') {
       lines.push('## Assistant\n');
-      if (message.response_id) {
-        lines.push(`*Response ID: \`${sanitizeText(message.response_id)}\`*\n`);
-      }
       lines.push(formatMessageContent(message));
     } else if (message.type === 'tool_call') {
       lines.push(formatToolCall(message));

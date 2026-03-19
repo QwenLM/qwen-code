@@ -27,9 +27,6 @@ export interface ExportMessage {
   /** Model used for assistant messages */
   model?: string;
 
-  /** Response ID from the LLM API for telemetry/tracing correlation */
-  response_id?: string;
-
   /** Token usage for this message (mainly for assistant messages) */
   usageMetadata?: GenerateContentResponseUsageMetadata;
 
@@ -88,8 +85,6 @@ export interface ExportMetadata {
   linesRemoved?: number;
   /** Unique files referenced in the session (written files only) */
   uniqueFiles: string[];
-  /** Last response ID from the LLM API (request ID) */
-  requestId?: string;
 }
 
 /**

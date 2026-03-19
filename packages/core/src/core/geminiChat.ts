@@ -633,7 +633,6 @@ export class GeminiChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
-    let responseId: string | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -653,11 +652,6 @@ export class GeminiChat {
 
           // Collect all parts for recording
           allModelParts.push(...content.parts);
-        }
-
-        // Collect response ID for telemetry/tracing correlation
-        if (chunk.responseId) {
-          responseId = chunk.responseId;
         }
       }
 
@@ -730,6 +724,8 @@ export class GeminiChat {
 
     // Record assistant turn with raw Content and metadata
     if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+      const contextWindowSize =
+        this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -742,7 +738,7 @@ export class GeminiChat {
             : []),
         ],
         tokens: usageMetadata,
-        responseId,
+        contextWindowSize,
       });
     }
 

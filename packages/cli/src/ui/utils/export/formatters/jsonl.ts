@@ -64,9 +64,6 @@ export function toJsonl(sessionData: ExportSessionData): string {
   if (sourceMetadata?.uniqueFiles && sourceMetadata.uniqueFiles.length > 0) {
     metadata['uniqueFiles'] = sourceMetadata.uniqueFiles;
   }
-  if (sourceMetadata?.requestId) {
-    metadata['requestId'] = sourceMetadata.requestId;
-  }
 
   lines.push(JSON.stringify(metadata));
 

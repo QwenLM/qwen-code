@@ -264,22 +264,36 @@ function extractTaskToolTokens(record: ChatRecord): number {
 /**
  * Calculate token statistics from ChatRecords.
  * Aggregates usageMetadata from assistant records and TaskTool executionSummary to get total token usage.
+ * Uses the last assistant record that has both totalTokenCount and contextWindowSize for calculating context usage percent.
  */
-function calculateTokenStats(
-  records: ChatRecord[],
-  contextWindowSize?: number,
-): { totalTokens: number; contextUsagePercent?: number } {
+function calculateTokenStats(records: ChatRecord[]): {
+  totalTokens: number;
+  contextUsagePercent?: number;
+  contextWindowSize?: number;
+} {
   let totalTokens = 0;
-  let lastTotalTokens = 0;
+  // Track the last assistant record that has BOTH totalTokenCount and contextWindowSize
+  // to ensure the percentage calculation uses values from the same record
+  let lastValidRecord: {
+    totalTokenCount: number;
+    contextWindowSize: number;
+  } | null = null;
 
   // Aggregate usageMetadata from all assistant records
-  // Use last available totalTokenCount for context usage calculation
   for (const record of records) {
-    if (record.type === 'assistant' && record.usageMetadata) {
-      totalTokens += record.usageMetadata.totalTokenCount ?? 0;
-      // Use the last available totalTokenCount for context usage calculation
-      if (record.usageMetadata.totalTokenCount !== undefined) {
-        lastTotalTokens = record.usageMetadata.totalTokenCount;
+    if (record.type === 'assistant') {
+      if (record.usageMetadata) {
+        totalTokens += record.usageMetadata.totalTokenCount ?? 0;
+      }
+      // Only update lastValidRecord when BOTH values are present in the same record
+      if (
+        record.usageMetadata?.totalTokenCount !== undefined &&
+        record.contextWindowSize !== undefined
+      ) {
+        lastValidRecord = {
+          totalTokenCount: record.usageMetadata.totalTokenCount,
+          contextWindowSize: record.contextWindowSize,
+        };
       }
     }
 
@@ -290,17 +304,29 @@ function calculateTokenStats(
     }
   }
 
-  // Use last totalTokenCount for context usage calculation
+  // Use last valid record's values for context usage calculation
   // This represents how much of the context window is being used by the total tokens
-  if (contextWindowSize && lastTotalTokens > 0) {
-    const percent = (lastTotalTokens / contextWindowSize) * 100;
+  if (lastValidRecord) {
+    const percent =
+      (lastValidRecord.totalTokenCount / lastValidRecord.contextWindowSize) *
+      100;
     return {
       totalTokens,
       contextUsagePercent: Math.round(percent * 10) / 10,
+      contextWindowSize: lastValidRecord.contextWindowSize,
     };
   }
 
-  return { totalTokens };
+  // Fallback: return the contextWindowSize from the last assistant record even if no valid pair found
+  // (for display purposes only, without percentage)
+  const lastAssistantRecord = [...records]
+    .reverse()
+    .find((r) => r.type === 'assistant' && r.contextWindowSize !== undefined);
+
+  return {
+    totalTokens,
+    contextWindowSize: lastAssistantRecord?.contextWindowSize,
+  };
 }
 
 /**
@@ -343,25 +369,12 @@ async function extractMetadata(
   // Count user prompts
   const promptCount = messages.filter((m) => m.type === 'user').length;
 
-  // Get context window size
-  const contentGenConfig = config.getContentGeneratorConfig?.();
-  const contextWindowSize = contentGenConfig?.contextWindowSize;
-
   // Calculate file stats from original ChatRecords
   const fileStats = calculateFileStats(messages);
 
   // Calculate token stats from original ChatRecords
-  const tokenStats = calculateTokenStats(messages, contextWindowSize);
-
-  // Extract the last response_id from assistant records (for request tracking)
-  let requestId: string | undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const record = messages[i];
-    if (record.type === 'assistant' && record.response_id) {
-      requestId = record.response_id;
-      break;
-    }
-  }
+  // contextWindowSize is retrieved from the last assistant record for accuracy
+  const tokenStats = calculateTokenStats(messages);
 
   return {
     sessionId,
@@ -374,13 +387,12 @@ async function extractMetadata(
     channel,
     promptCount,
     contextUsagePercent: tokenStats.contextUsagePercent,
-    contextWindowSize,
+    contextWindowSize: tokenStats.contextWindowSize,
     totalTokens: tokenStats.totalTokens,
     filesWritten: fileStats.writtenFilePaths.size,
     linesAdded: fileStats.linesAdded,
     linesRemoved: fileStats.linesRemoved,
     uniqueFiles: Array.from(fileStats.writtenFilePaths),
-    requestId,
   };
 }
 

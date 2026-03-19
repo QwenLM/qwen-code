@@ -28,7 +28,7 @@ export function normalizeSessionData(
     }
   });
 
-  // Build index of assistant messages by uuid for response_id mapping
+  // Build index of assistant messages by uuid for usageMetadata merging
   const assistantMessageIndexByUuid = new Map<string, number>();
   normalized.forEach((message, index) => {
     if (message.type === 'assistant') {
@@ -64,17 +64,6 @@ export function normalizeSessionData(
     }
 
     mergeToolCallData(existingMessage.toolCall, toolCallMessage.toolCall);
-  }
-
-  // Merge response_id from assistant records
-  for (const record of originalRecords) {
-    if (record.type !== 'assistant') continue;
-    if (!record.response_id) continue;
-
-    const existingIndex = assistantMessageIndexByUuid.get(record.uuid);
-    if (existingIndex !== undefined) {
-      normalized[existingIndex].response_id = record.response_id;
-    }
   }
 
   // Merge usageMetadata from assistant records

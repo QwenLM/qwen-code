@@ -81,8 +81,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
-  /** Response ID from the LLM API for telemetry/tracing correlation */
-  response_id?: string;
+  /** Context window size of the model used for this response */
+  contextWindowSize?: number;
   /**
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
@@ -301,14 +301,14 @@ export class ChatRecordingService {
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
    * @param data.tokens Token usage statistics
-   * @param data.responseId Response ID from the LLM API
+   * @param data.contextWindowSize Context window size of the model
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
-    responseId?: string;
+    contextWindowSize?: number;
   }): void {
     try {
       const record: ChatRecord = {
@@ -324,8 +324,8 @@ export class ChatRecordingService {
         record.usageMetadata = data.tokens;
       }
 
-      if (data.responseId) {
-        record.response_id = data.responseId;
+      if (data.contextWindowSize !== undefined) {
+        record.contextWindowSize = data.contextWindowSize;
       }
 
       this.appendRecord(record);
