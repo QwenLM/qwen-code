@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
+import { formatShortcut } from '../utils/shortcutFormatter.js';
 
 interface Shortcut {
   key: string;
@@ -46,7 +47,8 @@ const getShortcuts = (): Shortcut[] => [
 
 const ShortcutItem: React.FC<{ shortcut: Shortcut }> = ({ shortcut }) => (
   <Text color={theme.text.secondary}>
-    <Text color={theme.text.accent}>{shortcut.key}</Text> {shortcut.description}
+    <Text color={theme.text.accent}>{formatShortcut(shortcut.key)}</Text>{' '}
+    {shortcut.description}
   </Text>
 );
 
