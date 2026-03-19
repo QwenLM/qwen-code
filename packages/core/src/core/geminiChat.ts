@@ -34,11 +34,8 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
-import type {
-  UiTelemetryService} from '../telemetry/uiTelemetry.js';
-import {
-  uiTelemetryService,
-} from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 

@@ -62,6 +62,7 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { CodebaseSearchTool } from '../tools/codebaseSearch.js';
 import { LspTool } from '../tools/lsp.js';
 import type { LspClient } from '../lsp/types.js';
 
@@ -130,6 +131,8 @@ import {
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
+import { IndexService } from '../indexing/IndexService.js';
+import { DEFAULT_INDEX_CONFIG } from '../indexing/defaults.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -403,6 +406,17 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Codebase indexing configuration */
+  indexing?: {
+    enabled?: boolean;
+    autoIndex?: boolean;
+    pollIntervalMs?: number;
+    chunkMaxTokens?: number;
+    chunkOverlapTokens?: number;
+    embeddingBatchSize?: number;
+    streamThreshold?: number;
+    enableGraph?: boolean;
+  };
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
   /** Enable hook system for lifecycle events */
@@ -504,6 +518,7 @@ export class Config {
   private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
+  private indexService: IndexService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
@@ -556,6 +571,16 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
+  private readonly indexingConfig: {
+    enabled: boolean;
+    autoIndex: boolean;
+    pollIntervalMs: number;
+    chunkMaxTokens: number;
+    chunkOverlapTokens: number;
+    embeddingBatchSize: number;
+    streamThreshold: number;
+    enableGraph: boolean;
+  };
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
@@ -681,6 +706,19 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+
+    // Initialize indexing configuration
+    this.indexingConfig = {
+      enabled: params.indexing?.enabled ?? true,
+      autoIndex: params.indexing?.autoIndex ?? true,
+      pollIntervalMs: params.indexing?.pollIntervalMs ?? 600000, // 10 minutes
+      chunkMaxTokens: params.indexing?.chunkMaxTokens ?? 512,
+      chunkOverlapTokens: params.indexing?.chunkOverlapTokens ?? 50,
+      embeddingBatchSize: params.indexing?.embeddingBatchSize ?? 10,
+      streamThreshold: params.indexing?.streamThreshold ?? 50000,
+      enableGraph: params.indexing?.enableGraph ?? true,
+    };
+
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
     if (params.contextFileName) {
@@ -842,6 +880,65 @@ export class Config {
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
+    // Initialize codebase indexing if enabled
+    if (this.isIndexingEnabled()) {
+      try {
+        // Get embedding API configuration
+        // The Worker thread needs its own API credentials since it runs in a separate thread
+        const embeddingApiKey =
+          process.env['DASHSCOPE_API_KEY'] ||
+          this.contentGeneratorConfig?.apiKey;
+        const embeddingBaseUrl =
+          process.env['DASHSCOPE_BASE_URL'] ||
+          this.contentGeneratorConfig?.baseUrl;
+
+        // Create IndexService instance
+        this.indexService = new IndexService({
+          projectRoot: this.targetDir,
+          config: {
+            ...DEFAULT_INDEX_CONFIG,
+            chunkMaxTokens: this.indexingConfig.chunkMaxTokens,
+            chunkOverlapTokens: this.indexingConfig.chunkOverlapTokens,
+            embeddingBatchSize: this.indexingConfig.embeddingBatchSize,
+            streamThreshold: this.indexingConfig.streamThreshold,
+            enableGraph: this.indexingConfig.enableGraph,
+            pollIntervalMs: this.indexingConfig.pollIntervalMs,
+          },
+          // llmClientConfig is only used by Worker thread for embedding during index build
+          llmClientConfig: embeddingApiKey
+            ? {
+                apiKey: embeddingApiKey,
+                baseUrl: embeddingBaseUrl,
+                model: this.embeddingModel,
+              }
+            : undefined,
+          // baseLlmClient is used for retrieval queries - use the shared client from Config
+          baseLlmClient: this.baseLlmClient,
+        });
+
+        // Auto-start build if configured
+        if (this.indexingConfig.autoIndex) {
+          // Start build in background (don't await)
+          this.indexService.startBuild(true).catch((error) => {
+            this.debugLogger.warn(
+              `[Config] Failed to start index build: ${error}`,
+            );
+          });
+        }
+
+        // Start polling for changes
+        this.indexService.startPolling();
+
+        // Register codebaseSearch tool when index is ready.
+        // The tool is only available after the index has been fully built.
+        // this.registerCodebaseSearchToolWhenReady(this.indexService);
+      } catch (error) {
+        this.debugLogger.warn(
+          `[Config] Failed to initialize codebase indexing: ${error}`,
+        );
+      }
+    }
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
   }
@@ -962,10 +1059,35 @@ export class Config {
   }
 
   /**
-   * Returns warnings generated during configuration resolution.
-   * These warnings are collected from model configuration resolution
-   * and should be displayed to the user during startup.
+   * Shuts down the Config and releases all resources.
+   * This method is idempotent and safe to call multiple times.
+   * It handles the case where initialization was not completed.
    */
+  async shutdown(): Promise<void> {
+    if (!this.initialized) {
+      // Nothing to clean up if not initialized
+      return;
+    }
+    try {
+      this.skillManager?.stopWatching();
+
+      // Terminate index service
+      if (this.indexService) {
+        await this.indexService.terminate();
+        this.indexService = undefined;
+      }
+
+      if (this.toolRegistry) {
+        await this.toolRegistry.stop();
+      }
+
+      await this.cleanupArenaRuntime();
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      this.debugLogger.error('Error during Config shutdown:', error);
+    }
+  }
+
   getWarnings(): string[] {
     return this.warnings;
   }
@@ -1168,6 +1290,27 @@ export class Config {
     return this.embeddingModel;
   }
 
+  /**
+   * Get indexing configuration.
+   */
+  getIndexingConfig() {
+    return this.indexingConfig;
+  }
+
+  /**
+   * Check if codebase indexing is enabled.
+   */
+  isIndexingEnabled(): boolean {
+    return this.indexingConfig.enabled;
+  }
+
+  /**
+   * Gets the IndexService for codebase indexing.
+   */
+  getIndexService(): IndexService | undefined {
+    return this.indexService;
+  }
+
   getSandbox(): SandboxConfig | undefined {
     return this.sandbox;
   }
@@ -1197,30 +1340,6 @@ export class Config {
 
   getToolRegistry(): ToolRegistry {
     return this.toolRegistry;
-  }
-
-  /**
-   * Shuts down the Config and releases all resources.
-   * This method is idempotent and safe to call multiple times.
-   * It handles the case where initialization was not completed.
-   */
-  async shutdown(): Promise<void> {
-    if (!this.initialized) {
-      // Nothing to clean up if not initialized
-      return;
-    }
-    try {
-      this.skillManager?.stopWatching();
-
-      if (this.toolRegistry) {
-        await this.toolRegistry.stop();
-      }
-
-      await this.cleanupArenaRuntime();
-    } catch (error) {
-      // Log but don't throw - cleanup should be best-effort
-      this.debugLogger.error('Error during Config shutdown:', error);
-    }
   }
 
   getPromptRegistry(): PromptRegistry {
@@ -1884,6 +2003,37 @@ export class Config {
     return this.skillManager;
   }
 
+  /**
+   * Registers the codebaseSearch tool when the index becomes ready.
+   *
+   * If the index is already built (e.g. from a previous session), the tool
+   * is registered immediately. Otherwise, a `build_complete` listener is
+   * attached so the tool appears as soon as indexing finishes.
+   */
+  registerCodebaseSearchToolWhenReady(indexService: IndexService): void {
+    const createAndRegister = () => {
+      const tool = new CodebaseSearchTool(() =>
+        indexService.getRetrievalServiceAsync(),
+      );
+      this.toolRegistry.registerTool(tool);
+      // Refresh the LLM client's tool list so the new tool becomes callable.
+      this.geminiClient.setTools().catch((error) => {
+        this.debugLogger.warn(
+          `[Config] Failed to refresh tools after codebaseSearch registration: ${error}`,
+        );
+      });
+    };
+
+    if (indexService.isIndexReady()) {
+      createAndRegister();
+    }
+
+    // Also listen for future build completions (first build or rebuilds).
+    indexService.on('build_complete', () => {
+      createAndRegister();
+    });
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean },
@@ -1926,6 +2076,7 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
+    registerCoreTool(CodebaseSearchTool, this);
     registerCoreTool(SkillTool, this);
     registerCoreTool(LSTool, this);
     registerCoreTool(ReadFileTool, this);

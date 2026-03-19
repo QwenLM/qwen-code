@@ -246,6 +246,15 @@ export class ToolRegistry {
   }
 
   /**
+   * Removes a tool by name.
+   * @param name The tool name to remove.
+   * @returns True if the tool was found and removed, false otherwise.
+   */
+  unregisterTool(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  /**
    * Disconnects an MCP server by removing its tools, prompts, and disconnecting the client.
    * Unlike disableMcpServer, this does NOT add the server to the exclusion list.
    * @param serverName The name of the server to disconnect.

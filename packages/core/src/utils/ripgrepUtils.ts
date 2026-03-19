@@ -92,7 +92,15 @@ function getArchitectureString(arch: string): Architecture | undefined {
 }
 
 /**
- * Returns the path to the bundled ripgrep binary for the current platform
+ * Returns the path to the bundled ripgrep binary for the current platform.
+ *
+ * Walks up from the current file's directory looking for `vendor/ripgrep/`.
+ * This works regardless of how the code is loaded:
+ * - Main CLI bundle: `dist/cli.js` → finds `dist/vendor/ripgrep/`
+ * - Worker bundle: `dist/worker/indexWorker.js` → finds `dist/vendor/ripgrep/`
+ * - Transpiled: `packages/core/dist/src/utils/` → finds `packages/core/vendor/ripgrep/`
+ * - Source (vitest): `packages/core/src/utils/` → finds `packages/core/vendor/ripgrep/`
+ *
  * @returns The path to the bundled ripgrep binary, or null if not available
  */
 export function getBuiltinRipgrep(): string | null {

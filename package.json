@@ -68,7 +68,7 @@
     "baseline-browser-mapping": "^2.9.19"
   },
   "bin": {
-    "qwen": "dist/cli.js"
+    "qwen-test": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -114,7 +114,9 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "simple-git": "^3.28.0"
+    "better-sqlite3": "^12.6.2",
+    "simple-git": "^3.28.0",
+    "@zvec/zvec": "^0.2.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.1.0",

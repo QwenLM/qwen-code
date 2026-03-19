@@ -24,6 +24,7 @@ export const ToolNames = {
   WEB_FETCH: 'web_fetch',
   WEB_SEARCH: 'web_search',
   LS: 'list_directory',
+  CODEBASE_SEARCH: 'codebase_search',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
 } as const;
@@ -48,6 +49,7 @@ export const ToolDisplayNames = {
   WEB_FETCH: 'WebFetch',
   WEB_SEARCH: 'WebSearch',
   LS: 'ListFiles',
+  CODEBASE_SEARCH: 'CodebaseSearch',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
 } as const;

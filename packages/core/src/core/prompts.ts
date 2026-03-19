@@ -266,6 +266,11 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Task Management:** Use the '${ToolNames.TODO_WRITE}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
+- **Searching Code:** Choose the right search tool for the job:
+  - '${ToolNames.CODEBASE_SEARCH}': Use as the **primary search tool** when exploring the codebase, understanding how something is implemented, finding code related to a concept/pattern, or when you don't know the exact identifiers. It leverages the codebase index for semantic search and is much more effective than grep for conceptual queries.
+  - '${ToolNames.GREP}': Use when you know an exact string, regex pattern, or specific identifier name to search for.
+  - '${ToolNames.GLOB}': Use when you need to find files by name or path pattern.
+  When in doubt between '${ToolNames.CODEBASE_SEARCH}' and '${ToolNames.GREP}', prefer '${ToolNames.CODEBASE_SEARCH}' — it understands code semantics and can find relevant results even when you don't know the exact terms used in the codebase.
 - **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.TASK}' tool in order to reduce context usage. You should proactively use the '${ToolNames.TASK}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${ToolNames.MEMORY}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
@@ -519,6 +524,15 @@ I found the following 'app.config' files:
 - /path/to/moduleB/app.config
 To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
 </example>
+
+<example>
+user: How does the authentication middleware work in this project?
+model:
+Let me search the codebase to understand the authentication middleware implementation.
+[tool_call: ${ToolNames.CODEBASE_SEARCH} with bm25Queries=["auth middleware authenticate request", "JWT token verify middleware", "authentication authorization middleware pattern"] and vectorQueries=["async function authMiddleware(req, res, next) {\n  const token = req.headers.authorization;\n  const decoded = jwt.verify(token, secret);\n  req.user = decoded;\n  next();\n}", "middleware that validates authentication tokens before processing requests"]]
+(After reviewing results)
+The authentication middleware is implemented in 'src/middleware/auth.ts'. Here's how it works: ...
+</example>
 `.trim();
 
 const qwenCoderToolCallExamples = `
@@ -677,6 +691,24 @@ I found the following 'app.config' files:
 - /path/to/moduleB/app.config
 To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
 </example>
+
+<example>
+user: How does the authentication middleware work in this project?
+model:
+Let me search the codebase to understand the authentication middleware implementation.
+<tool_call>
+<function=${ToolNames.CODEBASE_SEARCH}>
+<parameter=bm25Queries>
+["auth middleware authenticate request", "JWT token verify middleware", "authentication authorization middleware pattern"]
+</parameter>
+<parameter=vectorQueries>
+["async function authMiddleware(req, res, next) {\n  const token = req.headers.authorization;\n  const decoded = jwt.verify(token, secret);\n  req.user = decoded;\n  next();\n}", "middleware that validates authentication tokens before processing requests"]
+</parameter>
+</function>
+</tool_call>
+(After reviewing results)
+The authentication middleware is implemented in 'src/middleware/auth.ts'. Here's how it works: ...
+</example>
 `.trim();
 const qwenVlToolCallExamples = `
 # Examples (Illustrating Tone and Workflow)
@@ -774,6 +806,17 @@ I found the following 'app.config' files:
 - /path/to/moduleA/app.config
 - /path/to/moduleB/app.config
 To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
+</example>
+
+<example>
+user: How does the authentication middleware work in this project?
+model:
+Let me search the codebase to understand the authentication middleware implementation.
+<tool_call>
+{"name": "${ToolNames.CODEBASE_SEARCH}", "arguments": {"bm25Queries": ["auth middleware authenticate request", "JWT token verify middleware", "authentication authorization middleware pattern"], "vectorQueries": ["async function authMiddleware(req, res, next) {\n  const token = req.headers.authorization;\n  const decoded = jwt.verify(token, secret);\n  req.user = decoded;\n  next();\n}", "middleware that validates authentication tokens before processing requests"]}}
+</tool_call>
+(After reviewing results)
+The authentication middleware is implemented in 'src/middleware/auth.ts'. Here's how it works: ...
 </example>
 `.trim();
 

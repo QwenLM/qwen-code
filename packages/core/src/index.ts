@@ -244,6 +244,8 @@ export * from './qwen/qwenOAuth2.js';
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
 
+// Export indexing module
+export * from './indexing/index.js';
 // ============================================================================
 // Hooks
 // ============================================================================

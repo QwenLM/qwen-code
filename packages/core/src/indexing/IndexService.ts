@@ -1,0 +1,979 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Worker } from 'node:worker_threads';
+import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+import type {
+  IndexConfig,
+  IndexingProgress,
+  WorkerMessage,
+  WorkerResponse,
+  ChangeSet,
+  DbQueryOp,
+} from './types.js';
+import { hasChanges } from './types.js';
+import { MetadataStore, getIndexDir } from './stores/metadataStore.js';
+import { DEFAULT_INDEX_CONFIG } from './defaults.js';
+import { ChangeDetector } from './changeDetector.js';
+import { BranchHandler, type BranchChangeResult } from './branchHandler.js';
+import { FileScanner } from './fileScanner.js';
+import { RetrievalService } from './retrievalService.js';
+import { WorkerRetrievalDataSource } from './workerRetrievalProxy.js';
+import { EmbeddingLlmClient } from './embeddingLlmClient.js';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
+
+/**
+ * Check if running on Windows platform.
+ */
+const isWindows = os.platform() === 'win32';
+
+/**
+ * Events emitted by IndexService.
+ */
+export interface IndexServiceEvents {
+  /** Emitted when build progress updates. */
+  progress: (progress: IndexingProgress) => void;
+  /** Emitted when build completes successfully. */
+  build_complete: () => void;
+  /** Emitted when incremental update completes. */
+  update_complete: () => void;
+  /** Emitted when indexing is paused. */
+  paused: () => void;
+  /** Emitted when indexing is resumed. */
+  resumed: () => void;
+  /** Emitted when indexing is cancelled. */
+  cancelled: () => void;
+  /** Emitted when an error occurs. */
+  error: (error: Error) => void;
+  /** Emitted when worker crashes and is being recovered. */
+  worker_recovering: () => void;
+  /** Emitted when worker recovery completes. */
+  worker_recovered: () => void;
+  /** Emitted when changes are detected during polling. */
+  changes_detected: (changes: ChangeSet) => void;
+  /** Emitted when branch change is detected. */
+  branch_changed: (result: BranchChangeResult) => void;
+  /** Emitted when polling cycle starts. */
+  poll_started: () => void;
+  /** Emitted when polling cycle completes. */
+  poll_complete: () => void;
+}
+
+/**
+ * Configuration for IndexService.
+ */
+export interface IndexServiceConfig {
+  /** Project root directory path. */
+  projectRoot: string;
+  /** Index configuration overrides. */
+  config?: Partial<IndexConfig>;
+  /** LLM client configuration for embeddings (used by Worker thread). */
+  llmClientConfig?: {
+    apiKey: string;
+    baseUrl?: string;
+    model?: string;
+  };
+  baseLlmClient?: BaseLlmClient;
+  /** Maximum worker restart attempts. Default: 3. */
+  maxRestartAttempts?: number;
+  /** Delay between restart attempts in ms. Default: 1000. */
+  restartDelayMs?: number;
+}
+
+/**
+ * IndexService provides the main thread API for codebase indexing.
+ * It manages Worker lifecycle, handles errors, and provides event-based progress updates.
+ *
+ * Usage:
+ * ```typescript
+ * const service = new IndexService({
+ *   projectRoot: '/path/to/project',
+ *   llmClientConfig: { apiKey: 'your-api-key' },
+ * });
+ *
+ * service.on('progress', (p) => console.log(p.status, p.overallProgress));
+ * service.on('build_complete', () => console.log('Done!'));
+ * service.on('error', (e) => console.error(e));
+ *
+ * await service.startBuild();
+ * ```
+ */
+export class IndexService extends EventEmitter {
+  private worker: Worker | null = null;
+  private projectRoot: string;
+  private projectHash: string;
+  private config: IndexConfig;
+  private llmClientConfig?: IndexServiceConfig['llmClientConfig'];
+  private baseLlmClient?: BaseLlmClient;
+  private maxRestartAttempts: number;
+  private restartDelayMs: number;
+  private restartAttempts = 0;
+  private currentProgress: IndexingProgress;
+  private isBuilding = false;
+  private enabled = true;
+  /** Cached RetrievalService backed by WorkerRetrievalDataSource. */
+  private retrievalService: RetrievalService | null = null;
+  /**
+   * Pending DB query promises keyed by request ID.
+   * Resolved/rejected when the worker sends db_result / db_error.
+   */
+  private readonly pendingDbQueries = new Map<
+    string,
+    {
+      resolve: (result: unknown) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+
+  // Polling and change detection
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollingMetadataStore: MetadataStore | null = null;
+  private changeDetector: ChangeDetector | null = null;
+  private branchHandler: BranchHandler | null = null;
+  private isPolling = false;
+
+  /**
+   * Creates a new IndexService instance.
+   * @param serviceConfig Service configuration.
+   */
+  constructor(serviceConfig: IndexServiceConfig) {
+    super();
+
+    this.projectRoot = path.resolve(serviceConfig.projectRoot);
+    this.projectHash = this.computeProjectHash(this.projectRoot);
+    this.config = { ...DEFAULT_INDEX_CONFIG, ...serviceConfig.config };
+    this.llmClientConfig = serviceConfig.llmClientConfig;
+    this.baseLlmClient = serviceConfig.baseLlmClient;
+    this.maxRestartAttempts = serviceConfig.maxRestartAttempts ?? 3;
+    this.restartDelayMs = serviceConfig.restartDelayMs ?? 1000;
+
+    // Initialize default progress state
+    this.currentProgress = this.createInitialProgress();
+  }
+
+  /**
+   * Computes a hash for the project root path.
+   */
+  private computeProjectHash(projectRoot: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(projectRoot)
+      .digest('hex')
+      .slice(0, 16);
+  }
+
+  /**
+   * Creates initial progress state.
+   */
+  private createInitialProgress(): IndexingProgress {
+    return {
+      status: 'idle',
+      phase: 0,
+      phaseProgress: 0,
+      overallProgress: 0,
+      scannedFiles: 0,
+      totalFiles: 0,
+      chunkedFiles: 0,
+      embeddedChunks: 0,
+      totalChunks: 0,
+      storedChunks: 0,
+      startTime: 0,
+    };
+  }
+
+  /**
+   * Gets the path to the worker script.
+   *
+   * Handles three runtime scenarios:
+   * 1. **Production bundle** (`dist/cli.js`): `import.meta.url` points to `dist/cli.js`,
+   *    so `currentDir = dist/` → resolves to `dist/worker/indexWorker.js`
+   *    (produced by the dedicated esbuild entry point).
+   * 2. **Development** (`npm start` → tsc-compiled): `import.meta.url` points to
+   *    `packages/core/dist/src/indexing/IndexService.js` → resolves to
+   *    `packages/core/dist/src/indexing/worker/indexWorker.js`.
+   * 3. **Tests** (vitest): `import.meta.url` points to the `.ts` source file →
+   *    falls back to `worker/indexWorker.ts` with `--experimental-strip-types`.
+   */
+  private getWorkerPath(): string {
+    const currentDir = path.dirname(fileURLToPath(import.meta.url));
+
+    // Try compiled JS first (production + development)
+    const jsPath = path.join(currentDir, 'worker', 'indexWorker.js');
+    if (fs.existsSync(jsPath)) {
+      return jsPath;
+    }
+
+    // Fall back to TypeScript source (test environment)
+    const tsPath = path.join(currentDir, 'worker', 'indexWorker.ts');
+    if (fs.existsSync(tsPath)) {
+      return tsPath;
+    }
+
+    // Return the JS path anyway — Worker constructor will throw a clear error
+    return jsPath;
+  }
+
+  /**
+   * Creates and starts the worker thread.
+   */
+  private createWorker(): Worker {
+    const workerPath = this.getWorkerPath();
+
+    const workerOptions: import('node:worker_threads').WorkerOptions = {
+      workerData: {
+        projectRoot: this.projectRoot,
+        config: this.config,
+        llmClientConfig: this.llmClientConfig,
+      },
+    };
+
+    // If the resolved path is a TypeScript file (test environment),
+    // use Node.js experimental strip-types to run it directly.
+    if (workerPath.endsWith('.ts')) {
+      workerOptions.execArgv = ['--experimental-strip-types'];
+    }
+
+    const worker = new Worker(workerPath, workerOptions);
+
+    // Handle messages from worker
+    worker.on('message', (response: WorkerResponse) => {
+      this.handleWorkerResponse(response);
+    });
+
+    // Handle worker errors
+    worker.on('error', (error: Error) => {
+      this.handleWorkerError(error);
+    });
+
+    // Handle worker exit
+    worker.on('exit', (code: number) => {
+      this.handleWorkerExit(code);
+    });
+
+    return worker;
+  }
+
+  /**
+   * Handles responses from the worker.
+   */
+  private handleWorkerResponse(response: WorkerResponse): void {
+    switch (response.type) {
+      case 'progress':
+        this.currentProgress = response.payload;
+        this.emit('progress', response.payload);
+        break;
+
+      case 'build_complete':
+        this.isBuilding = false;
+        this.restartAttempts = 0;
+        this.emit('build_complete');
+        break;
+
+      case 'update_complete':
+        this.isBuilding = false;
+        this.restartAttempts = 0;
+        this.emit('update_complete');
+        break;
+
+      case 'paused':
+        this.currentProgress = { ...this.currentProgress, status: 'paused' };
+        this.emit('paused');
+        break;
+
+      case 'resumed':
+        this.emit('resumed');
+        break;
+
+      case 'cancelled':
+        this.isBuilding = false;
+        this.currentProgress = { ...this.currentProgress, status: 'idle' };
+        this.emit('cancelled');
+        break;
+
+      case 'status':
+        this.currentProgress = response.payload;
+        break;
+
+      case 'db_result': {
+        const pending = this.pendingDbQueries.get(response.id);
+        if (pending) {
+          this.pendingDbQueries.delete(response.id);
+          pending.resolve(response.result);
+        }
+        break;
+      }
+
+      case 'db_error': {
+        const pending = this.pendingDbQueries.get(response.id);
+        if (pending) {
+          this.pendingDbQueries.delete(response.id);
+          pending.reject(new Error(response.message));
+        }
+        break;
+      }
+
+      case 'error':
+      default:
+        this.emit('error', new Error(response.payload.message));
+        break;
+    }
+  }
+
+  /**
+   * Handles worker errors.
+   */
+  private handleWorkerError(error: Error): void {
+    this.emit('error', error);
+    // Reject all in-flight DB query requests so callers don't hang.
+    this.rejectPendingDbQueries(error);
+    // Attempt recovery if building
+    if (this.isBuilding) {
+      this.attemptRecovery();
+    }
+  }
+
+  /**
+   * Handles worker exit.
+   */
+  private handleWorkerExit(code: number): void {
+    this.worker = null;
+
+    if (code !== 0) {
+      // Reject any in-flight DB query requests.
+      this.rejectPendingDbQueries(
+        new Error(`Worker exited unexpectedly with code ${code}`),
+      );
+    }
+    if (code !== 0 && this.isBuilding) {
+      this.attemptRecovery();
+    }
+  }
+
+  /**
+   * Attempts to recover from worker crash.
+   */
+  private async attemptRecovery(): Promise<void> {
+    if (this.restartAttempts >= this.maxRestartAttempts) {
+      this.isBuilding = false;
+      this.emit(
+        'error',
+        new Error(`Worker crashed ${this.maxRestartAttempts} times, giving up`),
+      );
+      return;
+    }
+
+    this.restartAttempts++;
+    this.emit('worker_recovering');
+
+    // Wait before restarting
+    await new Promise((resolve) => setTimeout(resolve, this.restartDelayMs));
+
+    try {
+      // Create new worker
+      this.worker = this.createWorker();
+
+      // Resume build from checkpoint
+      this.sendMessage({
+        type: 'build',
+        payload: { resumeFromCheckpoint: true },
+      });
+
+      this.emit('worker_recovered');
+    } catch (error) {
+      this.emit(
+        'error',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      this.attemptRecovery();
+    }
+  }
+
+  /**
+   * Rejects all pending DB query promises with the given error.
+   * Called when the worker errors, exits, or the service is terminated.
+   */
+  private rejectPendingDbQueries(error: Error): void {
+    for (const pending of this.pendingDbQueries.values()) {
+      pending.reject(error);
+    }
+    this.pendingDbQueries.clear();
+  }
+
+  /**
+   * Sends a single DB query operation to the worker thread and returns a Promise
+   * that resolves with the raw result, or rejects on error / timeout.
+   *
+   * This is the transport layer used by {@link WorkerRetrievalDataSource}.
+   * The worker executes the operation against its exclusively-owned stores
+   * and replies with a db_result / db_error message.
+   */
+  private sendDbQuery(op: DbQueryOp): Promise<unknown> {
+    this.ensureWorker();
+    const id = crypto.randomUUID();
+    return new Promise<unknown>((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        if (this.pendingDbQueries.delete(id)) {
+          reject(new Error('DB query timed out after 30 seconds'));
+        }
+      }, 30_000);
+
+      this.pendingDbQueries.set(id, {
+        resolve: (result) => {
+          clearTimeout(timeoutHandle);
+          resolve(result);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutHandle);
+          reject(err);
+        },
+      });
+
+      try {
+        this.sendMessage({ type: 'db_query', id, op });
+      } catch (err) {
+        this.pendingDbQueries.delete(id);
+        clearTimeout(timeoutHandle);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /**
+   * Sends a message to the worker.
+   */
+  private sendMessage(message: WorkerMessage): void {
+    if (!this.worker) {
+      throw new Error('Worker not started');
+    }
+    this.worker.postMessage(message);
+  }
+
+  /**
+   * Ensures the worker is running.
+   */
+  private ensureWorker(): void {
+    if (!this.worker) {
+      this.worker = this.createWorker();
+    }
+  }
+
+  // ===== Public API =====
+
+  /**
+   * Starts a full index build.
+   * If index is already complete and no changes detected, skips the build.
+   * If a checkpoint exists, resumes from where it left off.
+   * @param resumeFromCheckpoint Whether to resume from checkpoint. Default: true.
+   * @throws Error if platform is not supported or build already in progress.
+   */
+  async startBuild(resumeFromCheckpoint: boolean = true): Promise<void> {
+    // Platform check - Windows is not supported
+    if (isWindows) {
+      throw new Error('Codebase Index is not supported on Windows platform');
+    }
+
+    if (!this.enabled) {
+      throw new Error('IndexService is disabled');
+    }
+
+    if (this.isBuilding) {
+      throw new Error('Build already in progress');
+    }
+
+    // Check if index is already complete
+    const existingStatus = await this.getIndexStatus();
+    if (existingStatus && existingStatus.status === 'done') {
+      // Index already complete - skip build, just emit complete event
+      this.currentProgress = existingStatus;
+      this.emit('progress', existingStatus);
+      this.emit('build_complete');
+      return;
+    }
+
+    this.isBuilding = true;
+    this.restartAttempts = 0;
+    this.currentProgress = {
+      ...this.createInitialProgress(),
+      startTime: Date.now(),
+    };
+
+    this.ensureWorker();
+    this.sendMessage({
+      type: 'build',
+      payload: { resumeFromCheckpoint },
+    });
+  }
+
+  /**
+   * Gets the current index status from the metadata store.
+   * @returns IndexingProgress or null if not available.
+   */
+  private async getIndexStatus(): Promise<IndexingProgress | null> {
+    try {
+      const indexDir = getIndexDir(this.projectHash);
+      const dbPath = path.join(indexDir, 'metadata.db');
+
+      // Check if database exists
+      if (!fs.existsSync(dbPath)) {
+        return null;
+      }
+
+      // Create a temporary MetadataStore to read status
+      const store = new MetadataStore(this.projectHash);
+      const status = store.getIndexStatus();
+      store.close();
+
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Starts an incremental update with the given changes.
+   * @param changes The change set to process.
+   */
+  async startIncrementalUpdate(changes: ChangeSet): Promise<void> {
+    if (this.isBuilding) {
+      throw new Error('Build already in progress');
+    }
+
+    this.isBuilding = true;
+    this.restartAttempts = 0;
+
+    this.ensureWorker();
+    this.sendMessage({
+      type: 'incremental_update',
+      payload: { changes },
+    });
+  }
+
+  /**
+   * Pauses the current build.
+   */
+  pause(): void {
+    if (!this.isBuilding) {
+      return;
+    }
+
+    this.ensureWorker();
+    this.sendMessage({ type: 'pause' });
+  }
+
+  /**
+   * Resumes a paused build.
+   */
+  resume(): void {
+    if (this.currentProgress.status !== 'paused') {
+      return;
+    }
+
+    this.ensureWorker();
+    this.sendMessage({ type: 'resume' });
+  }
+
+  /**
+   * Cancels the current build.
+   */
+  cancel(): void {
+    if (!this.isBuilding) {
+      return;
+    }
+
+    this.ensureWorker();
+    this.sendMessage({ type: 'cancel' });
+  }
+
+  /**
+   * Enables the index service.
+   * Allows builds to be started.
+   */
+  enable(): void {
+    this.enabled = true;
+  }
+
+  /**
+   * Disables the index service.
+   * Cancels any ongoing build, stops polling, and prevents new builds.
+   */
+  disable(): void {
+    this.enabled = false;
+    this.stopPolling();
+    if (this.isBuilding) {
+      this.cancel();
+    }
+  }
+
+  /**
+   * Checks if indexing is enabled.
+   * @returns True if enabled.
+   */
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /**
+   * Checks if an index exists for the current project.
+   * @returns True if index database exists.
+   */
+  checkIndexExists(): boolean {
+    try {
+      const indexPath = path.join(getIndexDir(this.projectHash), 'metadata.db');
+      return fs.existsSync(indexPath);
+    } catch {
+      return false;
+    }
+  }
+
+  // ===== Polling and Change Detection =====
+
+  /**
+   * Starts periodic polling for file changes.
+   * Also initializes branch change detection.
+   *
+   * Polling detects file changes and triggers incremental updates automatically.
+   * The interval is configured via `config.pollIntervalMs` (default: 10 minutes).
+   */
+  startPolling(): void {
+    if (!this.enabled) {
+      return;
+    }
+
+    // Stop existing polling if any
+    this.stopPolling();
+
+    // Initialize change detector if needed
+    if (!this.changeDetector) {
+      this.pollingMetadataStore = new MetadataStore(this.projectHash);
+      const fileScanner = new FileScanner(this.projectRoot);
+      this.changeDetector = new ChangeDetector(
+        fileScanner,
+        this.pollingMetadataStore,
+      );
+    }
+
+    // Initialize branch handler if needed
+    if (!this.branchHandler) {
+      this.branchHandler = new BranchHandler(this.projectRoot);
+    }
+
+    // Start polling timer
+    this.pollTimer = setInterval(() => {
+      void this.pollCycle();
+    }, this.config.pollIntervalMs);
+
+    this.isPolling = true;
+  }
+
+  /**
+   * Stops periodic polling.
+   */
+  stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    this.isPolling = false;
+  }
+
+  /**
+   * Checks if polling is currently active.
+   * @returns True if polling is active.
+   */
+  isPollingActive(): boolean {
+    return this.isPolling;
+  }
+
+  /**
+   * Manually triggers a poll cycle.
+   * Detects changes and starts incremental update if needed.
+   *
+   * @returns True if changes were detected and update started.
+   */
+  async pollForChanges(): Promise<boolean> {
+    if (!this.enabled || this.isBuilding || !this.changeDetector) {
+      return false;
+    }
+
+    try {
+      this.emit('poll_started');
+
+      const changes = await this.changeDetector.detectChanges();
+
+      if (hasChanges(changes)) {
+        this.emit('changes_detected', changes);
+        await this.startIncrementalUpdate(changes);
+        return true;
+      }
+
+      this.emit('poll_complete');
+      return false;
+    } catch (error) {
+      this.emit(
+        'error',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Executes a single poll cycle: branch check + change detection.
+   *
+   * Flow:
+   * 1. Check for branch changes.
+   *    - If branch switched AND changedFiles available →
+   *      targeted `detectChangesForFiles()` (fast, no full scan).
+   *    - If branch switched but changedFiles is null →
+   *      fall back to full `pollForChanges()`.
+   * 2. If no branch change →
+   *    quick `hasUncommittedChanges()` pre-check (single git status).
+   *    Only run full detection if the working tree is dirty.
+   */
+  private async pollCycle(): Promise<void> {
+    if (!this.enabled || this.isBuilding) {
+      return;
+    }
+
+    try {
+      // Step 1: Check for branch changes
+      if (this.branchHandler) {
+        const branchResult = await this.branchHandler.checkBranchChange();
+
+        if (branchResult.changed) {
+          this.emit('branch_changed', branchResult);
+
+          if (branchResult.changedFiles && this.changeDetector) {
+            // Targeted detection — only check files that differ between branches
+            this.emit('poll_started');
+            const changes = await this.changeDetector.detectChangesForFiles(
+              branchResult.changedFiles,
+            );
+            if (hasChanges(changes)) {
+              this.emit('changes_detected', changes);
+              await this.startIncrementalUpdate(changes);
+            } else {
+              this.emit('poll_complete');
+            }
+          } else {
+            // changedFiles unavailable — fall back to full scan
+            await this.pollForChanges();
+          }
+          return;
+        }
+      }
+
+      // Step 2: No branch change — quick dirty check before full scan
+      if (this.branchHandler) {
+        const dirty = await this.branchHandler.hasUncommittedChanges();
+        if (!dirty) {
+          // Working tree clean — no need to scan
+          return;
+        }
+      }
+
+      await this.pollForChanges();
+    } catch (error) {
+      this.emit(
+        'error',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  /**
+   * Gets the current status.
+   * @returns Current indexing progress.
+   */
+  getStatus(): IndexingProgress {
+    return { ...this.currentProgress };
+  }
+
+  /**
+   * Gets the current status asynchronously from the worker.
+   * @returns Promise resolving to current indexing progress.
+   */
+  async getStatusAsync(): Promise<IndexingProgress> {
+    return new Promise((resolve) => {
+      if (!this.worker) {
+        resolve(this.currentProgress);
+        return;
+      }
+
+      const handler = (response: WorkerResponse) => {
+        if (response.type === 'status') {
+          this.worker?.off('message', handler);
+          resolve(response.payload);
+        }
+      };
+
+      this.worker.on('message', handler);
+      this.sendMessage({ type: 'get_status' });
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        this.worker?.off('message', handler);
+        resolve(this.currentProgress);
+      }, 5000);
+    });
+  }
+
+  /**
+   * Checks if a build is currently in progress.
+   * @returns True if building.
+   */
+  isBuildInProgress(): boolean {
+    return this.isBuilding;
+  }
+
+  /**
+   * Checks if the index is ready for queries.
+   * @returns True if index exists and build is not in progress.
+   */
+  isIndexReady(): boolean {
+    return !this.isBuilding && this.currentProgress.status === 'done';
+  }
+
+  /**
+   * Terminates the worker and cleans up resources.
+   */
+  async terminate(): Promise<void> {
+    // Stop polling
+    this.stopPolling();
+
+    // Close MetadataStore used by polling ChangeDetector
+    if (this.pollingMetadataStore) {
+      this.pollingMetadataStore.close();
+      this.pollingMetadataStore = null;
+    }
+
+    // Clean up change detector
+    if (this.changeDetector) {
+      this.changeDetector = null;
+    }
+
+    // Clean up branch handler
+    if (this.branchHandler) {
+      this.branchHandler = null;
+    }
+
+    // Reject all pending DB queries before terminating the worker.
+    this.rejectPendingDbQueries(new Error('IndexService terminated'));
+    // Drop the cached RetrievalService — will be recreated after next build.
+    this.retrievalService = null;
+
+    // Terminate worker
+    if (this.worker) {
+      await this.worker.terminate();
+      this.worker = null;
+    }
+    this.isBuilding = false;
+  }
+
+  /**
+   * Gets statistics about the current index.
+   * @returns Object with file and chunk counts.
+   */
+  getStats(): {
+    fileCount: number;
+    chunkCount: number;
+    cacheCount: number;
+  } | null {
+    try {
+      const store = new MetadataStore(this.projectHash);
+      const stats = store.getStats();
+      store.close();
+      return stats;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Returns a {@link RetrievalService} whose DB layer is backed by the worker thread.
+   *
+   * The returned service:
+   * - Runs all retrieval pipeline logic in the main thread:
+   *   LLM-based query enhancement (HyDE, multi-query), RRF fusion, reranking.
+   * - Routes every atomic DB operation (FTS5, vector search, graph traversal)
+   *   through a {@link WorkerRetrievalDataSource} to the worker via db_query
+   *   messages, so the worker's exclusive DB connections are never shared.
+   *
+   * @returns RetrievalService, or null if the index is not ready or
+   *          no BaseLlmClient has been configured.
+   */
+  async getRetrievalServiceAsync(): Promise<RetrievalService | null> {
+    if (this.retrievalService) {
+      return this.retrievalService;
+    }
+    if (!this.isIndexReady()) {
+      return null;
+    }
+    if (!this.baseLlmClient) {
+      return null;
+    }
+    // Ensure the worker is alive — it owns the database connections.
+    this.ensureWorker();
+
+    const dataSource = new WorkerRetrievalDataSource((op) =>
+      this.sendDbQuery(op),
+    );
+    const embeddingClient = this.llmClientConfig
+      ? new EmbeddingLlmClient(this.llmClientConfig)
+      : undefined;
+
+    this.retrievalService = new RetrievalService(
+      this.baseLlmClient,
+      embeddingClient,
+      { enableGraph: this.config.enableGraph },
+      {}, // queryEnhancerConfig — defaults
+      dataSource,
+    );
+    return this.retrievalService;
+  }
+
+  /**
+   * Sets the base LLM client for retrieval operations.
+   * This allows updating the client after initialization.
+   *
+   * @param client The LLM client implementing IRetrievalLlmClient interface.
+   */
+  setBaseLlmClient(client: BaseLlmClient): void {
+    this.baseLlmClient = client;
+    // Reset the cached service so it is recreated with the new client
+    // on the next getRetrievalServiceAsync() call.
+    this.retrievalService = null;
+  }
+
+  // ===== Event Emitter Type Safety =====
+
+  override on<K extends keyof IndexServiceEvents>(
+    event: K,
+    listener: IndexServiceEvents[K],
+  ): this {
+    return super.on(event, listener);
+  }
+
+  override off<K extends keyof IndexServiceEvents>(
+    event: K,
+    listener: IndexServiceEvents[K],
+  ): this {
+    return super.off(event, listener);
+  }
+
+  override emit<K extends keyof IndexServiceEvents>(
+    event: K,
+    ...args: Parameters<IndexServiceEvents[K]>
+  ): boolean {
+    return super.emit(event, ...args);
+  }
+}
