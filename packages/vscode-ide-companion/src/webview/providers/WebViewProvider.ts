@@ -985,6 +985,8 @@ export class WebViewProvider {
                 authMethods: this.agentManager.availableAuthMethods,
               },
             });
+            // Wipe the chat view so that App.tsx 'hasContent' correctly defaults back to false, thereby rendering the Onboarding tab
+            await this.initializeEmptyConversation();
           }
         } catch (_error) {
           const errorMsg = getErrorMessage(_error);
