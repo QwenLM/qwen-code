@@ -385,7 +385,7 @@ describe('TodoWriteTool – runtime output directory', () => {
     await invocation.execute(mockAbortSignal);
 
     const writePath = mockFs.writeFile.mock.calls[0]?.[0] as string;
-    expect(writePath).toContain('.qwen/todos/');
+    expect(writePath).toContain(path.join('.qwen', 'todos'));
   });
 
   it('should check file existence in custom runtime dir for getDescription', () => {
