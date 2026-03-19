@@ -111,6 +111,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     debugMessage: '',
     nightly: false,
     isTrustedFolder: true,
+    taskStartTokens: 0,
     ...overrides,
   }) as UIState;
 

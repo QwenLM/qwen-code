@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
+  AgentStatus,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -68,7 +69,6 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
-  outputFile?: string;
 }
 
 export interface CompressionProps {
@@ -126,6 +126,11 @@ export type HistoryItemError = HistoryItemBase & {
 
 export type HistoryItemWarning = HistoryItemBase & {
   type: 'warning';
+  text: string;
+};
+
+export type HistoryItemSuccess = HistoryItemBase & {
+  type: 'success';
   text: string;
 };
 
@@ -257,6 +262,89 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+// --- Context Usage types ---
+
+export interface ContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ContextSkillDetail {
+  name: string;
+  /** Token cost of the skill listing (name+description) in the tool definition */
+  tokens: number;
+  /** Whether this skill has been invoked and its full body loaded into context */
+  loaded?: boolean;
+  /** Token cost of the loaded SKILL.md body (only set when loaded is true) */
+  bodyTokens?: number;
+}
+
+export type HistoryItemContextUsage = HistoryItemBase & {
+  type: 'context_usage';
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ContextCategoryBreakdown;
+  builtinTools: ContextToolDetail[];
+  mcpTools: ContextToolDetail[];
+  memoryFiles: ContextMemoryDetail[];
+  skills: ContextSkillDetail[];
+  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  isEstimated?: boolean;
+  /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
+  showDetails?: boolean;
+};
+
+/**
+ * Arena agent completion card data.
+ */
+export interface ArenaAgentCardData {
+  label: string;
+  status: AgentStatus;
+  durationMs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  toolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  rounds: number;
+  error?: string;
+  diff?: string;
+}
+
+export type HistoryItemArenaAgentComplete = HistoryItemBase & {
+  type: 'arena_agent_complete';
+  agent: ArenaAgentCardData;
+};
+
+export type HistoryItemArenaSessionComplete = HistoryItemBase & {
+  type: 'arena_session_complete';
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
+/**
+ * Insight progress message.
+ */
 export type HistoryItemInsightProgress = HistoryItemBase & {
   type: 'insight_progress';
   progress: InsightProgressProps;
@@ -287,6 +375,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemSuccess
   | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
@@ -302,6 +391,9 @@ export type HistoryItemWithoutId =
   | HistoryItemToolsList
   | HistoryItemSkillsList
   | HistoryItemMcpStatus
+  | HistoryItemContextUsage
+  | HistoryItemArenaAgentComplete
+  | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw;
 
@@ -310,6 +402,7 @@ export type HistoryItem = HistoryItemWithoutId & { id: number };
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',
+  SUCCESS = 'success',
   ERROR = 'error',
   WARNING = 'warning',
   USER = 'user',
@@ -326,6 +419,9 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  CONTEXT_USAGE = 'context_usage',
+  ARENA_AGENT_COMPLETE = 'arena_agent_complete',
+  ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
 }

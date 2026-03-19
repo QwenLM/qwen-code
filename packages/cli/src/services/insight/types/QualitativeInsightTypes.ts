@@ -71,12 +71,12 @@ export interface InsightAtAGlance {
 }
 
 export interface QualitativeInsights {
-  impressiveWorkflows: InsightImpressiveWorkflows;
-  projectAreas: InsightProjectAreas;
-  futureOpportunities: InsightFutureOpportunities;
-  frictionPoints: InsightFrictionPoints;
-  memorableMoment: InsightMemorableMoment;
-  improvements: InsightImprovements;
-  interactionStyle: InsightInteractionStyle;
-  atAGlance: InsightAtAGlance;
+  impressiveWorkflows?: InsightImpressiveWorkflows;
+  projectAreas?: InsightProjectAreas;
+  futureOpportunities?: InsightFutureOpportunities;
+  frictionPoints?: InsightFrictionPoints;
+  memorableMoment?: InsightMemorableMoment;
+  improvements?: InsightImprovements;
+  interactionStyle?: InsightInteractionStyle;
+  atAGlance?: InsightAtAGlance;
 }

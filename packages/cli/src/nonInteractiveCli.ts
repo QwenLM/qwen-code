@@ -19,6 +19,7 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -265,7 +266,11 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          { isContinuation: !isFirstTurn },
+          {
+            type: isFirstTurn
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          },
         );
         isFirstTurn = false;
 
@@ -385,6 +390,16 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      // Ensure message_start / message_stop (and content_block events) are
+      // properly paired even when an error aborts the turn mid-stream.
+      // The call is safe when no message was started (throws → caught) or
+      // when already finalized (idempotent guard inside the adapter).
+      try {
+        adapter.finalizeAssistantMessage();
+      } catch {
+        // Expected when no message was started or already finalized
+      }
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       const metrics = uiTelemetryService.getMetrics();

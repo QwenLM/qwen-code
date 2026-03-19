@@ -17,7 +17,8 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent } from '@google/genai';
-import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff } from '../utils/retry.js';
+import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
@@ -33,6 +34,7 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
+import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
@@ -234,12 +236,16 @@ export class GeminiChat {
    * @param history - Optional initial conversation history.
    * @param chatRecordingService - Optional recording service. If provided, chat
    *   messages will be recorded.
+   * @param telemetryService - Optional UI telemetry service. When provided,
+   *   prompt token counts are reported on each API response. Pass `undefined`
+   *   for sub-agent chats to avoid overwriting the main agent's context usage.
    */
   constructor(
     private readonly config: Config,
     private readonly generationConfig: GenerateContentConfig = {},
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
+    private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
   }
@@ -571,6 +577,20 @@ export class GeminiChat {
       .filter((content) => content.parts && content.parts.length > 0);
   }
 
+  /**
+   * Pop all orphaned trailing user entries from chat history.
+   * In a valid conversation the last entry is always a model response;
+   * any trailing user entries are leftovers from a request that failed.
+   */
+  stripOrphanedUserEntriesFromHistory(): void {
+    while (
+      this.history.length > 0 &&
+      this.history[this.history.length - 1]!.role === 'user'
+    ) {
+      this.history.pop();
+    }
+  }
+
   setTools(tools: Tool[]): void {
     this.generationConfig.tools = tools;
   }
@@ -635,10 +655,21 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
+        // Use || instead of ?? so that totalTokenCount=0 falls back to promptTokenCount.
+        // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
-          usageMetadata.totalTokenCount ?? usageMetadata.promptTokenCount;
+          usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
         if (lastPromptTokenCount) {
-          uiTelemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+          (this.telemetryService ?? uiTelemetryService).setLastPromptTokenCount(
+            lastPromptTokenCount,
+          );
+        }
+        if (usageMetadata.cachedContentTokenCount) {
+          (
+            this.telemetryService ?? uiTelemetryService
+          ).setLastCachedContentTokenCount(
+            usageMetadata.cachedContentTokenCount,
+          );
         }
       }
 
@@ -690,6 +721,8 @@ export class GeminiChat {
 
     // Record assistant turn with raw Content and metadata
     if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+      const contextWindowSize =
+        this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -702,6 +735,7 @@ export class GeminiChat {
             : []),
         ],
         tokens: usageMetadata,
+        contextWindowSize,
       });
     }
 

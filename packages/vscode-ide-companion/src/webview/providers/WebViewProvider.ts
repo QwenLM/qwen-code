@@ -89,6 +89,10 @@ export class WebViewProvider {
       await this.forceReLogin();
     });
 
+    // Setup file watchers for cache invalidation
+    const fileWatcherDisposable = this.messageHandler.setupFileWatchers();
+    this.disposables.push(fileWatcherDisposable);
+
     // Setup agent callbacks
     this.agentManager.onMessage((message) => {
       // Do not suppress messages during checkpoint saves.

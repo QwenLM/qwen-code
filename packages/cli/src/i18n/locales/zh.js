@@ -116,6 +116,7 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
+  'List available skills.': '列出可用技能。',
   'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
@@ -437,6 +438,7 @@ export default {
     '当前支持以下编辑器。请注意，某些编辑器无法在沙箱模式下使用。',
   'Your preferred editor is:': '您的首选编辑器是：',
   'Manage extensions': '管理扩展',
+  'Manage installed extensions': '管理已安装的扩展',
   'List active extensions': '列出活动扩展',
   'Update extensions. Usage: update <extension-names>|--all':
     '更新扩展。用法：update <extension-names>|--all',
@@ -623,6 +625,37 @@ export default {
   'Failed to configure {{terminalName}}.': '配置 {{terminalName}} 失败。',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     '您的终端已配置为支持多行输入（Shift+Enter 和 Ctrl+Enter）的最佳体验。',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': '管理 Qwen Code Hook',
+  'List all configured hooks': '列出所有已配置的 Hook',
+  'Enable a disabled hook': '启用已禁用的 Hook',
+  'Disable an active hook': '禁用已启用的 Hook',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    '将当前会话的消息记录导出到文件',
+  'Export session to HTML format': '将会话导出为 HTML 文件',
+  'Export session to JSON format': '将会话导出为 JSON 文件',
+  'Export session to JSONL format (one message per line)':
+    '将会话导出为 JSONL 文件（每行一条消息）',
+  'Export session to markdown format': '将会话导出为 Markdown 文件',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    '根据你的聊天记录生成个性化编程洞察',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': '恢复先前会话',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    '恢复某次工具调用。这将把对话与文件历史重置到提出该工具调用建议时的状态',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     '无法检测终端类型。支持的终端：VS Code、Cursor、Windsurf 和 Trae。',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -1010,6 +1043,8 @@ export default {
   'No, suggest changes (esc)': '否，建议更改 (esc)',
   "Allow execution of: '{{command}}'?": "允许执行：'{{command}}'？",
   'Yes, allow always ...': '是，总是允许 ...',
+  'Always allow in this project': '在本项目中总是允许',
+  'Always allow for this user': '对该用户总是允许',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1163,6 +1198,71 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': '管理文件夹信任设置',
+  'Manage permission rules': '管理权限规则',
+  Allow: '允许',
+  Ask: '询问',
+  Deny: '拒绝',
+  Workspace: '工作区',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code 使用已允许的工具前不会询问。',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code 使用这些工具前会先询问。',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code 不允许使用被拒绝的工具。',
+  'Manage trusted directories for this workspace.':
+    '管理此工作区的受信任目录。',
+  'Any use of the {{tool}} tool': '{{tool}} 工具的任何使用',
+  "{{tool}} commands matching '{{pattern}}'":
+    "匹配 '{{pattern}}' 的 {{tool}} 命令",
+  'From user settings': '来自用户设置',
+  'From project settings': '来自项目设置',
+  'From session': '来自会话',
+  'Project settings (local)': '项目设置（本地）',
+  'Saved in .qwen/settings.local.json': '保存在 .qwen/settings.local.json',
+  'Project settings': '项目设置',
+  'Checked in at .qwen/settings.json': '保存在 .qwen/settings.json',
+  'User settings': '用户设置',
+  'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
+  'Add a new rule…': '添加新规则…',
+  'Add {{type}} permission rule': '添加{{type}}权限规则',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    '权限规则是一个工具名称，可选地后跟括号中的限定符。',
+  'e.g.,': '例如',
+  or: '或',
+  'Enter permission rule…': '输入权限规则…',
+  'Enter to submit · Esc to cancel': '回车提交 · Esc 取消',
+  'Where should this rule be saved?': '此规则应保存在哪里？',
+  'Enter to confirm · Esc to cancel': '回车确认 · Esc 取消',
+  'Delete {{type}} rule?': '删除{{type}}规则？',
+  'Are you sure you want to delete this permission rule?':
+    '确定要删除此权限规则吗？',
+  'Permissions:': '权限：',
+  '(←/→ or tab to cycle)': '（←/→ 或 tab 切换）',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '按 ↑↓ 导航 · 回车选择 · 输入搜索 · Esc 取消',
+  'Search…': '搜索…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    '使用 /trust 管理此工作区的文件夹信任设置。',
+  // Workspace directory management
+  'Add directory…': '添加目录…',
+  'Add directory to workspace': '添加工作区目录',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code 可以读取工作区中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code 将能够读取此目录中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'Enter the path to the directory:': '输入目录路径：',
+  'Enter directory path…': '输入目录路径…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab 补全 · 回车添加 · Esc 取消',
+  'Remove directory?': '删除目录？',
+  'Are you sure you want to remove this directory from the workspace?':
+    '确定要将此目录从工作区中移除吗？',
+  '  (Original working directory)': '  （原始工作目录）',
+  '  (from settings)': '  （来自设置）',
+  'Directory does not exist.': '目录不存在。',
+  'Path is not a directory.': '路径不是目录。',
+  'This directory is already in the workspace.': '此目录已在工作区中。',
+  'Already covered by existing directory: {{dir}}': '已被现有目录覆盖：{{dir}}',
 
   // ============================================================================
   // Status Bar
@@ -1463,6 +1563,33 @@ export default {
     '{{region}} 有新的模型配置可用。是否立即更新？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} 配置更新成功。模型已切换至 "{{model}}"。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json（已备份）。',
+
+  // ============================================================================
+  // Context Usage
+  // ============================================================================
+  'Context Usage': '上下文使用情况',
+  'Context window': '上下文窗口',
+  Used: '已用',
+  Free: '空闲',
+  'Autocompact buffer': '自动压缩缓冲区',
+  'Usage by category': '分类用量',
+  'System prompt': '系统提示',
+  'Built-in tools': '内置工具',
+  'MCP tools': 'MCP 工具',
+  'Memory files': '记忆文件',
+  Skills: '技能',
+  Messages: '消息',
+  tokens: 'tokens',
+  'Estimated pre-conversation overhead': '预估对话前开销',
+  'No API response yet. Send a message to see actual usage.':
+    '暂无 API 响应。发送消息以查看实际使用情况。',
+  'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
+  'Run /context detail for per-item breakdown.':
+    '运行 /context detail 查看详细分解。',
+  'body loaded': '内容已加载',
+  memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
     '成功通过 {{region}} 认证。API Key 和模型配置已保存至 settings.json。',
@@ -1493,4 +1620,72 @@ export default {
     '↑/↓: 导航 | Space/Enter: 切换 | Esc: 取消',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: 导航 | Enter: 选择 | Esc: 取消',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    '使用 Qwen OAuth 或阿里云百炼 Coding Plan 配置 Qwen 认证信息',
+  'Authenticate using Qwen OAuth': '使用 Qwen OAuth 进行认证',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    '使用阿里云百炼 Coding Plan 进行认证',
+  'Region for Coding Plan (china/global)': 'Coding Plan 区域 (china/global)',
+  'API key for Coding Plan': 'Coding Plan 的 API 密钥',
+  'Show current authentication status': '显示当前认证状态',
+  'Authentication completed successfully.': '认证完成。',
+  'Starting Qwen OAuth authentication...': '正在启动 Qwen OAuth 认证...',
+  'Successfully authenticated with Qwen OAuth.': '已成功通过 Qwen OAuth 认证。',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Qwen OAuth 认证失败：{{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    '正在处理阿里云百炼 Coding Plan 认证...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    '已成功通过阿里云百炼 Coding Plan 认证。',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Coding Plan 认证失败：{{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: '全球',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': '选择 Coding Plan 区域：',
+  'Enter your Coding Plan API key: ': '请输入您的 Coding Plan API 密钥：',
+  'Select authentication method:': '选择认证方式：',
+  '\n=== Authentication Status ===\n': '\n=== 认证状态 ===\n',
+  '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
+  'Run one of the following commands to get started:\n':
+    '运行以下命令之一开始配置：\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 认证（免费）',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - 使用阿里云百炼 Coding Plan 认证\n',
+  'Or simply run:': '或者直接运行：',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - 交互式认证配置\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ 认证方式：Qwen OAuth',
+  '  Type: Free tier': '  类型：免费版',
+  '  Limit: Up to 1,000 requests/day': '  限额：每天最多 1,000 次请求',
+  '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ 认证方式：阿里云百炼 Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': '全球 - Alibaba Cloud',
+  '  Region: {{region}}': '  区域：{{region}}',
+  '  Current Model: {{model}}': '  当前模型：{{model}}',
+  '  Config Version: {{version}}': '  配置版本：{{version}}',
+  '  Status: API key configured\n': '  状态：API 密钥已配置\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  认证方式：阿里云百炼 Coding Plan（不完整）',
+  '  Issue: API key not found in environment or settings\n':
+    '  问题：在环境变量或设置中未找到 API 密钥\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  运行 `qwen auth coding-plan` 重新配置。\n',
+  '✓ Authentication Method: {{type}}': '✓ 认证方式：{{type}}',
+  '  Status: Configured\n': '  状态：已配置\n',
+  'Failed to check authentication status: {{error}}':
+    '检查认证状态失败：{{error}}',
+  'Select an option:': '请选择：',
+  'Raw mode not available. Please run in an interactive terminal.':
+    '原始模式不可用。请在交互式终端中运行。',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
 };

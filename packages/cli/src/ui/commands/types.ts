@@ -148,6 +148,10 @@ export interface OpenDialogActionReturn {
 
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'
@@ -155,6 +159,7 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'trust'
     | 'permissions'
     | 'approval-mode'
     | 'resume'

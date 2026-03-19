@@ -43,10 +43,6 @@ export interface ServerTool {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolResult>;
-  shouldConfirmExecute(
-    params: Record<string, unknown>,
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false>;
 }
 
 export enum GeminiEventType {
@@ -109,7 +105,6 @@ export interface ToolCallResponseInfo {
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
-  outputFile?: string | undefined;
   contentLength?: number;
 }
 

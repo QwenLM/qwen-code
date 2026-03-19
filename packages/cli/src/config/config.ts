@@ -10,7 +10,6 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  FileEncoding,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
@@ -19,7 +18,6 @@ import {
   Storage,
   InputFormat,
   OutputFormat,
-  isToolEnabled,
   SessionService,
   ideContextStore,
   type ResumedSessionData,
@@ -31,10 +29,13 @@ import {
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
+  isToolEnabled,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings } from './settings.js';
+import type { Settings, LoadedSettings } from './settings.js';
+import { SettingScope } from './settings.js';
+import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -52,16 +53,16 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 
 // UUID v4 regex pattern for validation
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SESSION_ID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
 
 /**
- * Validates if a string is a valid UUID format
- * @param value - The string to validate
- * @returns True if the string is a valid UUID, false otherwise
+ * Validates if a string is a valid session ID format.
+ * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
+ * (used by Arena to give each agent a deterministic session ID).
  */
-function isValidUUID(value: string): boolean {
-  return UUID_REGEX.test(value);
+function isValidSessionId(value: string): boolean {
+  return SESSION_ID_REGEX.test(value);
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -111,6 +112,8 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
+  systemPrompt: string | undefined;
+  appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -290,6 +293,16 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Execute the provided prompt and continue in interactive mode',
         })
+        .option('system-prompt', {
+          type: 'string',
+          description:
+            'Override the main session system prompt for this run. Can be combined with --append-system-prompt.',
+        })
+        .option('append-system-prompt', {
+          type: 'string',
+          description:
+            'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
+        })
         .option('sandbox', {
           alias: 's',
           type: 'boolean',
@@ -386,6 +399,7 @@ export async function parseArguments(): Promise<CliArgs> {
           description: 'List all available extensions and exit.',
         })
         .option('include-directories', {
+          alias: 'add-dir',
           type: 'array',
           string: true,
           description:
@@ -557,10 +571,13 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
           }
-          if (argv['sessionId'] && !isValidUUID(argv['sessionId'] as string)) {
+          if (
+            argv['sessionId'] &&
+            !isValidSessionId(argv['sessionId'] as string)
+          ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          if (argv['resume'] && !isValidUUID(argv['resume'] as string)) {
+          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
             return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           return true;
@@ -570,6 +587,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
+    // Register Auth subcommands
+    .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand);
 
@@ -685,6 +704,7 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  loadedSettings?: LoadedSettings,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -814,63 +834,105 @@ export async function loadCliConfig(
     // (fallback for edge cases where query/prompt is provided with TEXT output)
     interactive = false;
   }
-  // In non-interactive mode, exclude tools that require a prompt.
-  // However, if stream-json input is used, control can be requested via JSON messages,
-  // so tools should not be excluded in that case.
-  const extraExcludes: string[] = [];
-  const resolvedCoreTools = argv.coreTools || settings.tools?.core || [];
-  const resolvedAllowedTools =
-    argv.allowedTools || settings.tools?.allowed || [];
-  const isExplicitlyEnabled = (toolName: ToolName): boolean => {
-    if (resolvedCoreTools.length > 0) {
-      if (isToolEnabled(toolName, resolvedCoreTools, [])) {
-        return true;
-      }
+  // ── Unified permissions construction ─────────────────────────────────────
+  // All permission sources are merged here, before constructing Config.
+  // The resulting three arrays are the single source of truth that Config /
+  // PermissionManager will use.
+  //
+  // Sources (in order of precedence within each list):
+  //   1. settings.permissions.{allow,ask,deny}  (persistent, merged by LoadedSettings)
+  //   2. argv.coreTools   → allow  (allowlist mode: only these tools are available)
+  //   3. argv.allowedTools → allow  (auto-approve these tools/commands)
+  //   4. argv.excludeTools → deny   (block these tools completely)
+  //   5. Non-interactive mode exclusions → deny (unless explicitly allowed above)
+
+  // Start from settings-level rules.
+  // Read from both new `permissions` and legacy `tools` paths for compatibility.
+  // Note: settings.tools.core / argv.coreTools are intentionally NOT merged into
+  // mergedAllow — they have whitelist semantics (only listed tools are registered),
+  // not auto-approve semantics. They are passed via the `coreTools` Config param
+  // and handled by PermissionManager.coreToolsAllowList.
+  const resolvedCoreTools: string[] = [
+    ...(argv.coreTools ?? []),
+    ...(settings.tools?.core ?? []),
+  ];
+  const mergedAllow: string[] = [
+    ...(settings.permissions?.allow ?? []),
+    ...(settings.tools?.allowed ?? []),
+  ];
+  const mergedAsk: string[] = [...(settings.permissions?.ask ?? [])];
+  const mergedDeny: string[] = [
+    ...(settings.permissions?.deny ?? []),
+    ...(settings.tools?.exclude ?? []),
+  ];
+
+  // argv.allowedTools adds allow rules (auto-approve).
+  for (const t of argv.allowedTools ?? []) {
+    if (t && !mergedAllow.includes(t)) mergedAllow.push(t);
+  }
+
+  // argv.excludeTools adds deny rules.
+  for (const t of argv.excludeTools ?? []) {
+    if (t && !mergedDeny.includes(t)) mergedDeny.push(t);
+  }
+
+  // Helper: check if a tool is explicitly covered by an allow rule OR by the
+  // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
+  // to preserve the original behaviour where "ShellTool", "Shell", and
+  // "run_shell_command" are all accepted as the same tool.
+  const isExplicitlyAllowed = (toolName: ToolName): boolean => {
+    const name = toolName as string;
+    // 1. Check permissions.allow / allowedTools rules.
+    if (
+      mergedAllow.some((rule) => {
+        const openParen = rule.indexOf('(');
+        const ruleName =
+          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
+        return ruleName === name;
+      })
+    ) {
+      return true;
     }
-    if (resolvedAllowedTools.length > 0) {
-      if (isToolEnabled(toolName, resolvedAllowedTools, [])) {
-        return true;
-      }
+    // 2. Check coreTools whitelist (with alias matching).
+    // If coreTools is non-empty and explicitly includes this tool, it is
+    // considered allowed for non-interactive mode exclusion purposes.
+    if (resolvedCoreTools.length > 0) {
+      return isToolEnabled(toolName, resolvedCoreTools, []);
     }
     return false;
   };
-  const excludeUnlessExplicit = (toolName: ToolName): void => {
-    if (!isExplicitlyEnabled(toolName)) {
-      extraExcludes.push(toolName);
-    }
-  };
 
-  // ACP mode check: must include both --acp (current) and --experimental-acp (deprecated).
-  // Without this check, edit, write_file, run_shell_command would be excluded in ACP mode.
+  // In non-interactive mode, tools that require a user prompt are denied unless
+  // the caller has explicitly allowed them. Stream-JSON input is excluded from
+  // this logic because approval can be sent programmatically via JSON messages.
   const isAcpMode = argv.acp || argv.experimentalAcp;
   if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
+    const denyUnlessAllowed = (toolName: ToolName): void => {
+      if (!isExplicitlyAllowed(toolName)) {
+        const name = toolName as string;
+        if (!mergedDeny.includes(name)) mergedDeny.push(name);
+      }
+    };
+
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
-        // In default non-interactive mode, all tools that require approval are excluded,
-        // unless explicitly enabled via coreTools/allowedTools.
-        excludeUnlessExplicit(ShellTool.Name as ToolName);
-        excludeUnlessExplicit(EditTool.Name as ToolName);
-        excludeUnlessExplicit(WriteFileTool.Name as ToolName);
+        // Deny all write/execute tools unless explicitly allowed.
+        denyUnlessAllowed(ShellTool.Name as ToolName);
+        denyUnlessAllowed(EditTool.Name as ToolName);
+        denyUnlessAllowed(WriteFileTool.Name as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
-        // In auto-edit non-interactive mode, only tools that still require a prompt are excluded.
-        excludeUnlessExplicit(ShellTool.Name as ToolName);
+        // Only shell requires a prompt in auto-edit mode.
+        denyUnlessAllowed(ShellTool.Name as ToolName);
         break;
       case ApprovalMode.YOLO:
-        // No extra excludes for YOLO mode.
+        // No extra denials for YOLO mode.
         break;
       default:
-        // This should never happen due to validation earlier, but satisfies the linter
         break;
     }
   }
-
-  const excludeTools = mergeExcludeTools(
-    settings,
-    extraExcludes.length > 0 ? extraExcludes : undefined,
-    argv.excludeTools,
-  );
 
   let allowedMcpServers: Set<string> | undefined;
   let excludedMcpServers: Set<string> | undefined;
@@ -962,9 +1024,33 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
+    systemPrompt: argv.systemPrompt,
+    appendSystemPrompt: argv.appendSystemPrompt,
+    // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
-    excludeTools,
+    excludeTools: mergedDeny,
+    // New unified permissions (PermissionManager source of truth).
+    permissions: {
+      allow: mergedAllow.length > 0 ? mergedAllow : undefined,
+      ask: mergedAsk.length > 0 ? mergedAsk : undefined,
+      deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+    },
+    // Permission rule persistence callback (writes to settings files).
+    onPersistPermissionRule: loadedSettings
+      ? async (scope, ruleType, rule) => {
+          const settingScope =
+            scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+          const key = `permissions.${ruleType}`;
+          const currentRules: string[] =
+            loadedSettings.forScope(settingScope).settings.permissions?.[
+              ruleType
+            ] ?? [];
+          if (!currentRules.includes(rule)) {
+            loadedSettings.setValue(settingScope, key, [...currentRules, rule]);
+          }
+        }
+      : undefined,
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,
     mcpServerCommand: settings.mcp?.serverCommand,
@@ -1013,7 +1099,6 @@ export async function loadCliConfig(
     warnings: resolvedCliConfig.warnings,
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
-    summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
@@ -1027,7 +1112,6 @@ export async function loadCliConfig(
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
-    enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
@@ -1043,11 +1127,22 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
-    defaultFileEncoding:
-      settings.general?.defaultFileEncoding ?? FileEncoding.UTF8,
+    defaultFileEncoding: settings.general?.defaultFileEncoding,
     lsp: {
       enabled: lspEnabled,
     },
+    agents: settings.agents
+      ? {
+          displayMode: settings.agents.displayMode,
+          arena: settings.agents.arena
+            ? {
+                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
+                preserveArtifacts:
+                  settings.agents.arena.preserveArtifacts ?? false,
+              }
+            : undefined,
+        }
+      : undefined,
   });
 
   if (lspEnabled) {
@@ -1073,17 +1168,4 @@ export async function loadCliConfig(
   }
 
   return config;
-}
-
-function mergeExcludeTools(
-  settings: Settings,
-  extraExcludes?: string[] | undefined,
-  cliExcludeTools?: string[] | undefined,
-): string[] {
-  const allExcludeTools = new Set([
-    ...(cliExcludeTools || []),
-    ...(settings.tools?.exclude || []),
-    ...(extraExcludes || []),
-  ]);
-  return [...allExcludeTools];
 }
