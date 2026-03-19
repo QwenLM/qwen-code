@@ -145,6 +145,9 @@ export class AcpConnection {
       console.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
+      this.sdkConnection = null;
+      this.sessionId = null;
+      this.child = null;
     });
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -334,7 +337,7 @@ export class AcpConnection {
   }
 
   private ensureConnection(): ClientSideConnection {
-    if (!this.sdkConnection) {
+    if (!this.sdkConnection || !this.isConnected) {
       throw new Error('Not connected to ACP agent');
     }
     return this.sdkConnection;
@@ -541,7 +544,9 @@ export class AcpConnection {
   }
 
   get isConnected(): boolean {
-    return this.child !== null && !this.child.killed;
+    return (
+      this.child !== null && !this.child.killed && this.child.exitCode === null
+    );
   }
 
   get hasActiveSession(): boolean {
