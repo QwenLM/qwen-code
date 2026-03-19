@@ -433,6 +433,9 @@ export const useWebViewMessages = ({
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
           handlers.messageHandling.setMessages(conversation.messages);
+          handlers.clearToolCalls();
+          handlers.setPlanEntries([]);
+          handlers.messageHandling.clearWaitingForResponse();
           break;
         }
 
