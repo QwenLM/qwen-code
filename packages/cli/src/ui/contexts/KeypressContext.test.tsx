@@ -850,6 +850,33 @@ describe('KeypressContext - Kitty Protocol', () => {
         vi.useRealTimers();
       }
     });
+
+    it('treats standalone CRLF as a paste event in passthrough mode', async () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('\r\n'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paste: true,
+          sequence: '\r\n',
+        }),
+      );
+    });
   });
 
   describe('Raw keypress pipeline', () => {
