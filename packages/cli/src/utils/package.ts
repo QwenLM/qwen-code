@@ -36,3 +36,7 @@ export async function getPackageJson(): Promise<PackageJson | undefined> {
   packageJson = result.packageJson;
   return packageJson;
 }
+
+export function clearPackageJsonCache(): void {
+  packageJson = undefined;
+}

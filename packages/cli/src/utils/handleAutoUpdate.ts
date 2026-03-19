@@ -12,6 +12,7 @@ import type { HistoryItem } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import type { spawn } from 'node:child_process';
+import { clearPackageJsonCache } from './package.js';
 import os from 'node:os';
 
 export function handleAutoUpdate(
@@ -64,6 +65,7 @@ export function handleAutoUpdate(
 
   updateProcess.on('close', (code) => {
     if (code === 0) {
+      clearPackageJsonCache();
       updateEventEmitter.emit('update-success', {
         message:
           'Update successful! The new version will be used on your next run.',
