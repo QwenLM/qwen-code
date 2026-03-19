@@ -108,6 +108,8 @@ export async function handleQwenAuth(
       excludeTools: undefined,
       authType: undefined,
       channel: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
     };
 
     // Create a minimal config to access settings and storage
