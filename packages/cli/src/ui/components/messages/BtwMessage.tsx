@@ -7,7 +7,6 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import type { BtwProps } from '../../types.js';
-import Spinner from 'ink-spinner';
 import { Colors } from '../../colors.js';
 import { t } from '../../../i18n/index.js';
 
@@ -15,35 +14,34 @@ export interface BtwDisplayProps {
   btw: BtwProps;
 }
 
-/**
- * BtwMessage renders the /btw (by the way) sidebar response.
- * Shows an ephemeral question and answer that doesn't affect the main conversation.
- */
 export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
-  <Box flexDirection="column">
+  <Box
+    flexDirection="column"
+    borderStyle="round"
+    borderColor={Colors.AccentYellow}
+    paddingX={1}
+    width="100%"
+  >
     <Box flexDirection="row">
-      <Text color={Colors.Gray} dimColor>
-        {'btw> '}
+      <Text color={Colors.AccentYellow} bold>
+        {'/btw '}
       </Text>
-      <Text wrap="wrap" color={Colors.Gray}>
+      <Text wrap="wrap" color={Colors.AccentYellow}>
         {btw.question}
       </Text>
     </Box>
-    <Box flexDirection="row">
-      {btw.isPending ? (
-        <Box>
-          <Box marginRight={1}>
-            <Spinner type="dots" />
-          </Box>
-          <Text color={Colors.AccentPurple}>{t('Thinking...')}</Text>
+    {btw.isPending ? (
+      <Box>
+        <Text color={Colors.AccentYellow}>{'+ '}</Text>
+        <Text color={Colors.AccentYellow}>{t('Answering...')}</Text>
+      </Box>
+    ) : (
+      <Box flexDirection="column">
+        <Text wrap="wrap">{btw.answer}</Text>
+        <Box marginTop={1}>
+          <Text dimColor>{t('Press Space, Enter, or Escape to dismiss')}</Text>
         </Box>
-      ) : (
-        <Box flexDirection="column">
-          <Text wrap="wrap" color={Colors.AccentCyan}>
-            {btw.answer}
-          </Text>
-        </Box>
-      )}
-    </Box>
+      </Box>
+    )}
   </Box>
 );

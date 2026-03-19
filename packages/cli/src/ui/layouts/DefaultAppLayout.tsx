@@ -10,6 +10,7 @@ import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
+import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
@@ -20,6 +21,12 @@ export const DefaultAppLayout: React.FC = () => {
   return (
     <Box flexDirection="column" width={terminalWidth}>
       <MainContent />
+
+      {uiState.btwItem && (
+        <Box marginX={2} width={uiState.mainAreaWidth}>
+          <BtwMessage btw={uiState.btwItem.btw} />
+        </Box>
+      )}
 
       <Box flexDirection="column" ref={uiState.mainControlsRef}>
         {uiState.dialogsVisible ? (

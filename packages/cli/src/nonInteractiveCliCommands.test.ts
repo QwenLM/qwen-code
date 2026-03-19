@@ -149,6 +149,33 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('should execute /btw when using the default allowed list', async () => {
+    const mockBtwCommand = {
+      name: 'btw',
+      description: 'Ask a side question',
+      kind: CommandKind.BUILT_IN,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'btw> question\nanswer',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockBtwCommand]);
+
+    const result = await handleSlashCommand(
+      '/btw question',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockBtwCommand.action).toHaveBeenCalled();
+    expect(result.type).toBe('message');
+    if (result.type === 'message') {
+      expect(result.content).toBe('btw> question\nanswer');
+    }
+  });
+
   it('should execute file commands regardless of allowed list', async () => {
     const mockFileCommand = {
       name: 'custom',

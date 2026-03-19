@@ -832,7 +832,7 @@ describe('useGeminiStream', () => {
 
       // Wait for the first part of the response
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Call cancelOngoingRequest directly
@@ -981,7 +981,7 @@ describe('useGeminiStream', () => {
       });
 
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Cancel the request
@@ -2707,6 +2707,109 @@ describe('useGeminiStream', () => {
   });
 
   describe('Concurrent Execution Prevention', () => {
+    it('should allow /btw slash commands while a main response is in progress', async () => {
+      let resolveFirstCall!: () => void;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      const firstStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'First call content',
+        };
+        await firstCallPromise;
+      })();
+
+      mockSendMessageStream.mockImplementation(() => firstStream);
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/btw quick side question',
+        );
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
+    it('should keep the main request cancellable after submitting /btw in parallel', async () => {
+      let resolveFirstCall!: () => void;
+      let mainAbortSignal: AbortSignal | undefined;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      mockSendMessageStream.mockImplementation((_query, signal) => {
+        mainAbortSignal = signal;
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'First call content',
+          };
+          await firstCallPromise;
+        })();
+      });
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mainAbortSignal).toBeDefined();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        act(() => {
+          result.current.cancelOngoingRequest();
+        });
+
+        expect(mainAbortSignal?.aborted).toBe(true);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
     it('should prevent concurrent submitQuery calls', async () => {
       let resolveFirstCall!: () => void;
       let resolveSecondCall!: () => void;

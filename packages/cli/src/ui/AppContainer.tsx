@@ -68,6 +68,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
+import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -550,6 +551,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleSlashCommand,
     slashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
+    btwItem,
+    setBtwItem,
+    cancelBtw,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -687,9 +691,16 @@ export const AppContainer = (props: AppContainerProps) => {
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {
+      if (
+        streamingState === StreamingState.Responding &&
+        isBtwCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
       addMessage(submittedValue);
     },
-    [addMessage],
+    [addMessage, streamingState, submitQuery],
   );
 
   // Welcome back functionality (must be after handleFinalSubmit)
@@ -1148,7 +1159,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Escape key handling
+        // Dismiss or cancel btw side-question on Escape
+        if (btwItem) {
+          cancelBtw();
+          return;
+        }
+
         // Skip if shell is focused (to allow shell's own escape handling)
         if (embeddedShellFocused) {
           return;
@@ -1188,6 +1204,15 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
+      }
+
+      // Dismiss completed btw side-question on Space or Enter,
+      // but only when the input buffer is empty so we don't swallow user keystrokes.
+      if (btwItem && !btwItem.btw.isPending && buffer.text.length === 0) {
+        if (key.name === 'return' || key.sequence === ' ') {
+          setBtwItem(null);
+          return;
+        }
       }
 
       let enteringConstrainHeightMode = false;
@@ -1244,6 +1269,9 @@ export const AppContainer = (props: AppContainerProps) => {
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
     ],
@@ -1403,6 +1431,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,
@@ -1495,6 +1526,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,

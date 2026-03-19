@@ -7,6 +7,7 @@
 import { createContext, useContext } from 'react';
 import type {
   HistoryItem,
+  HistoryItemBtw,
   ThoughtSummary,
   ShellConfirmationRequest,
   ConfirmationRequest,
@@ -101,6 +102,9 @@ export interface UIState {
   staticExtraHeight: number;
   dialogsVisible: boolean;
   pendingHistoryItems: HistoryItemWithoutId[];
+  btwItem: HistoryItemBtw | null;
+  setBtwItem: (item: HistoryItemBtw | null) => void;
+  cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
   sessionStats: SessionStatsState;

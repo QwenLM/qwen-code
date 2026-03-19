@@ -46,7 +46,11 @@ import type {
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
-import { isAtCommand, isSlashCommand } from '../utils/commandUtils.js';
+import {
+  isAtCommand,
+  isBtwCommand,
+  isSlashCommand,
+} from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
@@ -1085,16 +1089,27 @@ export const useGeminiStream = (
       options?: { isContinuation: boolean; skipPreparation?: boolean },
       prompt_id?: string,
     ) => {
+      const allowConcurrentBtwDuringResponse =
+        !options?.isContinuation &&
+        streamingState === StreamingState.Responding &&
+        typeof query === 'string' &&
+        isBtwCommand(query);
+
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
-      if (isSubmittingQueryRef.current && !options?.isContinuation) {
+      if (
+        isSubmittingQueryRef.current &&
+        !options?.isContinuation &&
+        !allowConcurrentBtwDuringResponse
+      ) {
         return;
       }
 
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        !options?.isContinuation
+        !options?.isContinuation &&
+        !allowConcurrentBtwDuringResponse
       )
         return;
 
@@ -1104,7 +1119,7 @@ export const useGeminiStream = (
       const userMessageTimestamp = Date.now();
 
       // Reset quota error flag when starting a new query (not a continuation)
-      if (!options?.isContinuation) {
+      if (!options?.isContinuation && !allowConcurrentBtwDuringResponse) {
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -1118,9 +1133,15 @@ export const useGeminiStream = (
         }
       }
 
-      abortControllerRef.current = new AbortController();
-      const abortSignal = abortControllerRef.current.signal;
-      turnCancelledRef.current = false;
+      const abortController = new AbortController();
+      const abortSignal = abortController.signal;
+
+      // Keep the main stream's cancellation state intact while /btw is handled
+      // in parallel. The side-question can use its own local abort signal.
+      if (!allowConcurrentBtwDuringResponse) {
+        abortControllerRef.current = abortController;
+        turnCancelledRef.current = false;
+      }
 
       if (!prompt_id) {
         prompt_id = config.getSessionId() + '########' + getPromptCount();

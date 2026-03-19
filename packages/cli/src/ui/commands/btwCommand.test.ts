@@ -27,6 +27,15 @@ describe('btwCommand', () => {
   let mockContext: CommandContext;
   let mockGenerateContent: ReturnType<typeof vi.fn>;
   let mockGetHistory: ReturnType<typeof vi.fn>;
+  const createConfig = (overrides: Record<string, unknown> = {}) => ({
+    getGeminiClient: () => ({
+      getHistory: mockGetHistory,
+      generateContent: mockGenerateContent,
+    }),
+    getModel: () => 'test-model',
+    getSessionId: () => 'test-session-id',
+    ...overrides,
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -36,13 +45,7 @@ describe('btwCommand', () => {
 
     mockContext = createMockCommandContext({
       services: {
-        config: {
-          getGeminiClient: () => ({
-            getHistory: mockGetHistory,
-            generateContent: mockGenerateContent,
-          }),
-          getModel: () => 'test-model',
-        },
+        config: createConfig(),
       },
     });
   });
@@ -90,13 +93,9 @@ describe('btwCommand', () => {
   it('should return error when model is not configured', async () => {
     const noModelContext = createMockCommandContext({
       services: {
-        config: {
-          getGeminiClient: () => ({
-            getHistory: mockGetHistory,
-            generateContent: mockGenerateContent,
-          }),
+        config: createConfig({
           getModel: () => '',
-        },
+        }),
       },
     });
 
@@ -110,11 +109,10 @@ describe('btwCommand', () => {
   });
 
   describe('interactive mode', () => {
-    // Helper to flush microtask queue so fire-and-forget promises settle.
     const flushPromises = () =>
       new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    it('should set pending item and add completed item on success', async () => {
+    it('should set btwItem and update it on success', async () => {
       mockGenerateContent.mockResolvedValue({
         candidates: [
           {
@@ -127,8 +125,8 @@ describe('btwCommand', () => {
 
       await btwCommand.action!(mockContext, 'what is the meaning of life?');
 
-      // Action returns immediately; pending item is set synchronously
-      expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith({
+      // Action returns immediately; btwItem is set synchronously
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledWith({
         type: MessageType.BTW,
         btw: {
           question: 'what is the meaning of life?',
@@ -137,22 +135,23 @@ describe('btwCommand', () => {
         },
       });
 
-      // Wait for background promise to settle
+      // pendingItem should NOT be used
+      expect(mockContext.ui.setPendingItem).not.toHaveBeenCalled();
+
       await flushPromises();
 
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.BTW,
-          btw: {
-            question: 'what is the meaning of life?',
-            answer: 'The answer is 42.',
-            isPending: false,
-          },
+      // On success, setBtwItem is called with the completed answer
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledWith({
+        type: MessageType.BTW,
+        btw: {
+          question: 'what is the meaning of life?',
+          answer: 'The answer is 42.',
+          isPending: false,
         },
-        expect.any(Number),
-      );
+      });
 
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+      // addItem should NOT be called (btw stays in fixed area, not in history)
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
     });
 
     it('should pass conversation history to generateContent', async () => {
@@ -183,15 +182,20 @@ describe('btwCommand', () => {
         {},
         expect.any(AbortSignal),
         'test-model',
+        expect.stringMatching(/^test-session-id########btw-/),
       );
     });
 
-    it('should add error item on failure', async () => {
+    it('should add error item on failure and clear btwItem', async () => {
       mockGenerateContent.mockRejectedValue(new Error('API error'));
 
       await btwCommand.action!(mockContext, 'test question');
       await flushPromises();
 
+      // btwItem should be cleared on error
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledWith(null);
+
+      // Error goes to history
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: MessageType.ERROR,
@@ -199,8 +203,6 @@ describe('btwCommand', () => {
         },
         expect.any(Number),
       );
-
-      expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
     });
 
     it('should handle non-Error exceptions', async () => {
@@ -218,46 +220,13 @@ describe('btwCommand', () => {
       );
     });
 
-    it('should return error when another operation is pending', async () => {
+    it('should not block when another pendingItem exists', async () => {
       const busyContext = createMockCommandContext({
         services: {
-          config: {
-            getGeminiClient: () => ({
-              getHistory: mockGetHistory,
-              generateContent: mockGenerateContent,
-            }),
-            getModel: () => 'test-model',
-          },
+          config: createConfig(),
         },
         ui: {
           pendingItem: { type: 'info' },
-        },
-      });
-
-      const result = await btwCommand.action!(busyContext, 'test question');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content:
-          'Another operation is in progress. Please wait for it to complete.',
-      });
-    });
-
-    it('should not add item when abort signal is aborted', async () => {
-      const abortController = new AbortController();
-      abortController.abort();
-
-      const abortContext = createMockCommandContext({
-        abortSignal: abortController.signal,
-        services: {
-          config: {
-            getGeminiClient: () => ({
-              getHistory: mockGetHistory,
-              generateContent: mockGenerateContent,
-            }),
-            getModel: () => 'test-model',
-          },
         },
       });
 
@@ -265,11 +234,92 @@ describe('btwCommand', () => {
         candidates: [{ content: { parts: [{ text: 'answer' }] } }],
       });
 
-      await btwCommand.action!(abortContext, 'test question');
+      // btw should NOT be blocked by pendingItem anymore
+      const result = await btwCommand.action!(busyContext, 'test question');
+      expect(result).toBeUndefined();
+      expect(busyContext.ui.setBtwItem).toHaveBeenCalled();
+    });
+
+    it('should not update btwItem when cancelled via btwAbortControllerRef', async () => {
+      mockGenerateContent.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  candidates: [
+                    { content: { parts: [{ text: 'late answer' }] } },
+                  ],
+                }),
+              50,
+            ),
+          ),
+      );
+
+      await btwCommand.action!(mockContext, 'test question');
+
+      // The btw command should have registered its AbortController
+      expect(mockContext.ui.btwAbortControllerRef.current).toBeInstanceOf(
+        AbortController,
+      );
+
+      // Simulate user pressing ESC: cancel the in-flight btw
+      mockContext.ui.btwAbortControllerRef.current!.abort();
+
       await flushPromises();
 
-      expect(abortContext.ui.addItem).not.toHaveBeenCalled();
-      expect(abortContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
+      // setBtwItem should only have the initial pending call (no completion)
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    });
+
+    it('should clear btwAbortControllerRef after successful completion', async () => {
+      mockGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      });
+
+      await btwCommand.action!(mockContext, 'test question');
+
+      // Ref is set during the call
+      expect(mockContext.ui.btwAbortControllerRef.current).toBeInstanceOf(
+        AbortController,
+      );
+
+      await flushPromises();
+
+      // After completion, ref should be cleaned up
+      expect(mockContext.ui.btwAbortControllerRef.current).toBeNull();
+    });
+
+    it('should clear btwAbortControllerRef after error', async () => {
+      mockGenerateContent.mockRejectedValue(new Error('API error'));
+
+      await btwCommand.action!(mockContext, 'test question');
+
+      expect(mockContext.ui.btwAbortControllerRef.current).toBeInstanceOf(
+        AbortController,
+      );
+
+      await flushPromises();
+
+      expect(mockContext.ui.btwAbortControllerRef.current).toBeNull();
+    });
+
+    it('should cancel previous btw when starting a new one', async () => {
+      mockGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      });
+
+      await btwCommand.action!(mockContext, 'first question');
+
+      // cancelBtw should have been called to clean up any previous btw
+      expect(mockContext.ui.cancelBtw).toHaveBeenCalledTimes(1);
+
+      // Second btw call
+      await btwCommand.action!(mockContext, 'second question');
+
+      // cancelBtw called again for the second invocation
+      expect(mockContext.ui.cancelBtw).toHaveBeenCalledTimes(2);
     });
 
     it('should return fallback text when response has no parts', async () => {
@@ -280,17 +330,14 @@ describe('btwCommand', () => {
       await btwCommand.action!(mockContext, 'test question');
       await flushPromises();
 
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        {
-          type: MessageType.BTW,
-          btw: {
-            question: 'test question',
-            answer: 'No response received.',
-            isPending: false,
-          },
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledWith({
+        type: MessageType.BTW,
+        btw: {
+          question: 'test question',
+          answer: 'No response received.',
+          isPending: false,
         },
-        expect.any(Number),
-      );
+      });
     });
 
     it('should return void immediately without blocking', async () => {
@@ -300,16 +347,15 @@ describe('btwCommand', () => {
 
       const result = await btwCommand.action!(mockContext, 'test question');
 
-      // Action should return void (not awaiting the API call)
       expect(result).toBeUndefined();
 
-      // addItem not yet called — background promise hasn't settled
-      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+      // Only the pending setBtwItem called so far
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledTimes(1);
 
       await flushPromises();
 
-      // Now the background work has completed
-      expect(mockContext.ui.addItem).toHaveBeenCalled();
+      // Now the completed setBtwItem has been called
+      expect(mockContext.ui.setBtwItem).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -320,13 +366,7 @@ describe('btwCommand', () => {
       nonInteractiveContext = createMockCommandContext({
         executionMode: 'non_interactive',
         services: {
-          config: {
-            getGeminiClient: () => ({
-              getHistory: mockGetHistory,
-              generateContent: mockGenerateContent,
-            }),
-            getModel: () => 'test-model',
-          },
+          config: createConfig(),
         },
       });
     });
@@ -371,13 +411,7 @@ describe('btwCommand', () => {
       acpContext = createMockCommandContext({
         executionMode: 'acp',
         services: {
-          config: {
-            getGeminiClient: () => ({
-              getHistory: mockGetHistory,
-              generateContent: mockGenerateContent,
-            }),
-            getModel: () => 'test-model',
-          },
+          config: createConfig(),
         },
       });
     });

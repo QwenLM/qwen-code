@@ -15,6 +15,10 @@ import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 import type { GeminiClient } from '@qwen-code/qwen-code-core';
 
+function makeBtwPromptId(sessionId: string): string {
+  return `${sessionId}########btw-${Date.now()}`;
+}
+
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
     error: error instanceof Error ? error.message : String(error),
@@ -30,6 +34,7 @@ async function askBtw(
   model: string,
   question: string,
   abortSignal: AbortSignal,
+  promptId: string,
 ): Promise<string> {
   const history = geminiClient.getHistory();
 
@@ -45,9 +50,10 @@ async function askBtw(
         ],
       },
     ],
-    {}, // No tools — btw questions are text-only
+    {},
     abortSignal,
     model,
+    promptId,
   );
 
   const parts = response.candidates?.[0]?.content?.parts;
@@ -96,6 +102,7 @@ export const btwCommand: SlashCommand = {
 
     const geminiClient = config.getGeminiClient();
     const model = config.getModel();
+    const sessionId = config.getSessionId();
 
     if (!model) {
       return {
@@ -107,6 +114,7 @@ export const btwCommand: SlashCommand = {
 
     // ACP mode: return a stream_messages async generator
     if (executionMode === 'acp') {
+      const btwPromptId = makeBtwPromptId(sessionId);
       const messages = async function* () {
         try {
           yield {
@@ -119,6 +127,7 @@ export const btwCommand: SlashCommand = {
             model,
             question,
             abortSignal,
+            btwPromptId,
           );
 
           yield {
@@ -139,7 +148,14 @@ export const btwCommand: SlashCommand = {
     // Non-interactive mode: return a simple message result
     if (executionMode === 'non_interactive') {
       try {
-        const answer = await askBtw(geminiClient, model, question, abortSignal);
+        const btwPromptId = makeBtwPromptId(sessionId);
+        const answer = await askBtw(
+          geminiClient,
+          model,
+          question,
+          abortSignal,
+          btwPromptId,
+        );
         return {
           type: 'message',
           messageType: 'info',
@@ -154,16 +170,15 @@ export const btwCommand: SlashCommand = {
       }
     }
 
-    // Interactive mode: use pending item for spinner, then add to UI history
-    if (ui.pendingItem) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Another operation is in progress. Please wait for it to complete.',
-        ),
-      };
-    }
+    // Interactive mode: use dedicated btwItem state for the fixed bottom area.
+    // This does NOT occupy pendingItem, so the main conversation is never blocked.
+
+    // Cancel any previous in-flight btw before starting a new one.
+    ui.cancelBtw();
+
+    const btwAbortController = new AbortController();
+    const btwSignal = btwAbortController.signal;
+    ui.btwAbortControllerRef.current = btwAbortController;
 
     const pendingItem: HistoryItemBtw = {
       type: MessageType.BTW,
@@ -173,14 +188,16 @@ export const btwCommand: SlashCommand = {
         isPending: true,
       },
     };
-    ui.setPendingItem(pendingItem);
+    ui.setBtwItem(pendingItem);
 
     // Fire-and-forget: run the API call in the background so the main
     // conversation is not blocked while waiting for the btw answer.
-    void askBtw(geminiClient, model, question, abortSignal)
+    const btwPromptId = makeBtwPromptId(sessionId);
+    void askBtw(geminiClient, model, question, btwSignal, btwPromptId)
       .then((answer) => {
-        if (abortSignal.aborted) return;
+        if (btwSignal.aborted) return;
 
+        ui.btwAbortControllerRef.current = null;
         const completedItem: HistoryItemBtw = {
           type: MessageType.BTW,
           btw: {
@@ -189,11 +206,13 @@ export const btwCommand: SlashCommand = {
             isPending: false,
           },
         };
-        ui.addItem(completedItem, Date.now());
+        ui.setBtwItem(completedItem);
       })
       .catch((error) => {
-        if (abortSignal.aborted) return;
+        if (btwSignal.aborted) return;
 
+        ui.btwAbortControllerRef.current = null;
+        ui.setBtwItem(null);
         ui.addItem(
           {
             type: MessageType.ERROR,
@@ -201,9 +220,6 @@ export const btwCommand: SlashCommand = {
           },
           Date.now(),
         );
-      })
-      .finally(() => {
-        ui.setPendingItem(null);
       });
   },
 };
