@@ -22,6 +22,103 @@ import {
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
+const WINDOWS_PATH_DELIMITER = ';';
+let cachedWindowsPathFingerprint: string | undefined;
+let cachedMergedWindowsPath: string | undefined;
+
+function mergeWindowsPathValues(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string | undefined {
+  const mergedEntries: string[] = [];
+  const seenEntries = new Set<string>();
+
+  for (const key of pathKeys) {
+    const value = env[key];
+    if (value === undefined) {
+      continue;
+    }
+
+    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
+      if (seenEntries.has(entry)) {
+        continue;
+      }
+      seenEntries.add(entry);
+      mergedEntries.push(entry);
+    }
+  }
+
+  return mergedEntries.length > 0
+    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
+    : undefined;
+}
+
+function getWindowsPathFingerprint(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string {
+  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
+}
+
+function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (os.platform() !== 'win32') {
+    return env;
+  }
+
+  const normalized: NodeJS.ProcessEnv = { ...env };
+  const pathKeys = Object.keys(normalized).filter(
+    (key) => key.toLowerCase() === 'path',
+  );
+
+  if (pathKeys.length === 0) {
+    return normalized;
+  }
+
+  const orderedPathKeys = [...pathKeys].sort((left, right) => {
+    if (left === 'PATH') {
+      return -1;
+    }
+    if (right === 'PATH') {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  const fingerprint = getWindowsPathFingerprint(normalized, orderedPathKeys);
+  const canonicalValue =
+    fingerprint === cachedWindowsPathFingerprint
+      ? cachedMergedWindowsPath
+      : mergeWindowsPathValues(normalized, orderedPathKeys);
+
+  if (fingerprint !== cachedWindowsPathFingerprint) {
+    cachedWindowsPathFingerprint = fingerprint;
+    cachedMergedWindowsPath = canonicalValue;
+  }
+
+  for (const key of pathKeys) {
+    if (key !== 'PATH') {
+      delete normalized[key];
+    }
+  }
+
+  if (canonicalValue !== undefined) {
+    normalized['PATH'] = canonicalValue;
+  }
+
+  return normalized;
+}
+
+/**
+ * On Windows with PowerShell, prefix the command with a statement that forces
+ * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
+ * as UTF-8 regardless of the system codepage.
+ */
+function applyPowerShellUtf8Prefix(command: string, shell: string): string {
+  if (os.platform() === 'win32' && shell === 'powershell') {
+    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  }
+  return command;
+}
 
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
@@ -88,10 +185,6 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
-const REPLAY_TERMINAL_COLS = 1024;
-const REPLAY_TERMINAL_ROWS = 24;
-const REPLAY_TERMINAL_SCROLLBACK = 2000;
-
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
@@ -103,12 +196,16 @@ const getFullBufferText = (terminal: pkg.Terminal): string => {
   return lines.join('\n').trimEnd();
 };
 
-const replayTerminalOutput = async (output: string): Promise<string> => {
+const replayTerminalOutput = async (
+  output: string,
+  cols: number,
+  rows: number,
+): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
-    cols: REPLAY_TERMINAL_COLS,
-    rows: REPLAY_TERMINAL_ROWS,
-    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    cols,
+    rows,
+    scrollback: 10000,
     convertEol: true,
   });
 
@@ -245,6 +342,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -261,7 +359,7 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
@@ -444,6 +542,8 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
       // that contain spaces, which mangles user-provided quoted arguments
@@ -465,7 +565,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',
@@ -486,7 +586,6 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let outputEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -618,10 +717,8 @@ export class ShellExecutionService {
           const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
-            outputEncoding = encoding;
           } catch {
             decoder = new TextDecoder('utf-8');
-            outputEncoding = 'utf-8';
           }
         };
 
@@ -684,10 +781,19 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  const decodedOutput = new TextDecoder(outputEncoding).decode(
+                  // Re-decode the full buffer with proper encoding detection.
+                  // The streaming decoder used the first-chunk heuristic which
+                  // can misdetect when early output is ASCII-only but later
+                  // output is in a different encoding (e.g. GBK).
+                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                  const decodedOutput = new TextDecoder(finalEncoding).decode(
                     finalBuffer,
                   );
-                  fullOutput = await replayTerminalOutput(decodedOutput);
+                  fullOutput = await replayTerminalOutput(
+                    decodedOutput,
+                    cols,
+                    rows,
+                  );
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);
                 }

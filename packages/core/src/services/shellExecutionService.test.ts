@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
+import {
+  vi,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
@@ -16,6 +24,9 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
 // Hoisted Mocks
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
@@ -67,6 +78,10 @@ vi.mock('../utils/terminalSerializer.js', () => ({
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getSystemEncoding: mockGetSystemEncoding,
+}));
 
 const mockProcessKill = vi
   .spyOn(process, 'kill')
@@ -79,6 +94,13 @@ const shellExecutionConfig = {
   showColor: false,
   disableDynamicLineTrimming: true,
 };
+
+const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
+const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
+const EXPECTED_MERGED_WINDOWS_PATH =
+  'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin';
+
+let originalProcessEnv: NodeJS.ProcessEnv;
 
 const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   const lines = Array.isArray(text) ? text : text.split('\n');
@@ -98,6 +120,19 @@ const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
     ],
   );
   return expected;
+};
+
+const setupConflictingPathEnv = () => {
+  process.env = {
+    ...originalProcessEnv,
+    PATH: WINDOWS_SYSTEM_PATH,
+    Path: WINDOWS_USER_PATH,
+  };
+};
+
+const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
+  expect(env['PATH']).toBe(EXPECTED_MERGED_WINDOWS_PATH);
+  expect(env['Path']).toBeUndefined();
 };
 
 describe('ShellExecutionService', () => {
@@ -122,6 +157,7 @@ describe('ShellExecutionService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -158,6 +194,11 @@ describe('ShellExecutionService', () => {
     };
 
     mockPtySpawn.mockReturnValue(mockPtyProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -517,7 +558,7 @@ describe('ShellExecutionService', () => {
       });
     });
 
-    it('should use PowerShell on Windows with array args', async () => {
+    it('should use PowerShell on Windows with array args and UTF-8 prefix', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -528,9 +569,14 @@ describe('ShellExecutionService', () => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -538,6 +584,18 @@ describe('ShellExecutionService', () => {
         argsPrefix: ['-c'],
         shell: 'bash',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for pty execution', async () => {
+      mockPlatform.mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
     });
 
     it('should use bash on Linux', async () => {
@@ -647,6 +705,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -666,6 +725,11 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     mockCpSpawn.mockReturnValue(mockChildProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -966,7 +1030,7 @@ describe('ShellExecutionService child_process fallback', () => {
       });
     });
 
-    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+    it('should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -977,9 +1041,14 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
@@ -991,6 +1060,16 @@ describe('ShellExecutionService child_process fallback', () => {
         argsPrefix: ['-c'],
         shell: 'bash',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
+      mockPlatform.mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
     });
 
     it('should use bash and detached process group on Linux', async () => {

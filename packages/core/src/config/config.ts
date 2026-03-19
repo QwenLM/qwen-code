@@ -21,6 +21,8 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type { ArenaManager } from '../agents/arena/ArenaManager.js';
+import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -37,7 +39,6 @@ import {
   type FileSystemService,
   StandardFileSystemService,
   type FileEncodingType,
-  FileEncoding,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
 
@@ -286,6 +287,26 @@ export interface SandboxConfig {
   image: string;
 }
 
+/**
+ * Settings shared across multi-agent collaboration features
+ * (Arena, Team, Swarm).
+ */
+export interface AgentsCollabSettings {
+  /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
+  displayMode?: string;
+  /** Arena-specific settings */
+  arena?: {
+    /** Custom base directory for Arena worktrees (default: ~/.qwen/arena) */
+    worktreeBaseDir?: string;
+    /** Preserve worktrees and state files after session ends */
+    preserveArtifacts?: boolean;
+    /** Maximum rounds (turns) per agent. No limit if unset. */
+    maxRoundsPerAgent?: number;
+    /** Total timeout in seconds for the Arena session. No limit if unset. */
+    timeoutSeconds?: number;
+  };
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -295,11 +316,10 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
-  /** @deprecated Use `permissions.allow` instead. Migrated automatically. */
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   coreTools?: string[];
-  /** @deprecated Use `permissions.allow` instead. Migrated automatically. */
   allowedTools?: string[];
-  /** @deprecated Use `permissions.deny` instead. Migrated automatically. */
   excludeTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
@@ -390,6 +410,8 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  agents?: AgentsCollabSettings;
   /** Enable hook system for lifecycle events */
   enableHooks?: boolean;
   /** Hooks configuration from settings */
@@ -470,6 +492,8 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
+  private readonly systemPrompt: string | undefined;
+  private readonly appendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -541,6 +565,12 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
+  private arenaManager: ArenaManager | null = null;
+  private arenaManagerChangeCallback:
+    | ((manager: ArenaManager | null) => void)
+    | null = null;
+  private readonly arenaAgentClient: ArenaAgentClient | null;
+  private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
@@ -556,7 +586,7 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
-  private readonly defaultFileEncoding: FileEncodingType;
+  private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -584,6 +614,8 @@ export class Config {
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
+    this.systemPrompt = params.systemPrompt;
+    this.appendSystemPrompt = params.appendSystemPrompt;
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
@@ -678,11 +710,13 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
-    this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
+    this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.arenaAgentClient = ArenaAgentClient.create();
+    this.agentsSettings = params.agents ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -1223,6 +1257,8 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -1239,6 +1275,14 @@ export class Config {
 
   getQuestion(): string | undefined {
     return this.question;
+  }
+
+  getSystemPrompt(): string | undefined {
+    return this.systemPrompt;
+  }
+
+  getAppendSystemPrompt(): string | undefined {
+    return this.appendSystemPrompt;
   }
 
   /** @deprecated Use getPermissionsAllow() instead. */
@@ -1409,6 +1453,50 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  getArenaManager(): ArenaManager | null {
+    return this.arenaManager;
+  }
+
+  setArenaManager(manager: ArenaManager | null): void {
+    this.arenaManager = manager;
+    this.arenaManagerChangeCallback?.(manager);
+  }
+
+  /**
+   * Register a callback invoked whenever the arena manager changes.
+   * Pass `null` to unsubscribe. Only one subscriber is supported.
+   */
+  onArenaManagerChange(
+    cb: ((manager: ArenaManager | null) => void) | null,
+  ): void {
+    this.arenaManagerChangeCallback = cb;
+  }
+
+  getArenaAgentClient(): ArenaAgentClient | null {
+    return this.arenaAgentClient;
+  }
+
+  getAgentsSettings(): AgentsCollabSettings {
+    return this.agentsSettings;
+  }
+
+  /**
+   * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
+   * always removes worktrees regardless of preserveArtifacts.
+   */
+  async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    const manager = this.arenaManager;
+    if (!manager) {
+      return;
+    }
+    if (!force && this.agentsSettings.arena?.preserveArtifacts) {
+      await manager.cleanupRuntime();
+    } else {
+      await manager.cleanup();
+    }
+    this.setArenaManager(null);
   }
 
   getApprovalMode(): ApprovalMode {
@@ -1736,7 +1824,7 @@ export class Config {
    * Get the default file encoding for new files.
    * @returns FileEncodingType
    */
-  getDefaultFileEncoding(): FileEncodingType {
+  getDefaultFileEncoding(): FileEncodingType | undefined {
     return this.defaultFileEncoding;
   }
 
@@ -1902,6 +1990,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
+    options?: { skipDiscovery?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -1994,7 +2083,9 @@ export class Config {
       registerCoreTool(LspTool, this);
     }
 
-    await registry.discoverAllTools();
+    if (!options?.skipDiscovery) {
+      await registry.discoverAllTools();
+    }
     this.debugLogger.debug(
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );

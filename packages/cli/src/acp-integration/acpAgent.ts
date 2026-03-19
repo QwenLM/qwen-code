@@ -58,11 +58,11 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
 import { SettingScope } from '../config/settings.js';
+import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
-import type { ApprovalModeValue } from './session/types.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');

@@ -9,7 +9,7 @@ type TokenCount = number;
 export type TokenLimitType = 'input' | 'output';
 
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
-export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 8_192; // 8K tokens
+export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
 /**
  * Accurate numeric limits:
@@ -166,6 +166,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3\.5/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen3-max/, LIMITS['64k']],
+  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
@@ -182,6 +183,19 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Kimi
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
+
+/**
+ * Check if a model has an explicitly defined output token limit.
+ * This distinguishes between models with known limits in OUTPUT_PATTERNS
+ * and unknown models that would fallback to DEFAULT_OUTPUT_TOKEN_LIMIT.
+ *
+ * @param model - The model name to check
+ * @returns true if the model has an explicit output limit definition, false if it uses the default fallback
+ */
+export function hasExplicitOutputLimit(model: Model): boolean {
+  const norm = normalize(model);
+  return OUTPUT_PATTERNS.some(([regex]) => regex.test(norm));
+}
 
 /**
  * Return the token limit for a model string based on the specified type.

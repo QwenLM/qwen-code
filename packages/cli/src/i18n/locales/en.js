@@ -1741,6 +1741,34 @@ export default {
     'New model configurations are available for {{region}}. Update now?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Context Usage',
+  'No API response yet. Send a message to see actual usage.':
+    'No API response yet. Send a message to see actual usage.',
+  'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
+  'Context window': 'Context window',
+  tokens: 'tokens',
+  Used: 'Used',
+  Free: 'Free',
+  'Autocompact buffer': 'Autocompact buffer',
+  'Usage by category': 'Usage by category',
+  'System prompt': 'System prompt',
+  'Built-in tools': 'Built-in tools',
+  'MCP tools': 'MCP tools',
+  'Memory files': 'Memory files',
+  Skills: 'Skills',
+  Messages: 'Messages',
+  'Show context window usage breakdown.':
+    'Show context window usage breakdown.',
+  'Run /context detail for per-item breakdown.':
+    'Run /context detail for per-item breakdown.',
+  'body loaded': 'body loaded',
+  memory: 'memory',
   '{{region}} configuration updated successfully.':
     '{{region}} configuration updated successfully.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':

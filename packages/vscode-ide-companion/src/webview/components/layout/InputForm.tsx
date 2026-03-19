@@ -13,6 +13,7 @@ import type {
   InputFormProps as BaseInputFormProps,
   EditModeInfo,
 } from '@qwen-code/webui';
+import type { CompletionItem } from '../../../types/completionItemTypes.js';
 import { getApprovalModeInfoFromString } from '../../../types/acpTypes.js';
 import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
 import type { ModelInfo } from '@agentclientprotocol/sdk';
@@ -22,9 +23,11 @@ import { ModelSelector } from './ModelSelector.js';
  * Extended props that accept ApprovalModeValue and ModelSelector
  */
 export interface InputFormProps
-  extends Omit<BaseInputFormProps, 'editModeInfo'> {
+  extends Omit<BaseInputFormProps, 'editModeInfo' | 'onCompletionFill'> {
   /** Edit mode value (local type) */
   editMode: ApprovalModeValue;
+  /** Completion fill callback (Tab or equivalent) */
+  onCompletionFill?: (item: CompletionItem) => void;
   /** Whether to show model selector */
   showModelSelector?: boolean;
   /** Available models for selection */

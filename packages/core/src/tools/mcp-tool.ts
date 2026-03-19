@@ -20,6 +20,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -257,10 +258,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     const transformedParts = transformMcpContentToParts(rawResponseParts);
+    const truncatedParts = await this.truncateTextParts(transformedParts);
 
     return {
-      llmContent: transformedParts,
-      returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+      llmContent: truncatedParts,
+      returnDisplay: getDisplayFromParts(truncatedParts),
     };
   }
 
@@ -327,11 +329,37 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     const transformedParts = transformMcpContentToParts(rawResponseParts);
+    const truncatedParts = await this.truncateTextParts(transformedParts);
 
     return {
-      llmContent: transformedParts,
-      returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+      llmContent: truncatedParts,
+      returnDisplay: getDisplayFromParts(truncatedParts),
     };
+  }
+
+  /**
+   * Truncates text parts in the transformed result if they exceed the
+   * configured threshold. Non-text parts (images, audio, etc.) are preserved.
+   */
+  private async truncateTextParts(parts: Part[]): Promise<Part[]> {
+    if (!this.cliConfig) {
+      return parts;
+    }
+
+    const result: Part[] = [];
+    for (const part of parts) {
+      if (part.text && !part.inlineData) {
+        const truncated = await truncateToolOutput(
+          this.cliConfig,
+          `mcp__${this.serverName}__${this.serverToolName}`,
+          part.text,
+        );
+        result.push({ text: truncated.content });
+      } else {
+        result.push(part);
+      }
+    }
+    return result;
   }
 
   getDescription(): string {
@@ -518,43 +546,22 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
 }
 
 /**
- * Processes the raw response from the MCP tool to generate a clean,
- * human-readable string for display in the CLI. It summarizes non-text
- * content and presents text directly.
- *
- * @param rawResponse The raw Part[] array from the GenAI SDK.
- * @returns A formatted string representing the tool's output.
+ * Builds a human-readable display string from transformed Part[].
+ * Text parts are shown directly; inline data is summarized by mime type.
  */
-function getStringifiedResultForDisplay(rawResponse: Part[]): string {
-  const mcpContent = rawResponse?.[0]?.functionResponse?.response?.[
-    'content'
-  ] as McpContentBlock[];
-
-  if (!Array.isArray(mcpContent)) {
-    return '```json\n' + JSON.stringify(rawResponse, null, 2) + '\n```';
+function getDisplayFromParts(parts: Part[]): string {
+  if (parts.length === 0) {
+    return '';
   }
 
-  const displayParts = mcpContent.map((block: McpContentBlock): string => {
-    switch (block.type) {
-      case 'text':
-        return block.text;
-      case 'image':
-        return `[Image: ${block.mimeType}]`;
-      case 'audio':
-        return `[Audio: ${block.mimeType}]`;
-      case 'resource_link':
-        return `[Link to ${block.title || block.name}: ${block.uri}]`;
-      case 'resource':
-        if (block.resource?.text) {
-          return block.resource.text;
-        }
-        return `[Embedded Resource: ${
-          block.resource?.mimeType || 'unknown type'
-        }]`;
-      default:
-        return `[Unknown content type: ${(block as { type: string }).type}]`;
+  const displayParts: string[] = [];
+  for (const part of parts) {
+    if (part.text !== undefined) {
+      displayParts.push(part.text);
+    } else if (part.inlineData) {
+      displayParts.push(`[${part.inlineData.mimeType}]`);
     }
-  });
+  }
 
   return displayParts.join('\n');
 }

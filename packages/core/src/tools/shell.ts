@@ -23,9 +23,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { truncateAndSaveToFile } from '../utils/truncation.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -33,7 +31,7 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import {
   getCommandRoot,
   getCommandRoots,
@@ -442,21 +440,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Truncate large output and save full content to a temp file.
-      const truncateThreshold = this.config.getTruncateToolOutputThreshold();
-      const truncateLines = this.config.getTruncateToolOutputLines();
-      if (
-        typeof llmContent === 'string' &&
-        truncateThreshold > 0 &&
-        truncateLines > 0
-      ) {
-        const originalContentLength = llmContent.length;
-        const fileName = `shell_${crypto.randomBytes(6).toString('hex')}`;
-        const truncatedResult = await truncateAndSaveToFile(
+      if (typeof llmContent === 'string') {
+        const truncatedResult = await truncateToolOutput(
+          this.config,
+          ShellTool.Name,
           llmContent,
-          fileName,
-          this.config.storage.getProjectTempDir(),
-          truncateThreshold,
-          truncateLines,
         );
 
         if (truncatedResult.outputFile) {
@@ -464,17 +452,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           returnDisplayMessage +=
             (returnDisplayMessage ? '\n' : '') +
             `Output too long and was saved to: ${truncatedResult.outputFile}`;
-
-          logToolOutputTruncated(
-            this.config,
-            new ToolOutputTruncatedEvent('', {
-              toolName: ShellTool.Name,
-              originalContentLength,
-              truncatedContentLength: truncatedResult.content.length,
-              threshold: truncateThreshold,
-              lines: truncateLines,
-            }),
-          );
         }
       }
 
@@ -698,10 +675,10 @@ export class ShellTool extends BaseDeclarativeTool<
         return 'Directory must be an absolute path.';
       }
 
-      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
       const resolvedDirectoryPath = path.resolve(params.directory);
-      const isWithinUserSkills = isSubpath(
-        userSkillsDir,
+      const isWithinUserSkills = isSubpaths(
+        userSkillsDirs,
         resolvedDirectoryPath,
       );
       if (isWithinUserSkills) {

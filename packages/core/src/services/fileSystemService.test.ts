@@ -6,9 +6,27 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
-import { StandardFileSystemService } from './fileSystemService.js';
+import {
+  StandardFileSystemService,
+  needsUtf8Bom,
+  resetUtf8BomCache,
+} from './fileSystemService.js';
+
+const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 
 vi.mock('fs/promises');
+vi.mock('os', () => ({
+  default: {
+    platform: mockPlatform,
+  },
+  platform: mockPlatform,
+}));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getSystemEncoding: mockGetSystemEncoding,
+}));
 
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
@@ -25,6 +43,9 @@ describe('StandardFileSystemService', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    resetUtf8BomCache();
+    mockPlatform.mockReturnValue('linux');
+    mockGetSystemEncoding.mockReturnValue('utf-8');
     fileSystem = new StandardFileSystemService();
   });
 
@@ -253,6 +274,178 @@ describe('StandardFileSystemService', () => {
       const buf = writeCall[1] as Buffer;
       // First two bytes should NOT be FF FE (the UTF-16LE BOM)
       expect(!(buf[0] === 0xff && buf[1] === 0xfe)).toBe(true);
+    });
+
+    it('should convert LF to CRLF when writing .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\necho hello\nexit /b 0\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\r\necho hello\r\nexit /b 0\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should convert LF to CRLF when writing .cmd files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.cmd',
+        content: '@echo off\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.cmd',
+        '@echo off\r\necho hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should not double-convert existing CRLF in .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\r\necho hello\r\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\r\necho hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should handle mixed line endings in .bat files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: 'line1\r\nline2\nline3\r\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        'line1\r\nline2\r\nline3\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should be case-insensitive for .BAT extension on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/SCRIPT.BAT',
+        content: 'echo hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/SCRIPT.BAT',
+        'echo hello\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings for non-.bat/.cmd files on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.sh',
+        content: '#!/bin/bash\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.sh',
+        '#!/bin/bash\necho hello\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings for .bat files on non-Windows', async () => {
+      mockPlatform.mockReturnValue('darwin');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/script.bat',
+        content: '@echo off\necho hello\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/script.bat',
+        '@echo off\necho hello\n',
+        'utf-8',
+      );
+    });
+  });
+
+  describe('needsUtf8Bom', () => {
+    beforeEach(() => {
+      resetUtf8BomCache();
+    });
+
+    it('should return true for .ps1 files on Windows with non-UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
+    });
+
+    it('should return true for .PS1 files (case-insensitive)', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/SCRIPT.PS1')).toBe(true);
+    });
+
+    it('should return false for .ps1 files on Windows with UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('utf-8');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
+    });
+
+    it('should return false for .ps1 files on non-Windows', () => {
+      mockPlatform.mockReturnValue('darwin');
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
+    });
+
+    it('should return false for non-.ps1 files on Windows with non-UTF-8 code page', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      expect(needsUtf8Bom('/test/script.sh')).toBe(false);
+      expect(needsUtf8Bom('/test/file.txt')).toBe(false);
+      expect(needsUtf8Bom('/test/script.bat')).toBe(false);
+    });
+
+    it('should cache the platform/encoding check across calls', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue('gbk');
+
+      needsUtf8Bom('/test/script.ps1');
+      needsUtf8Bom('/test/other.ps1');
+
+      // getSystemEncoding should only be called once due to caching
+      expect(mockGetSystemEncoding).toHaveBeenCalledTimes(1);
+    });
+
+    it('should treat null system encoding as non-UTF-8', () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetSystemEncoding.mockReturnValue(null);
+
+      expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
     });
   });
 });

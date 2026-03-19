@@ -40,7 +40,7 @@ describe('ReadFileTool', () => {
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
-        getUserSkillsDir: () => path.join(os.homedir(), '.qwen', 'skills'),
+        getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
@@ -88,6 +88,14 @@ describe('ReadFileTool', () => {
       const tempDir = path.join(tempRootDir, '.temp');
       const params: ReadFileToolParams = {
         absolute_path: path.join(tempDir, 'temp-file.txt'),
+      };
+      const result = tool.build(params);
+      expect(typeof result).not.toBe('string');
+    });
+
+    it('should allow access to files in OS temp directory', () => {
+      const params: ReadFileToolParams = {
+        absolute_path: path.join(os.tmpdir(), 'pr-review-context.md'),
       };
       const result = tool.build(params);
       expect(typeof result).not.toBe('string');
@@ -453,6 +461,28 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toBe(tempFileContent);
       expect(result.returnDisplay).toBe('');
+    });
+
+    it('should successfully read files from OS temp directory', async () => {
+      const osTempFile = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'read-file-test-'),
+      );
+      const tempFilePath = path.join(osTempFile, 'pr-review-context.md');
+      const tempFileContent = '## PR #123\nFix encoding issues';
+      await fsp.writeFile(tempFilePath, tempFileContent, 'utf-8');
+
+      try {
+        const params: ReadFileToolParams = { absolute_path: tempFilePath };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        const result = await invocation.execute(abortSignal);
+        expect(result.llmContent).toBe(tempFileContent);
+      } finally {
+        await fsp.rm(osTempFile, { recursive: true, force: true });
+      }
     });
 
     describe('with .qwenignore', () => {

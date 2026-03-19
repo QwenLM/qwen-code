@@ -107,10 +107,9 @@ export class ShellProcessor implements IPromptProcessor {
           return { ...injection, resolvedCommand: undefined };
         }
 
-        const resolvedCommand = command.replaceAll(
-          SHORTHAND_ARGS_PLACEHOLDER,
-          userArgsEscaped,
-        );
+        const resolvedCommand = command
+          .replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsEscaped) // Replace {{args}}
+          .replaceAll('$ARGUMENTS', userArgsEscaped); // Replace $ARGUMENTS
         return { ...injection, resolvedCommand };
       },
     );

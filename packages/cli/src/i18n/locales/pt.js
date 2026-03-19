@@ -1685,6 +1685,35 @@ export default {
     'Novas configurações de modelo estão disponíveis para o {{region}}. Atualizar agora?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     'Configuração do {{region}} atualizada com sucesso. Modelo alterado para "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Autenticado com sucesso com {{region}}. Chave de API e configurações de modelo salvas em settings.json (com backup).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Uso do Contexto',
+  'No API response yet. Send a message to see actual usage.':
+    'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
+  'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
+  'Context window': 'Janela de Contexto',
+  tokens: 'tokens',
+  Used: 'Usado',
+  Free: 'Livre',
+  'Autocompact buffer': 'Buffer de autocompactação',
+  'Usage by category': 'Uso por categoria',
+  'System prompt': 'Prompt do sistema',
+  'Built-in tools': 'Ferramentas integradas',
+  'MCP tools': 'Ferramentas MCP',
+  'Memory files': 'Arquivos de memória',
+  Skills: 'Habilidades',
+  Messages: 'Mensagens',
+  'Show context window usage breakdown.':
+    'Exibe a divisão de uso da janela de contexto.',
+  'Run /context detail for per-item breakdown.':
+    'Execute /context detail para detalhamento por item.',
+  active: 'ativo',
+  'body loaded': 'conteúdo carregado',
+  memory: 'memória',
   '{{region}} configuration updated successfully.':
     'Configuração do {{region}} atualizada com sucesso.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':

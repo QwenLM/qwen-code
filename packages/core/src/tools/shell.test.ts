@@ -56,7 +56,7 @@ describe('ShellTool', () => {
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
         getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
