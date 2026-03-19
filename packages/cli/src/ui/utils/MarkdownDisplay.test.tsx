@@ -155,6 +155,21 @@ Some text before.
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('renders escaped pipe characters inside table cells', () => {
+      const text = `
+| Type | Example |
+|------|---------|
+| Union | A\\|B |
+| Plain | Hello |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('A|B');
+      expect(frame).not.toContain('A\\|B');
+    });
+
     it('inserts a single space between paragraphs', () => {
       const text = `Paragraph 1.
 
