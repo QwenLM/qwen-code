@@ -91,12 +91,20 @@ export async function runAcpAgent(
   // Without this, signal handlers registered elsewhere in the CLI
   // (e.g., stdin raw mode restoration) override the default exit behavior,
   // causing the ACP process to ignore termination signals.
+  let shuttingDown = false;
   const shutdownHandler = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
     try {
       process.stdin.destroy();
     } catch {
       // stdin may already be closed
+    }
+    try {
+      process.stdout.destroy();
+    } catch {
+      // stdout may already be closed
     }
   };
   process.on('SIGTERM', shutdownHandler);
