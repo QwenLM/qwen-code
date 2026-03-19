@@ -721,6 +721,8 @@ export class GeminiChat {
 
     // Record assistant turn with raw Content and metadata
     if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+      const contextWindowSize =
+        this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -733,6 +735,7 @@ export class GeminiChat {
             : []),
         ],
         tokens: usageMetadata,
+        contextWindowSize,
       });
     }
 

@@ -94,6 +94,12 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
+import {
+  PermissionMode,
+  NotificationType,
+  type PermissionSuggestion,
+} from '../hooks/types.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -819,6 +825,73 @@ export class Config {
                   (input['last_assistant_message'] as string) || '',
                 );
                 break;
+              case 'PreToolUse': {
+                result = await hookSystem.firePreToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode | undefined) ??
+                    PermissionMode.Default,
+                );
+                break;
+              }
+              case 'PostToolUse':
+                result = await hookSystem.firePostToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_response'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                );
+                break;
+              case 'PostToolUseFailure':
+                result = await hookSystem.firePostToolUseFailureEvent(
+                  (input['tool_use_id'] as string) || '',
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['error'] as string) || '',
+                  input['is_interrupt'] as boolean | undefined,
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                );
+                break;
+              case 'Notification':
+                result = await hookSystem.fireNotificationEvent(
+                  (input['message'] as string) || '',
+                  (input['notification_type'] as NotificationType) ||
+                    'permission_prompt',
+                  (input['title'] as string) || undefined,
+                );
+                break;
+              case 'PermissionRequest':
+                result = await hookSystem.firePermissionRequestEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  (input['permission_suggestions'] as
+                    | PermissionSuggestion[]
+                    | undefined) || undefined,
+                );
+                break;
+              case 'SubagentStart':
+                result = await hookSystem.fireSubagentStartEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                );
+                break;
+              case 'SubagentStop':
+                result = await hookSystem.fireSubagentStopEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['agent_transcript_path'] as string) || '',
+                  (input['last_assistant_message'] as string) || '',
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                );
+                break;
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,
@@ -846,6 +919,8 @@ export class Config {
       );
 
       this.debugLogger.debug('MessageBus initialized with hook subscription');
+    } else {
+      this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
 
     this.subagentManager = new SubagentManager(this);
@@ -973,6 +1048,21 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    // Fire auth_success notification hook (supports both interactive & non-interactive)
+    const messageBus = this.getMessageBus();
+    const hooksEnabled = this.getEnableHooks();
+    if (hooksEnabled && messageBus) {
+      fireNotificationHook(
+        messageBus,
+        `Successfully authenticated with ${authMethod}`,
+        NotificationType.AuthSuccess,
+        'Authentication successful',
+      ).catch(() => {
+        // Silently ignore errors - fireNotificationHook has internal error handling
+        // and notification hooks should not block the auth flow
+      });
+    }
   }
 
   /**
