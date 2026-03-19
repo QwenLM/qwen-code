@@ -113,7 +113,7 @@ vi.mock('./WebViewContent.js', () => ({
   },
 }));
 
-vi.mock('../utils/imagePathResolver.js', () => ({
+vi.mock('../utils/imageHandler.js', () => ({
   createImagePathResolver: mockCreateImagePathResolver,
 }));
 

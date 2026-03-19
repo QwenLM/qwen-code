@@ -26,9 +26,14 @@ vi.mock('vscode', () => ({
   },
 }));
 
-vi.mock('../utils/imageAttachmentHandler.js', () => ({
-  processImageAttachments: mockProcessImageAttachments,
-}));
+vi.mock('../utils/imageHandler.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/imageHandler.js')>();
+  return {
+    ...actual,
+    processImageAttachments: mockProcessImageAttachments,
+  };
+});
 
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 

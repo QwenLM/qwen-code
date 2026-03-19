@@ -16,11 +16,11 @@ import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../../types/acpTypes.js';
-import { useImageResolution } from './useImageResolution.js';
-import type {
-  WebViewMessage,
-  WebViewMessageBase,
-} from '../utils/imageMessageUtils.js';
+import {
+  useImageResolution,
+  type WebViewMessage,
+  type WebViewMessageBase,
+} from './useImage.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',

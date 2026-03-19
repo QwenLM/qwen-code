@@ -56,8 +56,7 @@ import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
-import { useImageAttachments } from './hooks/useImageAttachments.js';
-import type { WebViewImageMessage } from './utils/imageMessageUtils.js';
+import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -292,7 +291,7 @@ export const App: React.FC = () => {
   ]);
 
   const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
-    useImageAttachments({
+    useImagePaste({
       onError: (error) => {
         console.error('Paste error:', error);
       },

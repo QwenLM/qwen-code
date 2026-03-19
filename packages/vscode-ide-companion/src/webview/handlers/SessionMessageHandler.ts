@@ -7,10 +7,12 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
-import type { ImageAttachment } from '../../types/imageAttachment.js';
+import type { ImageAttachment } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
-import { processImageAttachments } from '../utils/imageAttachmentHandler.js';
-import { buildPromptBlocks } from '../utils/acpPromptBuilder.js';
+import {
+  processImageAttachments,
+  buildPromptBlocks,
+} from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 

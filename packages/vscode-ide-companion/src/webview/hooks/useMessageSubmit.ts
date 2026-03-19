@@ -7,7 +7,7 @@
 import { useCallback } from 'react';
 import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
-import type { ImageAttachment } from '../utils/imageUtils.js';
+import type { ImageAttachment } from './useImage.js';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
