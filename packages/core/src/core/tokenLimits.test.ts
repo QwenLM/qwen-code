@@ -192,8 +192,8 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
-    it('should return 1M for MiniMax-M2.5 (latest)', () => {
-      expect(tokenLimit('MiniMax-M2.5')).toBe(1000000);
+    it('should return 192K for MiniMax-M2.5 (latest)', () => {
+      expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
     });
 
     it('should return 200K for MiniMax fallback', () => {

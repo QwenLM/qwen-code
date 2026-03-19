@@ -21,6 +21,7 @@ const LIMITS = {
   '32k': 32_768,
   '64k': 65_536,
   '128k': 131_072,
+  '192k': 196_608, // 192 * 1024, MiniMax-M2.5 context window
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
   '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
@@ -128,7 +129,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // MiniMax
   // -------------------
-  [/^minimax-m2\.5/i, LIMITS['1m']], // MiniMax-M2.5: 1,000,000
+  [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
   // -------------------
