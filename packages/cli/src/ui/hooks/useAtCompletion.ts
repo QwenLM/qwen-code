@@ -166,8 +166,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           cacheTtl: 30, // 30 seconds
           enableRecursiveFileSearch:
             config?.getEnableRecursiveFileSearch() ?? true,
-          disableFuzzySearch:
-            config?.getFileFilteringDisableFuzzySearch() ?? false,
+          // Use enableFuzzySearch with !== false to default to true when undefined.
+          enableFuzzySearch:
+            config?.getFileFilteringEnableFuzzySearch() !== false,
         });
         await searcher.initialize();
         fileSearch.current = searcher;

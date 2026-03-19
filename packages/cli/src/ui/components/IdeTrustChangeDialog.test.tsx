@@ -38,19 +38,13 @@ describe('IdeTrustChangeDialog', () => {
     expect(frameText).toContain("Press 'r' to restart Gemini");
   });
 
-  it('renders a generic message and logs an error for NONE reason', () => {
-    const consoleErrorSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+  it('renders a generic message for NONE reason', () => {
     const { lastFrame } = renderWithProviders(
       <IdeTrustChangeDialog reason="NONE" />,
     );
 
     const frameText = lastFrame();
     expect(frameText).toContain('Workspace trust has changed.');
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'IdeTrustChangeDialog rendered with unexpected reason "NONE"',
-    );
   });
 
   it('calls relaunchApp when "r" is pressed', () => {

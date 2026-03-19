@@ -4,12 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { listMcpServers } from './list.js';
 import { loadSettings } from '../../config/settings.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { createTransport, ExtensionManager } from '@qwen-code/qwen-code-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
+}));
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn(),
@@ -46,7 +55,6 @@ interface MockTransport {
 }
 
 describe('mcp list command', () => {
-  let consoleSpy: vi.SpyInstance;
   let mockClient: MockClient;
   let mockTransport: MockTransport;
   let mockExtensionManager: {
@@ -56,8 +64,7 @@ describe('mcp list command', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-
-    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    mockWriteStdoutLine.mockClear();
 
     mockTransport = { close: vi.fn() };
     mockClient = {
@@ -77,16 +84,14 @@ describe('mcp list command', () => {
     mockedIsWorkspaceTrusted.mockReturnValue(true);
   });
 
-  afterEach(() => {
-    consoleSpy.mockRestore();
-  });
-
   it('should display message when no servers configured', async () => {
     mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith('No MCP servers configured.');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No MCP servers configured.',
+    );
   });
 
   it('should display different server types with connected status', async () => {
@@ -105,18 +110,20 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith('Configured MCP servers:\n');
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Configured MCP servers:\n',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'stdio-server: /path/to/server arg1 (stdio) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'sse-server: https://example.com/sse (sse) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'http-server: https://example.com/http (http) - Connected',
       ),
@@ -136,7 +143,7 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'test-server: /test/server  (stdio) - Disconnected',
       ),
@@ -165,12 +172,12 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'config-server: /config/server  (stdio) - Connected',
       ),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'extension-server: /ext/server  (stdio) - Connected',
       ),

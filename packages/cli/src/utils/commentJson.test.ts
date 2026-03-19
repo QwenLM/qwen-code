@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -158,28 +158,14 @@ describe('commentJson', () => {
 
       fs.writeFileSync(testFilePath, corruptedContent, 'utf-8');
 
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
       expect(() => {
         updateSettingsFilePreservingFormat(testFilePath, {
           model: 'gemini-2.5-flash',
         });
       }).not.toThrow();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Error parsing settings file:',
-        expect.any(Error),
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Settings file may be corrupted. Please check the JSON syntax.',
-      );
-
       const unchangedContent = fs.readFileSync(testFilePath, 'utf-8');
       expect(unchangedContent).toBe(corruptedContent);
-
-      consoleSpy.mockRestore();
     });
   });
 });

@@ -8,18 +8,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isSubpath } from './paths.js';
 import { marked, type Token } from 'marked';
+import { createDebugLogger } from './debugLogger.js';
 
-// Simple console logger for import processing
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) =>
-    console.debug('[DEBUG] [ImportProcessor]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  warn: (...args: any[]) => console.warn('[WARN] [ImportProcessor]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) =>
-    console.error('[ERROR] [ImportProcessor]', ...args),
-};
+const logger = createDebugLogger('IMPORT_PROCESSOR');
 
 /**
  * Interface for tracking import processing state to prevent circular imports
@@ -201,7 +192,6 @@ function findCodeRegions(content: string): Array<[number, number]> {
  * Supports @path/to/file syntax for importing content from other files
  * @param content - The content to process for imports
  * @param basePath - The directory path where the current file is located
- * @param debugMode - Whether to enable debug logging
  * @param importState - State tracking for circular import prevention
  * @param projectRoot - The project root directory for allowed directories
  * @param importFormat - The format of the import tree
@@ -210,7 +200,6 @@ function findCodeRegions(content: string): Array<[number, number]> {
 export async function processImports(
   content: string,
   basePath: string,
-  debugMode: boolean = false,
   importState: ImportState = {
     processedFiles: new Set(),
     maxDepth: 5,
@@ -224,11 +213,9 @@ export async function processImports(
   }
 
   if (importState.currentDepth >= importState.maxDepth) {
-    if (debugMode) {
-      logger.warn(
-        `Maximum import depth (${importState.maxDepth}) reached. Stopping import processing.`,
-      );
-    }
+    logger.warn(
+      `Maximum import depth (${importState.maxDepth}) reached. Stopping import processing.`,
+    );
     return {
       content,
       importTree: { path: importState.currentFile || 'unknown' },
@@ -306,7 +293,7 @@ export async function processImports(
         } catch (error) {
           // If file doesn't exist, silently skip this import (it's not a real import)
           // Only log warnings for other types of errors
-          if (!isFileNotFoundError(error) && debugMode) {
+          if (!isFileNotFoundError(error)) {
             logger.warn(
               `Failed to import ${fullPath}: ${hasMessage(error) ? error.message : 'Unknown error'}`,
             );
@@ -377,7 +364,6 @@ export async function processImports(
       const imported = await processImports(
         fileContent,
         path.dirname(fullPath),
-        debugMode,
         newImportState,
         projectRoot,
         importFormat,

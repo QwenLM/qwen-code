@@ -13,13 +13,26 @@
 import type { AcpConnection } from './acpConnection.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { authMethod } from '../types/acpTypes.js';
-import { extractModelInfoFromNewSessionResult } from '../utils/acpModelInfo.js';
-import type { ModelInfo } from '../types/acpTypes.js';
+import {
+  extractModelInfoFromNewSessionResult,
+  extractSessionModeState,
+  extractSessionModelState,
+} from '../utils/acpModelInfo.js';
+import { getErrorMessage } from '../utils/errorMessage.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 
 export interface QwenConnectionResult {
   sessionCreated: boolean;
   requiresAuth: boolean;
   modelInfo?: ModelInfo;
+  availableModels?: ModelInfo[];
+  currentModeId?: ApprovalModeValue;
+  availableModes?: Array<{
+    id: ApprovalModeValue;
+    name: string;
+    description: string;
+  }>;
 }
 
 /**
@@ -48,6 +61,15 @@ export class QwenConnectionHandler {
     let sessionCreated = false;
     let requiresAuth = false;
     let modelInfo: ModelInfo | undefined;
+    let availableModels: ModelInfo[] | undefined;
+    let currentModeId: ApprovalModeValue | undefined;
+    let availableModes:
+      | Array<{
+          id: ApprovalModeValue;
+          name: string;
+          description: string;
+        }>
+      | undefined;
 
     // Build extra CLI arguments (only essential parameters)
     const extraArgs: string[] = [];
@@ -79,6 +101,23 @@ export class QwenConnectionHandler {
         );
         modelInfo =
           extractModelInfoFromNewSessionResult(newSessionResult) || undefined;
+
+        // Extract available models from session/new response
+        const modelState = extractSessionModelState(newSessionResult);
+        if (
+          modelState?.availableModels &&
+          modelState.availableModels.length > 0
+        ) {
+          availableModels = modelState.availableModels;
+          console.log(
+            '[QwenAgentManager] Extracted availableModels from session/new:',
+            availableModels.map((m) => m.modelId),
+          );
+        }
+        const modeState = extractSessionModeState(newSessionResult);
+        currentModeId = modeState?.currentModeId;
+        availableModes = modeState?.availableModes;
+
         console.log('[QwenAgentManager] New session created successfully');
         sessionCreated = true;
       } catch (sessionError) {
@@ -105,7 +144,14 @@ export class QwenConnectionHandler {
     console.log(`\n========================================`);
     console.log(`[QwenAgentManager] ✅ CONNECT() COMPLETED SUCCESSFULLY`);
     console.log(`========================================\n`);
-    return { sessionCreated, requiresAuth, modelInfo };
+    return {
+      sessionCreated,
+      requiresAuth,
+      modelInfo,
+      availableModels,
+      currentModeId,
+      availableModes,
+    };
   }
 
   /**
@@ -122,6 +168,8 @@ export class QwenConnectionHandler {
     authMethod: string,
     autoAuthenticate: boolean,
   ): Promise<unknown> {
+    let lastError: unknown;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(
@@ -131,8 +179,8 @@ export class QwenConnectionHandler {
         console.log('[QwenAgentManager] Session created successfully');
         return res;
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        lastError = error;
+        const errorMessage = getErrorMessage(error);
         console.error(
           `[QwenAgentManager] Session creation attempt ${attempt} failed:`,
           errorMessage,
@@ -176,15 +224,17 @@ export class QwenConnectionHandler {
         }
 
         if (attempt === maxRetries) {
-          throw new Error(
-            `Session creation failed after ${maxRetries} attempts: ${errorMessage}`,
-          );
+          throw error;
         }
 
         const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
         console.log(`[QwenAgentManager] Retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
+    }
+
+    if (lastError !== undefined) {
+      throw lastError;
     }
 
     throw new Error('Session creation failed unexpectedly');

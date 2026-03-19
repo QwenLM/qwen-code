@@ -25,6 +25,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { Mutex } from 'async-mutex';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('JSONL');
 
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
@@ -68,7 +71,7 @@ export async function readLines<T = unknown>(
     return results;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(
+      debugLogger.error(
         `Error reading first ${count} lines from ${filePath}:`,
         error,
       );
@@ -100,7 +103,7 @@ export async function read<T = unknown>(filePath: string): Promise<T[]> {
     return results;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(`Error reading ${filePath}:`, error);
+      debugLogger.error(`Error reading ${filePath}:`, error);
     }
     return [];
   }
@@ -174,7 +177,7 @@ export async function countLines(filePath: string): Promise<number> {
     return count;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(`Error counting lines in ${filePath}:`, error);
+      debugLogger.error(`Error counting lines in ${filePath}:`, error);
     }
     return 0;
   }

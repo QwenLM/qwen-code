@@ -34,6 +34,10 @@ export const useFileContext = (vscode: VSCodeAPI) => {
   // Whether workspace files have been requested
   const hasRequestedFilesRef = useRef(false);
 
+  // Use request ids to avoid applying stale workspace file responses.
+  const workspaceFilesRequestIdRef = useRef(0);
+  const latestWorkspaceFilesRequestIdRef = useRef<number | null>(null);
+
   // Last non-empty query to decide when to refetch full list
   const lastQueryRef = useRef<string | undefined>(undefined);
 
@@ -46,31 +50,47 @@ export const useFileContext = (vscode: VSCodeAPI) => {
   const requestWorkspaceFiles = useCallback(
     (query?: string) => {
       const normalizedQuery = query?.trim();
+      const normalizedQueryKey = normalizedQuery?.toLowerCase();
 
       // If there's a query, clear previous timer and set up debounce
       if (normalizedQuery && normalizedQuery.length >= 1) {
+        if (normalizedQueryKey === lastQueryRef.current) {
+          return;
+        }
         if (searchTimerRef.current) {
           clearTimeout(searchTimerRef.current);
         }
 
+        const requestId = workspaceFilesRequestIdRef.current + 1;
+        workspaceFilesRequestIdRef.current = requestId;
+        latestWorkspaceFilesRequestIdRef.current = requestId;
+
         searchTimerRef.current = setTimeout(() => {
           vscode.postMessage({
             type: 'getWorkspaceFiles',
-            data: { query: normalizedQuery },
+            data: { query: normalizedQuery, requestId },
           });
         }, 300);
-        lastQueryRef.current = normalizedQuery;
+        lastQueryRef.current = normalizedQueryKey;
       } else {
+        if (searchTimerRef.current) {
+          clearTimeout(searchTimerRef.current);
+          searchTimerRef.current = null;
+        }
+
         // For empty query, request once initially and whenever we are returning from a search
         const shouldRequestFullList =
           !hasRequestedFilesRef.current || lastQueryRef.current !== undefined;
 
         if (shouldRequestFullList) {
+          const requestId = workspaceFilesRequestIdRef.current + 1;
+          workspaceFilesRequestIdRef.current = requestId;
+          latestWorkspaceFilesRequestIdRef.current = requestId;
           lastQueryRef.current = undefined;
           hasRequestedFilesRef.current = true;
           vscode.postMessage({
             type: 'getWorkspaceFiles',
-            data: {},
+            data: { requestId },
           });
         }
       }
@@ -79,10 +99,36 @@ export const useFileContext = (vscode: VSCodeAPI) => {
   );
 
   /**
-   * Add file reference
+   * Apply workspace file responses only if they are current.
+   */
+  const setWorkspaceFilesFromResponse = useCallback(
+    (
+      files: Array<{
+        id: string;
+        label: string;
+        description: string;
+        path: string;
+      }>,
+      requestId?: number,
+    ) => {
+      if (
+        typeof requestId === 'number' &&
+        latestWorkspaceFilesRequestIdRef.current !== requestId
+      ) {
+        return;
+      }
+      setWorkspaceFiles(files);
+    },
+    [],
+  );
+
+  /**
+   * Add file reference (called when user selects a file from completion)
+   * Also resets the last query so that backspacing and re-typing will trigger a fresh search
    */
   const addFileReference = useCallback((fileName: string, filePath: string) => {
     fileReferenceMap.current.set(fileName, filePath);
+    lastQueryRef.current = undefined;
   }, []);
 
   /**
@@ -130,6 +176,7 @@ export const useFileContext = (vscode: VSCodeAPI) => {
     setActiveFilePath,
     setActiveSelection,
     setWorkspaceFiles,
+    setWorkspaceFilesFromResponse,
 
     // File reference operations
     addFileReference,

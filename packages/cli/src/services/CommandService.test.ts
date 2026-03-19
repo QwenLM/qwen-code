@@ -139,10 +139,6 @@ describe('CommandService', () => {
     const commands = service.getCommands();
     expect(commands).toHaveLength(1);
     expect(commands).toEqual([mockCommandA]);
-    expect(console.debug).toHaveBeenCalledWith(
-      'A command loader failed:',
-      error,
-    );
   });
 
   it('getCommands should return a readonly array that cannot be mutated', async () => {

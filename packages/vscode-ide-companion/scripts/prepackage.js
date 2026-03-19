@@ -189,6 +189,13 @@ function main() {
   console.log('[prepackage] Preparing root dist/ package metadata...');
   run(npm, ['--prefix', repoRoot, 'run', 'prepare:package'], { cwd: repoRoot });
 
+  console.log('[prepackage] Preparing webui dist/ package metadata...');
+  run(
+    npm,
+    ['--prefix', path.join(repoRoot, 'packages', 'webui'), 'run', 'build'],
+    { cwd: repoRoot },
+  );
+
   console.log('[prepackage] Generating notices...');
   run(npm, ['run', 'generate:notices'], { cwd: extensionRoot });
 

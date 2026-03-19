@@ -13,10 +13,13 @@ import {
   isSDKAssistantMessage,
   isSDKResultMessage,
   type TextBlock,
-  type ContentBlock,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
-import { SDKTestHelper, createSharedTestOptions } from './test-helper.js';
+import {
+  SDKTestHelper,
+  createSharedTestOptions,
+  createResultWaiter,
+} from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 
@@ -145,7 +148,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
   describe('Process Lifecycle Monitoring', () => {
     it('should handle normal process completion', async () => {
       const q = query({
-        prompt: 'Why do we choose to go to the moon?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -154,18 +157,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       });
 
       let completedSuccessfully = false;
+      let receivedAssistantMessage = false;
 
       try {
         for await (const message of q) {
           if (isSDKAssistantMessage(message)) {
-            const textBlocks = message.message.content.filter(
-              (block): block is TextBlock => block.type === 'text',
-            );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 100);
-            expect(text.length).toBeGreaterThan(0);
+            receivedAssistantMessage = true;
           }
         }
 
@@ -176,6 +173,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       } finally {
         await q.close();
         expect(completedSuccessfully).toBe(true);
+        expect(receivedAssistantMessage).toBe(true);
       }
     });
 
@@ -215,7 +213,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
   describe('Input Stream Control', () => {
     it('should support endInput() method', async () => {
       const q = query({
-        prompt: 'What is 2 + 2?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -229,13 +227,6 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       try {
         for await (const message of q) {
           if (isSDKAssistantMessage(message) && !endInputCalled) {
-            const textBlocks = message.message.content.filter(
-              (block: ContentBlock): block is TextBlock =>
-                block.type === 'text',
-            );
-            const text = textBlocks.map((b: TextBlock) => b.text).join('');
-
-            expect(text.length).toBeGreaterThan(0);
             receivedResponse = true;
 
             // End input after receiving first response
@@ -254,6 +245,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
   describe('Closed stdin behavior (asyncGenerator prompt)', () => {
     it('should reject control requests after stdin closes', async () => {
+      const resultWaiter = createResultWaiter(1);
+      let promptDoneResolve: () => void = () => {};
+      const promptDonePromise = new Promise<void>((resolve) => {
+        promptDoneResolve = resolve;
+      });
+
       async function* createPrompt(): AsyncIterable<SDKUserMessage> {
         yield {
           type: 'user',
@@ -264,6 +261,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           },
           parent_tool_use_id: null,
         };
+
+        await resultWaiter.waitForResult(0);
+        promptDoneResolve();
       }
 
       const q = query({
@@ -281,13 +281,14 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         for await (const message of q) {
           if (isSDKResultMessage(message)) {
             firstResultReceived = true;
+            resultWaiter.notifyResult();
             break;
           }
         }
 
         expect(firstResultReceived).toBe(true);
-
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await promptDonePromise;
+        q.endInput();
 
         await expect(q.setPermissionMode('default')).rejects.toThrow(
           'Input stream closed',
@@ -471,7 +472,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const stderrMessages: string[] = [];
 
       const q = query({
-        prompt: 'Why do we choose to go to the moon?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -483,17 +484,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       });
 
       try {
-        for await (const message of q) {
-          if (isSDKAssistantMessage(message)) {
-            const textBlocks = message.message.content.filter(
-              (block): block is TextBlock => block.type === 'text',
-            );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 50);
-            expect(text.length).toBeGreaterThan(0);
-          }
+        for await (const _message of q) {
+          // Just consume all messages
         }
       } finally {
         await q.close();

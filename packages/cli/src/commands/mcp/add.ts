@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// File for 'gemini mcp add' command
+// File for 'qwen mcp add' command
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 
 async function addMcpServer(
@@ -41,7 +42,7 @@ async function addMcpServer(
   const inHome = settings.workspace.path === settings.user.path;
 
   if (scope === 'project' && inHome) {
-    console.error(
+    writeStderrLine(
       'Error: Please use --scope user to edit settings in the home directory.',
     );
     process.exit(1);
@@ -116,7 +117,7 @@ async function addMcpServer(
 
   const isExistingServer = !!mcpServers[name];
   if (isExistingServer) {
-    console.log(
+    writeStdoutLine(
       `MCP server "${name}" is already configured within ${scope} settings.`,
     );
   }
@@ -126,9 +127,9 @@ async function addMcpServer(
   settings.setValue(settingsScope, 'mcpServers', mcpServers);
 
   if (isExistingServer) {
-    console.log(`MCP server "${name}" updated in ${scope} settings.`);
+    writeStdoutLine(`MCP server "${name}" updated in ${scope} settings.`);
   } else {
-    console.log(
+    writeStdoutLine(
       `MCP server "${name}" added to ${scope} settings. (${transport})`,
     );
   }
@@ -158,14 +159,14 @@ export const addCommand: CommandModule = {
         alias: 's',
         describe: 'Configuration scope (user or project)',
         type: 'string',
-        default: 'project',
+        default: 'user',
         choices: ['user', 'project'],
       })
       .option('transport', {
         alias: 't',
-        describe: 'Transport type (stdio, sse, http)',
+        describe:
+          'Transport type (stdio, sse, http). Auto-detected from URL if not specified.',
         type: 'string',
-        default: 'stdio',
         choices: ['stdio', 'sse', 'http'],
       })
       .option('env', {
@@ -173,6 +174,7 @@ export const addCommand: CommandModule = {
         describe: 'Set environment variables (e.g. -e KEY=value)',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('header', {
         alias: 'H',
@@ -180,6 +182,7 @@ export const addCommand: CommandModule = {
           'Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123")',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('timeout', {
         describe: 'Set connection timeout in milliseconds',
@@ -209,6 +212,20 @@ export const addCommand: CommandModule = {
         if (argv['--']) {
           const existingArgs = (argv['args'] as Array<string | number>) || [];
           argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
+        }
+
+        // Auto-detect transport from URL if not explicitly specified
+        if (!argv['transport']) {
+          const commandOrUrl = argv['commandOrUrl'] as string;
+          if (
+            commandOrUrl &&
+            (commandOrUrl.startsWith('http://') ||
+              commandOrUrl.startsWith('https://'))
+          ) {
+            argv['transport'] = 'http';
+          } else {
+            argv['transport'] = 'stdio';
+          }
         }
       }),
   handler: async (argv) => {

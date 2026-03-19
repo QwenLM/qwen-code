@@ -10,8 +10,9 @@ import { t } from '../../i18n/index.js';
 
 export const authCommand: SlashCommand = {
   name: 'auth',
+  altNames: ['login'],
   get description() {
-    return t('change the auth method');
+    return t('Configure authentication information for login');
   },
   kind: CommandKind.BUILT_IN,
   action: (_context, _args): OpenDialogActionReturn => ({

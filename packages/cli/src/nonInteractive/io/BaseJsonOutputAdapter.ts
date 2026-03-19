@@ -12,6 +12,7 @@ import type {
   SessionMetrics,
   ServerGeminiStreamEvent,
   TaskResultDisplay,
+  McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType,
@@ -82,6 +83,18 @@ export interface MessageEmitter {
     parentToolUseId?: string | null,
   ): void;
   emitSystemMessage(subtype: string, data?: unknown): void;
+  /**
+   * Emits a tool progress stream event.
+   * Only emits when the adapter supports partial messages (stream mode).
+   * In non-streaming mode, this is a no-op.
+   *
+   * @param request - Tool call request info
+   * @param progress - Structured MCP progress data
+   */
+  emitToolProgress(
+    request: ToolCallRequestInfo,
+    progress: McpToolProgressData,
+  ): void;
 }
 
 /**
@@ -269,12 +282,12 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    if (lastBlock.type === 'text') {
-      const index = state.blocks.length - 1;
-      this.onBlockClosed(state, index, actualParentToolUseId);
-      this.closeBlock(state, index);
-    } else if (lastBlock.type === 'thinking') {
-      const index = state.blocks.length - 1;
+    const index = state.blocks.length - 1;
+    if (!state.openBlocks.has(index)) {
+      return;
+    }
+
+    if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
       this.onBlockClosed(state, index, actualParentToolUseId);
       this.closeBlock(state, index);
     }
@@ -379,7 +392,9 @@ export abstract class BaseJsonOutputAdapter {
     }
 
     const message = this.buildMessage(parentToolUseId);
-    this.emitMessageImpl(message);
+    if (state.messageStarted) {
+      this.emitMessageImpl(message);
+    }
     return message;
   }
 
@@ -643,12 +658,7 @@ export abstract class BaseJsonOutputAdapter {
     parentToolUseId: string,
   ): CLIAssistantMessage {
     const state = this.getMessageState(parentToolUseId);
-    const message = this.finalizeAssistantMessageInternal(
-      state,
-      parentToolUseId,
-    );
-    this.updateLastAssistantMessage(message);
-    return message;
+    return this.finalizeAssistantMessageInternal(state, parentToolUseId);
   }
 
   /**
@@ -1049,6 +1059,22 @@ export abstract class BaseJsonOutputAdapter {
       data,
     } as const;
     this.emitMessageImpl(systemMessage);
+  }
+
+  /**
+   * Emits a tool progress stream event.
+   * Default implementation is a no-op. StreamJsonOutputAdapter overrides this
+   * to emit stream events when includePartialMessages is enabled.
+   *
+   * @param _request - Tool call request info
+   * @param _progress - Structured MCP progress data
+   */
+  emitToolProgress(
+    _request: ToolCallRequestInfo,
+    _progress: McpToolProgressData,
+  ): void {
+    // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
+    // as stream events when includePartialMessages is enabled.
   }
 
   /**

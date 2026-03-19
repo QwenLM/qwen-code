@@ -15,14 +15,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 export const USER_SETTINGS_DIR = path.join(homedir(), SETTINGS_DIRECTORY_NAME);
 
 export function getTrustedFoldersPath(): string {
-  if (process.env['GEMINI_CLI_TRUSTED_FOLDERS_PATH']) {
-    return process.env['GEMINI_CLI_TRUSTED_FOLDERS_PATH'];
+  if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    return process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
   }
   return path.join(USER_SETTINGS_DIR, TRUSTED_FOLDERS_FILENAME);
 }
@@ -184,7 +185,8 @@ export function saveTrustedFolders(
       { encoding: 'utf-8', mode: 0o600 },
     );
   } catch (error) {
-    console.error('Error saving trusted folders file:', error);
+    writeStderrLine('Error saving trusted folders file.');
+    writeStderrLine(error instanceof Error ? error.message : String(error));
   }
 }
 

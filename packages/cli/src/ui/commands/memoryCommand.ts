@@ -309,7 +309,6 @@ export const memoryCommand: SlashCommand = {
                 config.shouldLoadMemoryFromIncludeDirectories()
                   ? config.getWorkspaceContext().getDirectories()
                   : [],
-                config.getDebugMode(),
                 config.getFileService(),
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),

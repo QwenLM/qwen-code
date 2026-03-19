@@ -8,7 +8,7 @@ Use `web_search` to perform a web search and get information from the internet. 
 
 ### Supported Providers
 
-1. **DashScope** (Official, Free) - Automatically available for Qwen OAuth users (200 requests/minute, 2000 requests/day)
+1. **DashScope** (Official, Free) - Automatically available for Qwen OAuth users (200 requests/minute, 1000 requests/day)
 2. **Tavily** - High-quality search API with built-in answer generation
 3. **Google Custom Search** - Google's Custom Search JSON API
 
@@ -135,7 +135,7 @@ web_search(query="best practices for React 19", provider="dashscope")
 - **Cost:** Free
 - **Authentication:** Automatically available when using Qwen OAuth authentication
 - **Configuration:** No API key required, automatically added to provider list for Qwen OAuth users
-- **Quota:** 200 requests/minute, 2000 requests/day
+- **Quota:** 200 requests/minute, 1000 requests/day
 - **Best for:** General queries, always available as fallback for Qwen OAuth users
 - **Auto-registration:** If you're using Qwen OAuth, DashScope is automatically added to your provider list even if you don't configure it explicitly
 

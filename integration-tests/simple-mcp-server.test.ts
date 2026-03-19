@@ -215,7 +215,9 @@ describe('simple-mcp-server', () => {
     // Just run the command - MCP server config is in settings.json
     const output = await rig.run('add 5 and 10, use tool if you can.');
 
-    const foundToolCall = await rig.waitForToolCall('add');
+    const foundToolCall = await rig.waitForToolCall(
+      'mcp__addition-server__add',
+    );
 
     expect(foundToolCall, 'Expected to find an add tool call').toBeTruthy();
 

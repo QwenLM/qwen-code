@@ -34,6 +34,7 @@ import {
   type IdeContext,
   IdeClient,
   ideContextStore,
+  createDebugLogger,
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
@@ -51,11 +52,11 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
-import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -63,6 +64,7 @@ import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import { computeWindowTitle } from '../utils/windowTitle.js';
+import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
@@ -80,10 +82,8 @@ import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
-import { appEvents, AppEvent } from '../utils/events.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
-import { ConsolePatcher } from './utils/ConsolePatcher.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
@@ -95,15 +95,17 @@ import {
   useSettingInputRequests,
   usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
+import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { useAgentViewState } from './contexts/AgentViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
-import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
-import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
+import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import {
   requestConsentInteractive,
@@ -111,6 +113,7 @@ import {
 } from '../commands/extensions/consent.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+const debugLogger = createDebugLogger('APP_CONTAINER');
 
 function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
   return pendingHistoryItems.some((item) => {
@@ -232,6 +235,9 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
+  const { codingPlanUpdateRequest, dismissCodingPlanUpdate } =
+    useCodingPlanUpdates(settings, config, historyManager.addItem);
+
   const [isPermissionsDialogOpen, setPermissionsDialogOpen] = useState(false);
   const openPermissionsDialog = useCallback(
     () => setPermissionsDialogOpen(true),
@@ -312,21 +318,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
     return () => clearInterval(interval);
   }, [config, currentModel, getCurrentModel]);
-
-  const {
-    consoleMessages,
-    handleNewMessage,
-    clearConsoleMessages: clearConsoleMessagesState,
-  } = useConsoleMessages();
-
-  useEffect(() => {
-    const consolePatcher = new ConsolePatcher({
-      onNewMessage: handleNewMessage,
-      debugMode: config.getDebugMode(),
-    });
-    consolePatcher.patch();
-    registerCleanup(consolePatcher.cleanup);
-  }, [handleNewMessage, config]);
 
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
@@ -417,9 +408,10 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingAuthType,
     qwenAuthState,
     handleAuthSelect,
+    handleCodingPlanSubmit,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem);
+  } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
@@ -434,7 +426,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Check for enforced auth type mismatch
   useEffect(() => {
     // Check for initialization error first
-    const currentAuthType = config.modelsConfig.getCurrentAuthType();
+    const currentAuthType = config.getModelsConfig().getCurrentAuthType();
 
     if (
       settings.merged.security?.auth?.enforcedType &&
@@ -480,6 +472,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isModelDialogOpen, openModelDialog, closeModelDialog } =
     useModelCommand();
+  const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
+    useArenaCommand();
 
   const {
     isResumeDialogOpen,
@@ -505,18 +499,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openAgentsManagerDialog,
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
-
-  // Vision model auto-switch dialog state (must be before slashCommandActions)
-  const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
-    useState(false);
-  const [visionSwitchResolver, setVisionSwitchResolver] = useState<{
-    resolve: (result: {
-      modelOverride?: string;
-      persistSessionModel?: string;
-      showGuidance?: boolean;
-    }) => void;
-    reject: () => void;
-  } | null>(null);
+  const {
+    isExtensionsManagerDialogOpen,
+    openExtensionsManagerDialog,
+    closeExtensionsManagerDialog,
+  } = useExtensionsManagerDialog();
+  const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
 
   const slashCommandActions = useMemo(
     () => ({
@@ -525,6 +513,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
@@ -539,6 +528,8 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openExtensionsManagerDialog,
+      openMcpDialog,
       openResumeDialog,
     }),
     [
@@ -547,6 +538,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
@@ -554,6 +546,8 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openExtensionsManagerDialog,
+      openMcpDialog,
       openResumeDialog,
     ],
   );
@@ -573,6 +567,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.loadHistory,
     refreshStatic,
     toggleVimEnabled,
+    isProcessing,
     setIsProcessing,
     setGeminiMdFileCount,
     slashCommandActions,
@@ -581,36 +576,13 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
   );
 
-  // Vision switch handlers
-  const handleVisionSwitchRequired = useCallback(
-    async (_query: unknown) =>
-      new Promise<{
-        modelOverride?: string;
-        persistSessionModel?: string;
-        showGuidance?: boolean;
-      }>((resolve, reject) => {
-        setVisionSwitchResolver({ resolve, reject });
-        setIsVisionSwitchDialogOpen(true);
-      }),
-    [],
-  );
-
-  const handleVisionSwitchSelect = useCallback(
-    (outcome: VisionSwitchOutcome) => {
-      setIsVisionSwitchDialogOpen(false);
-      if (visionSwitchResolver) {
-        const result = processVisionSwitchOutcome(outcome);
-        visionSwitchResolver.resolve(result);
-        setVisionSwitchResolver(null);
-      }
+  // onDebugMessage should log to debug logfile, not update footer debugMessage
+  const onDebugMessage = useCallback(
+    (message: string) => {
+      config.getDebugLogger().debug(message);
     },
-    [visionSwitchResolver],
+    [config],
   );
-
-  // onDebugMessage should log to console, not update footer debugMessage
-  const onDebugMessage = useCallback((message: string) => {
-    console.debug(message);
-  }, []);
 
   const performMemoryRefresh = useCallback(async () => {
     historyManager.addItem(
@@ -626,7 +598,6 @@ export const AppContainer = (props: AppContainerProps) => {
         settings.merged.context?.loadFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
           : [],
-        config.getDebugMode(),
         config.getFileService(),
         config.getExtensionContextFilePaths(),
         config.isTrustedFolder(),
@@ -648,14 +619,12 @@ export const AppContainer = (props: AppContainerProps) => {
         },
         Date.now(),
       );
-      if (config.getDebugMode()) {
-        console.log(
-          `[DEBUG] Refreshed memory content in config: ${memoryContent.substring(
-            0,
-            200,
-          )}...`,
-        );
-      }
+      debugLogger.debug(
+        `[DEBUG] Refreshed memory content in config: ${memoryContent.substring(
+          0,
+          200,
+        )}...`,
+      );
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       historyManager.addItem(
@@ -665,7 +634,7 @@ export const AppContainer = (props: AppContainerProps) => {
         },
         Date.now(),
       );
-      console.error('Error refreshing memory:', error);
+      debugLogger.error('Error refreshing memory:', error);
     }
   }, [config, historyManager, settings.merged]);
 
@@ -678,6 +647,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
     cancelOngoingRequest,
+    retryLastPrompt,
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
@@ -697,19 +667,23 @@ export const AppContainer = (props: AppContainerProps) => {
     setModelSwitchedFromQuotaError,
     refreshStatic,
     () => cancelHandlerRef.current(),
-    settings.merged.experimental?.visionModelPreview ?? false, // visionModelPreviewEnabled
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
-    handleVisionSwitchRequired, // onVisionSwitchRequired
-    embeddedShellFocused,
   );
 
-  // Auto-accept indicator
+  // Track whether suggestions are visible for Tab key handling
+  const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
+
+  const agentViewState = useAgentViewState();
+
+  // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
+    shouldBlockTab: () => hasSuggestionsVisible,
+    disabled: agentViewState.activeView !== 'main',
   });
 
   const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
@@ -722,9 +696,26 @@ export const AppContainer = (props: AppContainerProps) => {
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {
+      // Route to active in-process agent if viewing a sub-agent tab.
+      if (agentViewState.activeView !== 'main') {
+        const agent = agentViewState.agents.get(agentViewState.activeView);
+        if (agent) {
+          agent.interactiveAgent.enqueueMessage(submittedValue.trim());
+          return;
+        }
+      }
       addMessage(submittedValue);
     },
-    [addMessage],
+    [addMessage, agentViewState],
+  );
+
+  const handleArenaModelsSelected = useCallback(
+    (models: string[]) => {
+      const value = models.join(',');
+      buffer.setText(`/arena start --models ${value} `);
+      closeArenaDialog();
+    },
+    [buffer, closeArenaDialog],
   );
 
   // Welcome back functionality (must be after handleFinalSubmit)
@@ -769,10 +760,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleClearScreen = useCallback(() => {
     historyManager.clearItems();
-    clearConsoleMessagesState();
-    console.clear();
+    clearScreen();
     refreshStatic();
-  }, [historyManager, clearConsoleMessagesState, refreshStatic]);
+  }, [historyManager, refreshStatic]);
 
   const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
 
@@ -801,10 +791,17 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [buffer, terminalWidth, terminalHeight]);
 
-  // Compute available terminal height based on controls measurement
+  // agentViewState is declared earlier (before handleFinalSubmit) so it
+  // is available for input routing. Referenced here for layout computation.
+
+  // Compute available terminal height based on controls measurement.
+  // When in-process agents are present the AgentTabBar renders an extra
+  // row at the top of the layout; subtract it so downstream consumers
+  // (shell, transcript, etc.) don't overestimate available space.
+  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2,
+    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
   );
 
   config.setShellExecutionConfig({
@@ -854,7 +851,6 @@ export const AppContainer = (props: AppContainerProps) => {
       !isThemeDialogOpen &&
       !isEditorDialogOpen &&
       !showWelcomeBackDialog &&
-      !isVisionSwitchDialogOpen &&
       welcomeBackChoice !== 'restart' &&
       geminiClient?.isInitialized?.()
     ) {
@@ -870,7 +866,6 @@ export const AppContainer = (props: AppContainerProps) => {
     isThemeDialogOpen,
     isEditorDialogOpen,
     showWelcomeBackDialog,
-    isVisionSwitchDialogOpen,
     welcomeBackChoice,
     geminiClient,
   ]);
@@ -900,7 +895,6 @@ export const AppContainer = (props: AppContainerProps) => {
     setShowMigrationNudge: setShowCommandMigrationNudge,
   } = useCommandMigration(settings, config.storage);
 
-  const [showErrorDetails, setShowErrorDetails] = useState<boolean>(false);
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
@@ -908,6 +902,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [escapePressedOnce, setEscapePressedOnce] = useState(false);
+  const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -950,28 +946,6 @@ export const AppContainer = (props: AppContainerProps) => {
     setIdeContextState(ideContextStore.get());
     return unsubscribe;
   }, []);
-
-  useEffect(() => {
-    const openDebugConsole = () => {
-      setShowErrorDetails(true);
-      setConstrainHeight(false);
-    };
-    appEvents.on(AppEvent.OpenDebugConsole, openDebugConsole);
-
-    const logErrorHandler = (errorMessage: unknown) => {
-      handleNewMessage({
-        type: 'error',
-        content: String(errorMessage),
-        count: 1,
-      });
-    };
-    appEvents.on(AppEvent.LogError, logErrorHandler);
-
-    return () => {
-      appEvents.off(AppEvent.OpenDebugConsole, openDebugConsole);
-      appEvents.off(AppEvent.LogError, logErrorHandler);
-    };
-  }, [handleNewMessage]);
 
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
     setShowEscapePrompt(showPrompt);
@@ -1081,10 +1055,16 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const { elapsedTime, currentLoadingPhrase } = useLoadingIndicator(
-    streamingState,
-    settings.merged.ui?.customWittyPhrases,
-  );
+  const currentCandidatesTokens = Object.values(
+    sessionStats.metrics?.models ?? {},
+  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+
+  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
+    useLoadingIndicator(
+      streamingState,
+      settings.merged.ui?.customWittyPhrases,
+      currentCandidatesTokens,
+    );
 
   useAttentionNotifications({
     isFocused,
@@ -1106,6 +1086,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    activeArenaDialog,
+    closeArenaDialog,
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
@@ -1180,7 +1162,7 @@ export const AppContainer = (props: AppContainerProps) => {
     (key: Key) => {
       // Debug log keystrokes if enabled
       if (settings.merged.general?.debugKeystrokeLogging) {
-        console.log('[DEBUG] Keystroke:', JSON.stringify(key));
+        debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
       if (keyMatchers[Command.QUIT](key)) {
@@ -1206,6 +1188,47 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
+      } else if (keyMatchers[Command.ESCAPE](key)) {
+        // Escape key handling
+        // Skip if shell is focused (to allow shell's own escape handling)
+        if (embeddedShellFocused) {
+          return;
+        }
+
+        // If input has content, use double-press to clear
+        if (buffer.text.length > 0) {
+          if (escapePressedOnce) {
+            // Second press: clear input, keep the flag to allow immediate cancel
+            buffer.setText('');
+            return;
+          }
+          // First press: set flag and show prompt
+          setEscapePressedOnce(true);
+          escapeTimerRef.current = setTimeout(() => {
+            setEscapePressedOnce(false);
+            escapeTimerRef.current = null;
+          }, CTRL_EXIT_PROMPT_DURATION_MS);
+          return;
+        }
+
+        // Input is empty, cancel request immediately (no double-press needed)
+        if (streamingState === StreamingState.Responding) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          cancelOngoingRequest?.();
+          setEscapePressedOnce(false);
+          return;
+        }
+
+        // No action available, reset the flag
+        if (escapeTimerRef.current) {
+          clearTimeout(escapeTimerRef.current);
+          escapeTimerRef.current = null;
+        }
+        setEscapePressedOnce(false);
+        return;
       }
 
       let enteringConstrainHeightMode = false;
@@ -1214,9 +1237,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
-        setShowErrorDetails((prev) => !prev);
-      } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
+      if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
 
@@ -1244,7 +1265,6 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       constrainHeight,
       setConstrainHeight,
-      setShowErrorDetails,
       showToolDescriptions,
       setShowToolDescriptions,
       config,
@@ -1253,10 +1273,15 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
-      buffer.text.length,
       ctrlDPressedOnce,
       setCtrlDPressedOnce,
       ctrlDTimerRef,
+      escapePressedOnce,
+      setEscapePressedOnce,
+      escapeTimerRef,
+      streamingState,
+      cancelOngoingRequest,
+      buffer,
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
@@ -1267,7 +1292,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useKeypress(handleGlobalKeypress, { isActive: true });
 
-  // Update terminal title with Gemini CLI status and thoughts
+  // Update terminal title with Qwen Code status and thoughts
   useEffect(() => {
     // Respect both showStatusInTitle and hideWindowTitle settings
     if (
@@ -1294,7 +1319,7 @@ export const AppContainer = (props: AppContainerProps) => {
       lastTitleRef.current = paddedTitle;
       stdout.write(`\x1b]2;${paddedTitle}\x07`);
     }
-    // Note: We don't need to reset the window title on exit because Gemini CLI is already doing that elsewhere
+    // Note: We don't need to reset the window title on exit because Qwen Code is already doing that elsewhere
   }, [
     streamingState,
     thought,
@@ -1302,22 +1327,6 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.hideWindowTitle,
     stdout,
   ]);
-
-  const filteredConsoleMessages = useMemo(() => {
-    if (config.getDebugMode()) {
-      return consoleMessages;
-    }
-    return consoleMessages.filter((msg) => msg.type !== 'debug');
-  }, [consoleMessages, config]);
-
-  // Computed values
-  const errorCount = useMemo(
-    () =>
-      filteredConsoleMessages
-        .filter((msg) => msg.type === 'error')
-        .reduce((total, msg) => total + msg.count, 0),
-    [filteredConsoleMessages],
-  );
 
   const nightly = props.version.includes('nightly');
 
@@ -1329,13 +1338,14 @@ export const AppContainer = (props: AppContainerProps) => {
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
+    !!codingPlanUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isModelDialogOpen ||
-    isVisionSwitchDialogOpen ||
+    activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
     isAuthenticating ||
@@ -1343,8 +1353,10 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
+    isMcpDialogOpen ||
     isApprovalModeDialogOpen ||
-    isResumeDialogOpen;
+    isResumeDialogOpen ||
+    isExtensionsManagerDialogOpen;
 
   const {
     isFeedbackDialogOpen,
@@ -1384,6 +1396,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1393,6 +1406,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      codingPlanUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -1413,8 +1427,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
       isTrustedFolder,
       constrainHeight,
-      showErrorDetails,
-      filteredConsoleMessages,
       ideContextState,
       showToolDescriptions,
       ctrlCPressedOnce,
@@ -1428,7 +1440,6 @@ export const AppContainer = (props: AppContainerProps) => {
       showAutoAcceptIndicator,
       currentModel,
       contextFileNames,
-      errorCount,
       availableTerminalHeight,
       mainAreaWidth,
       staticAreaMaxItemHeight,
@@ -1449,8 +1460,6 @@ export const AppContainer = (props: AppContainerProps) => {
       extensionsUpdateState,
       activePtyId,
       embeddedShellFocused,
-      // Vision switch dialog
-      isVisionSwitchDialogOpen,
       // Welcome back dialog
       showWelcomeBackDialog,
       welcomeBackInfo,
@@ -1458,8 +1467,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Extensions manager dialog
+      isExtensionsManagerDialogOpen,
+      // MCP dialog
+      isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     }),
     [
       isThemeDialogOpen,
@@ -1477,6 +1492,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1486,6 +1502,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      codingPlanUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
       loopDetectionConfirmationRequest,
@@ -1506,8 +1523,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isFolderTrustDialogOpen,
       isTrustedFolder,
       constrainHeight,
-      showErrorDetails,
-      filteredConsoleMessages,
       ideContextState,
       showToolDescriptions,
       ctrlCPressedOnce,
@@ -1520,7 +1535,6 @@ export const AppContainer = (props: AppContainerProps) => {
       messageQueue,
       showAutoAcceptIndicator,
       contextFileNames,
-      errorCount,
       availableTerminalHeight,
       mainAreaWidth,
       staticAreaMaxItemHeight,
@@ -1543,8 +1557,6 @@ export const AppContainer = (props: AppContainerProps) => {
       activePtyId,
       historyManager,
       embeddedShellFocused,
-      // Vision switch dialog
-      isVisionSwitchDialogOpen,
       // Welcome back dialog
       showWelcomeBackDialog,
       welcomeBackInfo,
@@ -1552,8 +1564,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Extensions manager dialog
+      isExtensionsManagerDialogOpen,
+      // MCP dialog
+      isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     ],
   );
 
@@ -1568,10 +1586,15 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
+      dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,
@@ -1580,17 +1603,21 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFolderTrustSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
+      onSuggestionsVisibilityChange: setHasSuggestionsVisible,
       refreshStatic,
       handleFinalSubmit,
+      handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
-      // Vision switch dialog
-      handleVisionSwitchSelect,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Extensions manager dialog
+      closeExtensionsManagerDialog,
+      // MCP dialog
+      closeMcpDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1611,10 +1638,15 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
+      dismissCodingPlanUpdate,
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,
@@ -1625,13 +1657,17 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      retryLastPrompt,
       handleClearScreen,
-      handleVisionSwitchSelect,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Extensions manager dialog
+      closeExtensionsManagerDialog,
+      // MCP dialog
+      closeMcpDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,

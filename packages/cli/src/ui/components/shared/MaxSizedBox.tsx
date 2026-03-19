@@ -10,8 +10,10 @@ import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
 import { toCodePoints } from '../../utils/textUtils.js';
 import { useOverflowActions } from '../../contexts/OverflowContext.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 let enableDebugLog = false;
+const debugLogger = createDebugLogger('MAX_SIZED_BOX');
 
 /**
  * Minimum height for the MaxSizedBox component.
@@ -28,7 +30,7 @@ function debugReportError(message: string, element: React.ReactNode) {
   if (!enableDebugLog) return;
 
   if (!React.isValidElement(element)) {
-    console.error(
+    debugLogger.error(
       message,
       `Invalid element: '${String(element)}' typeof=${typeof element}`,
     );
@@ -44,10 +46,13 @@ function debugReportError(message: string, element: React.ReactNode) {
     const lineNumber = elementWithSource._source?.lineNumber;
     sourceMessage = fileName ? `${fileName}:${lineNumber}` : '<Unknown file>';
   } catch (error) {
-    console.error('Error while trying to get file name:', error);
+    debugLogger.error('Error while trying to get file name:', error);
   }
 
-  console.error(message, `${String(element.type)}. Source: ${sourceMessage}`);
+  debugLogger.error(
+    message,
+    `${String(element.type)}. Source: ${sourceMessage}`,
+  );
 }
 interface MaxSizedBoxProps {
   children?: React.ReactNode;

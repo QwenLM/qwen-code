@@ -78,9 +78,6 @@ describe('mcp-client', () => {
     });
 
     it('should not skip tools even if a parameter is missing a type', async () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => {});
       const mockedClient = {
         connect: vi.fn(),
         discover: vi.fn(),
@@ -137,14 +134,9 @@ describe('mcp-client', () => {
       await client.connect();
       await client.discover({} as Config);
       expect(mockedToolRegistry.registerTool).toHaveBeenCalledTimes(2);
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      consoleWarnSpy.mockRestore();
     });
 
     it('should handle errors when discovering prompts', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
       const mockedClient = {
         connect: vi.fn(),
         discover: vi.fn(),
@@ -178,10 +170,6 @@ describe('mcp-client', () => {
       await expect(client.discover({} as Config)).rejects.toThrow(
         'No prompts or tools found on the server.',
       );
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        `Error discovering prompts from test-server: Test error`,
-      );
-      consoleErrorSpy.mockRestore();
     });
   });
   describe('appendMcpServerCommand', () => {

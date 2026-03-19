@@ -9,7 +9,7 @@ import type {
   Config,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { GeminiEventType, OutputFormat } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { JsonOutputAdapter } from './JsonOutputAdapter.js';
 
@@ -17,6 +17,7 @@ function createMockConfig(): Config {
   return {
     getSessionId: vi.fn().mockReturnValue('test-session-id'),
     getModel: vi.fn().mockReturnValue('test-model'),
+    getOutputFormat: vi.fn().mockReturnValue('json'),
   } as unknown as Config;
 }
 
@@ -413,6 +414,79 @@ describe('JsonOutputAdapter', () => {
       expect(resultMessage.result).toBe('Response text');
       expect(resultMessage.duration_ms).toBe(1000);
       expect(resultMessage.num_turns).toBe(1);
+    });
+
+    it('should emit success result as text to stdout in text mode', () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalled();
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      expect(output).toBe('Response text');
+    });
+
+    it('should emit error result to stderr in text mode', () => {
+      const stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.emitResult({
+        isError: true,
+        errorMessage: 'Test error message',
+        durationMs: 500,
+        apiDurationMs: 300,
+        numTurns: 1,
+      });
+
+      expect(stderrWriteSpy).toHaveBeenCalled();
+      const output = stderrWriteSpy.mock.calls[0][0] as string;
+      expect(output).toBe('Test error message');
+
+      stderrWriteSpy.mockRestore();
+    });
+
+    it('should use custom summary in text mode', () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.emitResult({
+        isError: false,
+        summary: 'Custom summary text',
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalled();
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      expect(output).toBe('Custom summary text');
+    });
+
+    it('should handle empty error message in text mode', () => {
+      const stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.emitResult({
+        isError: true,
+        durationMs: 500,
+        apiDurationMs: 300,
+        numTurns: 1,
+      });
+
+      expect(stderrWriteSpy).toHaveBeenCalled();
+      const output = stderrWriteSpy.mock.calls[0][0] as string;
+      // When no errorMessage is provided, the default 'Unknown error' is used
+      expect(output).toBe('Unknown error');
+
+      stderrWriteSpy.mockRestore();
     });
 
     it('should emit error result', () => {

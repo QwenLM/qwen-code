@@ -116,6 +116,7 @@ describe('ChatCompressionService', () => {
     mockConfig = {
       getChatCompression: vi.fn(),
       getContentGenerator: vi.fn(),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
     } as unknown as Config;
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
@@ -235,7 +236,11 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
-    vi.mocked(tokenLimit).mockReturnValue(1000);
+    // Mock contextWindowSize instead of tokenLimit
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
     // newTokenCount = 800 - (1600 - 1000) + 50 = 800 - 600 + 50 = 250 <= 800 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
       candidates: [
@@ -365,7 +370,10 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
-    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       candidates: [

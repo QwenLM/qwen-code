@@ -116,6 +116,6 @@
 
 ## 0.0.5
 
-- Added Qwen OAuth login and up to 2,000 free requests per day.
+- Added Qwen OAuth login and up to 1,000 free requests per day.
 - Synced upstream `gemini-cli` to v0.1.17.
 - Added the `systemPromptMappings` configuration option.

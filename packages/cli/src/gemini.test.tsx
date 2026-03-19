@@ -24,6 +24,8 @@ import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { OutputFormat } from '@qwen-code/qwen-code-core';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
   constructor(readonly code?: string | number | null | undefined) {
@@ -46,6 +48,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    getWarnings: vi.fn(() => []),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -79,6 +82,12 @@ vi.mock('./utils/sandbox.js', () => ({
   start_sandbox: vi.fn(() => Promise.resolve()), // Mock as an async function that resolves
 }));
 
+vi.mock('./utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStdoutLine: vi.fn(),
+  clearScreen: vi.fn(),
+}));
+
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
 }));
@@ -104,9 +113,9 @@ describe('gemini.tsx main function', () => {
 
   beforeEach(() => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
-    originalEnvGeminiSandbox = process.env['GEMINI_SANDBOX'];
+    originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
-    delete process.env['GEMINI_SANDBOX'];
+    delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
 
     initialUnhandledRejectionListeners =
@@ -116,9 +125,9 @@ describe('gemini.tsx main function', () => {
   afterEach(() => {
     // Restore original env variables
     if (originalEnvGeminiSandbox !== undefined) {
-      process.env['GEMINI_SANDBOX'] = originalEnvGeminiSandbox;
+      process.env['QWEN_SANDBOX'] = originalEnvGeminiSandbox;
     } else {
-      delete process.env['GEMINI_SANDBOX'];
+      delete process.env['QWEN_SANDBOX'];
     }
     if (originalEnvSandbox !== undefined) {
       process.env['SANDBOX'] = originalEnvSandbox;
@@ -169,6 +178,7 @@ describe('gemini.tsx main function', () => {
         getGeminiMdFileCount: () => 0,
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
+        getWarnings: () => [],
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -180,6 +190,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     try {
       await main();
@@ -252,7 +263,7 @@ describe('gemini.tsx main function', () => {
       'isRaw',
     );
     Object.defineProperty(process.stdin, 'isTTY', {
-      value: true,
+      value: false, // 在 stream-json 模式下应为 false
       configurable: true,
     });
     Object.defineProperty(process.stdin, 'isRaw', {
@@ -312,6 +323,7 @@ describe('gemini.tsx main function', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -333,6 +345,10 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
+      getWarnings: () => [],
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getOutputFormat: () => OutputFormat.TEXT,
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
@@ -430,6 +446,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getUsageStatisticsEnabled: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -440,6 +458,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       },
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
@@ -448,8 +467,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       debug: undefined,
       prompt: undefined,
       promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
       query: undefined,
-      allFiles: undefined,
       yolo: undefined,
       approvalMode: undefined,
       telemetry: undefined,
@@ -463,7 +483,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       allowedTools: undefined,
       acp: undefined,
       experimentalAcp: undefined,
-      experimentalSkills: undefined,
       extensions: undefined,
       listExtensions: undefined,
       openaiLogging: undefined,
@@ -477,8 +496,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       googleSearchEngineId: undefined,
       webSearchDefault: undefined,
       screenReader: undefined,
-      vlmSwitchMode: undefined,
-      useSmartEdit: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
       includePartialMessages: undefined,
@@ -488,8 +505,11 @@ describe('gemini.tsx main function kitty protocol', () => {
       excludeTools: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
+      experimentalLsp: undefined,
+      experimentalHooks: undefined,
       channel: undefined,
       chatRecording: undefined,
+      sessionId: undefined,
     });
 
     await main();
@@ -500,34 +520,28 @@ describe('gemini.tsx main function kitty protocol', () => {
 });
 
 describe('validateDnsResolutionOrder', () => {
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    consoleWarnSpy.mockRestore();
+    mockWriteStderrLine.mockClear();
   });
 
   it('should return "ipv4first" when the input is "ipv4first"', () => {
     expect(validateDnsResolutionOrder('ipv4first')).toBe('ipv4first');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return "verbatim" when the input is "verbatim"', () => {
     expect(validateDnsResolutionOrder('verbatim')).toBe('verbatim');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return the default "ipv4first" when the input is undefined', () => {
     expect(validateDnsResolutionOrder(undefined)).toBe('ipv4first');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return the default "ipv4first" and log a warning for an invalid string', () => {
     expect(validateDnsResolutionOrder('invalid-value')).toBe('ipv4first');
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Invalid value for dnsResolutionOrder in settings: "invalid-value". Using default "ipv4first".',
     );
   });
@@ -642,8 +656,19 @@ describe('startInteractiveUI', () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
 
-  it('should not check for updates when update nag is disabled', async () => {
+  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
     const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+
+    const settingsWithAutoUpdateDisabled = {
+      merged: {
+        general: {
+          enableAutoUpdate: false,
+        },
+        ui: {
+          hideWindowTitle: false,
+        },
+      },
+    } as LoadedSettings;
 
     const mockInitializationResult = {
       authError: null,
@@ -652,26 +677,17 @@ describe('startInteractiveUI', () => {
       geminiMdFileCount: 0,
     };
 
-    const settingsWithUpdateNagDisabled = {
-      merged: {
-        general: {
-          disableUpdateNag: true,
-        },
-        ui: {
-          hideWindowTitle: false,
-        },
-      },
-    } as LoadedSettings;
-
     await startInteractiveUI(
       mockConfig,
-      settingsWithUpdateNagDisabled,
+      settingsWithAutoUpdateDisabled,
       mockStartupWarnings,
       mockWorkspaceRoot,
       mockInitializationResult,
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // checkForUpdates should NOT be called when enableAutoUpdate is false
     expect(checkForUpdates).not.toHaveBeenCalled();
   });
 });

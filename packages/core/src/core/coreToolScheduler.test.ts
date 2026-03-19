@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
   Config,
@@ -23,12 +23,12 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  SkillTool,
 } from '../index.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
-  truncateAndSaveToFile,
 } from './coreToolScheduler.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -36,13 +36,6 @@ import {
   MockTool,
   MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
 } from '../test-utils/mock-tool.js';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-
-vi.mock('fs/promises', () => ({
-  writeFile: vi.fn(),
-}));
-
 class TestApprovalTool extends BaseDeclarativeTool<{ id: string }, ToolResult> {
   static readonly Name = 'testApprovalTool';
 
@@ -253,7 +246,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -331,7 +323,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -368,17 +359,17 @@ describe('CoreToolScheduler', () => {
   describe('getToolSuggestion', () => {
     it('should suggest the top N closest tool names for a typo', () => {
       // Create mocked tool registry
+      const mockToolRegistry = {
+        getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
+        getTool: () => undefined, // No SkillTool in this test
+      } as unknown as ToolRegistry;
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null, // No client needed for these tests
         getExcludeTools: () => undefined,
         isInteractive: () => true,
       } as unknown as Config;
-      const mockToolRegistry = {
-        getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
-      } as unknown as ToolRegistry;
 
       // Create scheduler
       const scheduler = new CoreToolScheduler({
@@ -409,12 +400,12 @@ describe('CoreToolScheduler', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
+        getTool: () => undefined, // No SkillTool in this test
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
@@ -439,12 +430,12 @@ describe('CoreToolScheduler', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
+        getTool: () => undefined, // No SkillTool in this test
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit'],
@@ -465,6 +456,61 @@ describe('CoreToolScheduler', () => {
       expect(hallucinatedTool).not.toContain(
         'not available in the current environment',
       );
+    });
+
+    it('should suggest using Skill tool when unknown tool name matches a skill name', () => {
+      // Create a mock that passes instanceof SkillTool check
+      const mockSkillTool = Object.create(SkillTool.prototype);
+      mockSkillTool.getAvailableSkillNames = () => [
+        'pdf',
+        'xlsx',
+        'frontend-design',
+      ];
+
+      // Create mocked tool registry that returns the mock SkillTool
+      const mockToolRegistry = {
+        getAllToolNames: () => ['skill', 'list_files', 'read_file'],
+        getTool: (name: string) =>
+          name === 'skill' ? mockSkillTool : undefined,
+      } as unknown as ToolRegistry;
+
+      // Create mocked config
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getExcludeTools: () => undefined,
+        isInteractive: () => true,
+      } as unknown as Config;
+
+      // Create scheduler
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // Test that when unknown tool name matches a skill name, we get skill-specific message
+      // @ts-expect-error accessing private method
+      const skillMessage = scheduler.getToolNotFoundMessage('pdf');
+      expect(skillMessage).toContain('is a skill name, not a tool name');
+      expect(skillMessage).toContain('skill');
+      expect(skillMessage).toContain('skill: "pdf"');
+      // Should NOT contain the standard "not found in registry" prefix
+      expect(skillMessage).not.toContain('not found in registry');
+
+      // Test another skill name
+      // @ts-expect-error accessing private method
+      const xlsxMessage = scheduler.getToolNotFoundMessage('xlsx');
+      expect(xlsxMessage).toContain('is a skill name, not a tool name');
+      expect(xlsxMessage).toContain('skill: "xlsx"');
+
+      // Test that non-skill names still use standard message with Levenshtein suggestions
+      // @ts-expect-error accessing private method
+      const nonSkillMessage = scheduler.getToolNotFoundMessage('list_fils');
+      expect(nonSkillMessage).toContain('not found in registry');
+      expect(nonSkillMessage).toContain('Did you mean');
+      expect(nonSkillMessage).not.toContain('is a skill name');
     });
   });
 
@@ -510,7 +556,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -597,7 +642,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -687,7 +731,6 @@ describe('CoreToolScheduler with payload', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -800,11 +843,11 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type image/png was processed.',
+            output: '',
           },
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
         },
       },
-      llmContent,
     ]);
   });
 
@@ -819,11 +862,15 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type application/pdf was processed.',
+            output: '',
           },
+          parts: [
+            {
+              fileData: { mimeType: 'application/pdf', fileUri: 'gs://...' },
+            },
+          ],
         },
       },
-      llmContent,
     ]);
   });
 
@@ -834,15 +881,22 @@ describe('convertToFunctionResponse', () => {
       { text: 'Another text part' },
     ];
     const result = convertToFunctionResponse(toolName, callId, llmContent);
+    // All content should be inside the FunctionResponse:
+    // - text parts joined into response.output
+    // - media parts in response.parts
     expect(result).toEqual([
       {
         functionResponse: {
           name: toolName,
           id: callId,
-          response: { output: 'Tool execution succeeded.' },
+          response: {
+            output: 'Some textual description\nAnother text part',
+          },
+          parts: [
+            { inlineData: { mimeType: 'image/jpeg', data: 'base64data...' } },
+          ],
         },
       },
-      ...llmContent,
     ]);
   });
 
@@ -857,11 +911,13 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type image/gif was processed.',
+            output: '',
           },
+          parts: [
+            { inlineData: { mimeType: 'image/gif', data: 'gifdata...' } },
+          ],
         },
       },
-      ...llmContent,
     ]);
   });
 
@@ -1011,7 +1067,6 @@ describe('CoreToolScheduler edit cancellation', () => {
         getProjectTempDir: () => '/tmp',
       },
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1121,7 +1176,6 @@ describe('CoreToolScheduler YOLO mode', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1363,7 +1417,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1496,7 +1549,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1599,7 +1651,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1672,7 +1723,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1801,6 +1851,175 @@ describe('CoreToolScheduler request queueing', () => {
   });
 });
 
+describe('CoreToolScheduler truncated output protection', () => {
+  function createTruncationTestScheduler(
+    tool: TestApprovalTool | MockTool,
+    toolNames: string[],
+  ) {
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockToolRegistry = {
+      getTool: () => tool,
+      getAllToolNames: () => toolNames,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      getAllowedTools: () => [],
+      getExcludeTools: () => undefined,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    return { scheduler, onAllToolCallsComplete };
+  }
+
+  it('should reject Kind.Edit tool calls when wasOutputTruncated is true', async () => {
+    const declarativeTool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+    } as unknown as Config);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      declarativeTool,
+      [TestApprovalTool.Name],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: TestApprovalTool.Name,
+          args: { id: 'test-truncated' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-truncated',
+          wasOutputTruncated: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message;
+      expect(errorMessage).toContain('truncated due to max_tokens limit');
+      expect(errorMessage).toContain(
+        'rejected to prevent writing truncated content',
+      );
+    }
+  });
+
+  it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
+    const declarativeTool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+    } as unknown as Config);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      declarativeTool,
+      [TestApprovalTool.Name],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: TestApprovalTool.Name,
+          args: { id: 'test-normal' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-normal',
+          wasOutputTruncated: false,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    // Should succeed (not error) since wasOutputTruncated is false
+    expect(completedCalls[0].status).toBe('success');
+  });
+
+  it('should allow non-Edit tools when wasOutputTruncated is true', async () => {
+    const mockTool = new MockTool({
+      name: 'mockReadTool',
+      execute: async () => ({
+        llmContent: 'read result',
+        returnDisplay: 'read result',
+      }),
+    });
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      mockTool,
+      ['mockReadTool'],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockReadTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-read-truncated',
+          wasOutputTruncated: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    // Non-Edit tools should still execute even when output was truncated
+    expect(completedCalls[0].status).toBe('success');
+  });
+});
+
 describe('CoreToolScheduler Sequential Execution', () => {
   it('should execute tool calls in a batch sequentially', async () => {
     // Arrange
@@ -1867,7 +2086,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -1988,7 +2206,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -2065,223 +2282,530 @@ describe('CoreToolScheduler Sequential Execution', () => {
   });
 });
 
-describe('truncateAndSaveToFile', () => {
-  const mockWriteFile = vi.mocked(fs.writeFile);
-  const THRESHOLD = 40_000;
-  const TRUNCATE_LINES = 1000;
+describe('CoreToolScheduler plan mode with ask_user_question', () => {
+  function createAskUserQuestionMockTool() {
+    let wasAnswered = false;
+    let userAnswers: Record<string, string> = {};
 
-  beforeEach(() => {
-    vi.clearAllMocks();
+    return new MockTool({
+      name: 'ask_user_question',
+      shouldConfirmExecute: async () => ({
+        type: 'ask_user_question' as const,
+        title: 'Please answer the following question(s):',
+        questions: [
+          {
+            question: 'Which approach do you prefer?',
+            header: 'Approach',
+            options: [
+              { label: 'Option A', description: 'First approach' },
+              { label: 'Option B', description: 'Second approach' },
+            ],
+            multiSelect: false,
+          },
+        ],
+        onConfirm: async (
+          outcome: ToolConfirmationOutcome,
+          payload?: ToolConfirmationPayload,
+        ) => {
+          if (
+            outcome === ToolConfirmationOutcome.ProceedOnce ||
+            outcome === ToolConfirmationOutcome.ProceedAlways
+          ) {
+            wasAnswered = true;
+            userAnswers = payload?.answers ?? {};
+          } else {
+            wasAnswered = false;
+          }
+        },
+      }),
+      execute: async () => {
+        if (!wasAnswered) {
+          return {
+            llmContent: 'User declined to answer the questions.',
+            returnDisplay: 'User declined to answer the questions.',
+          };
+        }
+        const answersContent = Object.entries(userAnswers)
+          .map(([key, value]) => `**Question ${key}**: ${value}`)
+          .join('\n');
+        return {
+          llmContent: `User has provided the following answers:\n\n${answersContent}`,
+          returnDisplay: `User has provided the following answers:\n\n${answersContent}`,
+        };
+      },
+    });
+  }
+
+  function createPlanModeScheduler(
+    tool: MockTool,
+    onAllToolCallsComplete: ReturnType<typeof vi.fn>,
+    onToolCallsUpdate: ReturnType<typeof vi.fn>,
+  ) {
+    const mockToolRegistry = {
+      getTool: () => tool,
+      getToolByName: () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.PLAN,
+      getAllowedTools: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
+
+    return new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+  }
+
+  it('should enter awaiting_approval for ask_user_question in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    // Should enter awaiting_approval, NOT be directly scheduled
+    const awaitingCall = await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    );
+    expect(awaitingCall).toBeDefined();
+    expect(awaitingCall.status).toBe('awaiting_approval');
   });
 
-  it('should return content unchanged if below threshold', async () => {
-    const content = 'Short content';
-    const callId = 'test-call-id';
-    const projectTempDir = '/tmp';
-
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
+  it('should execute successfully when user answers in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
     );
 
-    expect(result).toEqual({ content });
-    expect(mockWriteFile).not.toHaveBeenCalled();
-  });
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask-answer',
+    };
 
-  it('should truncate content by lines when content has many lines', async () => {
-    // Create content that exceeds 100,000 character threshold with many lines
-    const lines = Array(2000).fill('x'.repeat(100)); // 100 chars per line * 2000 lines = 200,000 chars
-    const content = lines.join('\n');
-    const callId = 'test-call-id';
-    const projectTempDir = '/tmp';
+    await scheduler.schedule([request], abortController.signal);
 
-    mockWriteFile.mockResolvedValue(undefined);
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
 
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
+    // Simulate user answering the question
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+      { answers: { '0': 'Option A' } },
     );
 
-    expect(result.outputFile).toBe(
-      path.join(projectTempDir, `${callId}.output`),
-    );
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      path.join(projectTempDir, `${callId}.output`),
-      content,
-    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
 
-    // Should contain the first and last lines with 1/5 head and 4/5 tail
-    const head = Math.floor(TRUNCATE_LINES / 5);
-    const beginning = lines.slice(0, head);
-    const end = lines.slice(-(TRUNCATE_LINES - head));
-    const expectedTruncated =
-      beginning.join('\n') + '\n... [CONTENT TRUNCATED] ...\n' + end.join('\n');
-
-    expect(result.content).toContain(
-      'Tool output was too large and has been truncated',
-    );
-    expect(result.content).toContain('Truncated part of the output:');
-    expect(result.content).toContain(expectedTruncated);
-  });
-
-  it('should wrap and truncate content when content has few but long lines', async () => {
-    const content = 'a'.repeat(200_000); // A single very long line
-    const callId = 'test-call-id';
-    const projectTempDir = '/tmp';
-    const wrapWidth = 120;
-
-    mockWriteFile.mockResolvedValue(undefined);
-
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+    if (completedCalls[0].status === 'success') {
+      expect(completedCalls[0].response.resultDisplay).toContain(
+        'User has provided the following answers',
+      );
     }
-    const expectedFileContent = wrappedLines.join('\n');
-
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
-    );
-
-    expect(result.outputFile).toBe(
-      path.join(projectTempDir, `${callId}.output`),
-    );
-    // Check that the file was written with the wrapped content
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      path.join(projectTempDir, `${callId}.output`),
-      expectedFileContent,
-    );
-
-    // Should contain the first and last lines with 1/5 head and 4/5 tail of the wrapped content
-    const head = Math.floor(TRUNCATE_LINES / 5);
-    const beginning = wrappedLines.slice(0, head);
-    const end = wrappedLines.slice(-(TRUNCATE_LINES - head));
-    const expectedTruncated =
-      beginning.join('\n') + '\n... [CONTENT TRUNCATED] ...\n' + end.join('\n');
-    expect(result.content).toContain(
-      'Tool output was too large and has been truncated',
-    );
-    expect(result.content).toContain('Truncated part of the output:');
-    expect(result.content).toContain(expectedTruncated);
   });
 
-  it('should handle file write errors gracefully', async () => {
-    const content = 'a'.repeat(2_000_000);
-    const callId = 'test-call-id';
-    const projectTempDir = '/tmp';
-
-    mockWriteFile.mockRejectedValue(new Error('File write failed'));
-
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
+  it('should block non-ask_user_question tools that need confirmation in plan mode', async () => {
+    const editTool = new MockTool({
+      name: 'write_file',
+      shouldConfirmExecute: MOCK_TOOL_SHOULD_CONFIRM_EXECUTE,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      editTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
     );
 
-    expect(result.outputFile).toBeUndefined();
-    expect(result.content).toContain(
-      '[Note: Could not save full output to file]',
-    );
-    expect(mockWriteFile).toHaveBeenCalled();
-  });
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'write_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-blocked',
+    };
 
-  it('should save to correct file path with call ID', async () => {
-    const content = 'a'.repeat(200_000);
-    const callId = 'unique-call-123';
-    const projectTempDir = '/custom/temp/dir';
-    const wrapWidth = 120;
+    await scheduler.schedule([request], abortController.signal);
 
-    mockWriteFile.mockResolvedValue(undefined);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
 
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    if (completedCalls[0].status === 'error') {
+      expect(completedCalls[0].response.resultDisplay).toBe(
+        'Plan mode blocked a non-read-only tool call.',
+      );
     }
-    const expectedFileContent = wrappedLines.join('\n');
-
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
-    );
-
-    const expectedPath = path.join(projectTempDir, `${callId}.output`);
-    expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      expectedPath,
-      expectedFileContent,
-    );
   });
 
-  it('should include helpful instructions in truncated message', async () => {
-    const content = 'a'.repeat(2_000_000);
-    const callId = 'test-call-id';
-    const projectTempDir = '/tmp';
-
-    mockWriteFile.mockResolvedValue(undefined);
-
-    const result = await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
+  it('should handle user cancellation of ask_user_question in plan mode', async () => {
+    const mockTool = createAskUserQuestionMockTool();
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      mockTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
     );
 
-    expect(result.content).toContain(
-      'Tool output was too large and has been truncated',
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'ask_user_question',
+      args: {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'A', description: 'First' },
+              { label: 'B', description: 'Second' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-ask-cancel',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    // Simulate user cancelling
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
     );
-    expect(result.content).toContain('The full output has been saved to:');
-    expect(result.content).toContain(
-      'To read the complete output, use the read_file tool with the absolute file path above',
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('cancelled');
+  });
+});
+
+describe('Concurrent task tool execution', () => {
+  function createScheduler(
+    tools: Map<string, MockTool>,
+    onAllToolCallsComplete: Mock,
+    onToolCallsUpdate: Mock,
+  ) {
+    const mockToolRegistry = {
+      getTool: (name: string) => tools.get(name),
+      getFunctionDeclarations: () => [],
+      tools,
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) => tools.get(name),
+      getToolByDisplayName: () => undefined,
+      getTools: () => [...tools.values()],
+      discoverTools: async () => {},
+      getAllTools: () => [...tools.values()],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      getAllowedTools: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
+
+    return new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+  }
+
+  it('should execute multiple task tools concurrently', async () => {
+    const executionLog: string[] = [];
+
+    const taskTool = new MockTool({
+      name: 'task',
+      execute: async (params) => {
+        const id = (params as { id: string }).id;
+        executionLog.push(`start:${id}`);
+        // Simulate async work — concurrent tasks will interleave here
+        await new Promise((r) => setTimeout(r, 50));
+        executionLog.push(`end:${id}`);
+        return {
+          llmContent: `Task ${id} done`,
+          returnDisplay: `Task ${id} done`,
+        };
+      },
+    });
+
+    const tools = new Map([['task', taskTool]]);
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createScheduler(
+      tools,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
     );
-    expect(result.content).toContain(
-      'The truncated output below shows the beginning and end of the content',
-    );
+
+    const abortController = new AbortController();
+    const requests = [
+      {
+        callId: '1',
+        name: 'task',
+        args: { id: 'A' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+      {
+        callId: '2',
+        name: 'task',
+        args: { id: 'B' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+      {
+        callId: '3',
+        name: 'task',
+        args: { id: 'C' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+    ];
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    // All tasks should have completed
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(3);
+    expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+    // Verify concurrency: all tasks should start before any finishes
+    // With sequential execution, the log would be [start:A, end:A, start:B, end:B, ...]
+    // With concurrent execution, all starts happen before any end
+    const startIndices = executionLog
+      .filter((e) => e.startsWith('start:'))
+      .map((e) => executionLog.indexOf(e));
+    const firstEnd = executionLog.findIndex((e) => e.startsWith('end:'));
+    expect(startIndices.every((i) => i < firstEnd)).toBe(true);
   });
 
-  it('should sanitize callId to prevent path traversal', async () => {
-    const content = 'a'.repeat(200_000);
-    const callId = '../../../../../etc/passwd';
-    const projectTempDir = '/tmp/safe_dir';
-    const wrapWidth = 120;
+  it('should run task tools concurrently while other tools run sequentially', async () => {
+    const executionLog: string[] = [];
 
-    mockWriteFile.mockResolvedValue(undefined);
+    const taskTool = new MockTool({
+      name: 'task',
+      execute: async (params) => {
+        const id = (params as { id: string }).id;
+        executionLog.push(`task:start:${id}`);
+        await new Promise((r) => setTimeout(r, 50));
+        executionLog.push(`task:end:${id}`);
+        return {
+          llmContent: `Task ${id} done`,
+          returnDisplay: `Task ${id} done`,
+        };
+      },
+    });
 
-    // Manually wrap the content to generate the expected file content
-    const wrappedLines: string[] = [];
-    for (let i = 0; i < content.length; i += wrapWidth) {
-      wrappedLines.push(content.substring(i, i + wrapWidth));
-    }
-    const expectedFileContent = wrappedLines.join('\n');
+    const readTool = new MockTool({
+      name: 'read_file',
+      execute: async (params) => {
+        const id = (params as { id: string }).id;
+        executionLog.push(`read:start:${id}`);
+        await new Promise((r) => setTimeout(r, 20));
+        executionLog.push(`read:end:${id}`);
+        return {
+          llmContent: `Read ${id} done`,
+          returnDisplay: `Read ${id} done`,
+        };
+      },
+    });
 
-    await truncateAndSaveToFile(
-      content,
-      callId,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
+    const tools = new Map<string, MockTool>([
+      ['task', taskTool],
+      ['read_file', readTool],
+    ]);
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createScheduler(
+      tools,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
     );
 
-    const expectedPath = path.join(projectTempDir, 'passwd.output');
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      expectedPath,
-      expectedFileContent,
+    const abortController = new AbortController();
+    const requests = [
+      {
+        callId: '1',
+        name: 'read_file',
+        args: { id: '1' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+      {
+        callId: '2',
+        name: 'task',
+        args: { id: 'A' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+      {
+        callId: '3',
+        name: 'read_file',
+        args: { id: '2' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+      {
+        callId: '4',
+        name: 'task',
+        args: { id: 'B' },
+        isClientInitiated: false,
+        prompt_id: 'p1',
+      },
+    ];
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(4);
+    expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+    // Non-task tools should execute sequentially: read:1 finishes before read:2 starts
+    const read1End = executionLog.indexOf('read:end:1');
+    const read2Start = executionLog.indexOf('read:start:2');
+    expect(read1End).toBeLessThan(read2Start);
+
+    // Task tools should execute concurrently: both start before either ends
+    const taskAStart = executionLog.indexOf('task:start:A');
+    const taskBStart = executionLog.indexOf('task:start:B');
+    const firstTaskEnd = Math.min(
+      executionLog.indexOf('task:end:A'),
+      executionLog.indexOf('task:end:B'),
     );
+    expect(taskAStart).toBeLessThan(firstTaskEnd);
+    expect(taskBStart).toBeLessThan(firstTaskEnd);
   });
 });

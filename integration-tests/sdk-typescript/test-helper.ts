@@ -41,6 +41,13 @@ export interface SDKTestHelperOptions {
    * Whether to create .qwen/settings.json
    */
   createQwenConfig?: boolean;
+  /**
+   * Whether to enable chat recording for this test.
+   * - Set to `true` to enable recording (needed for session-id duplicate detection tests)
+   * - Set to `false` or leave undefined to disable recording (default for most tests)
+   * This sets chatRecording in general settings.
+   */
+  chatRecording?: boolean;
 }
 
 /**
@@ -91,7 +98,8 @@ export class SDKTestHelper {
         },
         general: {
           ...generalSettings,
-          chatRecording: false, // SDK tests don't need chat recording
+          // Default to disabling chat recording unless explicitly enabled
+          ...(options.chatRecording !== true ? { chatRecording: false } : {}),
         },
       };
 
@@ -654,6 +662,29 @@ export function hasErrorToolResults(messages: SDKMessage[]): boolean {
 // ============================================================================
 // Streaming Input Utilities
 // ============================================================================
+
+export function createResultWaiter(expectedResults: number): {
+  waitForResult: (index: number) => Promise<void>;
+  notifyResult: () => void;
+} {
+  const resolvers: Array<() => void> = [];
+  const promises = Array.from({ length: expectedResults }, () => {
+    return new Promise<void>((resolve) => {
+      resolvers.push(resolve);
+    });
+  });
+  let resolvedCount = 0;
+
+  return {
+    waitForResult: (index: number) => promises[index],
+    notifyResult: () => {
+      if (resolvedCount < resolvers.length) {
+        resolvers[resolvedCount]?.();
+        resolvedCount += 1;
+      }
+    },
+  };
+}
 
 /**
  * Create a simple streaming input from an array of message contents

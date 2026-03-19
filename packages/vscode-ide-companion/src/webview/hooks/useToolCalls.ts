@@ -18,6 +18,29 @@ export const useToolCalls = () => {
   );
 
   /**
+   * Preserve insertion order for existing tool calls by keeping the current
+   * timestamp. Only assign a new timestamp for brand-new entries.
+   */
+  const resolveTimestamp = (
+    update: ToolCallUpdate,
+    existing?: ToolCallData,
+  ): number => {
+    if (
+      typeof existing?.timestamp === 'number' &&
+      Number.isFinite(existing.timestamp)
+    ) {
+      return existing.timestamp;
+    }
+    if (
+      typeof update.timestamp === 'number' &&
+      Number.isFinite(update.timestamp)
+    ) {
+      return update.timestamp;
+    }
+    return Date.now();
+  };
+
+  /**
    * Handle tool call update
    */
   const handleToolCallUpdate = useCallback((update: ToolCallUpdate) => {
@@ -143,7 +166,7 @@ export const useToolCalls = () => {
                   ...prev,
                   content, // Override (do not append)
                   status: update.status || prev.status,
-                  timestamp: update.timestamp || Date.now(),
+                  timestamp: resolveTimestamp(update, prev),
                 });
                 return newMap;
               }
@@ -159,7 +182,7 @@ export const useToolCalls = () => {
           rawInput: update.rawInput as string | object | undefined,
           content,
           locations: update.locations,
-          timestamp: update.timestamp || Date.now(), // Add timestamp
+          timestamp: resolveTimestamp(update),
         });
       } else if (update.type === 'tool_call_update') {
         const updatedContent = update.content
@@ -186,12 +209,7 @@ export const useToolCalls = () => {
               mergedContent = [...(existing.content || []), ...updatedContent];
             }
           }
-          // If tool call has just completed/failed, bump timestamp to now for correct ordering
-          const isFinal =
-            update.status === 'completed' || update.status === 'failed';
-          const nextTimestamp = isFinal
-            ? Date.now()
-            : update.timestamp || existing.timestamp || Date.now();
+          const nextTimestamp = resolveTimestamp(update, existing);
 
           newMap.set(update.toolCallId, {
             ...existing,
@@ -200,7 +218,7 @@ export const useToolCalls = () => {
             ...(update.status && { status: update.status }),
             content: mergedContent,
             ...(update.locations && { locations: update.locations }),
-            timestamp: nextTimestamp, // Update timestamp (use completion time when completed/failed)
+            timestamp: nextTimestamp,
           });
         } else {
           newMap.set(update.toolCallId, {
@@ -211,7 +229,7 @@ export const useToolCalls = () => {
             rawInput: update.rawInput as string | object | undefined,
             content: updatedContent,
             locations: update.locations,
-            timestamp: update.timestamp || Date.now(), // Add timestamp
+            timestamp: resolveTimestamp(update),
           });
         }
       }

@@ -80,6 +80,35 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot(); // Snapshot the combined prompt
   });
 
+  it('should append extra system prompt instructions after user memory when provided', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const memory = 'Remember the project conventions.';
+    const appendInstruction = 'Always answer in exactly one sentence.';
+    const prompt = getCoreSystemPrompt(memory, undefined, appendInstruction);
+
+    expect(prompt).toContain(`\n\n---\n\n${memory}`);
+    expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
+    expect(prompt.indexOf(memory)).toBeLessThan(
+      prompt.indexOf(appendInstruction),
+    );
+  });
+
+  it('should append extra instructions after a custom system prompt and user memory', () => {
+    const customInstruction = 'You are a release manager.';
+    const userMemory = 'The repo uses pnpm.';
+    const appendInstruction = 'Only report blocking issues.';
+
+    const result = getCustomSystemPrompt(
+      customInstruction,
+      userMemory,
+      appendInstruction,
+    );
+
+    expect(result).toBe(
+      [customInstruction, userMemory, appendInstruction].join('\n\n---\n\n'),
+    );
+  });
+
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
     vi.stubEnv('SANDBOX', 'true'); // Generic sandbox value
     const prompt = getCoreSystemPrompt();
@@ -302,7 +331,9 @@ describe('Model-specific tool call formats', () => {
     // Should contain JSON-style tool calls
     expect(prompt).toContain('<tool_call>');
     expect(prompt).toContain('{"name": "run_shell_command"');
-    expect(prompt).toContain('"arguments": {"command": "node server.js &"}');
+    expect(prompt).toContain(
+      '"arguments": {"command": "node server.js &", "is_background": true}',
+    );
     expect(prompt).toContain('</tool_call>');
 
     // Should NOT contain bracket-style tool calls
@@ -603,7 +634,6 @@ describe('resolvePathFromEnv helper function', () => {
       vi.spyOn(os, 'homedir').mockImplementation(() => {
         throw new Error('Cannot resolve home directory');
       });
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const result = resolvePathFromEnv('~/documents/file.txt');
       expect(result).toEqual({
@@ -611,12 +641,6 @@ describe('resolvePathFromEnv helper function', () => {
         value: null,
         isDisabled: false,
       });
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Could not resolve home directory for path: ~/documents/file.txt',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
     });
   });
 });

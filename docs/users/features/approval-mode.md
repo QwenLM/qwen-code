@@ -20,7 +20,7 @@ Qwen Code offers three distinct permission modes that allow you to flexibly cont
 
 > [!tip]
 >
-> You can quickly cycle through modes during a session using **Shift+Tab**. The terminal status bar shows your current mode, so you always know what permissions Qwen Code has.
+> You can quickly cycle through modes during a session using **Shift+Tab** (or **Tab** on Windows). The terminal status bar shows your current mode, so you always know what permissions Qwen Code has.
 
 ## 1. Use Plan Mode for safe code analysis
 
@@ -36,9 +36,9 @@ Plan Mode instructs Qwen Code to create a plan by analyzing the codebase with **
 
 **Turn on Plan Mode during a session**
 
-You can switch into Plan Mode during a session using **Shift+Tab** to cycle through permission modes.
+You can switch into Plan Mode during a session using **Shift+Tab** (or **Tab** on Windows) to cycle through permission modes.
 
-If you are in Normal Mode, **Shift+Tab** first switches into `auto-edits` Mode, indicated by `⏵⏵ accept edits on` at the bottom of the terminal. A subsequent **Shift+Tab** will switch into Plan Mode, indicated by `⏸ plan mode`.
+If you are in Normal Mode, **Shift+Tab** (or **Tab** on Windows) first switches into `auto-edits` Mode, indicated by `⏵⏵ accept edits on` at the bottom of the terminal. A subsequent **Shift+Tab** (or **Tab** on Windows) will switch into Plan Mode, indicated by `⏸ plan mode`.
 
 **Start a new session in Plan Mode**
 
@@ -100,7 +100,7 @@ Default Mode is the standard way to work with Qwen Code. In this mode, you maint
 
 **Turn on Default Mode during a session**
 
-You can switch into Default Mode during a session using **Shift+Tab**​ to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab**​ will eventually cycle back to Default Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
+You can switch into Default Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Default Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
 
 **Start a new session in Default Mode**
 
@@ -164,7 +164,7 @@ Auto-Edit Mode instructs Qwen Code to automatically approve file edits while req
 /approval-mode auto-edit
 
 # Or use keyboard shortcut
-Shift+Tab  # Switch from other modes
+Shift+Tab (or Tab on Windows) # Switch from other modes
 ```
 
 ### Workflow Example
@@ -235,7 +235,7 @@ qwen --prompt "Run the test suite, fix all failing tests, then commit changes"
 
 ### Keyboard Shortcut Switching
 
-During a Qwen Code session, use **Shift+Tab**​ to quickly cycle through the three modes:
+During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the three modes:
 
 ```
 Default Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Default Mode

@@ -8,44 +8,36 @@ import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
 } from '../constants.js';
-import { tokenLimit } from '../../tokenLimits.js';
 import type {
-  OpenAICompatibleProvider,
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { DefaultOpenAICompatibleProvider } from './default.js';
 
-export class DashScopeOpenAICompatibleProvider
-  implements OpenAICompatibleProvider
-{
-  private contentGeneratorConfig: ContentGeneratorConfig;
-  private cliConfig: Config;
-
+export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
     cliConfig: Config,
   ) {
-    this.cliConfig = cliConfig;
-    this.contentGeneratorConfig = contentGeneratorConfig;
+    super(contentGeneratorConfig, cliConfig);
   }
 
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const authType = contentGeneratorConfig.authType;
-    const baseUrl = contentGeneratorConfig.baseUrl;
-    return (
-      authType === AuthType.QWEN_OAUTH ||
-      baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1' ||
-      baseUrl === 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' ||
-      !baseUrl
-    );
+    const { authType, baseUrl } = contentGeneratorConfig;
+
+    if (authType === AuthType.QWEN_OAUTH) return true;
+    if (!baseUrl) return true;
+
+    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
   }
 
-  buildHeaders(): Record<string, string | undefined> {
+  override buildHeaders(): Record<string, string | undefined> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType, customHeaders } = this.contentGeneratorConfig;
@@ -61,7 +53,7 @@ export class DashScopeOpenAICompatibleProvider
       : defaultHeaders;
   }
 
-  buildClient(): OpenAI {
+  override buildClient(): OpenAI {
     const {
       apiKey,
       baseUrl = DEFAULT_DASHSCOPE_BASE_URL,
@@ -71,14 +63,17 @@ export class DashScopeOpenAICompatibleProvider
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
-    const fetchOptions = buildRuntimeFetchOptions('openai');
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.cliConfig.getProxy(),
+    );
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,
       defaultHeaders,
-      ...(fetchOptions ? { fetchOptions } : {}),
+      ...(runtimeOptions || {}),
     });
   }
 
@@ -96,15 +91,15 @@ export class DashScopeOpenAICompatibleProvider
    * @param userPromptId - Unique identifier for the user prompt for session tracking
    * @returns Configured request with DashScope-specific parameters applied
    */
-  buildRequest(
+  override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
     let tools = request.tools;
 
-    // Apply DashScope cache control only if not disabled
-    if (!this.shouldDisableCacheControl()) {
+    // Apply DashScope cache control if enabled (default is enabled).
+    if (this.shouldEnableCacheControl()) {
       const { messages: updatedMessages, tools: updatedTools } =
         this.addDashScopeCacheControl(
           request,
@@ -114,12 +109,12 @@ export class DashScopeOpenAICompatibleProvider
       tools = updatedTools;
     }
 
-    // Apply output token limits based on model capabilities
-    // This ensures max_tokens doesn't exceed the model's maximum output limit
-    const requestWithTokenLimits = this.applyOutputTokenLimit(
-      request,
-      request.model,
-    );
+    // Apply output token limits using parent class logic
+    // Uses conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
+    // to preserve input quota when user hasn't explicitly configured max_tokens
+    const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+
+    const extraBody = this.contentGeneratorConfig.extra_body;
 
     if (this.isVisionModel(request.model)) {
       return {
@@ -129,6 +124,7 @@ export class DashScopeOpenAICompatibleProvider
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
+        ...(extraBody ? extraBody : {}),
       } as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
@@ -137,6 +133,7 @@ export class DashScopeOpenAICompatibleProvider
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      ...(extraBody ? extraBody : {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
@@ -152,7 +149,7 @@ export class DashScopeOpenAICompatibleProvider
     };
   }
 
-  getDefaultGenerationConfig(): GenerateContentConfig {
+  override getDefaultGenerationConfig(): GenerateContentConfig {
     return {
       temperature: 0.3,
     };
@@ -262,34 +259,30 @@ export class DashScopeOpenAICompatibleProvider
     contentArray: ChatCompletionContentPartWithCache[],
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
-      return [
-        {
-          type: 'text',
-          text: '',
-          cache_control: { type: 'ephemeral' },
-        } as ChatCompletionContentPartTextWithCache,
-      ];
+      return contentArray;
     }
 
+    // Add cache_control to the last text item
     const lastItem = contentArray[contentArray.length - 1];
-
-    if (lastItem.type === 'text') {
-      // Add cache_control to the last text item
-      contentArray[contentArray.length - 1] = {
-        ...lastItem,
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache;
-    } else {
-      // If the last item is not text, add a new text item with cache_control
-      contentArray.push({
-        type: 'text',
-        text: '',
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache);
-    }
+    contentArray[contentArray.length - 1] = {
+      ...lastItem,
+      cache_control: { type: 'ephemeral' },
+    } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;
   }
+
+  /**
+   * Vision-capable model patterns.
+   * Supports exact matches and prefix patterns for easy extension.
+   */
+  private static readonly VISION_MODEL_EXACT_MATCHES = new Set(['coder-model']);
+
+  private static readonly VISION_MODEL_PREFIX_PATTERNS = [
+    'qwen-vl', // qwen-vl-max, qwen-vl-max-latest, etc.
+    'qwen3-vl-plus', // qwen3-vl-plus variants
+    'qwen3.5-plus', // qwen3.5-plus (has built-in vision capabilities)
+  ];
 
   private isVisionModel(model: string | undefined): boolean {
     if (!model) {
@@ -298,64 +291,34 @@ export class DashScopeOpenAICompatibleProvider
 
     const normalized = model.toLowerCase();
 
-    if (normalized === 'vision-model') {
+    // Check exact matches
+    if (
+      DashScopeOpenAICompatibleProvider.VISION_MODEL_EXACT_MATCHES.has(
+        normalized,
+      )
+    ) {
       return true;
     }
 
-    if (normalized.startsWith('qwen-vl')) {
-      return true;
-    }
-
-    if (normalized.startsWith('qwen3-vl-plus')) {
-      return true;
+    // Check prefix patterns
+    for (const prefix of DashScopeOpenAICompatibleProvider.VISION_MODEL_PREFIX_PATTERNS) {
+      if (normalized.startsWith(prefix)) {
+        return true;
+      }
     }
 
     return false;
   }
 
   /**
-   * Apply output token limit to a request's max_tokens parameter.
-   *
-   * Ensures that existing max_tokens parameters don't exceed the model's maximum output
-   * token limit. Only modifies max_tokens when already present in the request.
-   *
-   * @param request - The chat completion request parameters
-   * @param model - The model name to get the output token limit for
-   * @returns The request with max_tokens adjusted to respect the model's limits (if present)
-   */
-  private applyOutputTokenLimit<T extends { max_tokens?: number | null }>(
-    request: T,
-    model: string,
-  ): T {
-    const currentMaxTokens = request.max_tokens;
-
-    // Only process if max_tokens is already present in the request
-    if (currentMaxTokens === undefined || currentMaxTokens === null) {
-      return request; // No max_tokens parameter, return unchanged
-    }
-
-    const modelLimit = tokenLimit(model, 'output');
-
-    // If max_tokens exceeds the model limit, cap it to the model's limit
-    if (currentMaxTokens > modelLimit) {
-      return {
-        ...request,
-        max_tokens: modelLimit,
-      };
-    }
-
-    // If max_tokens is within the limit, return the request unchanged
-    return request;
-  }
-
-  /**
    * Check if cache control should be disabled based on configuration.
    *
-   * @returns true if cache control should be disabled, false otherwise
+   * @returns true if cache control should be enabled, false otherwise
    */
-  private shouldDisableCacheControl(): boolean {
+  private shouldEnableCacheControl(): boolean {
+    // Cache control is enabled by default (when enableCacheControl is undefined or true).
     return (
-      this.cliConfig.getContentGeneratorConfig()?.disableCacheControl === true
+      this.cliConfig.getContentGeneratorConfig()?.enableCacheControl !== false
     );
   }
 }

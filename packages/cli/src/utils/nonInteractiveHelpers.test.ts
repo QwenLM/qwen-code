@@ -29,6 +29,7 @@ import {
   extractUsageFromGeminiClient,
   computeUsageFromMetrics,
   buildSystemMessage,
+  createToolProgressHandler,
   createTaskToolProgressHandler,
   functionResponsePartsToString,
   toolResultContent,
@@ -301,11 +302,8 @@ describe('extractUsageFromGeminiClient', () => {
         throw new Error('Test error');
       }),
     };
-    const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     const result = extractUsageFromGeminiClient(client);
     expect(result).toBeUndefined();
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
   });
 
   it('should skip responses without usageMetadata', () => {
@@ -621,6 +619,115 @@ describe('buildSystemMessage', () => {
 
     // Should only include 'commit' (FILE command)
     expect(result.slash_commands).toEqual(['commit']);
+  });
+});
+
+describe('createToolProgressHandler', () => {
+  const mockRequest = {
+    callId: 'tool-call-1',
+    name: 'mcp__echo-test__echo',
+    args: {},
+    isClientInitiated: false,
+    prompt_id: '',
+  };
+
+  it('should call emitToolProgress with request and McpToolProgressData', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const { handler } = createToolProgressHandler(mockRequest, mockAdapter);
+
+    const progressData = {
+      type: 'mcp_tool_progress' as const,
+      progress: 1,
+      total: 10,
+      message: 'Echo: 1',
+    };
+    handler('tool-call-1', progressData);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledWith(
+      mockRequest,
+      progressData,
+    );
+  });
+
+  it('should not call emitToolProgress for non-McpToolProgressData output', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const { handler } = createToolProgressHandler(
+      { ...mockRequest, name: 'test_tool' },
+      mockAdapter,
+    );
+
+    // Pass a non-McpToolProgressData ToolResultDisplay (e.g., FileDiff)
+    handler('tool-call-1', {
+      fileDiff: 'diff',
+      fileName: 'test.ts',
+      originalContent: null,
+      newContent: 'new',
+    });
+
+    expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
+
+    // Also test with a plain string — should not emit
+    handler('tool-call-1', 'plain string progress');
+
+    expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
+  });
+
+  it('should forward multiple progress updates', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const browserRequest = {
+      ...mockRequest,
+      name: 'mcp__browser__navigate',
+    };
+    const { handler } = createToolProgressHandler(browserRequest, mockAdapter);
+
+    const progress1 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 1,
+      total: 3,
+      message: 'Navigating...',
+    };
+    const progress2 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 2,
+      total: 3,
+      message: 'Loading page...',
+    };
+    const progress3 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 3,
+      total: 3,
+      message: 'Complete',
+    };
+
+    handler('tool-call-1', progress1);
+    handler('tool-call-1', progress2);
+    handler('tool-call-1', progress3);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledTimes(3);
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      1,
+      browserRequest,
+      progress1,
+    );
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      2,
+      browserRequest,
+      progress2,
+    );
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      3,
+      browserRequest,
+      progress3,
+    );
   });
 });
 
@@ -982,26 +1089,6 @@ describe('createTaskToolProgressHandler', () => {
 
     // Should not emit tool_result if no content
     expect(mockAdapter.emitToolResult).not.toHaveBeenCalled();
-  });
-
-  it('should work without adapter (non-JSON mode)', () => {
-    const { handler } = createTaskToolProgressHandler(
-      mockConfig,
-      'parent-tool-id',
-      undefined,
-    );
-
-    const taskDisplay: TaskResultDisplay = {
-      type: 'task_execution',
-      subagentName: 'test-agent',
-      taskDescription: 'Test task',
-      taskPrompt: 'Test prompt',
-      status: 'running',
-      toolCalls: [],
-    };
-
-    // Should not throw
-    expect(() => handler('task-call-id', taskDisplay)).not.toThrow();
   });
 
   it('should work with adapter that does not support subagent APIs', () => {

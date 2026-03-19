@@ -89,6 +89,8 @@ export interface CommandContext {
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;
+  /** Abort signal for cancelling long-running slash command operations via ESC. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -137,6 +139,10 @@ export interface OpenDialogActionReturn {
 
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'
@@ -146,7 +152,9 @@ export interface OpenDialogActionReturn {
     | 'subagent_list'
     | 'permissions'
     | 'approval-mode'
-    | 'resume';
+    | 'resume'
+    | 'extensions_manage'
+    | 'mcp';
 }
 
 /**
@@ -207,6 +215,7 @@ export enum CommandKind {
   BUILT_IN = 'built-in',
   FILE = 'file',
   MCP_PROMPT = 'mcp-prompt',
+  SKILL = 'skill',
 }
 
 export interface CommandCompletionItem {

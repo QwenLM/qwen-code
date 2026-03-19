@@ -83,7 +83,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(result.messages).toHaveLength(1);
       expect(result.messages?.[0]).toEqual({
         role: 'user',
-        content: 'Hello world',
+        content: 'Hello\n\n world',
       });
       expect(originalRequest.messages?.[0].content).toEqual([
         { type: 'text', text: 'Hello' },
@@ -107,14 +107,36 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(result.messages?.[0].content).toBe('Hello world');
     });
 
-    it('throws when encountering non-text multimodal parts', () => {
+    it('handles plain string parts in the content array', () => {
+      const originalRequest = {
+        model: 'deepseek-chat',
+        messages: [
+          {
+            role: 'user' as const,
+            content: [
+              'Hello',
+              { type: 'text' as const, text: ' world' },
+            ] as unknown as OpenAI.Chat.ChatCompletionContentPart[],
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      expect(result.messages?.[0]).toEqual({
+        role: 'user',
+        content: 'Hello\n\n world',
+      });
+    });
+
+    it('replaces non-text parts with a placeholder', () => {
       const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'deepseek-chat',
         messages: [
           {
             role: 'user',
             content: [
-              { type: 'text', text: 'Hello' },
+              { type: 'text', text: 'Hello ' },
               {
                 type: 'image_url',
                 image_url: { url: 'https://example.com/image.png' },
@@ -124,9 +146,20 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
         ],
       };
 
-      expect(() =>
-        provider.buildRequest(originalRequest, userPromptId),
-      ).toThrow(/only supports text content/i);
+      const result = provider.buildRequest(originalRequest, userPromptId);
+
+      expect(result.messages?.[0]).toEqual({
+        role: 'user',
+        content: 'Hello \n\n[Unsupported content type: image_url]',
+      });
+    });
+  });
+
+  describe('getDefaultGenerationConfig', () => {
+    it('returns temperature 0', () => {
+      expect(provider.getDefaultGenerationConfig()).toEqual({
+        temperature: 0,
+      });
     });
   });
 });

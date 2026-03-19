@@ -24,6 +24,9 @@ import type {
   ModifyContext,
 } from './modifiable-tool.js';
 import { ToolErrorType } from './tool-error.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MEMORY_TOOL');
 
 const memoryToolSchemaData: FunctionDeclaration = {
   name: 'save_memory',
@@ -73,11 +76,16 @@ Do NOT use this tool:
 
 export const QWEN_CONFIG_DIR = '.qwen';
 export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
+export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
 
-// This variable will hold the currently configured filename for QWEN.md context files.
-// It defaults to DEFAULT_CONTEXT_FILENAME but can be overridden by setGeminiMdFilename.
-let currentGeminiMdFilename: string | string[] = DEFAULT_CONTEXT_FILENAME;
+// This variable will hold the currently configured filename for context files.
+// It defaults to include both QWEN.md and AGENTS.md but can be overridden by setGeminiMdFilename.
+// QWEN.md is first to maintain backward compatibility (used by /init command and save_memory tool).
+let currentGeminiMdFilename: string | string[] = [
+  DEFAULT_CONTEXT_FILENAME,
+  AGENT_CONTEXT_FILENAME,
+];
 
 export function setGeminiMdFilename(newFilename: string | string[]): void {
   if (Array.isArray(newFilename)) {
@@ -361,7 +369,7 @@ Project: ${projectPath} (current project only)`;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(
+      debugLogger.error(
         `[MemoryTool] Error executing save_memory for fact "${fact}" in ${scope}: ${errorMessage}`,
       );
 
@@ -435,7 +443,7 @@ export class MemoryTool
 
       await fsAdapter.writeFile(memoryFilePath, newContent, 'utf-8');
     } catch (error) {
-      console.error(
+      debugLogger.error(
         `[MemoryTool] Error adding memory entry to ${memoryFilePath}:`,
         error,
       );

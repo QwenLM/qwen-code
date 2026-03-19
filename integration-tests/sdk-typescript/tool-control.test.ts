@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   query,
   isSDKAssistantMessage,
+  isSDKResultMessage,
   type SDKMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
@@ -25,6 +26,7 @@ import {
   findToolResults,
   assertSuccessfulCompletion,
   createSharedTestOptions,
+  createResultWaiter,
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
@@ -751,6 +753,7 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'original content');
 
+        const resultWaiter = createResultWaiter(1);
         const canUseToolCalls: Array<{
           toolName: string;
           input: Record<string, unknown>;
@@ -768,7 +771,7 @@ describe('Tool Control Parameters (E2E)', () => {
             parent_tool_use_id: null,
           };
 
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          await resultWaiter.waitForResult(0);
         }
 
         const q = query({
@@ -795,6 +798,9 @@ describe('Tool Control Parameters (E2E)', () => {
         try {
           for await (const message of q) {
             messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
           }
 
           const toolCalls = findToolCalls(messages);
@@ -827,6 +833,7 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('test.txt', 'original content');
 
+        const resultWaiter = createResultWaiter(1);
         // Create an async generator that yields a single message
         async function* createPrompt(): AsyncIterable<SDKUserMessage> {
           yield {
@@ -838,7 +845,7 @@ describe('Tool Control Parameters (E2E)', () => {
             },
             parent_tool_use_id: null,
           };
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          await resultWaiter.waitForResult(0);
         }
 
         const q = query({
@@ -866,6 +873,9 @@ describe('Tool Control Parameters (E2E)', () => {
         try {
           for await (const message of q) {
             messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
           }
 
           // write_file should have been attempted but stream was closed
@@ -892,6 +902,7 @@ describe('Tool Control Parameters (E2E)', () => {
       async () => {
         await helper.createFile('data.txt', 'initial data');
 
+        const resultWaiter = createResultWaiter(2);
         const canUseToolCalls: string[] = [];
 
         // Create an async generator that yields multiple messages
@@ -908,8 +919,7 @@ describe('Tool Control Parameters (E2E)', () => {
             parent_tool_use_id: null,
           };
 
-          // Small delay to simulate multi-turn conversation
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await resultWaiter.waitForResult(0);
 
           yield {
             type: 'user',
@@ -920,6 +930,8 @@ describe('Tool Control Parameters (E2E)', () => {
             },
             parent_tool_use_id: null,
           };
+
+          await resultWaiter.waitForResult(1);
         }
 
         const q = query({
@@ -942,6 +954,9 @@ describe('Tool Control Parameters (E2E)', () => {
         try {
           for await (const message of q) {
             messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
           }
 
           const toolCalls = findToolCalls(messages);
@@ -951,17 +966,14 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(toolNames).toContain('read_file');
           expect(toolNames).toContain('write_file');
 
-          // canUseTool should not be called once stream is closed
-          expect(canUseToolCalls).toHaveLength(0);
+          expect(canUseToolCalls).toContain('write_file');
 
           const writeFileResults = findToolResults(messages, 'write_file');
           expect(writeFileResults.length).toBeGreaterThan(0);
-          for (const result of writeFileResults) {
-            expect(result.content).toContain('Error: Input closed');
-          }
 
           const content = await helper.readFile('data.txt');
-          expect(content).toBe('initial data');
+          expect(content).toContain('initial data');
+          expect(content).toContain(' - updated');
         } finally {
           await q.close();
         }

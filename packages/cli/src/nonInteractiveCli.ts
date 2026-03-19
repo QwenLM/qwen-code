@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Config,
-  ToolCallRequestInfo,
-  ToolResultDisplay,
-} from '@qwen-code/qwen-code-core';
+import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -22,6 +18,8 @@ import {
   InputFormat,
   uiTelemetryService,
   parseAndFormatApiError,
+  createDebugLogger,
+  SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -38,10 +36,13 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
   buildSystemMessage,
+  createToolProgressHandler,
   createTaskToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
@@ -53,18 +54,11 @@ import {
 async function emitNonInteractiveFinalMessage(params: {
   message: string;
   isError: boolean;
-  adapter?: JsonOutputAdapterInterface;
+  adapter: JsonOutputAdapterInterface;
   config: Config;
   startTimeMs: number;
 }): Promise<void> {
   const { message, isError, adapter, config } = params;
-
-  if (!adapter) {
-    // Text output mode: write directly to stdout/stderr
-    const target = isError ? process.stderr : process.stdout;
-    target.write(`${message}\n`);
-    return;
-  }
 
   // JSON output mode: emit assistant message and result
   // (systemMessage should already be emitted by caller)
@@ -122,18 +116,18 @@ export async function runNonInteractive(
 ): Promise<void> {
   return promptIdContext.run(prompt_id, async () => {
     // Create output adapter based on format
-    let adapter: JsonOutputAdapterInterface | undefined;
+    let adapter: JsonOutputAdapterInterface;
     const outputFormat = config.getOutputFormat();
 
     if (options.adapter) {
       adapter = options.adapter;
-    } else if (outputFormat === OutputFormat.JSON) {
-      adapter = new JsonOutputAdapter(config);
     } else if (outputFormat === OutputFormat.STREAM_JSON) {
       adapter = new StreamJsonOutputAdapter(
         config,
         config.getIncludePartialMessages(),
       );
+    } else {
+      adapter = new JsonOutputAdapter(config);
     }
 
     // Get readonly values once at the start
@@ -156,9 +150,7 @@ export async function runNonInteractive(
 
     // Setup signal handlers for graceful shutdown
     const shutdownHandler = () => {
-      if (config.getDebugMode()) {
-        console.error('[runNonInteractive] Shutdown signal received');
-      }
+      debugLogger.debug('[runNonInteractive] Shutdown signal received');
       abortController.abort();
     };
 
@@ -169,14 +161,12 @@ export async function runNonInteractive(
       process.on('SIGTERM', shutdownHandler);
 
       // Emit systemMessage first (always the first message in JSON mode)
-      if (adapter) {
-        const systemMessage = await buildSystemMessage(
-          config,
-          sessionId,
-          permissionMode,
-        );
-        adapter.emitMessage(systemMessage);
-      }
+      const systemMessage = await buildSystemMessage(
+        config,
+        sessionId,
+        permissionMode,
+      );
+      adapter.emitMessage(systemMessage);
 
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
@@ -237,7 +227,6 @@ export async function runNonInteractive(
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,
-            addItem: (_item, _timestamp) => 0,
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
@@ -277,51 +266,42 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          { isContinuation: !isFirstTurn },
+          {
+            type: isFirstTurn
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          },
         );
         isFirstTurn = false;
 
         // Start assistant message for this turn
-        if (adapter) {
-          adapter.startAssistantMessage();
-        }
+        adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
             handleCancellationError(config);
           }
-
-          if (adapter) {
-            // Use adapter for all event processing
-            adapter.processEvent(event);
-            if (event.type === GeminiEventType.ToolCallRequest) {
-              toolCallRequests.push(event.value);
-            }
-          } else {
-            // Text output mode - direct stdout
-            if (event.type === GeminiEventType.Thought) {
-              process.stdout.write(event.value.description);
-            } else if (event.type === GeminiEventType.Content) {
-              process.stdout.write(event.value);
-            } else if (event.type === GeminiEventType.ToolCallRequest) {
-              toolCallRequests.push(event.value);
-            } else if (event.type === GeminiEventType.Error) {
-              // Format and output the error message for text mode
-              const errorText = parseAndFormatApiError(
-                event.value.error,
-                config.getContentGeneratorConfig()?.authType,
-              );
-              process.stderr.write(`${errorText}\n`);
-              // Throw error to exit with non-zero code
-              throw new Error(errorText);
-            }
+          // Use adapter for all event processing
+          adapter.processEvent(event);
+          if (event.type === GeminiEventType.ToolCallRequest) {
+            toolCallRequests.push(event.value);
+          }
+          if (
+            outputFormat === OutputFormat.TEXT &&
+            event.type === GeminiEventType.Error
+          ) {
+            const errorText = parseAndFormatApiError(
+              event.value.error,
+              config.getContentGeneratorConfig()?.authType,
+            );
+            process.stderr.write(`${errorText}\n`);
+            // Throw error to exit with non-zero code
+            throw new Error(errorText);
           }
         }
 
         // Finalize assistant message
-        if (adapter) {
-          adapter.finalizeAssistantMessage();
-        }
+        adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
         if (toolCallRequests.length > 0) {
@@ -339,51 +319,29 @@ export async function runNonInteractive(
                 ? options.controlService.permission.getToolCallUpdateCallback()
                 : undefined;
 
-            // Create output handler for Task tool (for subagent execution)
+            // Build outputUpdateHandler for this tool call.
+            // Task tool has its own complex handler (subagent messages).
+            // All other tools with canUpdateOutput=true (e.g., MCP tools)
+            // get a generic handler that emits progress via the adapter.
             const isTaskTool = finalRequestInfo.name === 'task';
-            const taskToolProgress = isTaskTool
+            const { handler: outputUpdateHandler } = isTaskTool
               ? createTaskToolProgressHandler(
                   config,
                   finalRequestInfo.callId,
                   adapter,
                 )
-              : undefined;
-            const taskToolProgressHandler = taskToolProgress?.handler;
-
-            // Create output handler for non-Task tools in text mode (for console output)
-            const nonTaskOutputHandler =
-              !isTaskTool && !adapter
-                ? (callId: string, outputChunk: ToolResultDisplay) => {
-                    // Print tool output to console in text mode
-                    if (typeof outputChunk === 'string') {
-                      process.stdout.write(outputChunk);
-                    } else if (
-                      outputChunk &&
-                      typeof outputChunk === 'object' &&
-                      'ansiOutput' in outputChunk
-                    ) {
-                      // Handle ANSI output - just print as string for now
-                      process.stdout.write(String(outputChunk.ansiOutput));
-                    }
-                  }
-                : undefined;
-
-            // Combine output handlers
-            const outputUpdateHandler =
-              taskToolProgressHandler || nonTaskOutputHandler;
+              : createToolProgressHandler(finalRequestInfo, adapter);
 
             const toolResponse = await executeToolCall(
               config,
               finalRequestInfo,
               abortController.signal,
-              outputUpdateHandler || toolCallUpdateCallback
-                ? {
-                    ...(outputUpdateHandler && { outputUpdateHandler }),
-                    ...(toolCallUpdateCallback && {
-                      onToolCallsUpdate: toolCallUpdateCallback,
-                    }),
-                  }
-                : undefined,
+              {
+                outputUpdateHandler,
+                ...(toolCallUpdateCallback && {
+                  onToolCallsUpdate: toolCallUpdateCallback,
+                }),
+              },
             );
 
             // Note: In JSON mode, subagent messages are automatically added to the main
@@ -405,9 +363,7 @@ export async function runNonInteractive(
               );
             }
 
-            if (adapter) {
-              adapter.emitToolResult(finalRequestInfo, toolResponse);
-            }
+            adapter.emitToolResult(finalRequestInfo, toolResponse);
 
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
@@ -415,51 +371,53 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // For JSON and STREAM_JSON modes, compute usage from metrics
-          if (adapter) {
-            const metrics = uiTelemetryService.getMetrics();
-            const usage = computeUsageFromMetrics(metrics);
-            // Get stats for JSON format output
-            const stats =
-              outputFormat === OutputFormat.JSON
-                ? uiTelemetryService.getMetrics()
-                : undefined;
-            adapter.emitResult({
-              isError: false,
-              durationMs: Date.now() - startTime,
-              apiDurationMs: totalApiDurationMs,
-              numTurns: turnCount,
-              usage,
-              stats,
-            });
-          } else {
-            // Text output mode - no usage needed
-            process.stdout.write('\n');
-          }
+          const metrics = uiTelemetryService.getMetrics();
+          const usage = computeUsageFromMetrics(metrics);
+          // Get stats for JSON format output
+          const stats =
+            outputFormat === OutputFormat.JSON
+              ? uiTelemetryService.getMetrics()
+              : undefined;
+          adapter.emitResult({
+            isError: false,
+            durationMs: Date.now() - startTime,
+            apiDurationMs: totalApiDurationMs,
+            numTurns: turnCount,
+            usage,
+            stats,
+          });
           return;
         }
       }
     } catch (error) {
+      // Ensure message_start / message_stop (and content_block events) are
+      // properly paired even when an error aborts the turn mid-stream.
+      // The call is safe when no message was started (throws → caught) or
+      // when already finalized (idempotent guard inside the adapter).
+      try {
+        adapter.finalizeAssistantMessage();
+      } catch {
+        // Expected when no message was started or already finalized
+      }
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
-      if (adapter) {
-        const metrics = uiTelemetryService.getMetrics();
-        const usage = computeUsageFromMetrics(metrics);
-        // Get stats for JSON format output
-        const stats =
-          outputFormat === OutputFormat.JSON
-            ? uiTelemetryService.getMetrics()
-            : undefined;
-        adapter.emitResult({
-          isError: true,
-          durationMs: Date.now() - startTime,
-          apiDurationMs: totalApiDurationMs,
-          numTurns: turnCount,
-          errorMessage: message,
-          usage,
-          stats,
-        });
-      }
+      const metrics = uiTelemetryService.getMetrics();
+      const usage = computeUsageFromMetrics(metrics);
+      // Get stats for JSON format output
+      const stats =
+        outputFormat === OutputFormat.JSON
+          ? uiTelemetryService.getMetrics()
+          : undefined;
+      adapter.emitResult({
+        isError: true,
+        durationMs: Date.now() - startTime,
+        apiDurationMs: totalApiDurationMs,
+        numTurns: turnCount,
+        errorMessage: message,
+        usage,
+        stats,
+      });
       handleError(error, config);
     } finally {
       process.stdout.removeListener('error', stdoutErrorHandler);
@@ -467,7 +425,7 @@ export async function runNonInteractive(
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
       if (isTelemetrySdkInitialized()) {
-        await shutdownTelemetry(config);
+        await shutdownTelemetry();
       }
     }
   });

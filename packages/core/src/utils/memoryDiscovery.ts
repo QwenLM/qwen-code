@@ -12,19 +12,9 @@ import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
+import { createDebugLogger } from './debugLogger.js';
 
-// Simple console logger, similar to the one previously in CLI's config.ts
-// TODO: Integrate with a more robust server-side logger if available/appropriate.
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) =>
-    console.debug('[DEBUG] [MemoryDiscovery]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  warn: (...args: any[]) => console.warn('[WARN] [MemoryDiscovery]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) =>
-    console.error('[ERROR] [MemoryDiscovery]', ...args),
-};
+const logger = createDebugLogger('MEMORY_DISCOVERY');
 
 interface GeminiFileContent {
   filePath: string;
@@ -79,7 +69,6 @@ async function getGeminiMdFilePathsInternal(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
   userHomePath: string,
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -100,7 +89,6 @@ async function getGeminiMdFilePathsInternal(
       getGeminiMdFilePathsInternalForEachDir(
         dir,
         userHomePath,
-        debugMode,
         fileService,
         extensionContextFilePaths,
         folderTrust,
@@ -128,7 +116,6 @@ async function getGeminiMdFilePathsInternal(
 async function getGeminiMdFilePathsInternalForEachDir(
   dir: string,
   userHomePath: string,
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -148,10 +135,9 @@ async function getGeminiMdFilePathsInternalForEachDir(
     try {
       await fs.access(globalMemoryPath, fsSync.constants.R_OK);
       allPaths.add(globalMemoryPath);
-      if (debugMode)
-        logger.debug(
-          `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
-        );
+      logger.debug(
+        `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
+      );
     } catch {
       // It's okay if it's not found.
     }
@@ -167,10 +153,9 @@ async function getGeminiMdFilePathsInternalForEachDir(
         await fs.access(homeContextPath, fsSync.constants.R_OK);
         if (homeContextPath !== globalMemoryPath) {
           allPaths.add(homeContextPath);
-          if (debugMode)
-            logger.debug(
-              `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
-            );
+          logger.debug(
+            `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
+          );
         }
       } catch {
         // Not found, which is okay
@@ -179,14 +164,12 @@ async function getGeminiMdFilePathsInternalForEachDir(
       // FIX: Only perform the workspace search (upward scan from CWD to project root)
       // if a valid currentWorkingDirectory is provided and it's not the home directory.
       const resolvedCwd = path.resolve(dir);
-      if (debugMode)
-        logger.debug(
-          `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
-        );
+      logger.debug(
+        `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
+      );
 
       const projectRoot = await findProjectRoot(resolvedCwd);
-      if (debugMode)
-        logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
+      logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
 
       const upwardPaths: string[] = [];
       let currentDir = resolvedCwd;
@@ -226,18 +209,16 @@ async function getGeminiMdFilePathsInternalForEachDir(
 
   const finalPaths = Array.from(allPaths);
 
-  if (debugMode)
-    logger.debug(
-      `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
-        finalPaths,
-      )}`,
-    );
+  logger.debug(
+    `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
+      finalPaths,
+    )}`,
+  );
   return finalPaths;
 }
 
 async function readGeminiMdFiles(
   filePaths: string[],
-  debugMode: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
 ): Promise<GeminiFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
@@ -255,15 +236,13 @@ async function readGeminiMdFiles(
           const processedResult = await processImports(
             content,
             path.dirname(filePath),
-            debugMode,
             undefined,
             undefined,
             importFormat,
           );
-          if (debugMode)
-            logger.debug(
-              `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
-            );
+          logger.debug(
+            `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
+          );
 
           return { filePath, content: processedResult.content };
         } catch (error: unknown) {
@@ -276,7 +255,7 @@ async function readGeminiMdFiles(
               `Warning: Could not read ${getAllGeminiMdFilenames()} file at ${filePath}. Error: ${message}`,
             );
           }
-          if (debugMode) logger.debug(`Failed to read: ${filePath}`);
+          logger.debug(`Failed to read: ${filePath}`);
           return { filePath, content: null }; // Still include it with null content
         }
       },
@@ -333,16 +312,14 @@ export interface LoadServerHierarchicalMemoryResponse {
 export async function loadServerHierarchicalMemory(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
 ): Promise<LoadServerHierarchicalMemoryResponse> {
-  if (debugMode)
-    logger.debug(
-      `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
-    );
+  logger.debug(
+    `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
+  );
 
   // For the server, homedir() refers to the server process's home.
   // This is consistent with how MemoryTool already finds the global path.
@@ -351,20 +328,15 @@ export async function loadServerHierarchicalMemory(
     currentWorkingDirectory,
     includeDirectoriesToReadGemini,
     userHomePath,
-    debugMode,
     fileService,
     extensionContextFilePaths,
     folderTrust,
   );
   if (filePaths.length === 0) {
-    if (debugMode) logger.debug('No QWEN.md files found in hierarchy.');
+    logger.debug('No QWEN.md files found in hierarchy.');
     return { memoryContent: '', fileCount: 0 };
   }
-  const contentsWithPaths = await readGeminiMdFiles(
-    filePaths,
-    debugMode,
-    importFormat,
-  );
+  const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
   // Pass CWD for relative path display in concatenated content
   const combinedInstructions = concatenateInstructions(
     contentsWithPaths,
@@ -378,14 +350,6 @@ export async function loadServerHierarchicalMemory(
     memoryFilenames.has(path.basename(item.filePath)),
   ).length;
 
-  if (debugMode)
-    logger.debug(
-      `Combined instructions length: ${combinedInstructions.length}`,
-    );
-  if (debugMode && combinedInstructions.length > 0)
-    logger.debug(
-      `Combined instructions (snippet): ${combinedInstructions.substring(0, 500)}...`,
-    );
   return {
     memoryContent: combinedInstructions,
     fileCount, // Only count the context files

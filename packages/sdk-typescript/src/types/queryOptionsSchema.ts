@@ -123,12 +123,29 @@ export const TimeoutConfigSchema = z.object({
   streamClose: z.number().positive().optional(),
 });
 
+const QuerySystemPromptPresetSchema = z
+  .object({
+    type: z.literal('preset'),
+    preset: z.literal('qwen_code'),
+    append: z
+      .string()
+      .min(1, 'systemPrompt.append must be a non-empty string')
+      .optional(),
+  })
+  .strict();
+
 export const QueryOptionsSchema = z
   .object({
     cwd: z.string().optional(),
     model: z.string().optional(),
     pathToQwenExecutable: z.string().optional(),
     env: z.record(z.string(), z.string()).optional(),
+    systemPrompt: z
+      .union([
+        z.string().min(1, 'systemPrompt must be a non-empty string'),
+        QuerySystemPromptPresetSchema,
+      ])
+      .optional(),
     permissionMode: z.enum(['default', 'plan', 'auto-edit', 'yolo']).optional(),
     canUseTool: z
       .custom<CanUseTool>((val) => typeof val === 'function', {
@@ -148,7 +165,9 @@ export const QueryOptionsSchema = z
     coreTools: z.array(z.string()).optional(),
     excludeTools: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),
-    authType: z.enum(['openai', 'qwen-oauth']).optional(),
+    authType: z
+      .enum(['openai', 'anthropic', 'qwen-oauth', 'gemini', 'vertex-ai'])
+      .optional(),
     agents: z
       .array(
         z.custom<SubagentConfig>(
@@ -164,6 +183,8 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     includePartialMessages: z.boolean().optional(),
+    resume: z.string().optional(),
+    sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

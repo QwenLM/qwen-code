@@ -42,6 +42,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     branchName: 'main',
     nightly: false,
     debugMessage: '',
+    currentModel: 'gemini-pro',
     sessionStats: {
       lastPromptTokenCount: 0,
     },

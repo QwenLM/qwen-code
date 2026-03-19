@@ -113,7 +113,6 @@ export const directoryCommand: SlashCommand = {
                   ...config.getWorkspaceContext().getDirectories(),
                   ...pathsToAdd,
                 ],
-                config.getDebugMode(),
                 config.getFileService(),
                 config.getExtensionContextFilePaths(),
                 config.getFolderTrust(),

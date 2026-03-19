@@ -6,6 +6,7 @@
 
 import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ExtensionUpdateState } from '../../ui/state/extensions.js';
 import {
   checkForExtensionUpdate,
@@ -39,11 +40,13 @@ export async function handleUpdate(args: UpdateArgs) {
         (extension) => extension.name === args.name,
       );
       if (!extension) {
-        console.log(t('Extension "{{name}}" not found.', { name: args.name }));
+        writeStdoutLine(
+          t('Extension "{{name}}" not found.', { name: args.name }),
+        );
         return;
       }
       if (!extension.installMetadata) {
-        console.log(
+        writeStdoutLine(
           t(
             'Unable to install extension "{{name}}" due to missing install metadata',
             { name: args.name },
@@ -56,7 +59,7 @@ export async function handleUpdate(args: UpdateArgs) {
         extensionManager,
       );
       if (updateState !== ExtensionUpdateState.UPDATE_AVAILABLE) {
-        console.log(
+        writeStdoutLine(
           t('Extension "{{name}}" is already up to date.', { name: args.name }),
         );
         return;
@@ -71,7 +74,7 @@ export async function handleUpdate(args: UpdateArgs) {
         updatedExtensionInfo.originalVersion !==
         updatedExtensionInfo.updatedVersion
       ) {
-        console.log(
+        writeStdoutLine(
           t(
             'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.',
             {
@@ -82,12 +85,12 @@ export async function handleUpdate(args: UpdateArgs) {
           ),
         );
       } else {
-        console.log(
+        writeStdoutLine(
           t('Extension "{{name}}" is already up to date.', { name: args.name }),
         );
       }
     } catch (error) {
-      console.error(getErrorMessage(error));
+      writeStderrLine(getErrorMessage(error));
     }
   }
   if (args.all) {
@@ -109,12 +112,12 @@ export async function handleUpdate(args: UpdateArgs) {
         (info) => info.originalVersion !== info.updatedVersion,
       );
       if (updateInfos.length === 0) {
-        console.log(t('No extensions to update.'));
+        writeStdoutLine(t('No extensions to update.'));
         return;
       }
-      console.log(updateInfos.map((info) => updateOutput(info)).join('\n'));
+      writeStdoutLine(updateInfos.map((info) => updateOutput(info)).join('\n'));
     } catch (error) {
-      console.error(getErrorMessage(error));
+      writeStderrLine(getErrorMessage(error));
     }
   }
 }

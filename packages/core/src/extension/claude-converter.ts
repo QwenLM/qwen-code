@@ -16,6 +16,7 @@ import type {
   ExtensionInstallMetadata,
   MCPServerConfig,
 } from '../config/config.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
@@ -23,6 +24,122 @@ import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
+import { substituteHookVariables } from './variables.js';
+
+const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
+
+/**
+ * Perform variable replacement in all markdown and shell script files of the extension.
+ * This is done during the conversion phase to avoid modifying files during every extension load.
+ * @param extensionPath - The path to the extension directory
+ */
+export function performVariableReplacement(extensionPath: string): void {
+  // Process markdown files
+  const mdGlobPattern = '**/*.md';
+  const mdGlobOptions = {
+    cwd: extensionPath,
+    nodir: true,
+  };
+
+  try {
+    const mdFiles = glob.sync(mdGlobPattern, mdGlobOptions);
+
+    for (const file of mdFiles) {
+      const filePath = path.join(extensionPath, file);
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+
+        // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
+        const updatedContent = content.replace(
+          /\$\{CLAUDE_PLUGIN_ROOT\}/g,
+          extensionPath,
+        );
+
+        // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax
+        // This regex finds code blocks with ! language identifier and captures their content
+        const updatedMdContent = updatedContent.replace(
+          /```!(?:\s*\n)?([\s\S]*?)\n*```/g,
+          '!{$1}',
+        );
+
+        // Only write if content was actually changed
+        if (updatedMdContent !== content) {
+          fs.writeFileSync(filePath, updatedMdContent, 'utf8');
+          debugLogger.debug(
+            `Updated variables and syntax in file: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to scan markdown files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // Process shell script files
+  const scriptGlobPattern = '**/*.sh';
+  const scriptGlobOptions = {
+    cwd: extensionPath,
+    nodir: true,
+  };
+
+  try {
+    const scriptFiles = glob.sync(scriptGlobPattern, scriptGlobOptions);
+
+    for (const file of scriptFiles) {
+      const filePath = path.join(extensionPath, file);
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+
+        // Replace references to "role":"assistant" with "type":"assistant" in shell scripts
+        const updatedScriptContent = content.replace(
+          /"role":"assistant"/g,
+          '"type":"assistant"',
+        );
+
+        // Replace transcript parsing logic to adapt to actual transcript structure
+        // Change from .message.content | map(select(.type == "text")) to .message.parts | map(select(has("text")))
+        const adaptedScriptContent = updatedScriptContent.replace(
+          /\.message\.content\s*\|\s*map\(select\(\.type\s*==\s*"text"\)\)/g,
+          '.message.parts | map(select(has("text")))',
+        );
+
+        // Replace references to ".claude" directory with ".qwen" in shell scripts
+        // Only match path references (e.g., ~/.claude/, $HOME/.claude, ./.claude/)
+        // Avoid matching URLs, comments, or string literals containing .claude
+        const finalScriptContent = adaptedScriptContent.replace(
+          /(\$\{?HOME\}?\/|~\/)?\.claude(\/|$)/g,
+          '$1.qwen$2',
+        );
+
+        // Only write if content was actually changed
+        if (finalScriptContent !== content) {
+          fs.writeFileSync(filePath, finalScriptContent, 'utf8');
+          debugLogger.debug(
+            `Updated transcript format and replaced .claude with .qwen in shell script: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to process shell script file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to scan shell script files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 export interface ClaudePluginConfig {
   name: string;
@@ -36,10 +153,10 @@ export interface ClaudePluginConfig {
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
-  hooks?: string;
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
   outputStyles?: string | string[];
-  lspServers?: string;
+  lspServers?: string | Record<string, unknown>;
 }
 
 /**
@@ -88,7 +205,7 @@ export interface ClaudeMarketplaceConfig {
 }
 
 const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
-  AskUserQuestion: 'None',
+  AskUserQuestion: 'AskUserQuestion',
   Bash: 'Shell',
   BashOutput: 'None',
   Edit: 'Edit',
@@ -97,7 +214,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Grep: 'Grep',
   KillShell: 'None',
   NotebookEdit: 'None',
-  Read: ['ReadFile', 'ReadManyFiles'],
+  Read: 'ReadFile',
   Skill: 'Skill',
   Task: 'Task',
   TodoWrite: 'TodoWrite',
@@ -223,10 +340,11 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
 
     try {
       const content = await fs.promises.readFile(filePath, 'utf-8');
+      const normalizedContent = normalizeContent(content);
 
       // Parse frontmatter
       const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-      const match = content.match(frontmatterRegex);
+      const match = normalizedContent.match(frontmatterRegex);
 
       if (!match) {
         // No frontmatter, skip this file
@@ -274,7 +392,7 @@ ${systemPrompt}
 
       await fs.promises.writeFile(filePath, newContent, 'utf-8');
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] Failed to convert agent file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -299,7 +417,7 @@ export function convertClaudeToQwenConfig(
   if (claudeConfig.mcpServers) {
     if (typeof claudeConfig.mcpServers === 'string') {
       // TODO: Load from file path
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
     } else {
@@ -307,28 +425,33 @@ export function convertClaudeToQwenConfig(
     }
   }
 
-  // Warn about unsupported fields
+  // Parse hooks
+  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
   if (claudeConfig.hooks) {
-    console.warn(
-      `[Claude Converter] Hooks are not yet supported in ${claudeConfig.name}`,
-    );
+    if (typeof claudeConfig.hooks === 'string') {
+      // If it's a string, it's a file path, we handle it later in the conversion process
+      // hooks will be loaded from file path in the convertClaudePluginPackage function
+    } else {
+      // Assume it's already in the correct format
+      hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
+    }
+  } else {
+    hooks = undefined;
   }
+
+  // Warn about unsupported fields
   if (claudeConfig.outputStyles) {
-    console.warn(
+    debugLogger.warn(
       `[Claude Converter] Output styles are not yet supported in ${claudeConfig.name}`,
     );
   }
-  if (claudeConfig.lspServers) {
-    console.warn(
-      `[Claude Converter] LSP servers are not yet supported in ${claudeConfig.name}`,
-    );
-  }
-
   // Direct field mapping - commands, skills, agents will be collected as folders
   return {
     name: claudeConfig.name,
     version: claudeConfig.version,
     mcpServers,
+    lspServers: claudeConfig.lspServers,
+    hooks, // Assign the properly typed hooks variable
   };
 }
 
@@ -389,15 +512,15 @@ export async function convertClaudePluginPackage(
   const strict = marketplacePlugin.strict ?? false;
   let mergedConfig: ClaudePluginConfig;
 
-  if (strict) {
-    const pluginJsonPath = path.join(
-      pluginSource,
-      '.claude-plugin',
-      'plugin.json',
-    );
-    if (!fs.existsSync(pluginJsonPath)) {
-      throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
-    }
+  const pluginJsonPath = path.join(
+    pluginSource,
+    '.claude-plugin',
+    'plugin.json',
+  );
+  if (strict && !fs.existsSync(pluginJsonPath)) {
+    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+  }
+  if (fs.existsSync(pluginJsonPath)) {
     const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
     const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
     mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
@@ -419,7 +542,7 @@ export async function convertClaudePluginPackage(
           MCPServerConfig
         >;
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `Failed to parse MCP servers file ${mcpServersPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -433,29 +556,76 @@ export async function convertClaudePluginPackage(
     // Step 6: Copy plugin files to temporary directory
     await copyDirectory(pluginSource, tmpDir);
 
-    // Step 7: Collect commands to commands folder
-    if (mergedConfig.commands) {
-      const commandsDestDir = path.join(tmpDir, 'commands');
-      await collectResources(
-        mergedConfig.commands,
-        pluginSource,
-        commandsDestDir,
-      );
+    // Step 6.1: Handle commands/skills/agents folders based on configuration
+    // If configuration specifies resources, only collect those
+    // If configuration doesn't specify, keep the existing folder (if exists)
+    const resourceConfigs = [
+      { name: 'commands', config: mergedConfig.commands },
+      { name: 'skills', config: mergedConfig.skills },
+      { name: 'agents', config: mergedConfig.agents },
+    ];
+
+    for (const { name, config } of resourceConfigs) {
+      const folderPath = path.join(tmpDir, name);
+      const sourceFolderPath = path.join(pluginSource, name);
+
+      // If config explicitly specifies resources, remove existing folder and collect only specified ones
+      if (config) {
+        if (fs.existsSync(folderPath)) {
+          fs.rmSync(folderPath, { recursive: true, force: true });
+        }
+        await collectResources(config, pluginSource, folderPath);
+      }
+      // If config doesn't specify and source folder doesn't exist in pluginSource,
+      // remove it from tmpDir (it was copied but not needed)
+      else if (!fs.existsSync(sourceFolderPath) && fs.existsSync(folderPath)) {
+        fs.rmSync(folderPath, { recursive: true, force: true });
+      }
+      // Otherwise, keep the existing folder from pluginSource (default behavior)
     }
 
-    // Step 8: Collect skills to skills folder
-    if (mergedConfig.skills) {
-      const skillsDestDir = path.join(tmpDir, 'skills');
-      await collectResources(mergedConfig.skills, pluginSource, skillsDestDir);
+    // Step 7: Handle hooks from file paths if needed
+    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+      const hooksPath = path.isAbsolute(mergedConfig.hooks)
+        ? mergedConfig.hooks
+        : path.join(pluginSource, mergedConfig.hooks);
+
+      if (fs.existsSync(hooksPath)) {
+        try {
+          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
+          const parsedHooks = JSON.parse(hooksContent);
+
+          // Check if the file has a top-level "hooks" property (like Claude plugins use)
+          // or if the entire file content is the hooks object
+          let hooksData;
+          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+            hooksData = parsedHooks.hooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          } else {
+            // Assume the entire file content is the hooks object
+            hooksData = parsedHooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          }
+
+          // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
     }
 
-    // Step 9: Collect agents to agents folder
-    const agentsDestDir = path.join(tmpDir, 'agents');
-    if (mergedConfig.agents) {
-      await collectResources(mergedConfig.agents, pluginSource, agentsDestDir);
-    }
     // Step 9.1: Convert collected agent files from Claude format to Qwen format
+    const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
+
+    // Step 9.2: Perform variable replacement in markdown and shell script files
+    // This is done during conversion to avoid modifying files during every extension load
+    performVariableReplacement(tmpDir);
 
     // Step 10: Convert to Qwen format config
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);
@@ -511,7 +681,7 @@ async function collectResources(
       : path.join(pluginRoot, resourcePath);
 
     if (!fs.existsSync(resolvedPath)) {
-      console.warn(`Resource path not found: ${resolvedPath}`);
+      debugLogger.warn(`Resource path not found: ${resolvedPath}`);
       continue;
     }
 
@@ -525,11 +695,15 @@ async function collectResources(
       // If the directory is already named as the destination folder (e.g., 'commands')
       // and it's at the plugin root level, skip it
       if (dirName === destFolderName && parentDir === pluginRoot) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in the correct location`,
         );
         continue;
       }
+
+      // Determine destination: preserve the directory name
+      // e.g., ./skills/xlsx -> tmpDir/skills/xlsx/
+      const finalDestDir = path.join(destDir, dirName);
 
       // Copy all files from the directory
       const files = await glob('**/*', {
@@ -540,7 +714,19 @@ async function collectResources(
 
       for (const file of files) {
         const srcFile = path.join(resolvedPath, file);
-        const destFile = path.join(destDir, file);
+        const destFile = path.join(finalDestDir, file);
+
+        // Check if the source is a regular file (skip sockets, FIFOs, directories behind symlinks, etc.)
+        try {
+          const fileStat = fs.statSync(srcFile);
+          if (!fileStat.isFile()) {
+            debugLogger.debug(`Skipping non-regular file: ${srcFile}`);
+            continue;
+          }
+        } catch {
+          debugLogger.debug(`Failed to stat file, skipping: ${srcFile}`);
+          continue;
+        }
 
         // Ensure parent directory exists
         const destFileDir = path.dirname(destFile);
@@ -558,7 +744,7 @@ async function collectResources(
       // e.g., 'commands/test1.md' or 'commands/me/test.md' should be skipped
       const segments = relativePath.split(path.sep);
       if (segments.length > 0 && segments[0] === destFolderName) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in ${destFolderName}/`,
         );
         continue;
@@ -692,6 +878,7 @@ async function resolvePluginSource(
       const installMetadata: ExtensionInstallMetadata = {
         source,
         type: 'git',
+        originSource: 'Claude',
       };
       try {
         await downloadFromGitHubRelease(installMetadata, pluginDir);

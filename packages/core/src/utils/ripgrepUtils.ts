@@ -7,9 +7,11 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('RIPGREP');
 
 const RIPGREP_COMMAND = 'rg';
 const RIPGREP_BUFFER_LIMIT = 20_000_000; // Keep buffers aligned with the original bundle.
@@ -110,26 +112,22 @@ export function getBuiltinRipgrep(): string | null {
   }
 
   const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
-  const relTarget = path.join(
+
+  // Determine levels to traverse up to reach package root where vendor/ lives:
+  // - Bundle (dist/index.js): vendor copied into dist/, 0 levels
+  // - Source (src/utils/*.ts): 2 levels up
+  // - Transpiled (dist/src/utils/*.js): 3 levels up
+  const inSrcUtils = __filename.includes(path.join('src', 'utils'));
+  const levelsUp = !inSrcUtils ? 0 : __filename.endsWith('.ts') ? 2 : 3;
+
+  return path.join(
+    __dirname,
+    ...Array<string>(levelsUp).fill('..'),
     'vendor',
     'ripgrep',
     `${arch}-${platform}`,
     binaryName,
   );
-
-  // Walk upward from __dirname until we find vendor/ripgrep/ or hit the root
-  let dir = __dirname;
-  const root = path.parse(dir).root;
-  while (dir !== root) {
-    const candidate = path.join(dir, relTarget);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-    dir = path.dirname(dir);
-  }
-
-  // Not found — return best-guess path (will trigger a clear error downstream)
-  return path.join(__dirname, relTarget);
 }
 
 /**
@@ -311,7 +309,7 @@ export async function runRipgrep(
 
         // Log warnings for abnormal exits (except syntax errors)
         if (!syntaxError && truncated) {
-          console.warn(
+          debugLogger.warn(
             `ripgrep exited abnormally (signal=${error.signal} code=${error.code}) with stderr:\n${stderr.trim() || '(empty)'}`,
           );
         }

@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// File for 'gemini mcp list' command
+// File for 'qwen mcp list' command
 import type { CommandModule } from 'yargs';
 import { loadSettings } from '../../config/settings.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import {
   MCPServerStatus,
@@ -96,11 +97,11 @@ export async function listMcpServers(): Promise<void> {
   const serverNames = Object.keys(mcpServers);
 
   if (serverNames.length === 0) {
-    console.log('No MCP servers configured.');
+    writeStdoutLine('No MCP servers configured.');
     return;
   }
 
-  console.log('Configured MCP servers:\n');
+  writeStdoutLine('Configured MCP servers:\n');
 
   for (const serverName of serverNames) {
     const server = mcpServers[serverName];
@@ -134,7 +135,7 @@ export async function listMcpServers(): Promise<void> {
       serverInfo += `${server.command} ${server.args?.join(' ') || ''} (stdio)`;
     }
 
-    console.log(`${statusIndicator} ${serverInfo} - ${statusText}`);
+    writeStdoutLine(`${statusIndicator} ${serverInfo} - ${statusText}`);
   }
 }
 

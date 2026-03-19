@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
-import { InputFormat, logUserPrompt } from '@qwen-code/qwen-code-core';
+import {
+  InputFormat,
+  isDebugLoggingDegraded,
+  logUserPrompt,
+  Storage,
+  type Config,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
@@ -29,9 +35,9 @@ import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -50,9 +56,13 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
+import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
+import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+
+const debugLogger = createDebugLogger('STARTUP');
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -65,7 +75,7 @@ export function validateDnsResolutionOrder(
     return order;
   }
   // We don't want to throw here, just warn and use the default.
-  console.warn(
+  writeStderrLine(
     `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
   );
   return defaultValue;
@@ -81,7 +91,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   // Set target to 50% of total memory
   const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);
   if (isDebugMode) {
-    console.debug(
+    writeStderrLine(
       `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
     );
   }
@@ -92,7 +102,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
   if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
     if (isDebugMode) {
-      console.debug(
+      writeStderrLine(
         `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB`,
       );
     }
@@ -153,13 +163,15 @@ export async function startInteractiveUI(
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
-              <AppContainer
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                version={version}
-                initializationResult={initializationResult}
-              />
+              <AgentViewProvider config={config}>
+                <AppContainer
+                  config={config}
+                  settings={settings}
+                  startupWarnings={startupWarnings}
+                  version={version}
+                  initializationResult={initializationResult}
+                />
+              </AgentViewProvider>
             </VimModeProvider>
           </SessionStatsProvider>
         </KeypressProvider>
@@ -181,16 +193,16 @@ export async function startInteractiveUI(
     },
   );
 
-  if (!settings.merged.general?.disableUpdateNag) {
+  // Check for updates only if enableAutoUpdate is not explicitly disabled.
+  // Using !== false ensures updates are enabled by default when undefined.
+  if (settings.merged.general?.enableAutoUpdate !== false) {
     checkForUpdates()
       .then((info) => {
         handleAutoUpdate(info, settings, config.getProjectRoot());
       })
       .catch((err) => {
         // Silently ignore update check errors.
-        if (config.getDebugMode()) {
-          console.error('Update check failed:', err);
-        }
+        debugLogger.warn(`Update check failed: ${err}`);
       });
   }
 
@@ -202,11 +214,11 @@ export async function main() {
   const settings = loadSettings();
   await cleanupCheckpoints();
 
-  let argv = await parseArguments(settings.merged);
+  let argv = await parseArguments();
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
-    console.error(
+    writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
     process.exit(1);
@@ -225,7 +237,9 @@ export async function main() {
     if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      console.warn(`Warning: Theme "${settings.merged.ui?.theme}" not found.`);
+      writeStderrLine(
+        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
+      );
     }
   }
 
@@ -252,7 +266,7 @@ export async function main() {
       if (!settings.merged.security?.auth?.useExternal) {
         // Validate authentication here because the sandbox will interfere with the Oauth2 web redirect.
         try {
-          const authType = partialConfig.modelsConfig.getCurrentAuthType();
+          const authType = partialConfig.getModelsConfig().getCurrentAuthType();
           // Fresh users may not have selected/persisted an authType yet.
           // In that case, defer auth prompting/selection to the main interactive flow.
           if (authType) {
@@ -264,7 +278,7 @@ export async function main() {
             await partialConfig.refreshAuth(authType);
           }
         } catch (err) {
-          console.error('Error authenticating:', err);
+          writeStderrLine(`Error authenticating: ${err}`);
           process.exit(1);
         }
       }
@@ -325,8 +339,12 @@ export async function main() {
   }
 
   // We are now past the logic handling potentially launching a child process
-  // to run Gemini CLI. It is now safe to perform expensive initialization that
+  // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
+
+  // Initialize output language file before config loads to ensure it's included in context
+  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+
   {
     const config = await loadCliConfig(
       settings.merged,
@@ -334,6 +352,9 @@ export async function main() {
       process.cwd(),
       argv.extensions,
     );
+
+    // Register cleanup for MCP clients as early as possible
+    // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
     // FIXME: list extensions after the config initialize
@@ -344,15 +365,6 @@ export async function main() {
     //   }
     //   process.exit(0);
     // }
-
-    // Setup unified ConsolePatcher based on interactive mode
-    const isInteractive = config.isInteractive();
-    const consolePatcher = new ConsolePatcher({
-      stderr: isInteractive,
-      debugMode: isDebugMode,
-    });
-    consolePatcher.patch();
-    registerCleanup(consolePatcher.cleanup);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -376,17 +388,16 @@ export async function main() {
     setMaxSizedBoxDebugging(isDebugMode);
 
     // Check input format early to determine initialization flow
-    const inputFormat =
-      typeof config.getInputFormat === 'function'
+    // In TTY mode, ignore stream-json input format to prevent process from hanging
+    const inputFormat = process.stdin.isTTY
+      ? InputFormat.TEXT
+      : typeof config.getInputFormat === 'function'
         ? config.getInputFormat()
         : InputFormat.TEXT;
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    let initializationResult: InitializationResult | undefined;
-    if (inputFormat !== InputFormat.STREAM_JSON) {
-      initializationResult = await initializeApp(config, settings);
-    }
+    const initializationResult = await initializeApp(config, settings);
 
     if (config.getExperimentalZedIntegration()) {
       return runAcpAgent(config, settings, argv);
@@ -402,6 +413,7 @@ export async function main() {
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
         })),
         ...getSettingsWarnings(settings),
+        ...config.getWarnings(),
       ]),
     ];
 
@@ -417,6 +429,19 @@ export async function main() {
         initializationResult!,
       );
       return;
+    }
+
+    // Print debug mode notice to stderr for non-interactive mode
+    if (config.getDebugMode()) {
+      writeStderrLine('Debug mode enabled');
+      writeStderrLine(
+        `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
+      );
+      if (isDebugLoggingDegraded()) {
+        writeStderrLine(
+          'Warning: Debug logging is degraded (write failures occurred)',
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here
@@ -454,7 +479,7 @@ export async function main() {
     }
 
     if (!input) {
-      console.error(
+      writeStderrLine(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
       );
       process.exit(1);
@@ -469,9 +494,7 @@ export async function main() {
       prompt_length: input.length,
     });
 
-    if (config.getDebugMode()) {
-      console.log('Session ID: %s', config.getSessionId());
-    }
+    debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run

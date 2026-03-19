@@ -12,7 +12,7 @@
 !.gemini/config.yaml
 !.gemini/commands/
 
-# Note: .gemini-clipboard/ is NOT in gitignore so Gemini can access pasted images
+# Note: .qwen-clipboard/ is NOT in gitignore so Gemini can access pasted images
 
 # Dependency directory
 node_modules
@@ -24,6 +24,8 @@ package-lock.json
 *.iml
 .cursor
 .qoder
+.claude
+CLAUDE.md
 
 # OS metadata
 .DS_Store
@@ -47,11 +49,17 @@ packages/*/coverage/
 # Generated files
 packages/cli/src/generated/
 packages/core/src/generated/
+packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
-.qwen/
+
+.qwen/*
+!.qwen/commands/
+!.qwen/commands/**
+!.qwen/skills/
+!.qwen/skills/**
 logs/
 # GHA credentials
 gha-creds-*.json
@@ -63,3 +71,15 @@ patch_output.log
 docs-site/.next
 # content is a symlink to ../docs
 docs-site/content
+
+# python cache
+__pycache__/
+
+integration-tests/concurrent-runner/output/
+integration-tests/concurrent-runner/task-*
+
+integration-tests/terminal-capture/scenarios/screenshots/
+
+# storybook
+*storybook.log
+storybook-static

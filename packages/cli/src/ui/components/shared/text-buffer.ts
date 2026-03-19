@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
-import { unescapePath } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, unescapePath } from '@qwen-code/qwen-code-core';
 import {
   toCodePoints,
   cpLen,
@@ -19,6 +19,8 @@ import {
 } from '../../utils/textUtils.js';
 import type { VimAction } from './vim-buffer-actions.js';
 import { handleVimAction } from './vim-buffer-actions.js';
+
+const debugLogger = createDebugLogger('TEXT_BUFFER');
 
 export type Direction =
   | 'left'
@@ -1143,7 +1145,7 @@ function textBufferReducerLogic(
             break;
           default: {
             const exhaustiveCheck: never = dir;
-            console.error(
+            debugLogger.error(
               `Unknown visual movement direction: ${exhaustiveCheck}`,
             );
             return state;
@@ -1489,7 +1491,7 @@ function textBufferReducerLogic(
 
     default: {
       const exhaustiveCheck: never = action;
-      console.error(`Unknown action encountered: ${exhaustiveCheck}`);
+      debugLogger.error(`Unknown action encountered: ${exhaustiveCheck}`);
       return state;
     }
   }
@@ -1838,7 +1840,7 @@ export function useTextBuffer({
         process.env['VISUAL'] ??
         process.env['EDITOR'] ??
         (process.platform === 'win32' ? 'notepad' : 'vi');
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'gemini-edit-'));
+      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
       const filePath = pathMod.join(tmpDir, 'buffer.txt');
       fs.writeFileSync(filePath, text, 'utf8');
 
@@ -1858,7 +1860,7 @@ export function useTextBuffer({
         newText = newText.replace(/\r\n?/g, '\n');
         dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
       } catch (err) {
-        console.error('[useTextBuffer] external editor error', err);
+        debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
         if (wasRaw) setRawMode?.(true);
         try {
@@ -1905,8 +1907,8 @@ export function useTextBuffer({
       else if (key.ctrl && key.name === 'b') move('left');
       else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
       else if (key.ctrl && key.name === 'f') move('right');
-      else if (key.name === 'up') move('up');
-      else if (key.name === 'down') move('down');
+      else if (key.name === 'up' && !key.shift) move('up');
+      else if (key.name === 'down' && !key.shift) move('down');
       else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
       else if (key.meta && key.name === 'b') move('wordLeft');
       else if ((key.ctrl || key.meta) && key.name === 'right')

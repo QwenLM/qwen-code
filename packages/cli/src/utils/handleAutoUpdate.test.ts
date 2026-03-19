@@ -65,7 +65,7 @@ describe('handleAutoUpdate', () => {
     mockSettings = {
       merged: {
         general: {
-          disableAutoUpdate: false,
+          enableAutoUpdate: true,
         },
       },
     } as LoadedSettings;
@@ -94,32 +94,29 @@ describe('handleAutoUpdate', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('should do nothing if update nag is disabled', () => {
-    mockSettings.merged.general!.disableUpdateNag = true;
-    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
-    expect(mockGetInstallationInfo).not.toHaveBeenCalled();
-    expect(mockUpdateEventEmitter.emit).not.toHaveBeenCalled();
-    expect(mockSpawn).not.toHaveBeenCalled();
-  });
-
-  it('should emit "update-received" but not update if auto-updates are disabled', () => {
-    mockSettings.merged.general!.disableAutoUpdate = true;
+  it('should show manual update message when enableAutoUpdate is false', () => {
+    // When enableAutoUpdate is false, gemini.tsx won't call checkForUpdates(),
+    // but if handleAutoUpdate is still called, it should show a manual update message.
+    mockSettings.merged.general!.enableAutoUpdate = false;
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
-      updateMessage: 'Please update manually.',
+      updateMessage:
+        'Please run npm i -g @qwen-code/qwen-code@latest to update',
       isGlobal: true,
       packageManager: PackageManager.NPM,
     });
 
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
-    expect(mockUpdateEventEmitter.emit).toHaveBeenCalledTimes(1);
+    // Should still emit update-received with manual update message
     expect(mockUpdateEventEmitter.emit).toHaveBeenCalledWith(
       'update-received',
       {
-        message: 'An update is available!\nPlease update manually.',
+        message:
+          'An update is available!\nPlease run npm i -g @qwen-code/qwen-code@latest to update',
       },
     );
+    // Should NOT spawn update when enableAutoUpdate is false
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 

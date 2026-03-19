@@ -8,7 +8,6 @@ import { createContext, useContext } from 'react';
 import type {
   HistoryItem,
   ThoughtSummary,
-  ConsoleMessageItem,
   ShellConfirmationRequest,
   ConfirmationRequest,
   LoopDetectionConfirmationRequest,
@@ -33,6 +32,8 @@ import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
+import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
+import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -52,6 +53,7 @@ export interface UIState {
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
+  activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
@@ -61,6 +63,7 @@ export interface UIState {
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
+  codingPlanUpdateRequest: CodingPlanUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
@@ -81,8 +84,6 @@ export interface UIState {
   isFolderTrustDialogOpen: boolean;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
-  showErrorDetails: boolean;
-  filteredConsoleMessages: ConsoleMessageItem[];
   ideContextState: IdeContext | undefined;
   showToolDescriptions: boolean;
   ctrlCPressedOnce: boolean;
@@ -96,7 +97,6 @@ export interface UIState {
   // Quota-related state
   currentModel: string;
   contextFileNames: string[];
-  errorCount: number;
   availableTerminalHeight: number | undefined;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
@@ -117,8 +117,6 @@ export interface UIState {
   extensionsUpdateState: Map<string, ExtensionUpdateState>;
   activePtyId: number | undefined;
   embeddedShellFocused: boolean;
-  // Vision switch dialog
-  isVisionSwitchDialogOpen: boolean;
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   welcomeBackInfo: {
@@ -129,8 +127,14 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Extensions manager dialog
+  isExtensionsManagerDialogOpen: boolean;
+  // MCP dialog
+  isMcpDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
+  // Per-task token tracking
+  taskStartTokens: number;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

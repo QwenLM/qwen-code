@@ -96,6 +96,7 @@ describe('AnthropicContentGenerator', () => {
 
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
+      getProxy: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -326,6 +327,170 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.not.objectContaining({ thinking: expect.anything() }),
       );
+    });
+
+    describe('output token limits', () => {
+      it('caps configured samplingParams.max_tokens to model output limit', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 200_000 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 65536 }),
+        );
+      });
+
+      it('caps request.config.maxOutputTokens to model output limit when config max_tokens is missing', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { maxOutputTokens: 100_000 },
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 65536 }),
+        );
+      });
+
+      it('uses conservative default when max_tokens is not explicitly configured', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 32000 }),
+        );
+      });
+
+      it('respects configured max_tokens for unknown models', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'unknown-model',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'unknown-model',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 100_000 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 100_000 }),
+        );
+      });
+
+      it('treats null maxOutputTokens as not configured', async () => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model: 'claude-sonnet-4',
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-sonnet-4',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: {},
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+          config: { maxOutputTokens: null as unknown as undefined },
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({ max_tokens: 32000 }),
+        );
+      });
     });
   });
 

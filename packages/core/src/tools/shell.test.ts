@@ -21,7 +21,6 @@ vi.mock('../services/shellExecutionService.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
-vi.mock('../utils/summarizer.js');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
@@ -35,7 +34,6 @@ import * as os from 'node:os';
 import { EOL } from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import * as summarizer from '../utils/summarizer.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
@@ -55,13 +53,15 @@ describe('ShellTool', () => {
       getExcludeTools: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
-      getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
+      getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
+      getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -268,10 +268,10 @@ describe('ShellTool', () => {
       resolveExecutionPromise(fullResult);
     };
 
-    it('should wrap command on linux and parse pgrep output', async () => {
+    it('should wrap background command on linux and parse pgrep output', async () => {
       const invocation = shellTool.build({
-        command: 'my-command &',
-        is_background: false,
+        command: 'my-command',
+        is_background: true,
       });
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
@@ -291,7 +291,7 @@ describe('ShellTool', () => {
         false,
         {},
       );
-      expect(result.llmContent).toContain('Background PIDs: 54322');
+      expect(result.llmContent).toContain('PIDs: 54322');
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
@@ -353,15 +353,11 @@ describe('ShellTool', () => {
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('54321\n54322\n');
-
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ npm test; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'npm test',
         expect.any(String),
         expect.any(Function),
         expect.any(AbortSignal),
@@ -383,10 +379,9 @@ describe('ShellTool', () => {
       resolveShellExecution();
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ ls; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'ls',
         '/test/dir/subdir',
         expect.any(Function),
         expect.any(AbortSignal),
@@ -479,42 +474,6 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should summarize output when configured', async () => {
-      (mockConfig.getSummarizeToolOutputConfig as Mock).mockReturnValue({
-        [shellTool.name]: { tokenBudget: 1000 },
-      });
-      vi.mocked(summarizer.summarizeToolOutput).mockResolvedValue(
-        'summarized output',
-      );
-
-      const invocation = shellTool.build({
-        command: 'ls',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveExecutionPromise({
-        output: 'long output',
-        rawOutput: Buffer.from('long output'),
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      const result = await promise;
-
-      expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
-        expect.any(String),
-        mockConfig.getGeminiClient(),
-        expect.any(AbortSignal),
-        1000,
-      );
-      expect(result.llmContent).toBe('summarized output');
-      expect(result.returnDisplay).toBe('long output');
     });
 
     it('should clean up the temp file on synchronous execution error', async () => {
@@ -733,7 +692,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('npm install'),
           expect.any(String),
@@ -762,7 +720,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit'),
           expect.any(String),
@@ -828,7 +785,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit -m "Initial commit"'),
           expect.any(String),

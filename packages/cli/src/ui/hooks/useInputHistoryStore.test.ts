@@ -107,8 +107,6 @@ describe('useInputHistoryStore', () => {
         .mockRejectedValue(new Error('Logger error')),
     };
 
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
     const { result } = renderHook(() => useInputHistoryStore());
 
     await act(async () => {
@@ -116,12 +114,6 @@ describe('useInputHistoryStore', () => {
     });
 
     expect(result.current.inputHistory).toEqual([]);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      'Failed to initialize input history from logger:',
-      expect.any(Error),
-    );
-
-    consoleSpy.mockRestore();
   });
 
   it('should initialize only once', async () => {

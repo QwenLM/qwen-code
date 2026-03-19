@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isUtf8 } from 'node:buffer';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
 import { detect as chardetDetect } from 'chardet';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('ENCODING');
 
 // Cache for system encoding to avoid repeated detection
 // Use undefined to indicate "not yet checked" vs null meaning "checked but failed"
@@ -20,34 +24,39 @@ export function resetEncodingCache(): void {
 }
 
 /**
- * Returns the system encoding, caching the result to avoid repeated system calls.
- * If system encoding detection fails, falls back to detecting from the provided buffer.
- * Note: Only the system encoding is cached - buffer-based detection runs for each buffer
- * since different buffers may have different encodings.
- * @param buffer A buffer to use for detecting encoding if system detection fails.
+ * Detects the encoding of a buffer.
+ *
+ * Strategy: try UTF-8 first, then chardet, then system encoding.
+ * UTF-8 is tried first because modern developer tools, PowerShell Core,
+ * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
+ * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
+ *
+ * This function should be called on the **complete** output buffer
+ * (after the command finishes), not on individual streaming chunks,
+ * to avoid misdetection when early chunks are ASCII-only.
+ *
+ * @param buffer A buffer to analyze for encoding detection.
  */
 export function getCachedEncodingForBuffer(buffer: Buffer): string {
-  // Cache system encoding detection since it's system-wide
+  if (isUtf8(buffer)) {
+    return 'utf-8';
+  }
+
+  // Buffer is not valid UTF-8 — try chardet, then system encoding
+  const detected = detectEncodingFromBuffer(buffer);
+  if (detected) {
+    return detected;
+  }
+
   if (cachedSystemEncoding === undefined) {
     cachedSystemEncoding = getSystemEncoding();
   }
-
-  // If we have a cached system encoding, use it
   if (cachedSystemEncoding) {
-    // If the system encoding is not UTF-8 (e.g. Windows CP936), but the buffer
-    // is detected as UTF-8, prefer UTF-8. This handles tools like 'git' which
-    // often output UTF-8 regardless of the system code page.
-    if (cachedSystemEncoding !== 'utf-8') {
-      const detected = detectEncodingFromBuffer(buffer);
-      if (detected === 'utf-8') {
-        return 'utf-8';
-      }
-    }
     return cachedSystemEncoding;
   }
 
-  // Otherwise, detect from this specific buffer (don't cache this result)
-  return detectEncodingFromBuffer(buffer) || 'utf-8';
+  // Last resort
+  return 'utf-8';
 }
 
 /**
@@ -75,7 +84,7 @@ export function getSystemEncoding(): string | null {
         `Unable to parse Windows code page from 'chcp' output "${output.trim()}". `,
       );
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `Failed to get Windows code page using 'chcp' command: ${error instanceof Error ? error.message : String(error)}. ` +
           `Will attempt to detect encoding from command output instead.`,
       );
@@ -97,7 +106,7 @@ export function getSystemEncoding(): string | null {
         .toString()
         .trim();
     } catch (_e) {
-      console.warn('Failed to get locale charmap.');
+      debugLogger.warn('Failed to get locale charmap.');
       return null;
     }
   }
@@ -120,6 +129,7 @@ export function getSystemEncoding(): string | null {
  * @param cp The Windows code page number (e.g., 437, 850, etc.)
  * @returns The corresponding encoding name as a string, or null if no mapping exists.
  */
+
 export function windowsCodePageToEncoding(cp: number): string | null {
   // Most common mappings; extend as needed
   const map: { [key: number]: string } = {
@@ -129,7 +139,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     866: 'cp866',
     874: 'windows-874',
     932: 'shift_jis',
-    936: 'gb2312',
+    936: 'gbk',
     949: 'euc-kr',
     950: 'big5',
     1200: 'utf-16le',
@@ -150,25 +160,30 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     return map[cp];
   }
 
-  console.warn(`Unable to determine encoding for windows code page ${cp}.`);
+  debugLogger.warn(`Unable to determine encoding for windows code page ${cp}.`);
   return null; // Return null if no mapping found
 }
 
 /**
- * Attempts to detect encoding from a buffer using chardet.
- * This is useful when system encoding detection fails.
- * Returns the detected encoding in lowercase, or null if detection fails.
+ * Attempts to detect the encoding of a non-UTF-8 buffer using chardet
+ * statistical analysis. Returns null when chardet cannot determine the
+ * encoding (e.g. the buffer is too small or ambiguous).
+ *
+ * Callers that need a guaranteed result should provide their own fallback
+ * (e.g. {@link getCachedEncodingForBuffer} falls back to the system codepage).
+ *
  * @param buffer The buffer to analyze for encoding.
  * @return The detected encoding as a lowercase string, or null if detection fails.
  */
 export function detectEncodingFromBuffer(buffer: Buffer): string | null {
+  // Try chardet statistical detection first — works well for larger files
   try {
     const detected = chardetDetect(buffer);
     if (detected && typeof detected === 'string') {
       return detected.toLowerCase();
     }
   } catch (error) {
-    console.warn('Failed to detect encoding with chardet:', error);
+    debugLogger.warn('Failed to detect encoding with chardet:', error);
   }
 
   return null;

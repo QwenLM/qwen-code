@@ -33,6 +33,7 @@ Commands for adjusting interface appearance and work environment.
 | Command      | Description                              | Usage Examples                |
 | ------------ | ---------------------------------------- | ----------------------------- |
 | `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
+| `/context`   | Show context window usage breakdown      | `/context`                    |
 | `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
 | `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
 | `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
@@ -59,7 +60,7 @@ Commands for managing AI tools and models.
 | ---------------- | --------------------------------------------- | --------------------------------------------- |
 | `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
-| `/skills`        | List and run available skills (experimental)  | `/skills`, `/skills <name>`                   |
+| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
 | `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                   | Secure review                                 |
 | →`default`       | Require approval for edits                    | Daily use                                     |
@@ -94,6 +95,22 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
+### 1.7 CLI Auth Subcommands
+
+In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
+
+| Command                                              | Description                                       |
+| ---------------------------------------------------- | ------------------------------------------------- |
+| `qwen auth`                                          | Interactive authentication setup                  |
+| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth                      |
+| `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
+| `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth status`                                   | Show current authentication status                |
+
+> [!tip]
+>
+> These commands run outside of a Qwen Code session. Use them to configure authentication before starting a session, or in scripts and CI environments. See the [Authentication](../configuration/auth) page for full details.
+
 ## 2. @ Commands (Introducing Files)
 
 @ commands are used to quickly add local file or directory content to the conversation.
@@ -121,7 +138,9 @@ Environment Variables: Commands executed via `!` will set the `QWEN_CODE=1` envi
 
 Save frequently used prompts as shortcut commands to improve work efficiency and ensure consistency.
 
-> **Note:** Custom commands now use Markdown format with optional YAML frontmatter. TOML format is deprecated but still supported for backwards compatibility. When TOML files are detected, an automatic migration prompt will be displayed.
+> [!note]
+>
+> Custom commands now use Markdown format with optional YAML frontmatter. TOML format is deprecated but still supported for backwards compatibility. When TOML files are detected, an automatic migration prompt will be displayed.
 
 ### Quick Overview
 
@@ -137,10 +156,10 @@ Priority Rules: Project commands > User commands (project command used when name
 
 #### File Path to Command Name Mapping Table
 
-| File Location              | Generated Command | Example Call          |
-| -------------------------- | ----------------- | --------------------- |
-| `~/.qwen/commands/test.md` | `/test`           | `/test Parameter`     |
-| `<project>/git/commit.md`  | `/git:commit`     | `/git:commit Message` |
+| File Location                            | Generated Command | Example Call          |
+| ---------------------------------------- | ----------------- | --------------------- |
+| `~/.qwen/commands/test.md`               | `/test`           | `/test Parameter`     |
+| `<project>/.qwen/commands/git/commit.md` | `/git:commit`     | `/git:commit Message` |
 
 Naming Rules: Path separator (`/` or `\`) converted to colon (`:`)
 
@@ -164,6 +183,8 @@ Use {{args}} for parameter injection.
 
 ### TOML File Format (Deprecated)
 
+> [!warning]
+>
 > **Deprecated:** TOML format is still supported but will be removed in a future version. Please migrate to Markdown format.
 
 | Field         | Required | Description                              | Example                                    |
@@ -225,8 +246,6 @@ Please generate a Commit message based on the following diff:
 ```
 ````
 
-````
-
 #### 4. File Content Injection (`@{...}`)
 
 | File Type    | Support Status         | Processing Method           |
@@ -246,7 +265,7 @@ description: Code review based on best practices
 Review {{args}}, reference standards:
 
 @{docs/code-standards.md}
-````
+```
 
 ### Practical Creation Example
 

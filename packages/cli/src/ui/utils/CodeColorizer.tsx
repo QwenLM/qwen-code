@@ -21,9 +21,11 @@ import {
   MINIMUM_MAX_HEIGHT,
 } from '../components/shared/MaxSizedBox.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 // Configure theming and parsing utilities.
 const lowlight = createLowlight(common);
+const debugLogger = createDebugLogger('CODE_COLORIZER');
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,
@@ -123,6 +125,7 @@ export function colorizeLine(
  *
  * @param code The code string to highlight.
  * @param language The language identifier (e.g., 'javascript', 'css', 'html')
+ * @param tabWidth The number of spaces to replace each tab character with, default is 4
  * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
  */
 export function colorizeCode(
@@ -132,8 +135,11 @@ export function colorizeCode(
   maxWidth?: number,
   theme?: Theme,
   settings?: LoadedSettings,
+  tabWidth = 4,
 ): React.ReactNode {
-  const codeToHighlight = code.replace(/\n$/, '');
+  const codeToHighlight = code
+    .replace(/\n$/, '')
+    .replace(/\t/g, ' '.repeat(tabWidth));
   const activeTheme = theme || themeManager.getActiveTheme();
   const showLineNumbers = settings?.merged.ui?.showLineNumbers ?? true;
 
@@ -188,7 +194,7 @@ export function colorizeCode(
       </MaxSizedBox>
     );
   } catch (error) {
-    console.error(
+    debugLogger.error(
       `[colorizeCode] Error highlighting code for language "${language}":`,
       error,
     );

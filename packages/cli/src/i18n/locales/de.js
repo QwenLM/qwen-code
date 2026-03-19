@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Help / UI Components
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ Anhänge verwalten',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → auswählen, Entf zum Löschen, ↓ beenden',
+  'Attachments: ': 'Anhänge: ',
+
   'Basics:': 'Grundlagen:',
   'Add context': 'Kontext hinzufügen',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':
@@ -23,6 +29,7 @@ export default {
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
   'Accepting edits': 'Änderungen werden akzeptiert',
   '(shift + tab to cycle)': '(Umschalt + Tab zum Wechseln)',
+  '(tab to cycle)': '(Tab zum Wechseln)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Shell-Befehle über {{symbol}} ausführen (z.B. {{example1}}) oder natürliche Sprache verwenden (z.B. {{example2}}).',
   '!': '!',
@@ -90,8 +97,9 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analysiert das Projekt und erstellt eine maßgeschneiderte QWEN.md-Datei.',
-  'list available Qwen Code tools. Usage: /tools [desc]':
+  'List available Qwen Code tools. Usage: /tools [desc]':
     'Verfügbare Qwen Code Werkzeuge auflisten. Verwendung: /tools [desc]',
+  'List available skills.': 'Verfügbare Skills auflisten.',
   'Available Qwen Code CLI tools:': 'Verfügbare Qwen Code CLI-Werkzeuge:',
   'No tools available': 'Keine Werkzeuge verfügbar',
   'View or change the approval mode for tool usage':
@@ -118,6 +126,8 @@ export default {
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'change the auth method': 'Authentifizierungsmethode ändern',
+  'Configure authentication information for login':
+    'Authentifizierungsinformationen für die Anmeldung konfigurieren',
   'Copy the last result or code snippet to clipboard':
     'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
 
@@ -148,6 +158,7 @@ export default {
   'Enter to confirm, Esc to cancel': 'Enter zum Bestätigen, Esc zum Abbrechen',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter zum Auswählen, ↑↓ zum Navigieren, Esc zum Zurückgehen',
+  'Enter to submit, Esc to go back': 'Enter zum Absenden, Esc zum Zurückgehen',
   'Invalid step: {{step}}': 'Ungültiger Schritt: {{step}}',
   'No subagents found.': 'Keine Unteragenten gefunden.',
   "Use '/agents create' to create your first subagent.":
@@ -334,7 +345,6 @@ export default {
   'Folder Trust': 'Ordnervertrauen',
   'Vision Model Preview': 'Vision-Modell-Vorschau',
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
-  'Experimental: Skills': 'Experimentell: Fähigkeiten',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   Text: 'Text',
@@ -351,7 +361,9 @@ export default {
   'Show tool-specific usage statistics.':
     'Werkzeugspezifische Nutzungsstatistiken anzeigen.',
   'exit the cli': 'CLI beenden',
-  'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
+  'Open MCP management dialog, or authenticate with OAuth-enabled servers':
+    'MCP-Verwaltungsdialog öffnen oder mit OAuth-fähigem Server authentifizieren',
+  'List configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'Konfigurierte MCP-Server und Werkzeuge auflisten oder mit OAuth-fähigen Servern authentifizieren',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':
@@ -365,6 +377,7 @@ export default {
     'Diese Editoren werden derzeit unterstützt. Bitte beachten Sie, dass einige Editoren nicht im Sandbox-Modus verwendet werden können.',
   'Your preferred editor is:': 'Ihr bevorzugter Editor ist:',
   'Manage extensions': 'Erweiterungen verwalten',
+  'Manage installed extensions': 'Installierte Erweiterungen verwalten',
   'List active extensions': 'Aktive Erweiterungen auflisten',
   'Update extensions. Usage: update <extension-names>|--all':
     'Erweiterungen aktualisieren. Verwendung: update <Erweiterungsnamen>|--all',
@@ -424,6 +437,8 @@ export default {
     'Diese Erweiterung wird folgende Unteragenten installieren:',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'Sie installieren eine Erweiterung von {{originSource}}. Einige Funktionen funktionieren möglicherweise nicht perfekt mit Qwen Code.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref und --auto-update sind nicht anwendbar für Marketplace-Erweiterungen.',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -480,6 +495,17 @@ export default {
   'Either an extension name or --all must be provided':
     'Entweder ein Erweiterungsname oder --all muss angegeben werden',
   'Lists installed extensions.': 'Listet installierte Erweiterungen auf.',
+  'Path:': 'Pfad:',
+  'Source:': 'Quelle:',
+  'Type:': 'Typ:',
+  'Ref:': 'Ref:',
+  'Release tag:': 'Release-Tag:',
+  'Enabled (User):': 'Aktiviert (Benutzer):',
+  'Enabled (Workspace):': 'Aktiviert (Arbeitsbereich):',
+  'Context files:': 'Kontextdateien:',
+  'Skills:': 'Skills:',
+  'Agents:': 'Agents:',
+  'MCP servers:': 'MCP-Server:',
   'Link extension failed to install.':
     'Verknüpfte Erweiterung konnte nicht installiert werden.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -561,6 +587,38 @@ export default {
     'Fehler beim Konfigurieren von {{terminalName}}.',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'Ihr Terminal ist bereits für optimale Erfahrung mit mehrzeiliger Eingabe konfiguriert (Umschalt+Enter und Strg+Enter).',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Qwen Code-Hooks verwalten',
+  'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
+  'Enable a disabled hook': 'Einen deaktivierten Hook aktivieren',
+  'Disable an active hook': 'Einen aktiven Hook deaktivieren',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    'Den Nachrichtenverlauf der aktuellen Sitzung in eine Datei exportieren',
+  'Export session to HTML format': 'Sitzung in das HTML-Format exportieren',
+  'Export session to JSON format': 'Sitzung in das JSON-Format exportieren',
+  'Export session to JSONL format (one message per line)':
+    'Sitzung in das JSONL-Format exportieren (eine Nachricht pro Zeile)',
+  'Export session to markdown format':
+    'Sitzung in das Markdown-Format exportieren',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'Personalisierte Programmier-Einblicke aus Ihrem Chatverlauf generieren',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': 'Eine vorherige Sitzung fortsetzen',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurückgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'Terminal-Typ konnte nicht erkannt werden. Unterstützte Terminals: VS Code, Cursor, Windsurf und Trae.',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -569,8 +627,8 @@ export default {
   // ============================================================================
   // Commands - Language
   // ============================================================================
-  'Invalid language. Available: en-US, zh-CN':
-    'Ungültige Sprache. Verfügbar: en-US, zh-CN',
+  'Invalid language. Available: {{options}}':
+    'Ungültige Sprache. Verfügbar: {{options}}',
   'Language subcommands do not accept additional arguments.':
     'Sprach-Unterbefehle akzeptieren keine zusätzlichen Argumente.',
   'Current UI language: {{lang}}': 'Aktuelle UI-Sprache: {{lang}}',
@@ -579,12 +637,14 @@ export default {
   'LLM output language not set': 'LLM-Ausgabesprache nicht festgelegt',
   'Set UI language': 'UI-Sprache festlegen',
   'Set LLM output language': 'LLM-Ausgabesprache festlegen',
-  'Usage: /language ui [zh-CN|en-US]': 'Verwendung: /language ui [zh-CN|en-US]',
+  'Usage: /language ui [{{options}}]': 'Verwendung: /language ui [{{options}}]',
   'Usage: /language output <language>':
     'Verwendung: /language output <Sprache>',
   'Example: /language output 中文': 'Beispiel: /language output Deutsch',
-  'Example: /language output English': 'Beispiel: /language output English',
+  'Example: /language output English': 'Beispiel: /language output Englisch',
   'Example: /language output 日本語': 'Beispiel: /language output Japanisch',
+  'Example: /language output Português':
+    'Beispiel: /language output Portugiesisch',
   'UI language changed to {{lang}}': 'UI-Sprache geändert zu {{lang}}',
   'LLM output language set to {{lang}}':
     'LLM-Ausgabesprache auf {{lang}} gesetzt',
@@ -600,12 +660,7 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     'Um zusätzliche UI-Sprachpakete anzufordern, öffnen Sie bitte ein Issue auf GitHub.',
   'Available options:': 'Verfügbare Optionen:',
-  '  - zh-CN: Simplified Chinese': '  - zh-CN: Vereinfachtes Chinesisch',
-  '  - en-US: English': '  - en-US: Englisch',
-  'Set UI language to Simplified Chinese (zh-CN)':
-    'UI-Sprache auf Vereinfachtes Chinesisch (zh-CN) setzen',
-  'Set UI language to English (en-US)':
-    'UI-Sprache auf Englisch (en-US) setzen',
+  'Set UI language to {{name}}': 'UI-Sprache auf {{name}} setzen',
 
   // ============================================================================
   // Commands - Approval Mode
@@ -724,6 +779,15 @@ export default {
     "Authentifizierung mit MCP-Server '{{name}}' fehlgeschlagen: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "Werkzeuge von '{{name}}' werden neu erkannt...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "{{count}} Werkzeug(e) von '{{name}}' entdeckt.",
+  'Authentication complete. Returning to server details...':
+    'Authentifizierung abgeschlossen. Zurück zu den Serverdetails...',
+  'Authentication successful.': 'Authentifizierung erfolgreich.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Falls der Browser sich nicht öffnet, kopieren Sie diese URL und fügen Sie sie in Ihren Browser ein:',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  Stellen Sie sicher, dass Sie die VOLLSTÄNDIGE URL kopieren – sie kann über mehrere Zeilen gehen.',
 
   // ============================================================================
   // Commands - Chat
@@ -863,9 +927,115 @@ export default {
   'Do you want to proceed?': 'Möchten Sie fortfahren?',
   'Yes, allow once': 'Ja, einmal erlauben',
   'Allow always': 'Immer erlauben',
+  Yes: 'Ja',
   No: 'Nein',
   'No (esc)': 'Nein (Esc)',
   'Yes, allow always for this session': 'Ja, für diese Sitzung immer erlauben',
+
+  // MCP Management Dialog (translations for MCP UI components)
+  'Manage MCP servers': 'MCP-Server verwalten',
+  'Server Detail': 'Serverdetails',
+  'Disable Server': 'Server deaktivieren',
+  Tools: 'Werkzeuge',
+  'Tool Detail': 'Werkzeugdetails',
+  'MCP Management': 'MCP-Verwaltung',
+  'Loading...': 'Lädt...',
+  'Unknown step': 'Unbekannter Schritt',
+  'Esc to back': 'Esc zurück',
+  '↑↓ to navigate · Enter to select · Esc to close':
+    '↑↓ navigieren · Enter auswählen · Esc schließen',
+  '↑↓ to navigate · Enter to select · Esc to back':
+    '↑↓ navigieren · Enter auswählen · Esc zurück',
+  '↑↓ to navigate · Enter to confirm · Esc to back':
+    '↑↓ navigieren · Enter bestätigen · Esc zurück',
+  'User Settings (global)': 'Benutzereinstellungen (global)',
+  'Workspace Settings (project-specific)':
+    'Arbeitsbereichseinstellungen (projektspezifisch)',
+  'Disable server:': 'Server deaktivieren:',
+  'Select where to add the server to the exclude list:':
+    'Wählen Sie, wo der Server zur Ausschlussliste hinzugefügt werden soll:',
+  'Press Enter to confirm, Esc to cancel':
+    'Enter zum Bestätigen, Esc zum Abbrechen',
+  Disable: 'Deaktivieren',
+  Enable: 'Aktivieren',
+  Authenticate: 'Authentifizieren',
+  'Re-authenticate': 'Erneut authentifizieren',
+  'Clear Authentication': 'Authentifizierung löschen',
+  disabled: 'deaktiviert',
+  'Server:': 'Server:',
+  Reconnect: 'Neu verbinden',
+  'View tools': 'Werkzeuge anzeigen',
+  'Status:': 'Status:',
+  'Command:': 'Befehl:',
+  'Working Directory:': 'Arbeitsverzeichnis:',
+  'Capabilities:': 'Fähigkeiten:',
+  'No server selected': 'Kein Server ausgewählt',
+  '(disabled)': '(deaktiviert)',
+  'Error:': 'Fehler:',
+  Extension: 'Erweiterung',
+  tool: 'Werkzeug',
+  tools: 'Werkzeuge',
+  connected: 'verbunden',
+  connecting: 'verbindet',
+  disconnected: 'getrennt',
+  error: 'Fehler',
+
+  // MCP Server List
+  'User MCPs': 'Benutzer-MCPs',
+  'Project MCPs': 'Projekt-MCPs',
+  'Extension MCPs': 'Erweiterungs-MCPs',
+  server: 'Server',
+  servers: 'Server',
+  'Add MCP servers to your settings to get started.':
+    'Fügen Sie MCP-Server zu Ihren Einstellungen hinzu, um zu beginnen.',
+  'Run qwen --debug to see error logs':
+    'Führen Sie qwen --debug aus, um Fehlerprotokolle anzuzeigen',
+
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth-Authentifizierung',
+  'Press Enter to start authentication, Esc to go back':
+    'Drücken Sie Enter, um die Authentifizierung zu starten, Esc zum Zurückgehen',
+  'Authenticating... Please complete the login in your browser.':
+    'Authentifizierung läuft... Bitte schließen Sie die Anmeldung in Ihrem Browser ab.',
+  'Press Enter or Esc to go back': 'Drücken Sie Enter oder Esc zum Zurückgehen',
+
+  // MCP Tool List
+  'No tools available for this server.':
+    'Keine Werkzeuge für diesen Server verfügbar.',
+  destructive: 'destruktiv',
+  'read-only': 'schreibgeschützt',
+  'open-world': 'offene Welt',
+  idempotent: 'idempotent',
+  'Tools for {{name}}': 'Werkzeuge für {{name}}',
+  'Tools for {{serverName}}': 'Werkzeuge für {{serverName}}',
+  '{{current}}/{{total}}': '{{current}}/{{total}}',
+
+  // MCP Tool Detail
+  required: 'erforderlich',
+  Type: 'Typ',
+  Enum: 'Aufzählung',
+  Parameters: 'Parameter',
+  'No tool selected': 'Kein Werkzeug ausgewählt',
+  Annotations: 'Anmerkungen',
+  Title: 'Titel',
+  'Read Only': 'Schreibgeschützt',
+  Destructive: 'Destruktiv',
+  Idempotent: 'Idempotent',
+  'Open World': 'Offene Welt',
+  Server: 'Server',
+
+  // Invalid tool related translations
+  '{{count}} invalid tools': '{{count}} ungültige Werkzeuge',
+  invalid: 'ungültig',
+  'invalid: {{reason}}': 'ungültig: {{reason}}',
+  'missing name': 'Name fehlt',
+  'missing description': 'Beschreibung fehlt',
+  '(unnamed)': '(unbenannt)',
+  'Warning: This tool cannot be called by the LLM':
+    'Warnung: Dieses Werkzeug kann nicht vom LLM aufgerufen werden',
+  Reason: 'Grund',
+  'Tools must have both name and description to be used by the LLM.':
+    'Werkzeuge müssen sowohl einen Namen als auch eine Beschreibung haben, um vom LLM verwendet zu werden.',
   'Modify in progress:': 'Änderung in Bearbeitung:',
   'Save and close external editor to continue':
     'Speichern und externen Editor schließen, um fortzufahren',
@@ -926,16 +1096,25 @@ export default {
   // Dialogs - Auth
   // ============================================================================
   'Get started': 'Loslegen',
-  'How would you like to authenticate for this project?':
-    'Wie möchten Sie sich für dieses Projekt authentifizieren?',
+  'Select Authentication Method': 'Authentifizierungsmethode auswählen',
   'OpenAI API key is required to use OpenAI authentication.':
     'OpenAI API-Schlüssel ist für die OpenAI-Authentifizierung erforderlich.',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
     'Sie müssen eine Authentifizierungsmethode wählen, um fortzufahren. Drücken Sie erneut Strg+C zum Beenden.',
-  '(Use Enter to Set Auth)': '(Enter zum Festlegen der Authentifizierung)',
-  'Terms of Services and Privacy Notice for Qwen Code':
-    'Nutzungsbedingungen und Datenschutzhinweis für Qwen Code',
+  'Terms of Services and Privacy Notice':
+    'Nutzungsbedingungen und Datenschutzhinweis',
   'Qwen OAuth': 'Qwen OAuth',
+  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
+    'Kostenlos \u00B7 Bis zu 1.000 Anfragen/Tag \u00B7 Qwen neueste Modelle',
+  'Login with QwenChat account to use daily free quota.':
+    'Melden Sie sich mit Ihrem QwenChat-Konto an, um das tägliche kostenlose Kontingent zu nutzen.',
+  'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
+    'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Alle Alibaba Cloud Coding Plan Modelle',
+  'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
+  'Bring your own API key': 'Eigenen API-Schlüssel verwenden',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Verwenden Sie Coding Plan-Anmeldedaten oder Ihre eigenen API-Schlüssel/Anbieter.',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'Anmeldung fehlgeschlagen. Meldung: {{message}}',
@@ -962,6 +1141,8 @@ export default {
     'Warten auf Qwen OAuth-Authentifizierung...',
   'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
     'Hinweis: Ihr bestehender API-Schlüssel in settings.json wird bei Verwendung von Qwen OAuth nicht gelöscht. Sie können später bei Bedarf zur OpenAI-Authentifizierung zurückwechseln.',
+  'Note: Your existing API key will not be cleared when using Qwen OAuth.':
+    'Hinweis: Ihr bestehender API-Schlüssel wird bei Verwendung von Qwen OAuth nicht gelöscht.',
   'Authentication timed out. Please try again.':
     'Authentifizierung abgelaufen. Bitte versuchen Sie es erneut.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
@@ -1011,10 +1192,21 @@ export default {
   '(default)': '(Standard)',
   '(set)': '(gesetzt)',
   '(not set)': '(nicht gesetzt)',
+  Modality: 'Modalität',
+  'Context Window': 'Kontextfenster',
+  text: 'Text',
+  'text-only': 'nur Text',
+  image: 'Bild',
+  pdf: 'PDF',
+  audio: 'Audio',
+  video: 'Video',
+  'not set': 'nicht gesetzt',
+  none: 'keine',
+  unknown: 'unbekannt',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
-  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
-    'Das neueste Qwen Coder Modell von Alibaba Cloud ModelStudio (Version: qwen3-coder-plus-2025-09-23)',
+  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.5 Plus — effizientes Hybridmodell mit führender Programmierleistung',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Das neueste Qwen Vision Modell von Alibaba Cloud ModelStudio (Version: qwen3-vl-plus-2025-09-23)',
 
@@ -1045,9 +1237,6 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'Keine MCP-Server konfiguriert.',
-  'Please view MCP documentation in your browser:':
-    'Bitte sehen Sie die MCP-Dokumentation in Ihrem Browser:',
-  'or use the cli /docs command': 'oder verwenden Sie den CLI-Befehl /docs',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCP-Server werden gestartet ({{count}} werden initialisiert)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
@@ -1360,4 +1549,216 @@ export default {
     'Erweiterungsseite wird im Browser geöffnet: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Browser konnte nicht geöffnet werden. Besuchen Sie die Erweiterungsgalerie unter {{url}}',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Verwenden Sie /compress, wenn die Unterhaltung lang wird, um den Verlauf zusammenzufassen und Kontext freizugeben.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Starten Sie eine neue Idee mit /clear oder /new; die vorherige Sitzung bleibt im Verlauf verfügbar.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Verwenden Sie /bug, um Probleme an die Betreuer zu melden, wenn etwas schiefgeht.',
+  'Switch auth type quickly with /auth.':
+    'Wechseln Sie den Authentifizierungstyp schnell mit /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'Sie können beliebige Shell-Befehle in Qwen Code mit ! ausführen (z. B. !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Geben Sie / ein, um das Befehlsmenü zu öffnen; Tab vervollständigt Slash-Befehle und gespeicherte Prompts.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'Sie können eine frühere Unterhaltung mit qwen --continue oder qwen --resume fortsetzen.',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Sie können den Berechtigungsmodus schnell mit Shift+Tab oder /approval-mode wechseln.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
+  'Try /insight to generate personalized insights from your chat history.':
+    'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+
+  // ============================================================================
+  // Custom API Key Configuration
+  // ============================================================================
+  'You can configure your API key and models in settings.json':
+    'Sie können Ihren API-Schlüssel und Modelle in settings.json konfigurieren',
+  'Refer to the documentation for setup instructions':
+    'Einrichtungsanweisungen finden Sie in der Dokumentation',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'API key cannot be empty.': 'API-Schlüssel darf nicht leer sein.',
+  'You can get your Coding Plan API key here':
+    'Sie können Ihren Coding-Plan-API-Schlüssel hier erhalten',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Neue Modellkonfigurationen sind für Alibaba Cloud Coding Plan verfügbar. Jetzt aktualisieren?',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Coding Plan-Konfiguration erfolgreich aktualisiert. Neue Modelle sind jetzt verfügbar.',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'Coding Plan API-Schlüssel nicht gefunden. Bitte authentifizieren Sie sich erneut mit Coding Plan.',
+  'Failed to update Coding Plan configuration: {{message}}':
+    'Fehler beim Aktualisieren der Coding Plan-Konfiguration: {{message}}',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  Custom: 'Benutzerdefiniert',
+  'More instructions about configuring `modelProviders` manually.':
+    'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
+  'Select API-KEY configuration mode:':
+    'API-KEY-Konfigurationsmodus auswählen:',
+  '(Press Escape to go back)': '(Escape drücken zum Zurückgehen)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enter zum Absenden, Escape zum Abbrechen)',
+  'More instructions please check:': 'Weitere Anweisungen finden Sie unter:',
+  'Select Region for Coding Plan': 'Region für Coding Plan auswählen',
+  'Choose based on where your account is registered':
+    'Wählen Sie basierend auf dem Registrierungsort Ihres Kontos',
+  'Enter Coding Plan API Key': 'Coding-Plan-API-Schlüssel eingeben',
+
+  // ============================================================================
+  // Coding Plan International Updates
+  // ============================================================================
+  'New model configurations are available for {{region}}. Update now?':
+    'Neue Modellkonfigurationen sind für {{region}} verfügbar. Jetzt aktualisieren?',
+  '{{region}} configuration updated successfully. Model switched to "{{model}}".':
+    '{{region}}-Konfiguration erfolgreich aktualisiert. Modell auf "{{model}}" umgeschaltet.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert (gesichert).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Kontextnutzung',
+  'No API response yet. Send a message to see actual usage.':
+    'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated pre-conversation overhead':
+    'Geschätzte Vorabkosten vor der Unterhaltung',
+  'Context window': 'Kontextfenster',
+  tokens: 'Tokens',
+  Used: 'Verwendet',
+  Free: 'Frei',
+  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Usage by category': 'Verwendung nach Kategorie',
+  'System prompt': 'System-Prompt',
+  'Built-in tools': 'Integrierte Tools',
+  'MCP tools': 'MCP-Tools',
+  'Memory files': 'Speicherdateien',
+  Skills: 'Fähigkeiten',
+  Messages: 'Nachrichten',
+  'Show context window usage breakdown.':
+    'Zeigt die Aufschlüsselung der Kontextfenster-Nutzung an.',
+  'Run /context detail for per-item breakdown.':
+    'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
+  active: 'aktiv',
+  'body loaded': 'Inhalt geladen',
+  memory: 'Speicher',
+  '{{region}} configuration updated successfully.':
+    '{{region}}-Konfiguration erfolgreich aktualisiert.',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
+    'Erfolgreich mit {{region}} authentifiziert. API-Schlüssel und Modellkonfigurationen wurden in settings.json gespeichert.',
+  'Tip: Use /model to switch between available Coding Plan models.':
+    'Tipp: Verwenden Sie /model, um zwischen verfügbaren Coding Plan-Modellen zu wechseln.',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):':
+    'Bitte beantworten Sie die folgende(n) Frage(n):',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    'Benutzerfragen können im nicht-interaktiven Modus nicht gestellt werden. Bitte führen Sie das Tool im interaktiven Modus aus.',
+  'User declined to answer the questions.':
+    'Benutzer hat die Beantwortung der Fragen abgelehnt.',
+  'User has provided the following answers:':
+    'Benutzer hat die folgenden Antworten bereitgestellt:',
+  'Failed to process user answers:':
+    'Fehler beim Verarbeiten der Benutzerantworten:',
+  'Type something...': 'Etwas eingeben...',
+  Submit: 'Senden',
+  'Submit answers': 'Antworten senden',
+  Cancel: 'Abbrechen',
+  'Your answers:': 'Ihre Antworten:',
+  '(not answered)': '(nicht beantwortet)',
+  'Ready to submit your answers?': 'Bereit, Ihre Antworten zu senden?',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Enter: Auswählen',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: Navigieren | Space/Enter: Umschalten | Esc: Abbrechen',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: Navigieren | Enter: Auswählen | Esc: Abbrechen',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Qwen-Authentifizierung mit Qwen-OAuth oder Alibaba Cloud Coding Plan konfigurieren',
+  'Authenticate using Qwen OAuth': 'Mit Qwen OAuth authentifizieren',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Mit Alibaba Cloud Coding Plan authentifizieren',
+  'Region for Coding Plan (china/global)':
+    'Region für Coding Plan (china/global)',
+  'API key for Coding Plan': 'API-Schlüssel für Coding Plan',
+  'Show current authentication status':
+    'Aktuellen Authentifizierungsstatus anzeigen',
+  'Authentication completed successfully.':
+    'Authentifizierung erfolgreich abgeschlossen.',
+  'Starting Qwen OAuth authentication...':
+    'Qwen OAuth-Authentifizierung wird gestartet...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Erfolgreich mit Qwen OAuth authentifiziert.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Authentifizierung mit Qwen OAuth fehlgeschlagen: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Alibaba Cloud Coding Plan-Authentifizierung wird verarbeitet...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Erfolgreich mit Alibaba Cloud Coding Plan authentifiziert.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Authentifizierung mit Coding Plan fehlgeschlagen: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Global',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Region für Coding Plan auswählen:',
+  'Enter your Coding Plan API key: ':
+    'Geben Sie Ihren Coding Plan API-Schlüssel ein: ',
+  'Select authentication method:': 'Authentifizierungsmethode auswählen:',
+  '\n=== Authentication Status ===\n': '\n=== Authentifizierungsstatus ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  Keine Authentifizierungsmethode konfiguriert.\n',
+  'Run one of the following commands to get started:\n':
+    'Führen Sie einen der folgenden Befehle aus, um zu beginnen:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Mit Qwen OAuth authentifizieren (kostenlos)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Mit Alibaba Cloud Coding Plan authentifizieren\n',
+  'Or simply run:': 'Oder einfach ausführen:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Interaktive Authentifizierungseinrichtung\n',
+  '✓ Authentication Method: Qwen OAuth':
+    '✓ Authentifizierungsmethode: Qwen OAuth',
+  '  Type: Free tier': '  Typ: Kostenlos',
+  '  Limit: Up to 1,000 requests/day': '  Limit: Bis zu 1.000 Anfragen/Tag',
+  '  Models: Qwen latest models\n': '  Modelle: Qwen neueste Modelle\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Authentifizierungsmethode: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
+  '  Region: {{region}}': '  Region: {{region}}',
+  '  Current Model: {{model}}': '  Aktuelles Modell: {{model}}',
+  '  Config Version: {{version}}': '  Konfigurationsversion: {{version}}',
+  '  Status: API key configured\n': '  Status: API-Schlüssel konfiguriert\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Authentifizierungsmethode: Alibaba Cloud Coding Plan (Unvollständig)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Problem: API-Schlüssel nicht in Umgebung oder Einstellungen gefunden\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Führen Sie `qwen auth coding-plan` aus, um neu zu konfigurieren.\n',
+  '✓ Authentication Method: {{type}}': '✓ Authentifizierungsmethode: {{type}}',
+  '  Status: Configured\n': '  Status: Konfiguriert\n',
+  'Failed to check authentication status: {{error}}':
+    'Authentifizierungsstatus konnte nicht überprüft werden: {{error}}',
+  'Select an option:': 'Option auswählen:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
 };

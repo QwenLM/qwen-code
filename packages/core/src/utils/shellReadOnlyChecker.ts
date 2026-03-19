@@ -342,12 +342,12 @@ export function isShellCommandReadOnly(command: string): boolean {
   }
 
   const segments = splitCommands(command);
+
   for (const segment of segments) {
-    const isAllowed = evaluateShellSegment(segment);
-    if (!isAllowed) {
+    if (!evaluateShellSegment(segment)) {
       return false;
     }
   }
 
-  return true;
+  return segments.length > 0;
 }

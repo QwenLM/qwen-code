@@ -166,11 +166,11 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: '' },
         _meta: {
           usage: {
-            promptTokens: 100,
-            completionTokens: 50,
-            thoughtsTokens: 25,
+            inputTokens: 100,
+            outputTokens: 50,
             totalTokens: 175,
-            cachedTokens: 10,
+            thoughtTokens: 25,
+            cachedReadTokens: 10,
           },
         },
       });
@@ -192,11 +192,11 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: 'done' },
         _meta: {
           usage: {
-            promptTokens: 10,
-            completionTokens: 5,
-            thoughtsTokens: 2,
+            inputTokens: 10,
+            outputTokens: 5,
             totalTokens: 17,
-            cachedTokens: 1,
+            thoughtTokens: 2,
+            cachedReadTokens: 1,
           },
           durationMs: 1234,
         },

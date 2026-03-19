@@ -1,0 +1,27 @@
+{
+  "concurrency": 2,
+  "yolo": true,
+  "source_repo": "/Users/andy/workspace/projects/qwen-code/integration-tests/concurrent-runner/examples/toy-project",
+  "worktree_base": "~/.qwen/worktrees",
+  "outputs_dir": "./examples/test-run",
+  "results_file": "./examples/test-run/results.json",
+  "keep_worktree": false,
+  "tasks": [
+    {
+      "id": "task-1",
+      "name": "Rabbit Counting",
+      "prompts": [
+        "Suppose we have 3 rabbits and 4 carrots. How many animals are there?"
+      ]
+    },
+    {
+      "id": "task-2",
+      "name": "File Writer",
+      "prompts": [
+        "Use shell tool to get current date.",
+        "Create a new file called 'counter.txt' with numbers 1 to 10, each on a new line."
+      ]
+    }
+  ],
+  "models": ["qwen3-coder-plus", "claude-sonnet-4-20250514"]
+}

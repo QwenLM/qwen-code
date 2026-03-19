@@ -18,6 +18,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import { getLanguageSettingsOptions } from '../i18n/languages.js';
 
 export type SettingsType =
   | 'boolean'
@@ -69,18 +70,103 @@ export interface SettingDefinition {
   default: SettingsValue;
   description?: string;
   parentKey?: string;
-  childKey?: string;
   key?: string;
   properties?: SettingsSchema;
   showInDialog?: boolean;
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Schema for array items when type is 'array' */
+  items?: SettingItemDefinition;
+}
+
+/**
+ * Schema definition for array item types.
+ * Supports simple types (string, number, boolean) and complex object types.
+ */
+export interface SettingItemDefinition {
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  properties?: Record<
+    string,
+    SettingItemDefinition & {
+      required?: boolean;
+      enum?: string[];
+      additionalProperties?: SettingItemDefinition;
+    }
+  >;
+  items?: SettingItemDefinition;
+  required?: boolean;
+  enum?: string[];
+  description?: string;
+  additionalProperties?: boolean | SettingItemDefinition;
 }
 
 export interface SettingsSchema {
   [key: string]: SettingDefinition;
 }
+
+/**
+ * Common items schema for hook definitions.
+ * Used by both UserPromptSubmit and Stop hooks.
+ */
+const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
+  type: 'object',
+  description:
+    'A hook definition with an optional matcher and a list of hook configurations.',
+  properties: {
+    matcher: {
+      type: 'string',
+      description:
+        'An optional matcher pattern to filter when this hook definition applies.',
+    },
+    sequential: {
+      type: 'boolean',
+      description:
+        'Whether the hooks should be executed sequentially instead of in parallel.',
+    },
+    hooks: {
+      type: 'array',
+      description: 'The list of hook configurations to execute.',
+      required: true,
+      items: {
+        type: 'object',
+        description:
+          'A hook configuration entry that defines a command to execute.',
+        properties: {
+          type: {
+            type: 'string',
+            description: 'The type of hook.',
+            enum: ['command'],
+            required: true,
+          },
+          command: {
+            type: 'string',
+            description: 'The command to execute when the hook is triggered.',
+            required: true,
+          },
+          name: {
+            type: 'string',
+            description: 'An optional name for the hook.',
+          },
+          description: {
+            type: 'string',
+            description: 'An optional description of what the hook does.',
+          },
+          timeout: {
+            type: 'number',
+            description: 'Timeout in milliseconds for the hook execution.',
+          },
+          env: {
+            type: 'object',
+            description:
+              'Environment variables to set when executing the hook command.',
+            additionalProperties: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+};
 
 export type MemoryImportFormat = 'tree' | 'flat';
 export type DnsResolutionOrder = 'ipv4first' | 'verbatim';
@@ -116,6 +202,42 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  // Coding Plan configuration
+  codingPlan: {
+    type: 'object',
+    label: 'Coding Plan',
+    category: 'Model',
+    requiresRestart: false,
+    default: {},
+    description: 'Coding Plan template version tracking and configuration.',
+    showInDialog: false,
+    properties: {
+      version: {
+        type: 'string',
+        label: 'Coding Plan Template Version',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  // Environment variables fallback
+  env: {
+    type: 'object',
+    label: 'Environment Variables',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, string>,
+    description:
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   general: {
     type: 'object',
     label: 'General',
@@ -143,23 +265,15 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
-      disableAutoUpdate: {
+      enableAutoUpdate: {
         type: 'boolean',
-        label: 'Disable Auto Update',
+        label: 'Enable Auto Update',
         category: 'General',
         requiresRestart: false,
-        default: false,
-        description: 'Disable automatic updates',
+        default: true,
+        description:
+          'Enable automatic update checks and installations on startup.',
         showInDialog: true,
-      },
-      disableUpdateNag: {
-        type: 'boolean',
-        label: 'Disable Update Nag',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description: 'Disable update notification prompts.',
-        showInDialog: false,
       },
       gitCoAuthor: {
         type: 'boolean',
@@ -211,13 +325,7 @@ const SETTINGS_SCHEMA = {
           'You can also use custom language codes (e.g., "es", "fr") by placing JS language files ' +
           'in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
         showInDialog: true,
-        options: [
-          { value: 'auto', label: 'Auto (detect from system)' },
-          { value: 'en', label: 'English' },
-          { value: 'zh', label: '中文 (Chinese)' },
-          { value: 'ru', label: 'Русский (Russian)' },
-          { value: 'de', label: 'Deutsch (German)' },
-        ],
+        options: [] as readonly SettingEnumOption[],
       },
       outputLanguage: {
         type: 'string',
@@ -227,7 +335,7 @@ const SETTINGS_SCHEMA = {
         default: 'auto',
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
-          'or set a specific language (e.g., "English", "中文", "日本語").',
+          'or set a specific language.',
         showInDialog: true,
       },
       terminalBell: {
@@ -249,6 +357,20 @@ const SETTINGS_SCHEMA = {
         description:
           'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
         showInDialog: false,
+      },
+      defaultFileEncoding: {
+        type: 'enum',
+        label: 'Default File Encoding',
+        category: 'General',
+        requiresRestart: false,
+        default: 'utf-8',
+        description:
+          'Default encoding for new files. Use "utf-8" (default) for UTF-8 without BOM, or "utf-8-bom" for UTF-8 with BOM. Only change this if your project specifically requires BOM.',
+        showInDialog: false,
+        options: [
+          { value: 'utf-8', label: 'UTF-8 (without BOM)' },
+          { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
+        ],
       },
     },
   },
@@ -337,7 +459,7 @@ const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
       },
@@ -388,14 +510,14 @@ const SETTINGS_SCHEMA = {
         description: 'Accessibility settings.',
         showInDialog: false,
         properties: {
-          disableLoadingPhrases: {
+          enableLoadingPhrases: {
             type: 'boolean',
-            label: 'Disable Loading Phrases',
+            label: 'Enable Loading Phrases',
             category: 'UI',
             requiresRestart: true,
-            default: false,
-            description: 'Disable loading phrases for accessibility',
-            showInDialog: false,
+            default: true,
+            description: 'Enable loading phrases (disable for accessibility)',
+            showInDialog: true,
           },
           screenReader: {
             type: 'boolean',
@@ -510,17 +632,6 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
-      summarizeToolOutput: {
-        type: 'object',
-        label: 'Summarize Tool Output',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as
-          | Record<string, { tokenBudget?: number }>
-          | undefined,
-        description: 'Settings for summarizing tool output.',
-        showInDialog: false,
-      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -553,7 +664,7 @@ const SETTINGS_SCHEMA = {
         label: 'Skip Loop Detection',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
@@ -603,7 +714,6 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Request timeout in milliseconds.',
             parentKey: 'generationConfig',
-            childKey: 'timeout',
             showInDialog: false,
           },
           maxRetries: {
@@ -614,18 +724,16 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Maximum number of retries for failed requests.',
             parentKey: 'generationConfig',
-            childKey: 'maxRetries',
             showInDialog: false,
           },
-          disableCacheControl: {
+          enableCacheControl: {
             type: 'boolean',
-            label: 'Disable Cache Control',
+            label: 'Enable Cache Control',
             category: 'Generation Configuration',
             requiresRestart: false,
-            default: false,
-            description: 'Disable cache control for DashScope providers.',
+            default: true,
+            description: 'Enable cache control for DashScope providers.',
             parentKey: 'generationConfig',
-            childKey: 'disableCacheControl',
             showInDialog: false,
           },
           schemaCompliance: {
@@ -637,12 +745,22 @@ const SETTINGS_SCHEMA = {
             description:
               'The compliance mode for tool schemas sent to the model. Use "openapi_30" for strict OpenAPI 3.0 compatibility (e.g., for Gemini).',
             parentKey: 'generationConfig',
-            childKey: 'schemaCompliance',
             showInDialog: false,
             options: [
               { value: 'auto', label: 'Auto (Default)' },
               { value: 'openapi_30', label: 'OpenAPI 3.0 Strict' },
             ],
+          },
+          contextWindowSize: {
+            type: 'number',
+            label: 'Context Window Size',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined,
+            description:
+              "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
           },
         },
       },
@@ -732,14 +850,14 @@ const SETTINGS_SCHEMA = {
             description: 'Enable recursive file search functionality',
             showInDialog: false,
           },
-          disableFuzzySearch: {
+          enableFuzzySearch: {
             type: 'boolean',
-            label: 'Disable Fuzzy Search',
+            label: 'Enable Fuzzy Search',
             category: 'Context',
             requiresRestart: true,
-            default: false,
-            description: 'Disable fuzzy search when searching for files.',
-            showInDialog: false,
+            default: true,
+            description: 'Enable fuzzy search when searching for files.',
+            showInDialog: true,
           },
         },
       },
@@ -779,9 +897,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: true,
             description:
-              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
             showInDialog: true,
           },
           pager: {
@@ -898,15 +1016,6 @@ const SETTINGS_SCHEMA = {
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
       },
-      enableToolOutputTruncation: {
-        type: 'boolean',
-        label: 'Enable Tool Output Truncation',
-        category: 'General',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable truncation of large tool outputs.',
-        showInDialog: false,
-      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',
@@ -955,6 +1064,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to allow.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
       excluded: {
         type: 'array',
@@ -964,17 +1074,9 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to exclude.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
     },
-  },
-  useSmartEdit: {
-    type: 'boolean',
-    label: 'Use Smart Edit',
-    category: 'Advanced',
-    requiresRestart: false,
-    default: false,
-    description: 'Enable the smart-edit tool instead of the replace tool.',
-    showInDialog: false,
   },
   security: {
     type: 'object',
@@ -1142,6 +1244,175 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
+  agents: {
+    type: 'object',
+    label: 'Agents',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
+    showInDialog: false,
+    properties: {
+      displayMode: {
+        type: 'enum',
+        label: 'Display Mode',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Display mode for multi-agent sessions. Currently only "in-process" is supported.',
+        showInDialog: false,
+        options: [
+          { value: 'in-process', label: 'In-process' },
+          // { value: 'tmux', label: 'tmux' },
+          // { value: 'iterm2', label: 'iTerm2' },
+        ],
+      },
+      arena: {
+        type: 'object',
+        label: 'Arena',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description: 'Settings for Arena (multi-model competitive execution).',
+        showInDialog: false,
+        properties: {
+          worktreeBaseDir: {
+            type: 'string',
+            label: 'Worktree Base Directory',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description:
+              'Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.',
+            showInDialog: false,
+          },
+          preserveArtifacts: {
+            type: 'boolean',
+            label: 'Preserve Arena Artifacts',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.',
+            showInDialog: true,
+          },
+          maxRoundsPerAgent: {
+            type: 'number',
+            label: 'Max Rounds Per Agent',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum number of rounds (turns) each agent can execute. No limit if unset.',
+            showInDialog: false,
+          },
+          timeoutSeconds: {
+            type: 'number',
+            label: 'Timeout (seconds)',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Total timeout in seconds for the Arena session. No limit if unset.',
+            showInDialog: false,
+          },
+        },
+      },
+      team: {
+        type: 'object',
+        label: 'Team',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Team (role-based collaborative execution). Reserved for future use.',
+        showInDialog: false,
+      },
+      swarm: {
+        type: 'object',
+        label: 'Swarm',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  hooksConfig: {
+    type: 'object',
+    label: 'Hooks Config',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook configurations for intercepting and customizing agent behavior.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Hooks',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
+        showInDialog: false,
+      },
+      disabled: {
+        type: 'array',
+        label: 'Disabled Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  hooks: {
+    type: 'object',
+    label: 'Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook event configurations for extending CLI behavior at various lifecycle points.',
+    showInDialog: false,
+    properties: {
+      UserPromptSubmit: {
+        type: 'array',
+        label: 'Before Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      Stop: {
+        type: 'array',
+        label: 'After Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+    },
+  },
 
   experimental: {
     type: 'object',
@@ -1151,44 +1422,22 @@ const SETTINGS_SCHEMA = {
     default: {},
     description: 'Setting to enable experimental features',
     showInDialog: false,
-    properties: {
-      skills: {
-        type: 'boolean',
-        label: 'Experimental: Skills',
-        category: 'Experimental',
-        requiresRestart: true,
-        default: false,
-        description:
-          'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
-        showInDialog: true,
-      },
-      visionModelPreview: {
-        type: 'boolean',
-        label: 'Vision Model Preview',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: true,
-        description:
-          'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
-        showInDialog: false,
-      },
-      vlmSwitchMode: {
-        type: 'string',
-        label: 'VLM Switch Mode',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
-        showInDialog: false,
-      },
-    },
+    properties: {},
   },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
 
 export function getSettingsSchema(): SettingsSchemaType {
+  // Inject dynamic language options
+  const schema = SETTINGS_SCHEMA as unknown as SettingsSchema;
+  if (schema['general']?.properties?.['language']) {
+    (
+      schema['general'].properties['language'] as {
+        options?: SettingEnumOption[];
+      }
+    ).options = getLanguageSettingsOptions();
+  }
   return SETTINGS_SCHEMA;
 }
 

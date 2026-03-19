@@ -6,6 +6,7 @@
 
 import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { extensionToOutputString, getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
@@ -15,10 +16,10 @@ export async function handleList() {
     const extensions = extensionManager.getLoadedExtensions();
 
     if (!extensions || extensions.length === 0) {
-      console.log(t('No extensions installed.'));
+      writeStdoutLine(t('No extensions installed.'));
       return;
     }
-    console.log(
+    writeStdoutLine(
       extensions
         .map((extension, _): string =>
           extensionToOutputString(extension, extensionManager, process.cwd()),
@@ -26,7 +27,7 @@ export async function handleList() {
         .join('\n\n'),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }

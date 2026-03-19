@@ -40,10 +40,13 @@ describe('ReadFileTool', () => {
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
-        getUserSkillsDir: () => path.join(os.homedir(), '.qwen', 'skills'),
+        getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
+      getContentGeneratorConfig: () => ({
+        modalities: { image: true, pdf: true, audio: true, video: true },
+      }),
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -86,6 +89,14 @@ describe('ReadFileTool', () => {
       const tempDir = path.join(tempRootDir, '.temp');
       const params: ReadFileToolParams = {
         absolute_path: path.join(tempDir, 'temp-file.txt'),
+      };
+      const result = tool.build(params);
+      expect(typeof result).not.toBe('string');
+    });
+
+    it('should allow access to files in OS temp directory', () => {
+      const params: ReadFileToolParams = {
+        absolute_path: path.join(os.tmpdir(), 'pr-review-context.md'),
       };
       const result = tool.build(params);
       expect(typeof result).not.toBe('string');
@@ -231,8 +242,8 @@ describe('ReadFileTool', () => {
 
     it('should return error for a file that is too large', async () => {
       const filePath = path.join(tempRootDir, 'largefile.txt');
-      // 21MB of content exceeds 20MB limit
-      const largeContent = 'x'.repeat(21 * 1024 * 1024);
+      // 11MB of content exceeds 10MB limit
+      const largeContent = 'x'.repeat(11 * 1024 * 1024);
       await fsp.writeFile(filePath, largeContent, 'utf-8');
       const params: ReadFileToolParams = { absolute_path: filePath };
       const invocation = tool.build(params) as ToolInvocation<
@@ -244,7 +255,7 @@ describe('ReadFileTool', () => {
       expect(result).toHaveProperty('error');
       expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.error?.message).toContain(
-        'File size exceeds the 20MB limit',
+        'File size exceeds the 10MB limit',
       );
     });
 
@@ -283,6 +294,7 @@ describe('ReadFileTool', () => {
         inlineData: {
           data: pngHeader.toString('base64'),
           mimeType: 'image/png',
+          displayName: 'image.png',
         },
       });
       expect(result.returnDisplay).toBe('Read image file: image.png');
@@ -304,6 +316,7 @@ describe('ReadFileTool', () => {
         inlineData: {
           data: pdfHeader.toString('base64'),
           mimeType: 'application/pdf',
+          displayName: 'document.pdf',
         },
       });
       expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
@@ -420,6 +433,28 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toBe(tempFileContent);
       expect(result.returnDisplay).toBe('');
+    });
+
+    it('should successfully read files from OS temp directory', async () => {
+      const osTempFile = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'read-file-test-'),
+      );
+      const tempFilePath = path.join(osTempFile, 'pr-review-context.md');
+      const tempFileContent = '## PR #123\nFix encoding issues';
+      await fsp.writeFile(tempFilePath, tempFileContent, 'utf-8');
+
+      try {
+        const params: ReadFileToolParams = { absolute_path: tempFilePath };
+        const invocation = tool.build(params) as ToolInvocation<
+          ReadFileToolParams,
+          ToolResult
+        >;
+
+        const result = await invocation.execute(abortSignal);
+        expect(result.llmContent).toBe(tempFileContent);
+      } finally {
+        await fsp.rm(osTempFile, { recursive: true, force: true });
+      }
     });
 
     describe('with .qwenignore', () => {

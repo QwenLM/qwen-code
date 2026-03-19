@@ -16,7 +16,11 @@ import type {
   GeminiClient,
   ShellExecutionResult,
 } from '@qwen-code/qwen-code-core';
-import { isBinary, ShellExecutionService } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  isBinary,
+  ShellExecutionService,
+} from '@qwen-code/qwen-code-core';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { SHELL_COMMAND_NAME } from '../constants.js';
@@ -29,6 +33,7 @@ import { themeManager } from '../../ui/themes/theme-manager.js';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const MAX_OUTPUT_LENGTH = 10000;
+const debugLogger = createDebugLogger('SHELL_COMMAND_PROCESSOR');
 
 function addShellCommandToGeminiHistory(
   geminiClient: GeminiClient,
@@ -231,7 +236,7 @@ export const useShellCommandProcessor = (
             shellExecutionConfig,
           );
 
-          console.log(terminalHeight, terminalWidth);
+          debugLogger.debug(terminalHeight, terminalWidth);
 
           executionPid = pid;
           if (pid) {

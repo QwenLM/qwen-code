@@ -5,24 +5,33 @@
  */
 
 import type {
-  SubAgentEventEmitter,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentApprovalRequestEvent,
-  SubAgentUsageEvent,
+  AgentEventEmitter,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentUsageEvent,
+  AgentStreamTextEvent,
   ToolCallConfirmationDetails,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
-  SubAgentEventType,
+  AgentEventType,
   ToolConfirmationOutcome,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type * as acp from '../acp.js';
+import type {
+  AgentSideConnection,
+  PermissionOption,
+  RequestPermissionRequest,
+  ToolCallContent,
+} from '@agentclientprotocol/sdk';
+
+const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 
 /**
  * Permission option kind type matching ACP schema.
@@ -76,39 +85,54 @@ export class SubAgentTracker {
 
   constructor(
     private readonly ctx: SessionContext,
-    private readonly client: acp.Client,
+    private readonly client: AgentSideConnection,
+    private readonly parentToolCallId: string,
+    private readonly subagentType: string,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
   }
 
   /**
+   * Gets the subagent metadata to attach to all events.
+   */
+  private getSubagentMeta() {
+    return {
+      parentToolCallId: this.parentToolCallId,
+      subagentType: this.subagentType,
+    };
+  }
+
+  /**
    * Sets up event listeners for a sub-agent's tool events.
    *
-   * @param eventEmitter - The SubAgentEventEmitter from TaskTool
+   * @param eventEmitter - The AgentEventEmitter from TaskTool
    * @param abortSignal - Signal to abort tracking if parent is cancelled
    * @returns Array of cleanup functions to remove listeners
    */
   setup(
-    eventEmitter: SubAgentEventEmitter,
+    eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
     const onToolCall = this.createToolCallHandler(abortSignal);
     const onToolResult = this.createToolResultHandler(abortSignal);
     const onApproval = this.createApprovalHandler(abortSignal);
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
+    const onStreamText = this.createStreamTextHandler(abortSignal);
 
-    eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
-    eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
-    eventEmitter.on(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-    eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
+    eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
+    eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+    eventEmitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+    eventEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+    eventEmitter.on(AgentEventType.STREAM_TEXT, onStreamText);
 
     return [
       () => {
-        eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
-        eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
-        eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-        eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
+        eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+        eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+        eventEmitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+        eventEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        eventEmitter.off(AgentEventType.STREAM_TEXT, onStreamText);
         // Clean up any remaining states
         this.toolStates.clear();
       },
@@ -122,7 +146,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolCallEvent;
+      const event = args[0] as AgentToolCallEvent;
       if (abortSignal.aborted) return;
 
       // Look up tool and build invocation for metadata
@@ -135,7 +159,7 @@ export class SubAgentTracker {
           invocation = tool.build(event.args);
         } catch (e) {
           // If building fails, continue with defaults
-          console.warn(`Failed to build subagent tool ${event.name}:`, e);
+          debugLogger.warn(`Failed to build subagent tool ${event.name}:`, e);
         }
       }
 
@@ -151,6 +175,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
+        subagentMeta: this.getSubagentMeta(),
       });
     };
   }
@@ -162,7 +187,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolResultEvent;
+      const event = args[0] as AgentToolResultEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
@@ -175,6 +200,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
+        subagentMeta: this.getSubagentMeta(),
       });
 
       // Clean up state
@@ -189,11 +215,11 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => Promise<void> {
     return async (...args: unknown[]) => {
-      const event = args[0] as SubAgentApprovalRequestEvent;
+      const event = args[0] as AgentApprovalRequestEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
-      const content: acp.ToolCallContent[] = [];
+      const content: ToolCallContent[] = [];
 
       // Handle edit confirmation type - show diff
       if (event.confirmationDetails.type === 'edit') {
@@ -222,7 +248,7 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
-      const params: acp.RequestPermissionRequest = {
+      const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
         options: this.toPermissionOptions(fullConfirmationDetails),
         toolCall: {
@@ -250,7 +276,7 @@ export class SubAgentTracker {
         await event.respond(outcome);
       } catch (error) {
         // If permission request fails, cancel the tool call
-        console.error(
+        debugLogger.error(
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );
@@ -266,10 +292,35 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentUsageEvent;
+      const event = args[0] as AgentUsageEvent;
       if (abortSignal.aborted) return;
 
-      this.messageEmitter.emitUsageMetadata(event.usage, '', event.durationMs);
+      this.messageEmitter.emitUsageMetadata(
+        event.usage,
+        '',
+        event.durationMs,
+        this.getSubagentMeta(),
+      );
+    };
+  }
+
+  /**
+   * Creates a handler for stream text events.
+   * Emits agent message or thought chunks for text content from subagent model responses.
+   */
+  private createStreamTextHandler(
+    abortSignal: AbortSignal,
+  ): (...args: unknown[]) => void {
+    return (...args: unknown[]) => {
+      const event = args[0] as AgentStreamTextEvent;
+      if (abortSignal.aborted) return;
+
+      // Emit streamed text as agent message or thought based on the flag
+      void this.messageEmitter.emitMessage(
+        event.text,
+        'assistant',
+        event.thought ?? false,
+      );
     };
   }
 
@@ -278,7 +329,7 @@ export class SubAgentTracker {
    */
   private toPermissionOptions(
     confirmation: ToolCallConfirmationDetails,
-  ): acp.PermissionOption[] {
+  ): PermissionOption[] {
     switch (confirmation.type) {
       case 'edit':
         return [

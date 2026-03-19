@@ -9,6 +9,16 @@ import yargs from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { removeCommand } from './remove.js';
 
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockDeleteCredentials = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
+}));
+
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
   return {
@@ -23,6 +33,17 @@ vi.mock('../../config/settings.js', async () => {
   return {
     ...actual,
     loadSettings: vi.fn(),
+  };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    MCPOAuthTokenStorage: vi.fn(() => ({
+      deleteCredentials: mockDeleteCredentials,
+    })),
   };
 });
 
@@ -49,25 +70,46 @@ describe('mcp remove command', () => {
       forScope: () => ({ settings: mockSettings }),
       setValue: mockSetValue,
     });
+    mockWriteStdoutLine.mockClear();
+    mockDeleteCredentials.mockClear();
   });
 
-  it('should remove a server from project settings', async () => {
+  it('should remove a server from user settings by default', async () => {
     await parser.parseAsync('remove test-server');
 
     expect(mockSetValue).toHaveBeenCalledWith(
-      SettingScope.Workspace,
+      SettingScope.User,
       'mcpServers',
       {},
     );
   });
 
-  it('should show a message if server not found', async () => {
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  it('should clean up OAuth tokens when removing a server', async () => {
+    await parser.parseAsync('remove test-server');
+
+    expect(mockDeleteCredentials).toHaveBeenCalledWith('test-server');
+  });
+
+  it('should not fail if OAuth token cleanup fails', async () => {
+    mockDeleteCredentials.mockRejectedValue(new Error('cleanup failed'));
+
+    await parser.parseAsync('remove test-server');
+
+    // Server should still be removed from settings despite token cleanup failure
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      {},
+    );
+  });
+
+  it('should not clean up OAuth tokens if server not found', async () => {
     await parser.parseAsync('remove non-existent-server');
 
     expect(mockSetValue).not.toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith(
-      'Server "non-existent-server" not found in project settings.',
+    expect(mockDeleteCredentials).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Server "non-existent-server" not found in user settings.',
     );
   });
 });

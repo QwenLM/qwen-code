@@ -5,7 +5,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  McpToolProgressData,
+} from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -32,6 +36,8 @@ export class StreamJsonOutputAdapter
   extends BaseJsonOutputAdapter
   implements JsonOutputAdapterInterface
 {
+  private mainTurnMessageStartEmitted = false;
+
   constructor(
     config: Config,
     private readonly includePartialMessages: boolean,
@@ -64,29 +70,27 @@ export class StreamJsonOutputAdapter
     return this.includePartialMessages;
   }
 
+  override startAssistantMessage(): void {
+    this.mainTurnMessageStartEmitted = false;
+    super.startAssistantMessage();
+  }
+
   finalizeAssistantMessage(): CLIAssistantMessage {
-    const state = this.mainAgentMessageState;
-    if (state.finalized) {
-      return this.buildMessage(null);
-    }
-    state.finalized = true;
-
-    this.finalizePendingBlocks(state, null);
-    const orderedOpenBlocks = Array.from(state.openBlocks).sort(
-      (a, b) => a - b,
+    const message = this.finalizeAssistantMessageInternal(
+      this.mainAgentMessageState,
+      null,
     );
-    for (const index of orderedOpenBlocks) {
-      this.onBlockClosed(state, index, null);
-      this.closeBlock(state, index);
+    if (this.mainTurnMessageStartEmitted && this.includePartialMessages) {
+      const partial: CLIPartialAssistantMessage = {
+        type: 'stream_event',
+        uuid: randomUUID(),
+        session_id: this.getSessionId(),
+        parent_tool_use_id: null,
+        event: { type: 'message_stop' },
+      };
+      this.emitMessageImpl(partial);
     }
-
-    if (state.messageStarted && this.includePartialMessages) {
-      this.emitStreamEventIfEnabled({ type: 'message_stop' }, null);
-    }
-
-    const message = this.buildMessage(null);
-    this.updateLastAssistantMessage(message);
-    this.emitMessageImpl(message);
+    this.mainTurnMessageStartEmitted = false;
     return message;
   }
 
@@ -245,14 +249,15 @@ export class StreamJsonOutputAdapter
 
   /**
    * Overrides base class hook to emit message_start event when message is started.
-   * Only emits for main agent, not for subagents.
+   * Only emits once per turn for the main agent (guarded by mainTurnMessageStartEmitted),
+   * so block-type transitions inside a single turn do not produce spurious message_start events.
    */
   protected override onEnsureMessageStarted(
     state: MessageState,
     parentToolUseId: string | null,
   ): void {
-    // Only emit message_start for main agent, not for subagents
-    if (parentToolUseId === null) {
+    if (parentToolUseId === null && !this.mainTurnMessageStartEmitted) {
+      this.mainTurnMessageStartEmitted = true;
       this.emitStreamEventIfEnabled(
         {
           type: 'message_start',
@@ -260,11 +265,38 @@ export class StreamJsonOutputAdapter
             id: state.messageId!,
             role: 'assistant',
             model: this.config.getModel(),
+            content: [],
           },
         },
         null,
       );
     }
+  }
+
+  /**
+   * Emits a tool progress stream event when partial messages are enabled.
+   * This overrides the no-op in BaseJsonOutputAdapter.
+   */
+  override emitToolProgress(
+    request: ToolCallRequestInfo,
+    progress: McpToolProgressData,
+  ): void {
+    if (!this.includePartialMessages) {
+      return;
+    }
+
+    const partial: CLIPartialAssistantMessage = {
+      type: 'stream_event',
+      uuid: randomUUID(),
+      session_id: this.getSessionId(),
+      parent_tool_use_id: null,
+      event: {
+        type: 'tool_progress',
+        tool_use_id: request.callId,
+        content: progress,
+      },
+    };
+    this.emitMessageImpl(partial);
   }
 
   /**
@@ -281,19 +313,12 @@ export class StreamJsonOutputAdapter
       return;
     }
 
-    const state = this.getMessageState(parentToolUseId);
-    const enrichedEvent = state.messageStarted
-      ? ({ ...event, message_id: state.messageId } as StreamEvent & {
-          message_id: string;
-        })
-      : event;
-
     const partial: CLIPartialAssistantMessage = {
       type: 'stream_event',
       uuid: randomUUID(),
       session_id: this.getSessionId(),
       parent_tool_use_id: parentToolUseId,
-      event: enrichedEvent,
+      event,
     };
     this.emitMessageImpl(partial);
   }

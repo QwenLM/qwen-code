@@ -1,0 +1,207 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * LayoutComponents.css - Tool call layout styles with timeline support
+ */
+
+/* ToolCallContainer with timeline support */
+.toolcall-container {
+  position: relative;
+  --timeline-center-offset: 15px;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  user-select: text;
+  align-items: flex-start;
+  border-radius: 6px;
+}
+
+/*
+ * Timeline positioning calculation:
+ * - Container padding-top: 8px
+ * - Bullet font-size: 10px, line-height: 20px (to match content height)
+ * - Bullet vertical center: 8px (container padding) + 2px (padding-top) + 5px (half of 10px bullet) = 15px from top
+ * - Line left: 12px (centered under bullet at left: 8px + ~4px offset)
+ */
+
+/* Default timeline connector line - full height */
+.toolcall-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color, rgba(255, 255, 255, 0.15));
+}
+
+/* First item in sequence: connector starts from bullet center */
+.toolcall-container:first-child::after {
+  top: var(--timeline-center-offset, 15px);
+}
+
+/* Last item in sequence: connector ends at bullet center */
+.toolcall-container:last-child::after {
+  bottom: calc(100% - var(--timeline-center-offset, 15px));
+}
+
+/* Single item (both first and last): no connector */
+.toolcall-container:first-child:last-child::after {
+  display: none;
+}
+
+/*
+ * Status bullet points - all use consistent positioning
+ * Following the same calculation as AssistantMessage for consistency
+ */
+.toolcall-container.toolcall-status-default::before,
+.toolcall-container.toolcall-status-success::before,
+.toolcall-container.toolcall-status-error::before,
+.toolcall-container.toolcall-status-warning::before,
+.toolcall-container.toolcall-status-loading::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  z-index: 1;
+}
+
+/* Status colors */
+.toolcall-container.toolcall-status-default::before {
+  color: var(--app-secondary-foreground);
+}
+
+.toolcall-container.toolcall-status-success::before {
+  color: #74c991;
+}
+
+.toolcall-container.toolcall-status-error::before {
+  color: #c74e39;
+}
+
+.toolcall-container.toolcall-status-warning::before {
+  color: #e1c08d;
+}
+
+.toolcall-container.toolcall-status-loading::before {
+  color: var(--app-secondary-foreground);
+  animation: toolcallPulse 1s linear infinite;
+}
+
+/* Loading animation */
+@keyframes toolcallPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* Content wrapper */
+.toolcall-content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Legacy card styles */
+.toolcall-card {
+  grid-template-columns: auto 1fr;
+  gap: var(--spacing-medium);
+  background: var(--app-input-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--border-radius-medium);
+  padding: var(--spacing-large);
+  margin: var(--spacing-medium) 0;
+  align-items: start;
+  animation: fadeIn 0.2s ease-in;
+}
+
+/* Legacy row styles */
+.toolcall-row {
+  grid-template-columns: 80px 1fr;
+  gap: var(--spacing-medium);
+  min-width: 0;
+}
+
+.toolcall-row-label {
+  font-size: var(--font-size-xs);
+  color: var(--app-secondary-foreground);
+  font-weight: 500;
+  padding-top: 2px;
+}
+
+.toolcall-row-content {
+  color: var(--app-primary-foreground);
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* Locations list */
+.toolcall-locations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+/* ToolCall header with loading indicator */
+.toolcall-header {
+  position: relative;
+}
+
+.toolcall-header::before {
+  content: '\25cf';
+  position: absolute;
+  left: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  z-index: 1;
+  color: #e1c08d;
+  animation: toolcallHeaderPulse 1.5s ease-in-out infinite;
+}
+
+/* Loading animation for toolcall header */
+@keyframes toolcallHeaderPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* In-progress toolcall specific styles */
+.in-progress-toolcall .toolcall-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.in-progress-toolcall .toolcall-header {
+  display: flex;
+  align-items: center;
+  gap: 2;
+  position: relative;
+  min-width: 0;
+}
+
+.in-progress-toolcall .toolcall-content-text {
+  word-break: break-word;
+  white-space: pre-wrap;
+  width: 100%;
+}

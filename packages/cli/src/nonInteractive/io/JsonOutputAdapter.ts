@@ -52,12 +52,10 @@ export class JsonOutputAdapter
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
-    const message = this.finalizeAssistantMessageInternal(
+    return this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
       null,
     );
-    this.updateLastAssistantMessage(message);
-    return message;
   }
 
   emitResult(options: ResultOptions): void {
@@ -67,9 +65,17 @@ export class JsonOutputAdapter
     );
     this.messages.push(resultMessage);
 
-    // Emit the entire messages array as JSON (includes all main agent + subagent messages)
-    const json = JSON.stringify(this.messages);
-    process.stdout.write(`${json}\n`);
+    if (this.config.getOutputFormat() === 'text') {
+      if (resultMessage.is_error) {
+        process.stderr.write(`${resultMessage.error?.message || ''}`);
+      } else {
+        process.stdout.write(`${resultMessage.result}`);
+      }
+    } else {
+      // Emit the entire messages array as JSON (includes all main agent + subagent messages)
+      const json = JSON.stringify(this.messages);
+      process.stdout.write(`${json}\n`);
+    }
   }
 
   emitMessage(message: CLIMessage): void {

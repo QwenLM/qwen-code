@@ -13,6 +13,7 @@ import {
   updateSetting,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 // --- SET COMMAND ---
 interface SetArgs {
@@ -50,7 +51,7 @@ const setCommand: CommandModule<object, SetArgs> = {
     if (!extensions || extensions.length === 0) return;
     const extension = extensions.find((e) => e.name === name);
     if (!extension) {
-      console.log(t('Extension "{{name}}" not found.', { name }));
+      writeStdoutLine(t('Extension "{{name}}" not found.', { name }));
       return;
     }
     await updateSetting(
@@ -85,11 +86,11 @@ const listCommand: CommandModule<object, ListArgs> = {
     if (!extensions || extensions.length === 0) return;
     const extension = extensions.find((e) => e.name === name);
     if (!extension) {
-      console.log(t('Extension "{{name}}" not found.', { name }));
+      writeStdoutLine(t('Extension "{{name}}" not found.', { name }));
       return;
     }
     if (!extension || !extension.settings || extension.settings.length === 0) {
-      console.log(
+      writeStdoutLine(
         t('Extension "{{name}}" has no settings to configure.', { name }),
       );
       return;
@@ -107,7 +108,7 @@ const listCommand: CommandModule<object, ListArgs> = {
     );
     const mergedSettings = { ...userSettings, ...workspaceSettings };
 
-    console.log(t('Settings for "{{name}}":', { name }));
+    writeStdoutLine(t('Settings for "{{name}}":', { name }));
     for (const setting of extension.settings) {
       const value = mergedSettings[setting.envVar];
       let displayValue: string;
@@ -126,10 +127,10 @@ const listCommand: CommandModule<object, ListArgs> = {
       } else {
         displayValue = value;
       }
-      console.log(`
+      writeStdoutLine(`
 - ${setting.name} (${setting.envVar})`);
-      console.log(`  ${t('Description:')} ${setting.description}`);
-      console.log(`  ${t('Value:')} ${displayValue}${scopeInfo}`);
+      writeStdoutLine(`  ${t('Description:')} ${setting.description}`);
+      writeStdoutLine(`  ${t('Value:')} ${displayValue}${scopeInfo}`);
     }
   },
 };

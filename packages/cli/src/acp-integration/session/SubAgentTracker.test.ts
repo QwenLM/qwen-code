@@ -10,25 +10,26 @@ import type { SessionContext } from './types.js';
 import type {
   Config,
   ToolRegistry,
-  SubAgentEventEmitter,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentApprovalRequestEvent,
+  AgentEventEmitter,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentStreamTextEvent,
   ToolEditConfirmationDetails,
   ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
-  SubAgentEventType,
+  AgentEventType,
   ToolConfirmationOutcome,
   TodoWriteTool,
 } from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
+import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { EventEmitter } from 'node:events';
 
-// Helper to create a mock SubAgentToolCallEvent with required fields
+// Helper to create a mock AgentToolCallEvent with required fields
 function createToolCallEvent(
-  overrides: Partial<SubAgentToolCallEvent> & { name: string; callId: string },
-): SubAgentToolCallEvent {
+  overrides: Partial<AgentToolCallEvent> & { name: string; callId: string },
+): AgentToolCallEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -39,14 +40,14 @@ function createToolCallEvent(
   };
 }
 
-// Helper to create a mock SubAgentToolResultEvent with required fields
+// Helper to create a mock AgentToolResultEvent with required fields
 function createToolResultEvent(
-  overrides: Partial<SubAgentToolResultEvent> & {
+  overrides: Partial<AgentToolResultEvent> & {
     name: string;
     callId: string;
     success: boolean;
   },
-): SubAgentToolResultEvent {
+): AgentToolResultEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -55,15 +56,15 @@ function createToolResultEvent(
   };
 }
 
-// Helper to create a mock SubAgentApprovalRequestEvent with required fields
+// Helper to create a mock AgentApprovalRequestEvent with required fields
 function createApprovalEvent(
-  overrides: Partial<SubAgentApprovalRequestEvent> & {
+  overrides: Partial<AgentApprovalRequestEvent> & {
     name: string;
     callId: string;
-    confirmationDetails: SubAgentApprovalRequestEvent['confirmationDetails'];
-    respond: SubAgentApprovalRequestEvent['respond'];
+    confirmationDetails: AgentApprovalRequestEvent['confirmationDetails'];
+    respond: AgentApprovalRequestEvent['respond'];
   },
-): SubAgentApprovalRequestEvent {
+): AgentApprovalRequestEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -101,13 +102,25 @@ function createInfoConfirmation(
   };
 }
 
+// Helper to create a mock AgentStreamTextEvent with required fields
+function createStreamTextEvent(
+  overrides: Partial<AgentStreamTextEvent> & { text: string },
+): AgentStreamTextEvent {
+  return {
+    subagentId: 'test-subagent',
+    round: 1,
+    timestamp: Date.now(),
+    ...overrides,
+  };
+}
+
 describe('SubAgentTracker', () => {
   let mockContext: SessionContext;
-  let mockClient: acp.Client;
+  let mockClient: AgentSideConnection;
   let sendUpdateSpy: ReturnType<typeof vi.fn>;
   let requestPermissionSpy: ReturnType<typeof vi.fn>;
   let tracker: SubAgentTracker;
-  let eventEmitter: SubAgentEventEmitter;
+  let eventEmitter: AgentEventEmitter;
   let abortController: AbortController;
 
   beforeEach(() => {
@@ -130,10 +143,15 @@ describe('SubAgentTracker', () => {
 
     mockClient = {
       requestPermission: requestPermissionSpy,
-    } as unknown as acp.Client;
+    } as unknown as AgentSideConnection;
 
-    tracker = new SubAgentTracker(mockContext, mockClient);
-    eventEmitter = new EventEmitter() as unknown as SubAgentEventEmitter;
+    tracker = new SubAgentTracker(
+      mockContext,
+      mockClient,
+      'parent-call-123',
+      'test-subagent',
+    );
+    eventEmitter = new EventEmitter() as unknown as AgentEventEmitter;
     abortController = new AbortController();
   });
 
@@ -151,15 +169,19 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         expect.any(Function),
       );
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         expect.any(Function),
       );
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_WAITING_APPROVAL,
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        expect.any(Function),
+      );
+      expect(onSpy).toHaveBeenCalledWith(
+        AgentEventType.STREAM_TEXT,
         expect.any(Function),
       );
     });
@@ -171,15 +193,19 @@ describe('SubAgentTracker', () => {
       cleanups[0]();
 
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         expect.any(Function),
       );
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         expect.any(Function),
       );
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_WAITING_APPROVAL,
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        expect.any(Function),
+      );
+      expect(offSpy).toHaveBeenCalledWith(
+        AgentEventType.STREAM_TEXT,
         expect.any(Function),
       );
     });
@@ -196,7 +222,7 @@ describe('SubAgentTracker', () => {
         description: 'Reading file',
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       // Allow async operations to complete
       await vi.waitFor(() => {
@@ -214,6 +240,11 @@ describe('SubAgentTracker', () => {
           locations: [],
           kind: 'other',
           rawInput: { path: '/test.ts' },
+          _meta: expect.objectContaining({
+            toolName: 'read_file',
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+          }),
         }),
       );
     });
@@ -227,7 +258,7 @@ describe('SubAgentTracker', () => {
         args: { todos: [] },
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -245,7 +276,7 @@ describe('SubAgentTracker', () => {
         args: {},
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -259,7 +290,7 @@ describe('SubAgentTracker', () => {
 
       // First emit tool call to store state
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
           name: 'read_file',
           callId: 'call-123',
@@ -275,7 +306,7 @@ describe('SubAgentTracker', () => {
         resultDisplay: 'File contents',
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith(
@@ -283,6 +314,11 @@ describe('SubAgentTracker', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'call-123',
             status: 'completed',
+            _meta: expect.objectContaining({
+              toolName: 'read_file',
+              parentToolCallId: 'parent-call-123',
+              subagentType: 'test-subagent',
+            }),
           }),
         );
       });
@@ -298,13 +334,18 @@ describe('SubAgentTracker', () => {
         resultDisplay: undefined,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             sessionUpdate: 'tool_call_update',
             status: 'failed',
+            _meta: expect.objectContaining({
+              toolName: 'read_file',
+              parentToolCallId: 'parent-call-123',
+              subagentType: 'test-subagent',
+            }),
           }),
         );
       });
@@ -315,7 +356,7 @@ describe('SubAgentTracker', () => {
 
       // Store args via tool call
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
           name: TodoWriteTool.Name,
           callId: 'call-todo',
@@ -336,7 +377,7 @@ describe('SubAgentTracker', () => {
         }),
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
@@ -352,7 +393,7 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -361,7 +402,7 @@ describe('SubAgentTracker', () => {
       );
 
       eventEmitter.emit(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         createToolResultEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -372,7 +413,7 @@ describe('SubAgentTracker', () => {
       // Emit another result for same callId - should not have stored args
       sendUpdateSpy.mockClear();
       eventEmitter.emit(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         createToolResultEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -406,7 +447,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(requestPermissionSpy).toHaveBeenCalled();
@@ -442,7 +483,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
@@ -463,7 +504,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
@@ -484,7 +525,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
@@ -507,7 +548,7 @@ describe('SubAgentTracker', () => {
         respond: vi.fn(),
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(requestPermissionSpy).toHaveBeenCalled();
@@ -518,6 +559,165 @@ describe('SubAgentTracker', () => {
         expect.objectContaining({
           optionId: ToolConfirmationOutcome.ProceedAlways,
           name: 'Allow All Edits',
+        }),
+      );
+    });
+  });
+
+  describe('stream text handling', () => {
+    it('should emit agent_message_chunk on STREAM_TEXT event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createStreamTextEvent({
+        text: 'Hello, this is a response from the model.',
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Hello, this is a response from the model.',
+          },
+        }),
+      );
+    });
+
+    it('should emit multiple chunks for multiple STREAM_TEXT events', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      eventEmitter.emit(
+        AgentEventType.STREAM_TEXT,
+        createStreamTextEvent({ text: 'First chunk ' }),
+      );
+      eventEmitter.emit(
+        AgentEventType.STREAM_TEXT,
+        createStreamTextEvent({ text: 'Second chunk ' }),
+      );
+      eventEmitter.emit(
+        AgentEventType.STREAM_TEXT,
+        createStreamTextEvent({ text: 'Third chunk' }),
+      );
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalledTimes(3);
+      });
+
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'First chunk ' },
+        }),
+      );
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Second chunk ' },
+        }),
+      );
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Third chunk' },
+        }),
+      );
+    });
+
+    it('should not emit when aborted', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      abortController.abort();
+
+      const event = createStreamTextEvent({
+        text: 'This should not be emitted',
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit agent_thought_chunk when thought flag is true', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createStreamTextEvent({
+        text: 'Let me think about this...',
+        thought: true,
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_thought_chunk',
+          content: {
+            type: 'text',
+            text: 'Let me think about this...',
+          },
+        }),
+      );
+    });
+
+    it('should emit agent_message_chunk when thought flag is false', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createStreamTextEvent({
+        text: 'Here is the answer.',
+        thought: false,
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Here is the answer.',
+          },
+        }),
+      );
+    });
+
+    it('should emit agent_message_chunk when thought flag is undefined', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      // Event without thought flag (undefined)
+      const event = createStreamTextEvent({
+        text: 'Default behavior text.',
+      });
+
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Default behavior text.',
+          },
         }),
       );
     });

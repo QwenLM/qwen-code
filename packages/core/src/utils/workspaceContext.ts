@@ -8,6 +8,9 @@ import { isNodeError } from '../utils/errors.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as process from 'node:process';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKSPACE');
 
 export type Unsubscribe = () => void;
 
@@ -53,7 +56,7 @@ export class WorkspaceContext {
         listener();
       } catch (e) {
         // Don't let one listener break others.
-        console.error('Error in WorkspaceContext listener:', e);
+        debugLogger.error('Error in WorkspaceContext listener:', e);
       }
     }
   }
@@ -72,8 +75,8 @@ export class WorkspaceContext {
       this.directories.add(resolved);
       this.notifyDirectoriesChanged();
     } catch (err) {
-      console.warn(
-        `[WARN] Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
+      debugLogger.warn(
+        `Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
       );
     }
   }
@@ -134,7 +137,7 @@ export class WorkspaceContext {
       const fullyResolvedPath = this.fullyResolvedPath(pathToCheck);
 
       for (const dir of this.directories) {
-        if (this.isPathWithinRoot(fullyResolvedPath, dir)) {
+        if (isPathWithinRoot(fullyResolvedPath, dir)) {
           return true;
         }
       }
@@ -169,24 +172,6 @@ export class WorkspaceContext {
   }
 
   /**
-   * Checks if a path is within a given root directory.
-   * @param pathToCheck The absolute path to check
-   * @param rootDirectory The absolute root directory
-   * @returns True if the path is within the root directory, false otherwise
-   */
-  private isPathWithinRoot(
-    pathToCheck: string,
-    rootDirectory: string,
-  ): boolean {
-    const relative = path.relative(rootDirectory, pathToCheck);
-    return (
-      !relative.startsWith(`..${path.sep}`) &&
-      relative !== '..' &&
-      !path.isAbsolute(relative)
-    );
-  }
-
-  /**
    * Checks if a file path is a symbolic link that points to a file.
    */
   private isFileSymlink(filePath: string): boolean {
@@ -196,4 +181,22 @@ export class WorkspaceContext {
       return false;
     }
   }
+}
+
+/**
+ * Checks if a path is within a given root directory.
+ * @param pathToCheck The absolute path to check
+ * @param rootDirectory The absolute root directory
+ * @returns True if the path is within the root directory, false otherwise
+ */
+export function isPathWithinRoot(
+  pathToCheck: string,
+  rootDirectory: string,
+): boolean {
+  const relative = path.relative(rootDirectory, pathToCheck);
+  return (
+    !relative.startsWith(`..${path.sep}`) &&
+    relative !== '..' &&
+    !path.isAbsolute(relative)
+  );
 }

@@ -11,7 +11,6 @@ import type {
   Tool,
   ToolListUnion,
   CallableTool,
-  FunctionCall,
   FunctionResponse,
   ContentListUnion,
   ContentUnion,
@@ -21,11 +20,15 @@ import type {
 import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { InputModalities } from '../contentGenerator.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+
+const debugLogger = createDebugLogger('CONVERTER');
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -47,11 +50,13 @@ type ExtendedChatCompletionMessageParam =
 export interface ExtendedCompletionMessage
   extends OpenAI.Chat.ChatCompletionMessage {
   reasoning_content?: string | null;
+  reasoning?: string | null;
 }
 
 export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
+  reasoning?: string | null;
 }
 
 /**
@@ -63,21 +68,27 @@ export interface ToolCallAccumulator {
   arguments: string;
 }
 
-/**
- * Parsed parts from Gemini content, categorized by type
- */
-interface ParsedParts {
-  thoughtParts: string[];
-  contentParts: string[];
-  functionCalls: FunctionCall[];
-  functionResponses: FunctionResponse[];
-  mediaParts: Array<{
-    type: 'image' | 'audio' | 'file';
-    data: string;
-    mimeType: string;
-    fileUri?: string;
-  }>;
-}
+type OpenAIContentPartVideoUrl = {
+  type: 'video_url';
+  video_url: {
+    url: string;
+  };
+};
+
+type OpenAIContentPartFile = {
+  type: 'file';
+  file: {
+    filename: string;
+    file_data: string;
+  };
+};
+
+type OpenAIContentPart =
+  | OpenAI.Chat.ChatCompletionContentPartText
+  | OpenAI.Chat.ChatCompletionContentPartImage
+  | OpenAI.Chat.ChatCompletionContentPartInputAudio
+  | OpenAIContentPartVideoUrl
+  | OpenAIContentPartFile;
 
 /**
  * Converter class for transforming data between Gemini and OpenAI formats
@@ -85,12 +96,18 @@ interface ParsedParts {
 export class OpenAIContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
+  private modalities: InputModalities;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
 
-  constructor(model: string, schemaCompliance: SchemaComplianceMode = 'auto') {
+  constructor(
+    model: string,
+    schemaCompliance: SchemaComplianceMode = 'auto',
+    modalities: InputModalities = {},
+  ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
+    this.modalities = modalities;
   }
 
   /**
@@ -99,6 +116,13 @@ export class OpenAIContentConverter {
    */
   setModel(model: string): void {
     this.model = model;
+  }
+
+  /**
+   * Update the supported input modalities.
+   */
+  setModalities(modalities: InputModalities): void {
+    this.modalities = modalities;
   }
 
   /**
@@ -271,28 +295,48 @@ export class OpenAIContentConverter {
   ): OpenAI.Chat.ChatCompletion {
     const candidate = response.candidates?.[0];
     const parts = (candidate?.content?.parts || []) as Part[];
-    const parsedParts = this.parseParts(parts);
+
+    // Parse parts inline
+    const thoughtParts: string[] = [];
+    const contentParts: string[] = [];
+    const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+    let toolCallIndex = 0;
+
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        contentParts.push(part);
+      } else if ('text' in part && part.text) {
+        if ('thought' in part && part.thought) {
+          thoughtParts.push(part.text);
+        } else {
+          contentParts.push(part.text);
+        }
+      } else if ('functionCall' in part && part.functionCall) {
+        toolCalls.push({
+          id: part.functionCall.id || `call_${toolCallIndex}`,
+          type: 'function' as const,
+          function: {
+            name: part.functionCall.name || '',
+            arguments: JSON.stringify(part.functionCall.args || {}),
+          },
+        });
+        toolCallIndex += 1;
+      }
+    }
 
     const message: ExtendedCompletionMessage = {
       role: 'assistant',
-      content: parsedParts.contentParts.join('') || null,
+      content: contentParts.join('') || null,
       refusal: null,
     };
 
-    const reasoningContent = parsedParts.thoughtParts.join('');
+    const reasoningContent = thoughtParts.join('');
     if (reasoningContent) {
       message.reasoning_content = reasoningContent;
     }
 
-    if (parsedParts.functionCalls.length > 0) {
-      message.tool_calls = parsedParts.functionCalls.map((call, index) => ({
-        id: call.id || `call_${index}`,
-        type: 'function' as const,
-        function: {
-          name: call.name || '',
-          arguments: JSON.stringify(call.args || {}),
-        },
-      }));
+    if (toolCalls.length > 0) {
+      message.tool_calls = toolCalls;
     }
 
     const finishReason = this.mapGeminiFinishReasonToOpenAI(
@@ -390,40 +434,82 @@ export class OpenAIContentConverter {
     }
 
     if (!this.isContentObject(content)) return;
+    const parts = content.parts || [];
+    const role = content.role === 'model' ? 'assistant' : 'user';
 
-    const parsedParts = this.parseParts(content.parts || []);
+    const contentParts: OpenAIContentPart[] = [];
+    const reasoningParts: string[] = [];
+    const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+    let toolCallIndex = 0;
 
-    // Handle function responses (tool results) first
-    if (parsedParts.functionResponses.length > 0) {
-      for (const funcResponse of parsedParts.functionResponses) {
-        messages.push({
-          role: 'tool' as const,
-          tool_call_id: funcResponse.id || '',
-          content: this.extractFunctionResponseContent(funcResponse.response),
-        });
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        contentParts.push({ type: 'text' as const, text: part });
+        continue;
       }
-      return;
+
+      if ('text' in part && 'thought' in part && part.thought) {
+        if (role === 'assistant' && part.text) {
+          reasoningParts.push(part.text);
+        }
+      }
+
+      if ('text' in part && part.text && !('thought' in part && part.thought)) {
+        contentParts.push({ type: 'text' as const, text: part.text });
+      }
+
+      const mediaPart = this.createMediaContentPart(part);
+      if (mediaPart && role === 'user') {
+        contentParts.push(mediaPart);
+      }
+
+      if ('functionCall' in part && part.functionCall && role === 'assistant') {
+        toolCalls.push({
+          id: part.functionCall.id || `call_${toolCallIndex}`,
+          type: 'function' as const,
+          function: {
+            name: part.functionCall.name || '',
+            arguments: JSON.stringify(part.functionCall.args || {}),
+          },
+        });
+        toolCallIndex += 1;
+      }
+
+      if (part.functionResponse && role === 'user') {
+        // Create tool message for the function response (with embedded media)
+        const toolMessage = this.createToolMessage(part.functionResponse);
+        if (toolMessage) {
+          messages.push(toolMessage);
+        }
+      }
     }
 
-    // Handle model messages with function calls
-    if (content.role === 'model' && parsedParts.functionCalls.length > 0) {
-      const toolCalls = parsedParts.functionCalls.map((fc, index) => ({
-        id: fc.id || `call_${index}`,
-        type: 'function' as const,
-        function: {
-          name: fc.name || '',
-          arguments: JSON.stringify(fc.args || {}),
-        },
-      }));
+    if (role === 'assistant') {
+      if (
+        contentParts.length === 0 &&
+        toolCalls.length === 0 &&
+        reasoningParts.length === 0
+      ) {
+        return;
+      }
 
+      const assistantTextContent = contentParts
+        .filter(
+          (part): part is OpenAI.Chat.ChatCompletionContentPartText =>
+            part.type === 'text',
+        )
+        .map((part) => part.text)
+        .join('');
       const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
-        role: 'assistant' as const,
-        content: parsedParts.contentParts.join('') || null,
-        tool_calls: toolCalls,
+        role: 'assistant',
+        content: assistantTextContent || null,
       };
 
-      // Only include reasoning_content if it has actual content
-      const reasoningContent = parsedParts.thoughtParts.join('');
+      if (toolCalls.length > 0) {
+        assistantMessage.tool_calls = toolCalls;
+      }
+
+      const reasoningContent = reasoningParts.join('');
       if (reasoningContent) {
         assistantMessage.reasoning_content = reasoningContent;
       }
@@ -432,77 +518,13 @@ export class OpenAIContentConverter {
       return;
     }
 
-    // Handle regular messages with multimodal content
-    const role = content.role === 'model' ? 'assistant' : 'user';
-    const openAIMessage = this.createMultimodalMessage(role, parsedParts);
-
-    if (openAIMessage) {
-      messages.push(openAIMessage);
+    if (contentParts.length > 0) {
+      messages.push({
+        role: 'user',
+        content:
+          contentParts as unknown as OpenAI.Chat.ChatCompletionContentPart[],
+      });
     }
-  }
-
-  /**
-   * Parse Gemini parts into categorized components
-   */
-  private parseParts(parts: Part[]): ParsedParts {
-    const thoughtParts: string[] = [];
-    const contentParts: string[] = [];
-    const functionCalls: FunctionCall[] = [];
-    const functionResponses: FunctionResponse[] = [];
-    const mediaParts: Array<{
-      type: 'image' | 'audio' | 'file';
-      data: string;
-      mimeType: string;
-      fileUri?: string;
-    }> = [];
-
-    for (const part of parts) {
-      if (typeof part === 'string') {
-        contentParts.push(part);
-      } else if (
-        'text' in part &&
-        part.text &&
-        !('thought' in part && part.thought)
-      ) {
-        contentParts.push(part.text);
-      } else if (
-        'text' in part &&
-        part.text &&
-        'thought' in part &&
-        part.thought
-      ) {
-        thoughtParts.push(part.text);
-      } else if ('functionCall' in part && part.functionCall) {
-        functionCalls.push(part.functionCall);
-      } else if ('functionResponse' in part && part.functionResponse) {
-        functionResponses.push(part.functionResponse);
-      } else if ('inlineData' in part && part.inlineData) {
-        const { data, mimeType } = part.inlineData;
-        if (data && mimeType) {
-          const mediaType = this.getMediaType(mimeType);
-          mediaParts.push({ type: mediaType, data, mimeType });
-        }
-      } else if ('fileData' in part && part.fileData) {
-        const { fileUri, mimeType } = part.fileData;
-        if (fileUri && mimeType) {
-          const mediaType = this.getMediaType(mimeType);
-          mediaParts.push({
-            type: mediaType,
-            data: '',
-            mimeType,
-            fileUri,
-          });
-        }
-      }
-    }
-
-    return {
-      thoughtParts,
-      contentParts,
-      functionCalls,
-      functionResponses,
-      mediaParts,
-    };
   }
 
   private extractFunctionResponseContent(response: unknown): string {
@@ -536,91 +558,203 @@ export class OpenAIContentConverter {
   }
 
   /**
-   * Determine media type from MIME type
+   * Create a tool message from function response (with embedded media parts)
    */
-  private getMediaType(mimeType: string): 'image' | 'audio' | 'file' {
-    if (mimeType.startsWith('image/')) return 'image';
-    if (mimeType.startsWith('audio/')) return 'audio';
-    return 'file';
+  private createToolMessage(
+    response: FunctionResponse,
+  ): OpenAI.Chat.ChatCompletionToolMessageParam | null {
+    const textContent = this.extractFunctionResponseContent(response.response);
+    const contentParts: OpenAIContentPart[] = [];
+
+    // Add text content first if present
+    if (textContent) {
+      contentParts.push({ type: 'text' as const, text: textContent });
+    }
+
+    // Add media parts from function response
+    for (const part of response.parts || []) {
+      const mediaPart = this.createMediaContentPart(part);
+      if (mediaPart) {
+        contentParts.push(mediaPart);
+      }
+    }
+
+    // IMPORTANT: Always return a tool message, even if content is empty
+    // OpenAI API requires that every tool call has a corresponding tool response
+    // Empty tool results are valid (e.g., reading an empty file, successful operations with no output)
+    if (contentParts.length === 0) {
+      // Return empty string for empty tool results
+      return {
+        role: 'tool' as const,
+        tool_call_id: response.id || '',
+        content: '',
+      };
+    }
+
+    // Cast to OpenAI type - some OpenAI-compatible APIs support richer content in tool messages
+    return {
+      role: 'tool' as const,
+      tool_call_id: response.id || '',
+      content: contentParts as unknown as
+        | string
+        | OpenAI.Chat.ChatCompletionContentPartText[],
+    };
   }
 
   /**
-   * Create multimodal OpenAI message from parsed parts
+   * Create OpenAI media content part from Gemini part.
+   * Checks modality support before building each media type.
    */
-  private createMultimodalMessage(
-    role: 'user' | 'assistant',
-    parsedParts: Pick<
-      ParsedParts,
-      'contentParts' | 'mediaParts' | 'thoughtParts'
-    >,
-  ): ExtendedChatCompletionMessageParam | null {
-    const { contentParts, mediaParts, thoughtParts } = parsedParts;
-    const reasoningContent = thoughtParts.join('');
-    const content = contentParts.map((text) => ({
-      type: 'text' as const,
-      text,
-    }));
+  private createMediaContentPart(part: Part): OpenAIContentPart | null {
+    if (part.inlineData?.mimeType && part.inlineData?.data) {
+      const mimeType = part.inlineData.mimeType;
+      const mediaType = this.getMediaType(mimeType);
+      const displayName = part.inlineData.displayName || mimeType;
 
-    // If no media parts, return simple text message
-    if (mediaParts.length === 0) {
-      if (content.length === 0) return null;
-      const message: ExtendedChatCompletionMessageParam = { role, content };
-      // Only include reasoning_content if it has actual content
-      if (reasoningContent) {
-        (
-          message as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content = reasoningContent;
-      }
-      return message;
-    }
-
-    // For assistant messages with media, convert to text only
-    // since OpenAI assistant messages don't support media content arrays
-    if (role === 'assistant') {
-      return content.length > 0
-        ? { role: 'assistant' as const, content }
-        : null;
-    }
-
-    const contentArray: OpenAI.Chat.ChatCompletionContentPart[] = [...content];
-
-    // Add media content
-    for (const mediaPart of mediaParts) {
-      if (mediaPart.type === 'image') {
-        if (mediaPart.fileUri) {
-          // For file URIs, use the URI directly
-          contentArray.push({
-            type: 'image_url' as const,
-            image_url: { url: mediaPart.fileUri },
-          });
-        } else if (mediaPart.data) {
-          // For inline data, create data URL
-          const dataUrl = `data:${mediaPart.mimeType};base64,${mediaPart.data}`;
-          contentArray.push({
-            type: 'image_url' as const,
-            image_url: { url: dataUrl },
-          });
+      if (mediaType === 'image') {
+        if (!this.modalities.image) {
+          return this.unsupportedModalityPlaceholder('image', displayName);
         }
-      } else if (mediaPart.type === 'audio' && mediaPart.data) {
-        // Convert audio format from MIME type
-        const format = this.getAudioFormat(mediaPart.mimeType);
+        const dataUrl = `data:${mimeType};base64,${part.inlineData.data}`;
+        return {
+          type: 'image_url' as const,
+          image_url: { url: dataUrl },
+        };
+      }
+
+      if (mimeType === 'application/pdf') {
+        if (!this.modalities.pdf) {
+          return this.unsupportedModalityPlaceholder('pdf', displayName);
+        }
+        const filename = part.inlineData.displayName || 'document.pdf';
+        return {
+          type: 'file' as const,
+          file: {
+            filename,
+            file_data: `data:${mimeType};base64,${part.inlineData.data}`,
+          },
+        };
+      }
+
+      if (mediaType === 'audio') {
+        if (!this.modalities.audio) {
+          return this.unsupportedModalityPlaceholder('audio', displayName);
+        }
+        const format = this.getAudioFormat(mimeType);
         if (format) {
-          contentArray.push({
+          return {
             type: 'input_audio' as const,
             input_audio: {
-              data: mediaPart.data,
-              format: format as 'wav' | 'mp3',
+              data: `data:${mimeType};base64,${part.inlineData.data}`,
+              format,
             },
-          });
+          };
         }
       }
-      // Note: File type is not directly supported in OpenAI's current API
-      // Could be extended in the future or handled as text description
+
+      if (mediaType === 'video') {
+        if (!this.modalities.video) {
+          return this.unsupportedModalityPlaceholder('video', displayName);
+        }
+        return {
+          type: 'video_url' as const,
+          video_url: {
+            url: `data:${mimeType};base64,${part.inlineData.data}`,
+          },
+        };
+      }
+
+      return {
+        type: 'text' as const,
+        text: `Unsupported inline media type: ${mimeType} (${displayName}).`,
+      };
     }
 
-    return contentArray.length > 0
-      ? { role: 'user' as const, content: contentArray }
-      : null;
+    if (part.fileData?.mimeType && part.fileData?.fileUri) {
+      const filename = part.fileData.displayName || 'file';
+      const fileUri = part.fileData.fileUri;
+      const mimeType = part.fileData.mimeType;
+      const mediaType = this.getMediaType(mimeType);
+
+      if (mediaType === 'image') {
+        if (!this.modalities.image) {
+          return this.unsupportedModalityPlaceholder('image', filename);
+        }
+        return {
+          type: 'image_url' as const,
+          image_url: { url: fileUri },
+        };
+      }
+
+      if (mimeType === 'application/pdf') {
+        if (!this.modalities.pdf) {
+          return this.unsupportedModalityPlaceholder('pdf', filename);
+        }
+        return {
+          type: 'file' as const,
+          file: {
+            filename,
+            file_data: fileUri,
+          },
+        };
+      }
+
+      if (mediaType === 'video') {
+        if (!this.modalities.video) {
+          return this.unsupportedModalityPlaceholder('video', filename);
+        }
+        return {
+          type: 'video_url' as const,
+          video_url: {
+            url: fileUri,
+          },
+        };
+      }
+
+      const displayNameStr = part.fileData.displayName
+        ? ` (${part.fileData.displayName})`
+        : '';
+      return {
+        type: 'text' as const,
+        text: `Unsupported file media type: ${mimeType}${displayNameStr}.`,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Create a text placeholder for unsupported modalities.
+   */
+  private unsupportedModalityPlaceholder(
+    modality: string,
+    displayName: string,
+  ): OpenAIContentPart {
+    debugLogger.warn(
+      `Model '${this.model}' does not support ${modality} input. ` +
+        `Replacing with text placeholder: ${displayName}`,
+    );
+    let hint: string;
+    if (modality === 'pdf') {
+      hint =
+        'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
+    } else {
+      hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+    }
+    return {
+      type: 'text' as const,
+      text: `[Unsupported ${modality} file: "${displayName}". ${hint}]`,
+    };
+  }
+
+  /**
+   * Determine media type from MIME type
+   */
+  private getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    if (mimeType.startsWith('video/')) return 'video';
+    return 'file';
   }
 
   /**
@@ -687,61 +821,66 @@ export class OpenAIContentConverter {
   convertOpenAIResponseToGemini(
     openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
-    const choice = openaiResponse.choices[0];
+    const choice = openaiResponse.choices?.[0];
     const response = new GenerateContentResponse();
 
-    const parts: Part[] = [];
+    if (choice) {
+      const parts: Part[] = [];
 
-    // Handle reasoning content (thoughts)
-    const reasoningText = (choice.message as ExtendedCompletionMessage)
-      .reasoning_content;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
-    }
+      // Handle reasoning content (thoughts)
+      const reasoningText =
+        (choice.message as ExtendedCompletionMessage).reasoning_content ??
+        (choice.message as ExtendedCompletionMessage).reasoning;
+      if (reasoningText) {
+        parts.push({ text: reasoningText, thought: true });
+      }
 
-    // Handle text content
-    if (choice.message.content) {
-      parts.push({ text: choice.message.content });
-    }
+      // Handle text content
+      if (choice.message.content) {
+        parts.push({ text: choice.message.content });
+      }
 
-    // Handle tool calls
-    if (choice.message.tool_calls) {
-      for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.function) {
-          let args: Record<string, unknown> = {};
-          if (toolCall.function.arguments) {
-            args = safeJsonParse(toolCall.function.arguments, {});
+      // Handle tool calls
+      if (choice.message.tool_calls) {
+        for (const toolCall of choice.message.tool_calls) {
+          if (toolCall.function) {
+            let args: Record<string, unknown> = {};
+            if (toolCall.function.arguments) {
+              args = safeJsonParse(toolCall.function.arguments, {});
+            }
+
+            parts.push({
+              functionCall: {
+                id: toolCall.id,
+                name: toolCall.function.name,
+                args,
+              },
+            });
           }
-
-          parts.push({
-            functionCall: {
-              id: toolCall.id,
-              name: toolCall.function.name,
-              args,
-            },
-          });
         }
       }
+
+      response.candidates = [
+        {
+          content: {
+            parts,
+            role: 'model' as const,
+          },
+          finishReason: this.mapOpenAIFinishReasonToGemini(
+            choice.finish_reason || 'stop',
+          ),
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+    } else {
+      response.candidates = [];
     }
 
     response.responseId = openaiResponse.id;
     response.createTime = openaiResponse.created
       ? openaiResponse.created.toString()
       : new Date().getTime().toString();
-
-    response.candidates = [
-      {
-        content: {
-          parts,
-          role: 'model' as const,
-        },
-        finishReason: this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason || 'stop',
-        ),
-        index: 0,
-        safetyRatings: [],
-      },
-    ];
 
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };
@@ -798,8 +937,9 @@ export class OpenAIContentConverter {
     if (choice) {
       const parts: Part[] = [];
 
-      const reasoningText = (choice.delta as ExtendedCompletionChunkDelta)
-        ?.reasoning_content;
+      const reasoningText =
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
+        (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
       if (reasoningText) {
         parts.push({ text: reasoningText, thought: true });
       }
@@ -837,7 +977,14 @@ export class OpenAIContentConverter {
       }
 
       // Only emit function calls when streaming is complete (finish_reason is present)
+      let toolCallsTruncated = false;
       if (choice.finish_reason) {
+        // Detect truncation the provider may not report correctly.
+        // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
+        // even when output was cut off mid-JSON due to max_tokens.
+        toolCallsTruncated =
+          this.streamingToolCallParser.hasIncompleteToolCalls();
+
         const completedToolCalls =
           this.streamingToolCallParser.getCompletedToolCalls();
 
@@ -859,6 +1006,13 @@ export class OpenAIContentConverter {
         this.streamingToolCallParser.reset();
       }
 
+      // If tool call JSON was truncated, override to "length" so downstream
+      // (turn.ts) correctly sets wasOutputTruncated=true.
+      const effectiveFinishReason =
+        toolCallsTruncated && choice.finish_reason !== 'length'
+          ? 'length'
+          : choice.finish_reason;
+
       // Only include finishReason key if finish_reason is present
       const candidate: Candidate = {
         content: {
@@ -868,9 +1022,9 @@ export class OpenAIContentConverter {
         index: 0,
         safetyRatings: [],
       };
-      if (choice.finish_reason) {
+      if (effectiveFinishReason) {
         candidate.finishReason = this.mapOpenAIFinishReasonToGemini(
-          choice.finish_reason,
+          effectiveFinishReason,
         );
       }
       response.candidates = [candidate];
@@ -1130,6 +1284,10 @@ export class OpenAIContentConverter {
 
         // If the last message is also an assistant message, merge them
         if (lastMessage.role === 'assistant') {
+          const lastToolCalls =
+            'tool_calls' in lastMessage ? lastMessage.tool_calls || [] : [];
+          const currentToolCalls =
+            'tool_calls' in message ? message.tool_calls || [] : [];
           // Combine content
           const lastContent = lastMessage.content;
           const currentContent = message.content;
@@ -1171,10 +1329,6 @@ export class OpenAIContentConverter {
           }
 
           // Combine tool calls
-          const lastToolCalls =
-            'tool_calls' in lastMessage ? lastMessage.tool_calls || [] : [];
-          const currentToolCalls =
-            'tool_calls' in message ? message.tool_calls || [] : [];
           const combinedToolCalls = [...lastToolCalls, ...currentToolCalls];
 
           // Update the last message with combined data

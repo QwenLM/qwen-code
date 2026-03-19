@@ -16,6 +16,9 @@ import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('RIPGREP');
 
 /**
  * Parameters for the GrepTool (Simplified)
@@ -157,7 +160,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: displayMessage,
       };
     } catch (error) {
-      console.error(`Error during ripgrep search operation: ${error}`);
+      debugLogger.error('Error during ripgrep search operation:', error);
       const errorMessage = getErrorMessage(error);
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,

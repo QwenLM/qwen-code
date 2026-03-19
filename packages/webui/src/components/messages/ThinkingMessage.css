@@ -1,0 +1,150 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ThinkingMessage.css - Thinking message styles with timeline support
+ */
+
+/* ThinkingMessage container with timeline support */
+.thinking-message {
+  position: relative;
+  --timeline-center-offset: 15px;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  user-select: text;
+  align-items: flex-start;
+  border-radius: 6px;
+  animation: fadeIn 0.2s ease-in;
+}
+
+/* Timeline connector line - full height */
+.thinking-message::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color, rgba(255, 255, 255, 0.15));
+}
+
+/* First item in sequence: connector starts from bullet center */
+.thinking-message:first-child::after {
+  top: var(--timeline-center-offset, 15px);
+}
+
+/* Last item in sequence: connector ends at bullet center */
+.thinking-message:last-child::after {
+  bottom: calc(100% - var(--timeline-center-offset, 15px));
+}
+
+/* Single item (both first and last): no connector */
+.thinking-message:first-child:last-child::after {
+  display: none;
+}
+
+/*
+ * Status bullet points - using Unicode bullet character
+ * Positioned to align with other message items
+ */
+.thinking-message.thinking-status-default::before,
+.thinking-message.thinking-status-loading::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  z-index: 1;
+}
+
+/* Default status - gray bullet */
+.thinking-message.thinking-status-default::before {
+  color: var(--app-secondary-foreground);
+  opacity: 0.6;
+}
+
+/* Loading status - pulsing animation */
+.thinking-message.thinking-status-loading::before {
+  color: var(--app-secondary-foreground);
+  animation: thinkingPulse 1s linear infinite;
+}
+
+/* Pulse animation for loading state */
+@keyframes thinkingPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Content wrapper */
+.thinking-content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Toggle button styles */
+.thinking-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  color: var(--app-secondary-foreground);
+  line-height: 1;
+  height: 15px;
+}
+
+.thinking-toggle-btn:hover {
+  opacity: 0.8;
+}
+
+/* Thinking label text */
+.thinking-label {
+  font-size: 14px;
+  font-style: italic;
+  color: var(--app-secondary-foreground);
+  opacity: 0.8;
+  line-height: 1;
+}
+
+/* Chevron icon */
+.thinking-chevron {
+  color: var(--app-tertiary-foreground, #666);
+  opacity: 0.7;
+}
+
+/* Expanded content area */
+.thinking-content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--app-secondary-foreground);
+  opacity: 0.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-left: 8px;
+  margin-top: 4px;
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

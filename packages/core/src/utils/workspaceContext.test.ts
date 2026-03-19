@@ -391,32 +391,24 @@ describe('WorkspaceContext with optional directories', () => {
     fs.mkdirSync(cwd, { recursive: true });
     fs.mkdirSync(existingDir1, { recursive: true });
     fs.mkdirSync(existingDir2, { recursive: true });
-
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
   });
 
-  it('should skip a missing optional directory and log a warning', () => {
+  it('should skip a missing optional directory', () => {
     const workspaceContext = new WorkspaceContext(cwd, [
       nonExistentDir,
       existingDir1,
     ]);
     const directories = workspaceContext.getDirectories();
     expect(directories).toEqual([cwd, existingDir1]);
-    expect(console.warn).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledWith(
-      `[WARN] Skipping unreadable directory: ${nonExistentDir} (Directory does not exist: ${nonExistentDir})`,
-    );
   });
 
   it('should include an existing optional directory', () => {
     const workspaceContext = new WorkspaceContext(cwd, [existingDir1]);
     const directories = workspaceContext.getDirectories();
     expect(directories).toEqual([cwd, existingDir1]);
-    expect(console.warn).not.toHaveBeenCalled();
   });
 });

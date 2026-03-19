@@ -12,10 +12,12 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
+  McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   OutputFormat,
   ToolErrorType,
+  createDebugLogger,
   getMCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
@@ -25,9 +27,14 @@ import type {
   PermissionMode,
   CLISystemMessage,
 } from '../nonInteractive/types.js';
-import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
+import type {
+  JsonOutputAdapterInterface,
+  MessageEmitter,
+} from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import { computeSessionStats } from '../ui/utils/computeStats.js';
 import { getAvailableCommands } from '../nonInteractiveCliCommands.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE');
 
 /**
  * Normalizes various part list formats into a consistent Part[] array.
@@ -144,7 +151,7 @@ export function extractUsageFromGeminiClient(
       }
     }
   } catch (error) {
-    console.debug('Failed to extract usage metadata:', error);
+    debugLogger.debug('Failed to extract usage metadata:', error);
   }
 
   return undefined;
@@ -208,12 +215,10 @@ async function loadSlashCommandNames(
     // Extract command names and sort
     return commands.map((cmd) => cmd.name).sort();
   } catch (error) {
-    if (config.getDebugMode()) {
-      console.error(
-        '[buildSystemMessage] Failed to load slash commands:',
-        error,
-      );
-    }
+    debugLogger.error(
+      '[buildSystemMessage] Failed to load slash commands:',
+      error,
+    );
     return [];
   } finally {
     controller.abort();
@@ -269,9 +274,7 @@ export async function buildSystemMessage(
     const subagents = await subagentManager.listSubagents();
     agentNames = subagents.map((subagent) => subagent.name);
   } catch (error) {
-    if (config.getDebugMode()) {
-      console.error('[buildSystemMessage] Failed to load subagents:', error);
-    }
+    debugLogger.error('[buildSystemMessage] Failed to load subagents:', error);
   }
 
   const systemMessage: CLISystemMessage = {
@@ -292,6 +295,45 @@ export async function buildSystemMessage(
   return systemMessage;
 }
 
+function isMcpToolProgressData(
+  output: ToolResultDisplay,
+): output is McpToolProgressData {
+  return (
+    typeof output === 'object' &&
+    output !== null &&
+    'type' in output &&
+    (output as McpToolProgressData).type === 'mcp_tool_progress'
+  );
+}
+
+/**
+ * Creates a generic output update handler for tools with canUpdateOutput=true.
+ * This handler forwards MCP progress data (McpToolProgressData) as tool_progress
+ * stream events via the adapter. Progress events are only emitted when the adapter
+ * supports partial messages (i.e., includePartialMessages is true).
+ *
+ * @param request - Tool call request info
+ * @param adapter - The adapter instance for emitting messages
+ * @returns An object containing the output update handler
+ */
+export function createToolProgressHandler(
+  request: ToolCallRequestInfo,
+  adapter: MessageEmitter,
+): {
+  handler: OutputUpdateHandler;
+} {
+  const handler: OutputUpdateHandler = (
+    _callId: string,
+    output: ToolResultDisplay,
+  ) => {
+    if (isMcpToolProgressData(output)) {
+      adapter.emitToolProgress(request, output);
+    }
+  };
+
+  return { handler };
+}
+
 /**
  * Creates an output update handler specifically for Task tool subagent execution.
  * This handler monitors TaskResultDisplay updates and converts them to protocol messages
@@ -306,7 +348,7 @@ export async function buildSystemMessage(
 export function createTaskToolProgressHandler(
   config: Config,
   taskToolCallId: string,
-  adapter: JsonOutputAdapterInterface | undefined,
+  adapter: JsonOutputAdapterInterface,
 ): {
   handler: OutputUpdateHandler;
 } {
@@ -406,7 +448,7 @@ export function createTaskToolProgressHandler(
       toolCallToEmit.status === 'executing' ||
       toolCallToEmit.status === 'awaiting_approval'
     ) {
-      if (adapter?.processSubagentToolCall) {
+      if (adapter.processSubagentToolCall) {
         adapter.processSubagentToolCall(toolCallToEmit, taskToolCallId);
         emittedToolUseIds.add(toolCall.callId);
       }
@@ -432,19 +474,17 @@ export function createTaskToolProgressHandler(
     // Mark as emitted even if we skip, to prevent duplicate emits
     emittedToolResultIds.add(toolCall.callId);
 
-    if (adapter) {
-      const request = buildRequest(toolCall);
-      const response = buildResponse(toolCall);
-      // For subagent tool results, we need to pass parentToolUseId
-      // The adapter implementations accept an optional parentToolUseId parameter
-      if (
-        'emitToolResult' in adapter &&
-        typeof adapter.emitToolResult === 'function'
-      ) {
-        adapter.emitToolResult(request, response, taskToolCallId);
-      } else {
-        adapter.emitToolResult(request, response);
-      }
+    const request = buildRequest(toolCall);
+    const response = buildResponse(toolCall);
+    // For subagent tool results, we need to pass parentToolUseId
+    // The adapter implementations accept an optional parentToolUseId parameter
+    if (
+      'emitToolResult' in adapter &&
+      typeof adapter.emitToolResult === 'function'
+    ) {
+      adapter.emitToolResult(request, response, taskToolCallId);
+    } else {
+      adapter.emitToolResult(request, response);
     }
   };
 
@@ -500,12 +540,6 @@ export function createTaskToolProgressHandler(
     ) {
       const taskDisplay = outputChunk as TaskResultDisplay;
       const previous = previousTaskStates.get(callId);
-
-      // If no adapter, just track state (for non-JSON modes)
-      if (!adapter) {
-        previousTaskStates.set(callId, taskDisplay);
-        return;
-      }
 
       // Only process if adapter supports subagent APIs
       if (

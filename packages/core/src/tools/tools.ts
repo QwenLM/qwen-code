@@ -9,7 +9,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 /**
@@ -447,7 +447,7 @@ export interface TaskResultDisplay {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   terminateReason?: string;
   result?: string;
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -470,13 +470,28 @@ export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
 }
 
+/**
+ * Structured progress data following the MCP notifications/progress spec.
+ * @see https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/progress
+ */
+export interface McpToolProgressData {
+  type: 'mcp_tool_progress';
+  /** Current progress value (must increase with each notification) */
+  progress: number;
+  /** Optional total value indicating the operation's target */
+  total?: number;
+  /** Optional human-readable progress message */
+  message?: string;
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | TaskResultDisplay
-  | AnsiOutputDisplay;
+  | AnsiOutputDisplay
+  | McpToolProgressData;
 
 export interface FileDiff {
   fileDiff: string;
@@ -510,6 +525,7 @@ export interface PlanResultDisplay {
   type: 'plan_summary';
   message: string;
   plan: string;
+  rejected?: boolean;
 }
 
 export interface ToolEditConfirmationDetails {
@@ -534,6 +550,8 @@ export interface ToolConfirmationPayload {
   newContent?: string;
   // used to provide custom cancellation message when outcome is Cancel
   cancelMessage?: string;
+  // used to pass user answers from ask_user_question tool
+  answers?: Record<string, string>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -572,13 +590,35 @@ export type ToolCallConfirmationDetails =
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
-  | ToolPlanConfirmationDetails;
+  | ToolPlanConfirmationDetails
+  | ToolAskUserQuestionConfirmationDetails;
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
   title: string;
   plan: string;
   onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+}
+
+export interface ToolAskUserQuestionConfirmationDetails {
+  type: 'ask_user_question';
+  title: string;
+  questions: Array<{
+    question: string;
+    header: string;
+    options: Array<{
+      label: string;
+      description: string;
+    }>;
+    multiSelect: boolean;
+  }>;
+  metadata?: {
+    source?: string;
+  };
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
 }
 
 /**

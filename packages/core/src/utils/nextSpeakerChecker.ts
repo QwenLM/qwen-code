@@ -9,6 +9,9 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('NEXT_SPEAKER');
 
 const CHECK_PROMPT = `Analyze *only* the content and structure of your immediately preceding response (your last turn in the conversation history). Based *strictly* on that response, determine who should logically speak next: the 'user' or the 'model' (you).
 **Decision Rules (apply in order):**
@@ -126,7 +129,7 @@ export async function checkNextSpeaker(
     }
     return null;
   } catch (error) {
-    console.warn(
+    debugLogger.warn(
       'Failed to talk to Gemini endpoint when seeing if conversation should continue.',
       error,
     );

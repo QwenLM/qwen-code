@@ -20,6 +20,7 @@ import type {
   PlanResultDisplay,
   AnsiOutput,
   Config,
+  McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
@@ -110,6 +111,22 @@ const useResultDisplayRenderer = (
       return {
         type: 'diff',
         data: resultDisplay as { fileDiff: string; fileName: string },
+      };
+    }
+
+    // Check for McpToolProgressData
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'mcp_tool_progress'
+    ) {
+      const progress = resultDisplay as McpToolProgressData;
+      const msg = progress.message ?? `Progress: ${progress.progress}`;
+      const totalStr = progress.total != null ? `/${progress.total}` : '';
+      return {
+        type: 'string',
+        data: `⏳ [${progress.progress}${totalStr}] ${msg}`,
       };
     }
 

@@ -3,11 +3,16 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { AcpPermissionRequest, ModelInfo } from './acpTypes.js';
+import type {
+  ModelInfo,
+  AvailableCommand,
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
 }
@@ -26,14 +31,22 @@ export interface ToolCallUpdateData {
   rawInput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
+  timestamp?: number;
 }
 
 export interface UsageStatsPayload {
   usage?: {
+    // SDK field names (primary)
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    thoughtTokens?: number | null;
+    totalTokens?: number | null;
+    cachedReadTokens?: number | null;
+    cachedWriteTokens?: number | null;
+    // Legacy field names (compat with older CLI builds)
     promptTokens?: number | null;
     completionTokens?: number | null;
     thoughtsTokens?: number | null;
-    totalTokens?: number | null;
     cachedTokens?: number | null;
   } | null;
   durationMs?: number | null;
@@ -46,7 +59,10 @@ export interface QwenAgentCallbacks {
   onThoughtChunk?: (chunk: string) => void;
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
-  onPermissionRequest?: (request: AcpPermissionRequest) => Promise<string>;
+  onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
+  onAskUserQuestion?: (
+    request: AskUserQuestionRequest,
+  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
@@ -59,6 +75,9 @@ export interface QwenAgentCallbacks {
   onModeChanged?: (modeId: ApprovalModeValue) => void;
   onUsageUpdate?: (stats: UsageStatsPayload) => void;
   onModelInfo?: (info: ModelInfo) => void;
+  onModelChanged?: (model: ModelInfo) => void;
+  onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableModels?: (models: ModelInfo[]) => void;
 }
 
 export interface ToolCallUpdate {
@@ -85,4 +104,10 @@ export interface ToolCallUpdate {
     line?: number | null;
   }>;
   timestamp?: number; // Add timestamp field for message ordering
+  /** Server-side metadata including timestamp for correct ordering */
+  _meta?: {
+    timestamp?: number;
+    toolName?: string;
+    [key: string]: unknown;
+  };
 }

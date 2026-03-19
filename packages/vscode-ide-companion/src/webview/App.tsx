@@ -19,38 +19,38 @@ import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
 import { useMessageSubmit } from './hooks/useMessageSubmit.js';
-import type {
-  PermissionOption,
-  ToolCall as PermissionToolCall,
-} from './components/PermissionDrawer/PermissionRequest.js';
+import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
-import { PermissionDrawer } from './components/PermissionDrawer/PermissionDrawer.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
 import { hasToolCallOutput } from './utils/utils.js';
-import { EmptyState } from './components/layout/EmptyState.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
-import { ChatHeader } from './components/layout/ChatHeader.js';
 import {
-  UserMessage,
   AssistantMessage,
+  UserMessage,
   ThinkingMessage,
   WaitingMessage,
   InterruptedMessage,
-} from './components/messages/index.js';
+  FileIcon,
+  PermissionDrawer,
+  // Layout components imported directly from webui
+  EmptyState,
+  ChatHeader,
+  SessionSelector,
+} from '@qwen-code/webui';
 import { InputForm } from './components/layout/InputForm.js';
-import { SessionSelector } from './components/layout/SessionSelector.js';
-import { FileIcon, UserIcon } from './components/icons/index.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
-import type { ModelInfo } from '../types/acpTypes.js';
+import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
+import type { Question } from '../types/acpTypes.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import { AskUserQuestionDialog } from '@qwen-code/webui';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -72,11 +72,23 @@ export const App: React.FC = () => {
     options: PermissionOption[];
     toolCall: PermissionToolCall;
   } | null>(null);
+  const [askUserQuestionRequest, setAskUserQuestionRequest] = useState<{
+    questions: Question[];
+    sessionId: string;
+    metadata?: {
+      source?: string;
+    };
+  } | null>(null);
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
+  const [availableCommands, setAvailableCommands] = useState<
+    AvailableCommand[]
+  >([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [showModelSelector, setShowModelSelector] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(
     null,
   ) as React.RefObject<HTMLDivElement>;
@@ -105,7 +117,7 @@ export const App: React.FC = () => {
           requested: fileContext.hasRequestedFiles,
           workspaceFiles: fileContext.workspaceFiles.length,
         });
-        // 始终根据当前 query 触发请求，让 hook 判断是否需要真正请求
+        // Always trigger request based on current query, let the hook decide if an actual request is needed
         fileContext.requestWorkspaceFiles(query);
 
         const fileIcon = <FileIcon />;
@@ -122,18 +134,11 @@ export const App: React.FC = () => {
           }),
         );
 
-        if (query && query.length >= 1) {
-          const lowerQuery = query.toLowerCase();
-          return allItems.filter(
-            (item) =>
-              item.label.toLowerCase().includes(lowerQuery) ||
-              (item.description &&
-                item.description.toLowerCase().includes(lowerQuery)),
-          );
-        }
+        // Fuzzy search is handled by the backend (FileSearchFactory)
+        // No client-side filtering needed - results are already fuzzy-matched
 
         // If first time and still loading, show a placeholder
-        if (allItems.length === 0) {
+        if (allItems.length === 0 && query && query.length >= 1) {
           return [
             {
               id: 'loading-files',
@@ -146,23 +151,59 @@ export const App: React.FC = () => {
 
         return allItems;
       } else {
-        // Handle slash commands
-        const commands: CompletionItem[] = [
+        // Handle slash commands with grouping
+        // Model group - special items without / prefix
+        const modelGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: '/login',
-            description: 'Login to Qwen Code',
+            id: 'model',
+            label: 'Switch model...',
+            description: modelInfo?.name || 'Default',
             type: 'command',
-            icon: <UserIcon />,
+            group: 'Model',
           },
         ];
 
-        return commands.filter((cmd) =>
-          cmd.label.toLowerCase().includes(query.toLowerCase()),
+        // Account group
+        const accountGroupItems: CompletionItem[] = [
+          {
+            id: 'login',
+            label: 'Login',
+            description: 'Login to Qwen Code',
+            type: 'command',
+            group: 'Account',
+          },
+        ];
+
+        // Slash Commands group - commands from server (available_commands_update)
+        const slashCommandItems: CompletionItem[] = availableCommands.map(
+          (cmd) => ({
+            id: cmd.name,
+            label: `/${cmd.name}`,
+            description: cmd.description,
+            type: 'command' as const,
+            group: 'Slash Commands',
+            value: cmd.name,
+          }),
+        );
+
+        // Combine all commands
+        const allCommands = [
+          ...modelGroupItems,
+          ...accountGroupItems,
+          ...slashCommandItems,
+        ];
+
+        // Filter by query
+        const lowerQuery = query.toLowerCase();
+        return allCommands.filter(
+          (cmd) =>
+            cmd.label.toLowerCase().includes(lowerQuery) ||
+            (cmd.description &&
+              cmd.description.toLowerCase().includes(lowerQuery)),
         );
       }
     },
-    [fileContext],
+    [fileContext, availableCommands, modelInfo?.name],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
@@ -179,8 +220,13 @@ export const App: React.FC = () => {
           ? modelInfo.name
           : undefined;
 
+    // Note: In the webview context, the contextWindowSize is already reflected in
+    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
+    // We only use tokenLimit as a fallback if metaLimit is not available.
     const derivedLimit =
-      modelName && modelName.length > 0 ? tokenLimit(modelName) : undefined;
+      modelName && modelName.length > 0
+        ? tokenLimit(modelName, 'input')
+        : undefined;
 
     const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
     const metaLimit =
@@ -221,16 +267,11 @@ export const App: React.FC = () => {
     [fileContext.workspaceFiles],
   );
 
-  // When workspace files update while menu open for @, refresh items so the first @ shows the list
+  // When workspace files update while menu open for @, refresh items to reflect latest search results.
   // Note: Avoid depending on the entire `completion` object here, since its identity
   // changes on every render which would retrigger this effect and can cause a refresh loop.
   useEffect(() => {
-    // Only auto-refresh when there's no query (first @ popup) to avoid repeated refreshes during search
-    if (
-      completion.isOpen &&
-      completion.triggerChar === '@' &&
-      !completion.query
-    ) {
+    if (completion.isOpen && completion.triggerChar === '@') {
       // Only refresh items; do not change other completion state to avoid re-renders loops
       completion.refreshCompletion();
     }
@@ -260,22 +301,24 @@ export const App: React.FC = () => {
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
-      // Proactively end local states and add an 'Interrupted' line
-      try {
-        messageHandling.endStreaming?.();
-      } catch {
-        /* no-op */
+      // End streaming state and add an 'Interrupted' line.
+      // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
+      // extension's streamEnd message clear it after the cancel is
+      // properly processed on the backend.  This keeps the submit
+      // guard active and prevents any cached input from being
+      // auto-submitted during the cancel → confirmed window.
+      if (messageHandling.isStreaming) {
+        try {
+          messageHandling.endStreaming?.();
+        } catch {
+          /* no-op */
+        }
+        messageHandling.addMessage({
+          role: 'assistant',
+          content: 'Interrupted',
+          timestamp: Date.now(),
+        });
       }
-      try {
-        messageHandling.clearWaitingForResponse?.();
-      } catch {
-        /* no-op */
-      }
-      messageHandling.addMessage({
-        role: 'assistant',
-        content: 'Interrupted',
-        timestamp: Date.now(),
-      });
     }
     // Notify extension/agent to cancel server-side work
     vscode.postMessage({
@@ -293,6 +336,7 @@ export const App: React.FC = () => {
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest: setPermissionRequest,
+    handleAskUserQuestion: setAskUserQuestionRequest,
     inputFieldRef,
     setInputText,
     setEditMode,
@@ -300,6 +344,12 @@ export const App: React.FC = () => {
     setUsageStats: (stats) => setUsageStats(stats ?? null),
     setModelInfo: (info) => {
       setModelInfo(info);
+    },
+    setAvailableCommands: (commands) => {
+      setAvailableCommands(commands);
+    },
+    setAvailableModels: (models) => {
+      setAvailableModels(models);
     },
   });
 
@@ -437,9 +487,36 @@ export const App: React.FC = () => {
     [vscode],
   );
 
-  // Handle completion selection
+  // Handle ask user question response
+  const handleAskUserQuestionResponse = useCallback(
+    (answers: Record<string, string>) => {
+      // Forward answers to extension as ACP permission response
+      vscode.postMessage({
+        type: 'askUserQuestionResponse',
+        data: { answers },
+      });
+
+      setAskUserQuestionRequest(null);
+    },
+    [vscode],
+  );
+
+  // Handle ask user question cancel
+  const handleAskUserQuestionCancel = useCallback(() => {
+    // Forward cancel to extension as ACP permission response with cancel option
+    vscode.postMessage({
+      type: 'askUserQuestionResponse',
+      data: { answers: {}, cancelled: true },
+    });
+
+    setAskUserQuestionRequest(null);
+  }, [vscode]);
+
+  // Handle completion selection.
+  // When fillOnly is true (Tab), slash commands are inserted into the input
+  // instead of being sent immediately, so users can append arguments.
   const handleCompletionSelect = useCallback(
-    (item: CompletionItem) => {
+    (item: CompletionItem, fillOnly?: boolean) => {
       // Handle completion selection by inserting the value into the input field
       const inputElement = inputFieldRef.current;
       if (!inputElement) {
@@ -452,11 +529,92 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Slash commands can execute immediately
+      // Commands can execute immediately
       if (item.type === 'command') {
-        const command = (item.label || '').trim();
-        if (command === '/login') {
+        const itemId = item.id;
+
+        // Helper to clear trigger text from input
+        const clearTriggerText = () => {
+          const text = inputElement.textContent || '';
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) {
+            // Fallback: just clear everything
+            inputElement.textContent = '';
+            setInputText('');
+            return;
+          }
+
+          // Find and remove the slash command trigger
+          const range = selection.getRangeAt(0);
+          let cursorPos = text.length;
+          if (range.startContainer === inputElement) {
+            const childIndex = range.startOffset;
+            let offset = 0;
+            for (
+              let i = 0;
+              i < childIndex && i < inputElement.childNodes.length;
+              i++
+            ) {
+              offset += inputElement.childNodes[i].textContent?.length || 0;
+            }
+            cursorPos = offset || text.length;
+          } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
+            const walker = document.createTreeWalker(
+              inputElement,
+              NodeFilter.SHOW_TEXT,
+              null,
+            );
+            let offset = 0;
+            let found = false;
+            let node: Node | null = walker.nextNode();
+            while (node) {
+              if (node === range.startContainer) {
+                offset += range.startOffset;
+                found = true;
+                break;
+              }
+              offset += node.textContent?.length || 0;
+              node = walker.nextNode();
+            }
+            cursorPos = found ? offset : text.length;
+          }
+
+          const textBeforeCursor = text.substring(0, cursorPos);
+          const slashPos = textBeforeCursor.lastIndexOf('/');
+          if (slashPos >= 0) {
+            const newText =
+              text.substring(0, slashPos) + text.substring(cursorPos);
+            inputElement.textContent = newText;
+            setInputText(newText);
+          }
+        };
+
+        if (itemId === 'login') {
+          clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
+          completion.closeCompletion();
+          return;
+        }
+
+        if (itemId === 'model') {
+          clearTriggerText();
+          setShowModelSelector(true);
+          completion.closeCompletion();
+          return;
+        }
+
+        // Handle server-provided slash commands by sending them as messages.
+        // Skip when fillOnly (Tab) — let the generic insertion path fill the
+        // command text so the user can keep typing arguments.
+        const serverCmd = availableCommands.find((c) => c.name === itemId);
+        if (serverCmd && !fillOnly) {
+          // Clear the trigger text since we're sending the command
+          clearTriggerText();
+          // Send the slash command as a user message
+          vscode.postMessage({
+            type: 'sendMessage',
+            data: { text: `/${serverCmd.name}` },
+          });
           completion.closeCompletion();
           return;
         }
@@ -517,7 +675,9 @@ export const App: React.FC = () => {
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
       const atPos = textBeforeCursor.lastIndexOf('@');
-      const slashPos = textBeforeCursor.lastIndexOf('/');
+      // Only consider slash as trigger if we're in slash command mode
+      const slashPos =
+        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {
@@ -544,7 +704,25 @@ export const App: React.FC = () => {
       // Close the completion menu
       completion.closeCompletion();
     },
-    [completion, inputFieldRef, setInputText, fileContext, vscode],
+    [
+      completion,
+      inputFieldRef,
+      setInputText,
+      fileContext,
+      vscode,
+      availableCommands,
+    ],
+  );
+
+  // Handle model selection
+  const handleModelSelect = useCallback(
+    (modelId: string) => {
+      vscode.postMessage({
+        type: 'setModel',
+        data: { modelId },
+      });
+    },
+    [vscode],
   );
 
   // Handle attach context click
@@ -614,7 +792,7 @@ export const App: React.FC = () => {
     const inProgressTools = inProgressToolCalls.map((toolCall) => ({
       type: 'in-progress-tool-call' as const,
       data: toolCall,
-      timestamp: toolCall.timestamp || Date.now(),
+      timestamp: toolCall.timestamp ?? 0,
     }));
 
     // Completed tool calls
@@ -623,7 +801,7 @@ export const App: React.FC = () => {
       .map((toolCall) => ({
         type: 'completed-tool-call' as const,
         data: toolCall,
-        timestamp: toolCall.timestamp || Date.now(),
+        timestamp: toolCall.timestamp ?? 0,
       }));
 
     // Merge and sort by timestamp to ensure messages and tool calls are interleaved
@@ -691,24 +869,10 @@ export const App: React.FC = () => {
 
           case 'in-progress-tool-call':
           case 'completed-tool-call': {
-            const prev = allMessages[index - 1];
-            const next = allMessages[index + 1];
-            const isToolCallType = (
-              x: unknown,
-            ): x is { type: 'in-progress-tool-call' | 'completed-tool-call' } =>
-              !!x &&
-              typeof x === 'object' &&
-              'type' in (x as Record<string, unknown>) &&
-              ((x as { type: string }).type === 'in-progress-tool-call' ||
-                (x as { type: string }).type === 'completed-tool-call');
-            const isFirst = !isToolCallType(prev);
-            const isLast = !isToolCallType(next);
             return (
               <ToolCall
                 key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
                 toolCall={item.data as ToolCallData}
-                isFirst={isFirst}
-                isLast={isLast}
               />
             );
           }
@@ -748,7 +912,7 @@ export const App: React.FC = () => {
         currentSessionId={sessionManagement.currentSessionId}
         searchQuery={sessionManagement.sessionSearchQuery}
         onSearchChange={sessionManagement.setSessionSearchQuery}
-        onSelectSession={(sessionId) => {
+        onSelectSession={(sessionId: string) => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}
@@ -866,7 +1030,13 @@ export const App: React.FC = () => {
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionFill={(item) => handleCompletionSelect(item, true)}
           onCompletionClose={completion.closeCompletion}
+          showModelSelector={showModelSelector}
+          availableModels={availableModels}
+          currentModelId={modelInfo?.modelId}
+          onSelectModel={handleModelSelect}
+          onCloseModelSelector={() => setShowModelSelector(false)}
         />
       )}
 
@@ -877,6 +1047,14 @@ export const App: React.FC = () => {
           toolCall={permissionRequest.toolCall}
           onResponse={handlePermissionResponse}
           onClose={() => setPermissionRequest(null)}
+        />
+      )}
+
+      {isAuthenticated && askUserQuestionRequest && (
+        <AskUserQuestionDialog
+          questions={askUserQuestionRequest.questions}
+          onSubmit={handleAskUserQuestionResponse}
+          onCancel={handleAskUserQuestionCancel}
         />
       )}
     </div>

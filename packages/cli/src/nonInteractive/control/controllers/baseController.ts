@@ -16,6 +16,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { DebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { IControlContext } from '../ControlContext.js';
 import type {
   ControlRequestPayload,
@@ -57,6 +59,7 @@ export abstract class BaseController {
   protected context: IControlContext;
   protected registry: IPendingRequestRegistry;
   protected controllerName: string;
+  protected debugLogger: DebugLogger;
 
   constructor(
     context: IControlContext,
@@ -66,6 +69,7 @@ export abstract class BaseController {
     this.context = context;
     this.registry = registry;
     this.controllerName = controllerName;
+    this.debugLogger = createDebugLogger();
   }
 
   /**
@@ -83,9 +87,9 @@ export abstract class BaseController {
     const timeoutId = setTimeout(() => {
       requestAbortController.abort();
       this.registry.deregisterIncomingRequest(requestId);
-      if (this.context.debugMode) {
-        console.error(`[${this.controllerName}] Request timeout: ${requestId}`);
-      }
+      this.debugLogger.warn(
+        `[${this.controllerName}] Request timeout: ${requestId}`,
+      );
     }, DEFAULT_REQUEST_TIMEOUT_MS);
 
     // Register with central registry
@@ -141,11 +145,9 @@ export abstract class BaseController {
       const abortHandler = () => {
         this.registry.deregisterOutgoingRequest(requestId);
         reject(new Error('Request aborted'));
-        if (this.context.debugMode) {
-          console.error(
-            `[${this.controllerName}] Outgoing request aborted: ${requestId}`,
-          );
-        }
+        this.debugLogger.warn(
+          `[${this.controllerName}] Outgoing request aborted: ${requestId}`,
+        );
       };
 
       if (signal) {
@@ -159,11 +161,9 @@ export abstract class BaseController {
         }
         this.registry.deregisterOutgoingRequest(requestId);
         reject(new Error('Control request timeout'));
-        if (this.context.debugMode) {
-          console.error(
-            `[${this.controllerName}] Outgoing request timeout: ${requestId}`,
-          );
-        }
+        this.debugLogger.warn(
+          `[${this.controllerName}] Outgoing request timeout: ${requestId}`,
+        );
       }, timeoutMs);
 
       // Wrap resolve/reject to clean up abort listener

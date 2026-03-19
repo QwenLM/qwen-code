@@ -46,7 +46,7 @@ describe('Telemetry SDK', () => {
   });
 
   afterEach(async () => {
-    await shutdownTelemetry(mockConfig);
+    await shutdownTelemetry();
   });
 
   it('should use gRPC exporters when protocol is grpc', () => {

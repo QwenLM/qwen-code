@@ -5,9 +5,20 @@
  */
 
 /* eslint-env node */
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ['./src/webview/**/**/*.{js,jsx,ts,tsx}'],
+  // Use webui preset for shared theme configuration
+  presets: [require('@qwen-code/webui/tailwind.preset')],
+  content: [
+    './src/webview/**/**/*.{js,jsx,ts,tsx}',
+    // Include webui components to prevent Tailwind JIT from tree-shaking their classes
+    // Use relative path for pnpm workspace - node_modules symlinks are in root
+    '../webui/src/**/*.{js,jsx,ts,tsx}',
+    '../webui/dist/**/*.js',
+  ],
   theme: {
     extend: {
       keyframes: {

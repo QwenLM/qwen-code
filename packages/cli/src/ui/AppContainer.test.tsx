@@ -62,7 +62,6 @@ vi.mock('./hooks/useEditorSettings.js');
 vi.mock('./hooks/useSettingsCommand.js');
 vi.mock('./hooks/useModelCommand.js');
 vi.mock('./hooks/slashCommandProcessor.js');
-vi.mock('./hooks/useConsoleMessages.js');
 vi.mock('./hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 80, rows: 24 })),
 }));
@@ -79,13 +78,27 @@ vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
+vi.mock('./contexts/AgentViewContext.js', () => ({
+  useAgentViewState: vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+  })),
+  useAgentViewActions: vi.fn(() => ({
+    switchToMain: vi.fn(),
+    switchToAgent: vi.fn(),
+    switchToNext: vi.fn(),
+    switchToPrevious: vi.fn(),
+    registerAgent: vi.fn(),
+    unregisterAgent: vi.fn(),
+    unregisterAll: vi.fn(),
+  })),
+}));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
 
 // Mock external utilities
 vi.mock('../utils/events.js');
 vi.mock('../utils/handleAutoUpdate.js');
-vi.mock('./utils/ConsolePatcher.js');
 vi.mock('../utils/cleanup.js');
 
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -95,7 +108,6 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
-import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
@@ -125,7 +137,6 @@ describe('AppContainer State Management', () => {
   const mockedUseSettingsCommand = useSettingsCommand as Mock;
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
-  const mockedUseConsoleMessages = useConsoleMessages as Mock;
   const mockedUseGeminiStream = useGeminiStream as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
@@ -206,11 +217,6 @@ describe('AppContainer State Management', () => {
       shellConfirmationRequest: null,
       confirmationRequest: null,
     });
-    mockedUseConsoleMessages.mockReturnValue({
-      consoleMessages: [],
-      handleNewMessage: vi.fn(),
-      clearConsoleMessages: vi.fn(),
-    });
     mockedUseGeminiStream.mockReturnValue({
       streamingState: 'idle',
       submitQuery: vi.fn(),
@@ -218,6 +224,7 @@ describe('AppContainer State Management', () => {
       pendingHistoryItems: [],
       thought: null,
       cancelOngoingRequest: vi.fn(),
+      retryLastPrompt: vi.fn(),
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -276,7 +283,7 @@ describe('AppContainer State Management', () => {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createSubagent: vi.fn(),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -616,6 +623,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -661,6 +669,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: null,
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -707,6 +716,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: { subject: thoughtSubject },
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -753,6 +763,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: { subject: shortTitle },
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -803,6 +814,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: { subject: title },
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -850,6 +862,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: null,
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
       });
 
       // Act: Render the container
@@ -891,6 +904,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: null,
         cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
         activePtyId: 'some-id',
       });
 
@@ -1022,6 +1036,7 @@ describe('AppContainer State Management', () => {
         pendingHistoryItems: [],
         thought: null,
         cancelOngoingRequest: mockCancelOngoingRequest,
+        retryLastPrompt: vi.fn(),
       });
 
       const mockHandleSlashCommand = vi.fn();

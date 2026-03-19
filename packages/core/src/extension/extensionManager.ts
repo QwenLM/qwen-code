@@ -11,6 +11,7 @@ import type {
   SubagentConfig,
   ClaudeMarketplaceConfig,
 } from '../index.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import {
   Storage,
   Config,
@@ -28,6 +29,7 @@ import {
   EXTENSIONS_CONFIG_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
+  substituteHookVariables,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -55,7 +57,10 @@ import type {
   ExtensionSetting,
   ResolvedExtensionSetting,
 } from './extensionSettings.js';
-import type { TelemetrySettings } from '../config/config.js';
+import type {
+  ExtensionOriginSource,
+  TelemetrySettings,
+} from '../config/config.js';
 import { logExtensionUpdateEvent } from '../telemetry/loggers.js';
 import {
   ExtensionDisableEvent,
@@ -66,6 +71,9 @@ import {
 } from '../telemetry/types.js';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('EXTENSIONS');
 
 // ============================================================================
 // Types and Interfaces
@@ -94,17 +102,20 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionConfig {
   name: string;
   version: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
   commands?: string | string[];
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
 }
 
 export interface ExtensionUpdateInfo {
@@ -132,6 +143,7 @@ export enum ExtensionUpdateState {
 
 export type ExtensionRequestOptions = {
   extensionConfig: ExtensionConfig;
+  originSource: ExtensionOriginSource;
   commands?: string[];
   skills?: SkillConfig[];
   subagents?: SubagentConfig[];
@@ -233,7 +245,7 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
     const isAbortError = error instanceof Error && error.name === 'AbortError';
     if (!isEnoent && !isAbortError) {
-      console.error(`Error loading commands from ${dir}:`, error);
+      debugLogger.error(`Error loading commands from ${dir}:`, error);
     }
     return [];
   }
@@ -242,21 +254,24 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
-) {
+): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
   let newExtensionDir = extensionDir;
+  let originSource: ExtensionOriginSource = 'QwenCode';
   const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
   if (fs.existsSync(configFilePath)) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtensionConfig(extensionDir)) {
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
+    originSource = 'Gemini';
   } else if (pluginName) {
     newExtensionDir = (
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
+    originSource = 'Claude';
   }
   // Claude plugin conversion not yet implemented
-  return newExtensionDir;
+  return { extensionDir: newExtensionDir, originSource };
 }
 
 // ============================================================================
@@ -339,7 +354,7 @@ export class ExtensionManager {
           (ext) => ext.config.name.toLowerCase() === name.toLowerCase(),
         )
       ) {
-        console.error(`Extension not found: ${name}`);
+        debugLogger.error(`Extension not found: ${name}`);
       }
     }
   }
@@ -495,7 +510,7 @@ export class ExtensionManager {
       ) {
         return {};
       }
-      console.error('Error reading extension enablement config:', error);
+      debugLogger.error('Error reading extension enablement config:', error);
       return {};
     }
   }
@@ -613,7 +628,10 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
-        version: config.version,
+        version:
+          config.version ||
+          installMetadata?.marketplaceConfig?.metadata?.version ||
+          '1.0.0',
         path: effectiveExtensionPath,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
@@ -648,15 +666,69 @@ export class ExtensionManager {
         `${effectiveExtensionPath}/agents`,
       );
 
+      if (config.hooks) {
+        // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+        extension.hooks = this.substituteHookVariables(
+          config.hooks,
+          effectiveExtensionPath,
+        );
+      }
+
+      // Also load hooks from hooks directory if available and not already set
+      if (!extension.hooks) {
+        const hooksDir = path.join(effectiveExtensionPath, 'hooks');
+        const hooksJsonPath = path.join(hooksDir, 'hooks.json');
+
+        if (fs.existsSync(hooksJsonPath)) {
+          try {
+            const hooksContent = fs.readFileSync(hooksJsonPath, 'utf-8');
+            const parsedHooks = JSON.parse(hooksContent);
+
+            // Check if the file has a top-level "hooks" property or if the entire file content is the hooks object
+            let hooksData;
+            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+              hooksData = parsedHooks.hooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            } else {
+              // Assume the entire file content is the hooks object
+              hooksData = parsedHooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            }
+
+            // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+            extension.hooks = this.substituteHookVariables(
+              hooksData,
+              effectiveExtensionPath,
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+
       return extension;
     } catch (e) {
-      console.error(
+      debugLogger.warn(
         `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
           e,
         )}`,
       );
       return null;
     }
+  }
+
+  /**
+   * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
+   */
+  private substituteHookVariables(
+    hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
+    extensionPath: string,
+  ): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return substituteHookVariables(hooks, extensionPath);
   }
 
   loadInstallMetadata(
@@ -752,7 +824,7 @@ export class ExtensionManager {
       let tempDir: string | undefined;
 
       if (
-        installMetadata.type === 'marketplace' &&
+        installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
         !installMetadata.pluginName
       ) {
@@ -763,7 +835,6 @@ export class ExtensionManager {
       }
 
       if (
-        installMetadata.type === 'marketplace' ||
         installMetadata.type === 'git' ||
         installMetadata.type === 'github-release'
       ) {
@@ -782,10 +853,7 @@ export class ExtensionManager {
           }
         } catch (_error) {
           await cloneFromGit(installMetadata, tempDir);
-          if (
-            installMetadata.type === 'git' ||
-            installMetadata.type === 'github-release'
-          ) {
+          if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
         }
@@ -800,10 +868,15 @@ export class ExtensionManager {
       }
 
       try {
-        localSourcePath = await convertGeminiOrClaudeExtension(
-          localSourcePath,
-          installMetadata.pluginName,
-        );
+        const { extensionDir, originSource } =
+          await convertGeminiOrClaudeExtension(
+            localSourcePath,
+            installMetadata.pluginName,
+          );
+
+        localSourcePath = extensionDir;
+        installMetadata.originSource = originSource;
+
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
@@ -865,6 +938,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            originSource: installMetadata.originSource,
           });
         } else {
           await this.requestConsent({
@@ -876,6 +950,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            originSource: installMetadata.originSource,
           });
         }
 
@@ -1073,6 +1148,7 @@ export class ExtensionManager {
         const installMetadata: ExtensionInstallMetadata = {
           source: extension.path,
           type: 'local',
+          originSource: extension.installMetadata?.originSource || 'QwenCode',
         };
         await this.installExtension(
           installMetadata,
@@ -1163,7 +1239,7 @@ export class ExtensionManager {
         updatedVersion,
       };
     } catch (e) {
-      console.error(
+      debugLogger.error(
         `Error updating extension, rolling back. ${getErrorMessage(e)}`,
       );
       callback(extension.name, ExtensionUpdateState.ERROR);
@@ -1223,7 +1299,21 @@ export async function copyExtension(
   source: string,
   destination: string,
 ): Promise<void> {
-  await fs.promises.cp(source, destination, { recursive: true });
+  await fs.promises.cp(source, destination, {
+    recursive: true,
+    dereference: true,
+    filter: async (src: string) => {
+      try {
+        const stats = await fs.promises.stat(src);
+        // Only copy regular files and directories
+        // Skip sockets, FIFOs, block devices, and character devices
+        return stats.isFile() || stats.isDirectory();
+      } catch {
+        // If we can't stat the file, skip it
+        return false;
+      }
+    },
+  });
 }
 
 export function getExtensionId(

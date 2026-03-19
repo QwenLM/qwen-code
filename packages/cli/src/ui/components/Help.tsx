@@ -154,7 +154,7 @@ export const Help: React.FC<Help> = ({ commands, width }) => (
     </Text>
     <Text color={theme.text.primary}>
       <Text bold color={theme.text.accent}>
-        Shift+Tab
+        {process.platform === 'win32' ? 'Tab' : 'Shift+Tab'}
       </Text>{' '}
       - {t('Cycle approval modes')}
     </Text>

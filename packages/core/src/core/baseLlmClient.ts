@@ -20,7 +20,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
-const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_MAX_ATTEMPTS = 7;
 
 /**
  * Options for the generateJson utility function.

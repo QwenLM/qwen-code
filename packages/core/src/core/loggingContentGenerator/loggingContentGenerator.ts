@@ -35,13 +35,13 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
-import { isStructuredError } from '../../utils/quotaErrorDetection.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
-
-interface StructuredError {
-  status: number;
-}
+import {
+  getErrorMessage,
+  getErrorStatus,
+  getErrorType,
+} from '../../utils/errors.js';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -108,33 +108,26 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     prompt_id: string,
   ): void {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorType =
-      (error as { type?: string })?.type ||
-      (error instanceof Error ? error.name : 'unknown');
+    const errorMessage = getErrorMessage(error);
+    const errorType = getErrorType(error);
     const errorResponseId =
       (error as { requestID?: string; request_id?: string })?.requestID ||
       (error as { requestID?: string; request_id?: string })?.request_id ||
       responseId;
-    const errorStatus =
-      (error as { code?: string | number; status?: number })?.code ??
-      (error as { status?: number })?.status ??
-      (isStructuredError(error)
-        ? (error as StructuredError).status
-        : undefined);
+    const errorStatus = getErrorStatus(error);
 
     logApiError(
       this.config,
-      new ApiErrorEvent(
-        errorResponseId,
+      new ApiErrorEvent({
+        responseId: errorResponseId,
         model,
-        errorMessage,
         durationMs,
-        prompt_id,
-        this.config.getAuthType(),
+        promptId: prompt_id,
+        authType: this.config.getAuthType(),
+        errorMessage,
         errorType,
-        errorStatus,
-      ),
+        statusCode: errorStatus,
+      }),
     );
   }
 
@@ -154,13 +147,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
-        JSON.stringify(response),
       );
       await this.logOpenAIInteraction(openaiRequest, response);
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
       await this.logOpenAIInteraction(openaiRequest, undefined, error);
       throw error;
     }
@@ -179,7 +171,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       stream = await this.wrapped.generateContentStream(req, userPromptId);
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
       await this.logOpenAIInteraction(openaiRequest, undefined, error);
       throw error;
     }
@@ -219,7 +211,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses[0]?.modelVersion || model,
         userPromptId,
         lastUsageMetadata,
-        JSON.stringify(responses),
       );
       const consolidatedResponse =
         this.consolidateGeminiResponsesForLogging(responses);
@@ -227,7 +218,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
-        undefined,
+        responses[0]?.responseId ?? '',
         durationMs,
         error,
         responses[0]?.modelVersion || model,

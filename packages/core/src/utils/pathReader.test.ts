@@ -31,6 +31,9 @@ const createMockConfig = (
     getFileService: () => mockFileService,
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
+    getContentGeneratorConfig: () => ({
+      modalities: { image: true, pdf: true, audio: true, video: true },
+    }),
   } as unknown as Config;
 };
 
@@ -113,6 +116,7 @@ describe('readPathFromWorkspace', () => {
         inlineData: {
           mimeType: 'image/png',
           data: imageData.toString('base64'),
+          displayName: 'image.png',
         },
       },
     ]);
@@ -263,6 +267,7 @@ describe('readPathFromWorkspace', () => {
         inlineData: {
           mimeType: 'image/png',
           data: imageData.toString('base64'),
+          displayName: 'photo.png',
         },
       });
     });
@@ -390,8 +395,8 @@ describe('readPathFromWorkspace', () => {
   );
 
   it('should return an error string for files exceeding the size limit', async () => {
-    // Mock a file slightly larger than the 20MB limit defined in fileUtils.ts
-    const largeContent = 'a'.repeat(21 * 1024 * 1024); // 21MB
+    // Mock a file slightly larger than the 10MB limit defined in fileUtils.ts
+    const largeContent = 'a'.repeat(11 * 1024 * 1024); // 11MB
     mock({
       [CWD]: {
         'large.txt': largeContent,
@@ -404,6 +409,6 @@ describe('readPathFromWorkspace', () => {
     const result = await readPathFromWorkspace('large.txt', config);
     const textResult = result[0] as string;
     // The error message comes directly from processSingleFileContent
-    expect(textResult).toBe('File size exceeds the 20MB limit.');
+    expect(textResult).toBe('File size exceeds the 10MB limit.');
   });
 });

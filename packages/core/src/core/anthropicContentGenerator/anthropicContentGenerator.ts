@@ -29,6 +29,15 @@ import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  tokenLimit,
+  DEFAULT_OUTPUT_TOKEN_LIMIT,
+  hasExplicitOutputLimit,
+} from '../tokenLimits.js';
+
+const debugLogger = createDebugLogger('ANTHROPIC');
 
 type StreamingBlockState = {
   type: string;
@@ -57,12 +66,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const baseURL = contentGeneratorConfig.baseUrl;
     // Configure runtime options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
-    const runtimeOptions = buildRuntimeFetchOptions('anthropic');
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'anthropic',
+      this.cliConfig.getProxy(),
+    );
 
     this.client = new Anthropic({
       apiKey: contentGeneratorConfig.apiKey,
       baseURL,
-      timeout: contentGeneratorConfig.timeout,
+      timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
@@ -71,6 +83,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     this.converter = new AnthropicContentConverter(
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
+      contentGeneratorConfig.enableCacheControl,
     );
   }
 
@@ -117,7 +130,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         totalTokens: result.totalTokens,
       };
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         'Failed to calculate tokens with tokenizer, ' +
           'falling back to simple method:',
         error,
@@ -215,8 +228,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
+    // Apply output token limit logic consistent with OpenAI providers
+    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    const modelId = this.contentGeneratorConfig.model;
+    const modelLimit = tokenLimit(modelId, 'output');
+    const isKnownModel = hasExplicitOutputLimit(modelId);
+
     const maxTokens =
-      getParam<number>('max_tokens', 'maxOutputTokens') ?? 10_000;
+      userMaxTokens !== undefined && userMaxTokens !== null
+        ? isKnownModel
+          ? Math.min(userMaxTokens, modelLimit)
+          : userMaxTokens
+        : Math.min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT);
 
     return {
       max_tokens: maxTokens,

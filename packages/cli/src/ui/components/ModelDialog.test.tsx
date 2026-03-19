@@ -12,14 +12,10 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import {
-  AVAILABLE_MODELS_QWEN,
-  MAINLINE_CODER,
-  MAINLINE_VLM,
-} from '../models/availableModels.js';
+import { getFilteredQwenModels } from '../models/availableModels.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -29,6 +25,19 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
   DescriptiveRadioButtonSelect: vi.fn(() => null),
 }));
+
+// Helper to create getAvailableModelsForAuthType mock
+const createMockGetAvailableModelsForAuthType = () =>
+  vi.fn((t: AuthType) => {
+    if (t === AuthType.QWEN_OAUTH) {
+      return getFilteredQwenModels().map((m) => ({
+        id: m.id,
+        label: m.label,
+        authType: AuthType.QWEN_OAUTH,
+      }));
+    }
+    return [];
+  });
 const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 
 const renderComponent = (
@@ -47,30 +56,35 @@ const renderComponent = (
     setValue: vi.fn(),
   } as unknown as LoadedSettings;
 
-  const mockConfig = contextValue
-    ? ({
-        // --- Functions used by ModelDialog ---
-        getModel: vi.fn(() => MAINLINE_CODER),
-        setModel: vi.fn().mockResolvedValue(undefined),
-        switchModel: vi.fn().mockResolvedValue(undefined),
-        getAuthType: vi.fn(() => 'qwen-oauth'),
+  const mockConfig = {
+    // --- Functions used by ModelDialog ---
+    getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
+    setModel: vi.fn().mockResolvedValue(undefined),
+    switchModel: vi.fn().mockResolvedValue(undefined),
+    getAuthType: vi.fn(() => 'qwen-oauth'),
+    getAllConfiguredModels: vi.fn(() =>
+      getFilteredQwenModels().map((m) => ({
+        id: m.id,
+        label: m.label,
+        description: m.description || '',
+        authType: AuthType.QWEN_OAUTH,
+      })),
+    ),
 
-        // --- Functions used by ClearcutLogger ---
-        getUsageStatisticsEnabled: vi.fn(() => true),
-        getSessionId: vi.fn(() => 'mock-session-id'),
-        getDebugMode: vi.fn(() => false),
-        getContentGeneratorConfig: vi.fn(() => ({
-          authType: AuthType.QWEN_OAUTH,
-          model: MAINLINE_CODER,
-        })),
-        getUseSmartEdit: vi.fn(() => false),
-        getUseModelRouter: vi.fn(() => false),
-        getProxy: vi.fn(() => undefined),
+    // --- Functions used by ClearcutLogger ---
+    getUsageStatisticsEnabled: vi.fn(() => true),
+    getSessionId: vi.fn(() => 'mock-session-id'),
+    getDebugMode: vi.fn(() => false),
+    getContentGeneratorConfig: vi.fn(() => ({
+      authType: AuthType.QWEN_OAUTH,
+      model: DEFAULT_QWEN_MODEL,
+    })),
+    getUseModelRouter: vi.fn(() => false),
+    getProxy: vi.fn(() => undefined),
 
-        // --- Spread test-specific overrides ---
-        ...contextValue,
-      } as unknown as Config)
-    : undefined;
+    // --- Spread test-specific overrides ---
+    ...(contextValue ?? {}),
+  } as unknown as Config;
 
   const renderResult = render(
     <SettingsContext.Provider value={mockSettings}>
@@ -100,10 +114,9 @@ describe('<ModelDialog />', () => {
     cleanup();
   });
 
-  it('renders the title and help text', () => {
+  it('renders the title', () => {
     const { getByText } = renderComponent();
     expect(getByText('Select Model')).toBeDefined();
-    expect(getByText('(Press Esc to close)')).toBeDefined();
   });
 
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
@@ -111,24 +124,34 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
 
     const props = mockedSelect.mock.calls[0][0];
-    expect(props.items).toHaveLength(AVAILABLE_MODELS_QWEN.length);
+    expect(props.items).toHaveLength(getFilteredQwenModels().length);
+    // coder-model is the only model and it has vision capability
     expect(props.items[0].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
-    );
-    expect(props.items[1].value).toBe(
-      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
+      `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
   });
 
   it('initializes with the model from ConfigContext', () => {
-    const mockGetModel = vi.fn(() => MAINLINE_VLM);
-    renderComponent({}, { getModel: mockGetModel });
+    const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
+    renderComponent(
+      {},
+      {
+        getModel: mockGetModel,
+        getAvailableModelsForAuthType:
+          createMockGetAvailableModelsForAuthType(),
+      },
+    );
 
     expect(mockGetModel).toHaveBeenCalled();
+    // Calculate expected index dynamically based on model list
+    const qwenModels = getFilteredQwenModels();
+    const expectedIndex = qwenModels.findIndex(
+      (m) => m.id === DEFAULT_QWEN_MODEL,
+    );
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialIndex: 1,
+        initialIndex: expectedIndex,
       }),
       undefined,
     );
@@ -146,14 +169,19 @@ describe('<ModelDialog />', () => {
   });
 
   it('initializes with default coder model if getModel returns undefined', () => {
-    const mockGetModel = vi.fn(() => undefined);
-    // @ts-expect-error This test validates component robustness when getModel
-    // returns an unexpected undefined value.
-    renderComponent({}, { getModel: mockGetModel });
+    const mockGetModel = vi.fn(() => undefined as unknown as string);
+    renderComponent(
+      {},
+      {
+        getModel: mockGetModel,
+        getAvailableModelsForAuthType:
+          createMockGetAvailableModelsForAuthType(),
+      },
+    );
 
     expect(mockGetModel).toHaveBeenCalled();
 
-    // When getModel returns undefined, preferredModel falls back to MAINLINE_CODER
+    // When getModel returns undefined, preferredModel falls back to DEFAULT_QWEN_MODEL
     // which has index 0, so initialIndex should be 0
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -165,26 +193,36 @@ describe('<ModelDialog />', () => {
   });
 
   it('calls config.switchModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', async () => {
-    const { props, mockConfig, mockSettings } = renderComponent({}, {}); // Pass empty object for contextValue
+    const { props, mockConfig, mockSettings } = renderComponent(
+      {},
+      {
+        getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+          if (t === AuthType.QWEN_OAUTH) {
+            return getFilteredQwenModels().map((m) => ({
+              id: m.id,
+              label: m.label,
+              authType: AuthType.QWEN_OAUTH,
+            }));
+          }
+          return [];
+        }),
+      },
+    );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
     expect(mockConfig?.switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
       undefined,
-      {
-        reason: 'user_manual',
-        context: 'Model switched via /model dialog',
-      },
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -202,7 +240,7 @@ describe('<ModelDialog />', () => {
         return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
       }
       if (t === AuthType.QWEN_OAUTH) {
-        return AVAILABLE_MODELS_QWEN.map((m) => ({
+        return getFilteredQwenModels().map((m) => ({
           id: m.id,
           label: m.label,
           authType: AuthType.QWEN_OAUTH,
@@ -216,7 +254,7 @@ describe('<ModelDialog />', () => {
       getModel: vi.fn(() => 'gpt-4'),
       getContentGeneratorConfig: vi.fn(() => ({
         authType: AuthType.QWEN_OAUTH,
-        model: MAINLINE_CODER,
+        model: DEFAULT_QWEN_MODEL,
       })),
       // Add switchModel to the mock object (not the type)
       switchModel,
@@ -230,21 +268,17 @@ describe('<ModelDialog />', () => {
     );
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`);
 
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_OAUTH,
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
       { requireCachedCredentials: true },
-      {
-        reason: 'user_manual',
-        context: 'AuthType+model switched via /model dialog',
-      },
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
-      MAINLINE_CODER,
+      DEFAULT_QWEN_MODEL,
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -254,11 +288,12 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('does not pass onHighlight to DescriptiveRadioButtonSelect', () => {
+  it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();
 
     const childOnHighlight = mockedSelect.mock.calls[0][0].onHighlight;
-    expect(childOnHighlight).toBeUndefined();
+    expect(childOnHighlight).toBeDefined();
+    expect(typeof childOnHighlight).toBe('function');
   });
 
   it('calls onClose prop when "escape" key is pressed', () => {
@@ -293,7 +328,7 @@ describe('<ModelDialog />', () => {
   });
 
   it('updates initialIndex when config context changes', () => {
-    const mockGetModel = vi.fn(() => MAINLINE_CODER);
+    const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
     const mockSettings = {
       isTrusted: true,
@@ -308,6 +343,16 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getAvailableModelsForAuthType:
+                createMockGetAvailableModelsForAuthType(),
+              getAllConfiguredModels: vi.fn(() =>
+                getFilteredQwenModels().map((m) => ({
+                  id: m.id,
+                  label: m.label,
+                  description: m.description || '',
+                  authType: AuthType.QWEN_OAUTH,
+                })),
+              ),
             } as unknown as Config
           }
         >
@@ -316,12 +361,22 @@ describe('<ModelDialog />', () => {
       </SettingsContext.Provider>,
     );
 
+    // DEFAULT_QWEN_MODEL (coder-model) is at index 0
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
 
-    mockGetModel.mockReturnValue(MAINLINE_VLM);
+    mockGetModel.mockReturnValue(DEFAULT_QWEN_MODEL);
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getAvailableModelsForAuthType: createMockGetAvailableModelsForAuthType(),
+      getAllConfiguredModels: vi.fn(() =>
+        getFilteredQwenModels().map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description || '',
+          authType: AuthType.QWEN_OAUTH,
+        })),
+      ),
     } as unknown as Config;
 
     rerender(
@@ -334,6 +389,11 @@ describe('<ModelDialog />', () => {
 
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
-    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(1);
+    // Calculate expected index for DEFAULT_QWEN_MODEL dynamically
+    const qwenModels = getFilteredQwenModels();
+    const expectedCoderIndex = qwenModels.findIndex(
+      (m) => m.id === DEFAULT_QWEN_MODEL,
+    );
+    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
   });
 });

@@ -41,6 +41,8 @@ export interface ResolvedCliGenerationConfig {
   generationConfig: Partial<ContentGeneratorConfig>;
   /** Source attribution for each resolved field */
   sources: ContentGeneratorConfigSources;
+  /** Warnings generated during resolution */
+  warnings: string[];
 }
 
 export function getAuthTypeFromEnv(): AuthType | undefined {
@@ -129,11 +131,6 @@ export function resolveCliGenerationConfig(
 
   const resolved = resolveModelConfig(configSources);
 
-  // Log warnings if any
-  for (const warning of resolved.warnings) {
-    console.warn(warning);
-  }
-
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)
   const enableOpenAILogging =
     (typeof argv.openaiLogging === 'undefined'
@@ -157,5 +154,6 @@ export function resolveCliGenerationConfig(
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
     sources: resolved.sources,
+    warnings: resolved.warnings,
   };
 }
