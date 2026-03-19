@@ -304,9 +304,12 @@ describe('Storage – config paths remain at ~/.qwen regardless of runtime dir',
     expect(Storage.getGlobalBinDir()).toBe(path.join(globalQwenDir, 'bin'));
   });
 
-  it('getUserSkillsDir still uses ~/.qwen', () => {
+  it('getUserSkillsDirs still includes ~/.qwen/skills', () => {
     const storage = new Storage('/tmp/project');
-    expect(storage.getUserSkillsDir()).toBe(path.join(globalQwenDir, 'skills'));
+    const skillsDirs = storage.getUserSkillsDirs();
+    expect(
+      skillsDirs.some((dir) => dir === path.join(globalQwenDir, 'skills')),
+    ).toBe(true);
   });
 });
 
