@@ -6,7 +6,7 @@
 
 import type { Mock } from 'vitest';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { copyCommand } from './copyCommand.js';
+import { copyCommand, extractCodeBlocks } from './copyCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
@@ -300,5 +300,106 @@ describe('copyCommand', () => {
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  describe('/copy code', () => {
+    it('should extract and copy only code blocks when args is "code"', async () => {
+      if (!copyCommand.action) throw new Error('Command has no action');
+
+      const markdownWithCode = [
+        {
+          role: 'model',
+          parts: [
+            {
+              text: 'Here is the code:\n```python\nprint("hello")\n```\nDone!',
+            },
+          ],
+        },
+      ];
+
+      mockGetHistory.mockReturnValue(markdownWithCode);
+      mockCopyToClipboard.mockResolvedValue(undefined);
+
+      const result = await copyCommand.action(mockContext, 'code');
+
+      expect(mockCopyToClipboard).toHaveBeenCalledWith('print("hello")');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Code block copied to the clipboard',
+      });
+    });
+
+    it('should copy multiple code blocks separated by blank lines', async () => {
+      if (!copyCommand.action) throw new Error('Command has no action');
+
+      const markdownWithMultipleBlocks = [
+        {
+          role: 'model',
+          parts: [
+            {
+              text: '```js\nconst a = 1;\n```\nAnd:\n```ts\nconst b: number = 2;\n```',
+            },
+          ],
+        },
+      ];
+
+      mockGetHistory.mockReturnValue(markdownWithMultipleBlocks);
+      mockCopyToClipboard.mockResolvedValue(undefined);
+
+      const result = await copyCommand.action(mockContext, 'code');
+
+      expect(mockCopyToClipboard).toHaveBeenCalledWith(
+        'const a = 1;\n\nconst b: number = 2;',
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: '2 code blocks copied to the clipboard',
+      });
+    });
+
+    it('should return info when no code blocks found', async () => {
+      if (!copyCommand.action) throw new Error('Command has no action');
+
+      const markdownWithoutCode = [
+        {
+          role: 'model',
+          parts: [{ text: 'Just plain text, no code here.' }],
+        },
+      ];
+
+      mockGetHistory.mockReturnValue(markdownWithoutCode);
+
+      const result = await copyCommand.action(mockContext, 'code');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'No code blocks found in the last AI output.',
+      });
+      expect(mockCopyToClipboard).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('extractCodeBlocks', () => {
+  it('should extract a single code block', () => {
+    const md = '```python\nprint("hello")\n```';
+    expect(extractCodeBlocks(md)).toEqual(['print("hello")']);
+  });
+
+  it('should extract multiple code blocks', () => {
+    const md = '```js\nconst a = 1;\n```\ntext\n```ts\nconst b = 2;\n```';
+    expect(extractCodeBlocks(md)).toEqual(['const a = 1;', 'const b = 2;']);
+  });
+
+  it('should return empty array when no code blocks', () => {
+    expect(extractCodeBlocks('just text')).toEqual([]);
+  });
+
+  it('should preserve multi-line code content', () => {
+    const md = '```python\nline1\nline2\nline3\n```';
+    expect(extractCodeBlocks(md)).toEqual(['line1\nline2\nline3']);
   });
 });
