@@ -155,6 +155,22 @@ Some text before.
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('handles escaped pipe characters in table cells', () => {
+      const text = `
+| Type | Example |
+|------|---------|
+| Union | A\\|B |
+| Plain | C |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const frame = lastFrame() ?? '';
+      // The escaped pipe should appear as literal "A|B" in the rendered output,
+      // not split into a third column.
+      expect(frame).toContain('A|B');
+    });
+
     it('inserts a single space between paragraphs', () => {
       const text = `Paragraph 1.
 
