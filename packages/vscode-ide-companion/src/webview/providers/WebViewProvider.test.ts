@@ -102,6 +102,7 @@ vi.mock('./MessageHandler.js', () => ({
     setLoginHandler = vi.fn();
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
+    setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
   },

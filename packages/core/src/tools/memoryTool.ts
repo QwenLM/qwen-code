@@ -8,7 +8,7 @@ import type {
   ToolEditConfirmationDetails,
   ToolResult,
   ToolCallConfirmationDetails,
-  
+
   ToolConfirmationOutcome} from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {

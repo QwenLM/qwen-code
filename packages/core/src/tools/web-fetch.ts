@@ -15,7 +15,7 @@ import type {
   ToolInvocation,
   ToolResult,
   ToolConfirmationPayload,
-  
+
   ToolConfirmationOutcome} from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
