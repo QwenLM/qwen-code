@@ -84,11 +84,17 @@ export class AcpFileSystemService implements FileSystemService {
       ? '\uFEFF' + params.content
       : params.content;
 
-    await this.connection.writeTextFile({
-      ...params,
-      content: finalContent,
-      sessionId: this.sessionId,
-    });
+    try {
+      await this.connection.writeTextFile({
+        ...params,
+        content: finalContent,
+        sessionId: this.sessionId,
+      });
+    } catch {
+      // Fall back to local filesystem if ACP write fails (e.g. file does not
+      // yet exist and the IDE companion rejects the path).
+      return this.fallback.writeTextFile(params);
+    }
 
     return { _meta: params._meta };
   }

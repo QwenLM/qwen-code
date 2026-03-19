@@ -127,4 +127,81 @@ describe('AcpFileSystemService', () => {
       expect(client.readTextFile).not.toHaveBeenCalled();
     });
   });
+
+  describe('writeTextFile', () => {
+    it('falls back to local filesystem when ACP write fails', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockRejectedValue(new Error('invalid path')),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      const svc = new AcpFileSystemService(
+        client,
+        'session-1',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+      );
+
+      await svc.writeTextFile({
+        path: '/some/new-dir/file.txt',
+        content: 'hello',
+      });
+
+      expect(fallback.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/new-dir/file.txt',
+        content: 'hello',
+      });
+    });
+
+    it('writes through ACP when connection succeeds', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      const svc = new AcpFileSystemService(
+        client,
+        'session-1',
+        { readTextFile: true, writeTextFile: true },
+        fallback,
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-1',
+      });
+      expect(fallback.writeTextFile).not.toHaveBeenCalled();
+    });
+
+    it('uses fallback when writeTextFile capability is disabled', async () => {
+      const client = {
+        writeTextFile: vi.fn(),
+      } as unknown as AgentSideConnection;
+
+      const fallback = createFallback();
+      const svc = new AcpFileSystemService(
+        client,
+        'session-1',
+        { readTextFile: true, writeTextFile: false },
+        fallback,
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+      });
+
+      expect(fallback.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+      });
+      expect(client.writeTextFile).not.toHaveBeenCalled();
+    });
+  });
 });
