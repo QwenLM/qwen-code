@@ -28,11 +28,11 @@ export const Onboarding: FC<OnboardingPageProps> = ({
 }) => {
   const iconUri = generateIconUrl('icon.png');
 
-  // @ts-expect-error AuthMethodInfo is not exported from @qwen-code/webui causing type mismatch here
   return (
     <BaseOnboarding
       iconUrl={iconUri}
       onGetStarted={onLogin}
+      // @ts-expect-error AuthMethodInfo is not exported from @qwen-code/webui causing type mismatch here
       authMethods={authMethods}
       errorMessage={errorMessage}
     />
