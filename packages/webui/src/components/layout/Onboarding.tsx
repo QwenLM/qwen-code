@@ -81,8 +81,14 @@ export const Onboarding: FC<OnboardingProps> = ({
           {iconUrl && (
             <div className="relative">
               <img
-                src={iconUrl}
-                alt={`${appName} Logo`}
+                src={
+                  iconUrl.startsWith('data:image') ||
+                  iconUrl.startsWith('http') ||
+                  iconUrl.startsWith('vscode-webview-resource:')
+                    ? iconUrl
+                    : ''
+                }
+                alt={`${appName || 'Qwen Code'} Logo`}
                 className="w-[80px] h-[80px] object-contain"
               />
             </div>
