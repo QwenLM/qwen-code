@@ -57,14 +57,10 @@ function getWindowsPathFingerprint(
   env: NodeJS.ProcessEnv,
   pathKeys: string[],
 ): string {
-  return pathKeys
-    .map((key) => `${key}=${env[key] ?? ''}`)
-    .join('\0');
+  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
 }
 
-function normalizePathEnvForWindows(
-  env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
+function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (os.platform() !== 'win32') {
     return env;
   }
