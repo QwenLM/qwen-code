@@ -209,6 +209,59 @@ You are a helpful assistant with this skill.
       expect(config.allowedTools).toEqual(['read_file', 'write_file']);
     });
 
+    it('should parse content with extends: bundled', () => {
+      const markdownWithExtends = `---
+name: review
+description: Extended review
+extends: bundled
+---
+
+### Agent 5: Accessibility
+`;
+
+      mockParseYaml.mockReturnValueOnce({
+        name: 'review',
+        description: 'Extended review',
+        extends: 'bundled',
+      });
+
+      const config = manager.parseSkillContent(
+        markdownWithExtends,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.extends).toBe('bundled');
+      expect(config.body).toContain('### Agent 5: Accessibility');
+    });
+
+    it('should reject invalid extends value', () => {
+      const markdownBadExtends = `---
+name: test-skill
+description: A test skill
+extends: user
+---
+
+Content
+`;
+
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-skill',
+        description: 'A test skill',
+        extends: 'user',
+      });
+
+      expect(() =>
+        manager.parseSkillContent(
+          markdownBadExtends,
+          validSkillConfig.filePath,
+          'project',
+        ),
+      ).toThrow(
+        'Invalid "extends" value: "user". Only "bundled" is supported.',
+      );
+    });
+
     it('should determine level from file path', () => {
       const projectPath = '/test/project/.qwen/skills/test-skill/SKILL.md';
       const userPath = '/home/user/.qwen/skills/test-skill/SKILL.md';
@@ -720,6 +773,75 @@ Review content`);
       expect(skill).toBeDefined();
       expect(skill!.name).toBe('review');
       expect(skill!.level).toBe('bundled');
+    });
+
+    it('should merge project skill with bundled when extends: bundled is set', async () => {
+      mockReaddirForLevels(new Set(['project', 'bundled']));
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+
+      // Return different content based on path
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.startsWith(projectPrefix)) {
+          return Promise.resolve(`---
+name: review
+description: Extended review
+extends: bundled
+---
+### Agent 5: Accessibility`);
+        }
+        return Promise.resolve(`---
+name: review
+description: Review code changes
+---
+Review content`);
+      });
+
+      mockParseYaml.mockImplementation((yamlStr: string) => {
+        if (yamlStr.includes('extends')) {
+          return {
+            name: 'review',
+            description: 'Extended review',
+            extends: 'bundled',
+          };
+        }
+        return {
+          name: 'review',
+          description: 'Review code changes',
+        };
+      });
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.level).toBe('project');
+      expect(skill!.body).toContain('Review content');
+      expect(skill!.body).toContain('### Agent 5: Accessibility');
+      expect(skill!.extends).toBeUndefined();
+    });
+
+    it('should throw when extends: bundled references a non-existent bundled skill', async () => {
+      // Only project level has the skill (no bundled)
+      mockReaddirForLevels(new Set(['project']));
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: custom-skill
+description: Custom skill
+extends: bundled
+---
+Extra content`);
+
+      mockParseYaml.mockReturnValue({
+        name: 'custom-skill',
+        description: 'Custom skill',
+        extends: 'bundled',
+      });
+
+      await expect(manager.loadSkill('custom-skill')).rejects.toThrow(
+        'Cannot extend: bundled skill "custom-skill" not found',
+      );
     });
   });
 
