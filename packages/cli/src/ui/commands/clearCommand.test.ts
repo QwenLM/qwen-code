@@ -58,6 +58,7 @@ describe('clearCommand', () => {
             warn: vi.fn(),
           }),
           getModel: () => 'test-model',
+          getToolRegistry: () => undefined,
         },
       },
       session: {

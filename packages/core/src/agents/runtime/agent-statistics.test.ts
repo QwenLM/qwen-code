@@ -5,14 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SubagentStatistics } from './subagent-statistics.js';
+import { AgentStatistics } from './agent-statistics.js';
 
-describe('SubagentStatistics', () => {
-  let stats: SubagentStatistics;
+describe('AgentStatistics', () => {
+  let stats: AgentStatistics;
   const baseTime = 1000000000000; // Fixed timestamp for consistent testing
 
   beforeEach(() => {
-    stats = new SubagentStatistics();
+    stats = new AgentStatistics();
   });
 
   describe('basic statistics tracking', () => {
@@ -57,7 +57,23 @@ describe('SubagentStatistics', () => {
       const summary = stats.getSummary();
       expect(summary.thoughtTokens).toBe(10);
       expect(summary.cachedTokens).toBe(5);
-      expect(summary.totalTokens).toBe(165); // 100 + 50 + 10 + 5
+      // cachedTokens is a subset of inputTokens, not additive
+      expect(summary.totalTokens).toBe(160); // 100 + 50 + 10
+    });
+
+    it('should use API-provided totalTokenCount when available', () => {
+      stats.recordTokens(100, 50, 10, 5, 170);
+
+      const summary = stats.getSummary();
+      expect(summary.totalTokens).toBe(170);
+    });
+
+    it('should accumulate API totalTokenCount across rounds', () => {
+      stats.recordTokens(100, 50, 0, 0, 150);
+      stats.recordTokens(200, 80, 0, 0, 280);
+
+      const summary = stats.getSummary();
+      expect(summary.totalTokens).toBe(430); // 150 + 280
     });
   });
 
@@ -109,7 +125,7 @@ describe('SubagentStatistics', () => {
       expect(result).toContain('📋 Task Completed: Test task');
       expect(result).toContain('🔧 Tool Usage: 1 calls, 100.0% success');
       expect(result).toContain('⏱️ Duration: 5.0s | 🔁 Rounds: 2');
-      expect(result).toContain('🔢 Tokens: 1,530 (in 1000, out 500)');
+      expect(result).toContain('🔢 Tokens: 1,520 (in 1000, out 500)');
     });
 
     it('should handle zero tool calls', () => {

@@ -124,7 +124,13 @@ describe('GeminiChat', async () => {
     // Disable 429 simulation for tests
     setSimulate429(false);
     // Reset history for each test by creating a new instance
-    chat = new GeminiChat(mockConfig, config, []);
+    chat = new GeminiChat(
+      mockConfig,
+      config,
+      [],
+      undefined,
+      uiTelemetryService,
+    );
   });
 
   afterEach(() => {

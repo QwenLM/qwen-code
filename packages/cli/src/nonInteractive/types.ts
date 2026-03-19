@@ -201,6 +201,7 @@ export interface MessageStartStreamEvent {
     id: string;
     role: 'assistant';
     model: string;
+    content: [];
   };
 }
 

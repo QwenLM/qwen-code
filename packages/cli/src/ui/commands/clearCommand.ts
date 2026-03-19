@@ -11,6 +11,8 @@ import {
   uiTelemetryService,
   SessionEndReason,
   SessionStartSource,
+  ToolNames,
+  SkillTool,
 } from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
@@ -37,6 +39,15 @@ export const clearCommand: SlashCommand = {
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
+
+      // Clear loaded-skills tracking so /context doesn't show stale data
+      const skillTool = config
+        .getToolRegistry()
+        ?.getAllTools()
+        .find((tool) => tool.name === ToolNames.SKILL);
+      if (skillTool instanceof SkillTool) {
+        skillTool.clearLoadedSkills();
+      }
 
       if (newSessionId && context.session.startNewSession) {
         context.session.startNewSession(newSessionId);

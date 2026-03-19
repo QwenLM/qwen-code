@@ -23,6 +23,7 @@ const debugLogger = createDebugLogger('CLIENT');
 import type { ContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
+  getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
@@ -239,6 +240,7 @@ export class GeminiClient {
         },
         history,
         this.config.getChatRecordingService(),
+        uiTelemetryService,
       );
     } catch (error) {
       await reportError(
@@ -582,6 +584,19 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
+    // Check for arena control signal before starting a new turn
+    const arenaAgentClient = this.config.getArenaAgentClient();
+    if (arenaAgentClient) {
+      const controlSignal = await arenaAgentClient.checkControlSignal();
+      if (controlSignal) {
+        debugLogger.info(
+          `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
+        );
+        await arenaAgentClient.reportCancelled();
+        return new Turn(this.getChat(), prompt_id);
+      }
+    }
+
     const turn = new Turn(this.getChat(), prompt_id);
 
     // append system reminders to the request
@@ -606,6 +621,18 @@ export class GeminiClient {
         );
       }
 
+      // add arena system reminder if an arena session is active
+      const arenaManager = this.config.getArenaManager();
+      if (arenaManager) {
+        try {
+          const sessionDir = arenaManager.getArenaSessionDir();
+          const configPath = `${sessionDir}/config.json`;
+          systemReminders.push(getArenaSystemReminder(configPath));
+        } catch {
+          // Arena config not yet initialized — skip
+        }
+      }
+
       requestToSent = [...systemReminders, ...requestToSent];
     }
 
@@ -618,11 +645,27 @@ export class GeminiClient {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
           yield { type: GeminiEventType.LoopDetected };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
           return turn;
         }
       }
+      // Update arena status on Finished events — stats are derived
+      // automatically from uiTelemetryService by the reporter.
+      if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+        await arenaAgentClient.updateStatus();
+      }
+
       yield event;
       if (event.type === GeminiEventType.Error) {
+        if (arenaAgentClient) {
+          const errorMsg =
+            event.value instanceof Error
+              ? event.value.message
+              : 'Unknown error';
+          await arenaAgentClient.reportError(errorMsg);
+        }
         return turn;
       }
     }
@@ -687,6 +730,10 @@ export class GeminiClient {
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
+        // Report completed before returning — agent has no more work to do
+        if (arenaAgentClient) {
+          await arenaAgentClient.reportCompleted();
+        }
         return turn;
       }
 
@@ -715,7 +762,15 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
+      } else if (arenaAgentClient) {
+        // No continuation needed — agent completed its task
+        await arenaAgentClient.reportCompleted();
       }
+    }
+
+    // Report cancelled to arena when user cancelled mid-stream
+    if (signal?.aborted && arenaAgentClient) {
+      await arenaAgentClient.reportCancelled();
     }
 
     return turn;
