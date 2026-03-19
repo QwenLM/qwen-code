@@ -372,6 +372,16 @@ const SETTINGS_SCHEMA = {
           { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
         ],
       },
+      suppressHomeDirectoryWarning: {
+        type: 'boolean',
+        label: 'Suppress Home Directory Warning',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Suppress the warning when running Qwen Code from the home directory.',
+        showInDialog: true,
+      },
     },
   },
   output: {

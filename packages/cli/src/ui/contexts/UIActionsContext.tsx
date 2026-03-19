@@ -91,6 +91,8 @@ export interface UIActions {
   closeFeedbackDialog: () => void;
   temporaryCloseFeedbackDialog: () => void;
   submitFeedback: (rating: number) => void;
+  // Startup warnings
+  dismissStartupWarnings: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

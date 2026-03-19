@@ -5,17 +5,35 @@
  */
 
 import { Box, Text } from 'ink';
+import React from 'react';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { UpdateNotification } from './UpdateNotification.js';
 
+// Check if a warning is a home directory warning (less severe)
+const isHomeDirectoryWarning = (warning: string): boolean => {
+  return warning.includes('running Qwen Code in your home directory');
+};
+
+// Check if a warning is a root directory warning (more severe)
+const isRootDirectoryWarning = (warning: string): boolean => {
+  return warning.includes('running Qwen Code in the root directory');
+};
+
 export const Notifications = () => {
   const { startupWarnings } = useAppContext();
-  const { initError, streamingState, updateInfo } = useUIState();
+  const { initError, streamingState, updateInfo, startupWarningsDismissed } = useUIState();
+  const { dismissStartupWarnings } = useUIActions();
 
-  const showStartupWarnings = startupWarnings.length > 0;
+  // Filter out dismissed warnings
+  const visibleWarnings = startupWarningsDismissed 
+    ? [] 
+    : startupWarnings;
+
+  const showStartupWarnings = visibleWarnings.length > 0;
   const showInitError =
     initError && streamingState !== StreamingState.Responding;
 
@@ -30,11 +48,25 @@ export const Notifications = () => {
           marginY={1}
           flexDirection="column"
         >
-          {startupWarnings.map((warning, index) => (
-            <Text key={index} color={theme.status.warning}>
-              {warning}
-            </Text>
-          ))}
+          {visibleWarnings.map((warning, index) => {
+            // Use different styling for home directory warnings (info level)
+            const isHomeDir = isHomeDirectoryWarning(warning);
+            const isRootDir = isRootDirectoryWarning(warning);
+
+            return (
+              <Text
+                key={index}
+                color={isHomeDir ? theme.status.warningDim : theme.status.warning}
+              >
+                {isHomeDir ? 'ℹ ' : isRootDir ? '⚠ ' : ''}
+                {warning}
+              </Text>
+            );
+          })}
+          <Text dimColor>
+            {' '}
+            Press `Esc` to dismiss
+          </Text>
         </Box>
       )}
       {showInitError && (

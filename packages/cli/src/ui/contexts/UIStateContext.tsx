@@ -94,6 +94,8 @@ export interface UIState {
   historyRemountKey: number;
   messageQueue: string[];
   showAutoAcceptIndicator: ApprovalMode;
+  // Startup warnings dismissed state
+  startupWarningsDismissed: boolean;
   // Quota-related state
   currentModel: string;
   contextFileNames: string[];

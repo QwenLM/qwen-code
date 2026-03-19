@@ -411,6 +411,7 @@ export async function main() {
           workspaceRoot: process.cwd(),
           useRipgrep: settings.merged.tools?.useRipgrep ?? true,
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
+          suppressHomeDirectoryWarning: settings.merged.general?.suppressHomeDirectoryWarning ?? false,
         })),
         ...getSettingsWarnings(settings),
         ...config.getWarnings(),

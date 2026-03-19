@@ -13,6 +13,7 @@ type WarningCheckOptions = {
   workspaceRoot: string;
   useRipgrep: boolean;
   useBuiltinRipgrep: boolean;
+  suppressHomeDirectoryWarning?: boolean;
 };
 
 type WarningCheck = {
@@ -24,6 +25,11 @@ type WarningCheck = {
 const homeDirectoryCheck: WarningCheck = {
   id: 'home-directory',
   check: async (options: WarningCheckOptions) => {
+    // Skip check if suppressed
+    if (options.suppressHomeDirectoryWarning) {
+      return null;
+    }
+
     try {
       const [workspaceRealPath, homeRealPath] = await Promise.all([
         fs.realpath(options.workspaceRoot),
@@ -31,7 +37,7 @@ const homeDirectoryCheck: WarningCheck = {
       ]);
 
       if (workspaceRealPath === homeRealPath) {
-        return 'You are running Qwen Code in your home directory. It is recommended to run in a project-specific directory.';
+        return 'You are running Qwen Code in your home directory. Run `cd <project-dir>` first, or use `--workspace <path>` to specify a project directory. Set `suppressHomeDirectoryWarning: true` in ~/.qwen/settings.json to suppress this warning.';
       }
       return null;
     } catch (_err: unknown) {

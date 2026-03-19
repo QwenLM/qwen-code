@@ -169,6 +169,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
   const [updateInfo, setUpdateInfo] = useState<UpdateObject | null>(null);
   const [isTrustedFolder, setIsTrustedFolder] = useState<boolean | undefined>(
+  const [startupWarningsDismissed, setStartupWarningsDismissed] =
+    useState<boolean>(false);
     config.isTrustedFolder(),
   );
 
@@ -1222,6 +1224,18 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        // Dismiss startup warnings if showing
+        if (props.startupWarnings && props.startupWarnings.length > 0 && !startupWarningsDismissed) {
+          setStartupWarningsDismissed(true);
+          return;
+        }
+
+        // Dismiss startup warnings if showing
+        if (props.startupWarnings && props.startupWarnings.length > 0 && !startupWarningsDismissed) {
+          setStartupWarningsDismissed(true);
+          return;
+        }
+
         // No action available, reset the flag
         if (escapeTimerRef.current) {
           clearTimeout(escapeTimerRef.current);
@@ -1364,6 +1378,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeFeedbackDialog,
     temporaryCloseFeedbackDialog,
     submitFeedback,
+      // Startup warnings
+      dismissStartupWarnings: () => setStartupWarningsDismissed(true),
   } = useFeedbackDialog({
     config,
     settings,
@@ -1475,6 +1491,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Startup warnings dismissed
+      startupWarningsDismissed,
     }),
     [
       isThemeDialogOpen,
@@ -1572,6 +1590,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Startup warnings dismissed
+      startupWarningsDismissed,
     ],
   );
 
@@ -1627,6 +1647,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Startup warnings
+      dismissStartupWarnings: () => setStartupWarningsDismissed(true),
     }),
     [
       openThemeDialog,
@@ -1677,6 +1699,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Startup warnings
+      dismissStartupWarnings: () => setStartupWarningsDismissed(true),
     ],
   );
 
