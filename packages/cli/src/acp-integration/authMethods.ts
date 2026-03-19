@@ -12,7 +12,7 @@ export function buildAuthMethods(): AuthMethod[] {
   return [
     {
       id: AuthType.QWEN_OAUTH,
-      name: 'Qwen OAuth',
+      name: t('Qwen OAuth'),
       description: t(
         'OAuth authentication for Qwen models with free daily requests',
       ),

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as vscode from 'vscode';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -80,7 +81,10 @@ export class AcpConnection {
 
     this.workingDir = workingDir;
 
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      QWEN_IDE_LANGUAGE: vscode.env.language,
+    };
 
     const proxyArg = extraArgs.find(
       (arg, i) => arg === '--proxy' && i + 1 < extraArgs.length,
@@ -166,8 +170,7 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-     
-    const self = this;
+    const getSelf = () => this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
         sessionUpdate(params: SessionNotification): Promise<void> {
@@ -175,7 +178,7 @@ export class AcpConnection {
             '[ACP] >>> Processing session_update:',
             JSON.stringify(params).substring(0, 300),
           );
-          self.onSessionUpdate(params as unknown as SessionNotification);
+          getSelf().onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
 
@@ -197,7 +200,7 @@ export class AcpConnection {
               const metadata =
                 rawInput?.metadata as AskUserQuestionRequest['metadata'];
 
-              const response = await self.onAskUserQuestion({
+              const response = await getSelf().onAskUserQuestion({
                 sessionId: permissionData.sessionId,
                 questions,
                 metadata,
@@ -230,7 +233,8 @@ export class AcpConnection {
             }
 
             // Handle regular permission request
-            const response = await self.onPermissionRequest(permissionData);
+            const response =
+              await getSelf().onPermissionRequest(permissionData);
             const optionId = response?.optionId;
             console.log('[ACP] Permission request:', optionId);
             let outcome: 'selected' | 'cancelled';
@@ -247,7 +251,7 @@ export class AcpConnection {
             if (outcome === 'cancelled') {
               return { outcome: { outcome: 'cancelled' } };
             }
-            const selectedOptionId = self.resolvePermissionOptionId(
+            const selectedOptionId = getSelf().resolvePermissionOptionId(
               permissionData,
               optionId,
             );
@@ -269,7 +273,7 @@ export class AcpConnection {
           params: ReadTextFileRequest,
         ): Promise<ReadTextFileResponse> {
           try {
-            const result = await self.fileHandler.handleReadTextFile({
+            const result = await getSelf().fileHandler.handleReadTextFile({
               path: params.path,
               sessionId: params.sessionId,
               line: params.line ?? null,
@@ -277,14 +281,14 @@ export class AcpConnection {
             });
             return { content: result.content };
           } catch (error) {
-            throw self.mapReadTextFileError(error, params.path);
+            throw getSelf().mapReadTextFileError(error, params.path);
           }
         },
 
         async writeTextFile(
           params: WriteTextFileRequest,
         ): Promise<WriteTextFileResponse> {
-          await self.fileHandler.handleWriteTextFile({
+          await getSelf().fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
             sessionId: params.sessionId,
@@ -301,7 +305,7 @@ export class AcpConnection {
               '[ACP] >>> Processing authenticate_update:',
               JSON.stringify(params).substring(0, 300),
             );
-            self.onAuthenticateUpdate(
+            getSelf().onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
           } else {
@@ -386,13 +390,16 @@ export class AcpConnection {
     );
   }
 
-  async authenticate(methodId?: string, _meta?: Record<string, any>): Promise<AuthenticateResponse> {
+  async authenticate(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<AuthenticateResponse> {
     const conn = this.ensureConnection();
     const authMethodId = methodId || 'default';
     console.log(
       '[ACP] Sending authenticate request with methodId:',
       authMethodId,
-      _meta
+      _meta,
     );
     const response = await conn.authenticate({ methodId: authMethodId, _meta });
     console.log('[ACP] Authenticate successful', response);

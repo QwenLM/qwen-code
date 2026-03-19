@@ -40,10 +40,17 @@ export const Onboarding: FC<OnboardingProps> = ({
   onGetStarted,
   authMethods = [],
   appName = 'Qwen Code',
-  subtitle = 'Unlock the power of AI to understand, navigate, and transform your codebase faster than ever before.',
-  buttonText = 'Get Started with Qwen Code',
+  subtitle,
+  buttonText,
   errorMessage,
 }) => {
+  const defaultSubtitle = t(
+    'Unlock the power of AI to understand, navigate, and transform your codebase faster than ever before.',
+  );
+  const defaultButtonText = t('Get Started with Qwen Code');
+  const finalSubtitle = subtitle ?? defaultSubtitle;
+  const finalButtonText = buttonText ?? defaultButtonText;
+
   const [selectedMethodId, setSelectedMethodId] = useState<string>('');
   const [codingPlanKey, setCodingPlanKey] = useState<string>('');
   const [codingPlanRegion, setCodingPlanRegion] = useState<string>('china');
@@ -83,16 +90,20 @@ export const Onboarding: FC<OnboardingProps> = ({
 
           <div className="text-center">
             <h1 className="text-2xl font-bold text-[var(--app-primary-foreground)] mb-2">
-              Welcome to {appName}
+              {appName === 'Qwen Code'
+                ? t('Welcome to Qwen Code')
+                : `Welcome to ${appName}`}
             </h1>
             <p className="text-[var(--app-secondary-foreground)] max-w-sm">
-              {subtitle}
+              {finalSubtitle}
             </p>
           </div>
 
           {errorMessage && (
             <div className="w-full p-3 bg-red-500/10 border border-red-500/30 rounded-md text-red-500 text-sm break-words">
-              {errorMessage}
+              {errorMessage === 'Login failed. Please try again.'
+                ? t('Login failed. Please try again.')
+                : errorMessage}
             </div>
           )}
 
@@ -102,7 +113,7 @@ export const Onboarding: FC<OnboardingProps> = ({
                 onClick={() => onGetStarted('qwen-oauth')}
                 className="w-full px-4 py-3 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200"
               >
-                {buttonText}
+                {finalButtonText}
               </button>
             ) : selectedMethodId === 'coding-plan' ? (
               <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
@@ -128,9 +139,11 @@ export const Onboarding: FC<OnboardingProps> = ({
                     onChange={(e) => setCodingPlanRegion(e.target.value)}
                     className="px-3 py-2 bg-[var(--vscode-dropdown-background)] border border-[var(--vscode-dropdown-border)] text-[var(--vscode-dropdown-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)] cursor-pointer"
                   >
-                    <option value="china">阿里云百炼 (aliyun.com)</option>
+                    <option value="china">
+                      {t('Alibaba Cloud (aliyun.com)')}
+                    </option>
                     <option value="global">
-                      Alibaba Cloud (alibabacloud.com)
+                      {t('Alibaba Cloud (alibabacloud.com)')}
                     </option>
                   </select>
                 </div>
@@ -165,12 +178,16 @@ export const Onboarding: FC<OnboardingProps> = ({
                     {t('Refer to the documentation for setup instructions.')}
                   </p>
                   <a
-                    href="https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/"
+                    href={t(
+                      'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/',
+                    )}
                     target="_blank"
                     rel="noreferrer"
                     className="text-[var(--vscode-textLink-foreground)] hover:text-[var(--vscode-textLink-activeForeground)] underline break-all"
                   >
-                    https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/
+                    {t(
+                      'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/',
+                    )}
                   </a>
                 </div>
                 <div className="flex gap-2 mt-4">

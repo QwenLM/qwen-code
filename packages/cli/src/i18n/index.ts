@@ -55,10 +55,14 @@ const getLocalePath = (
 
 // Language detection
 export function detectSystemLanguage(): SupportedLanguage {
-  const envLang = process.env['QWEN_CODE_LANG'] || process.env['LANG'];
+  const envLang =
+    process.env['QWEN_CODE_LANG'] ||
+    process.env['QWEN_IDE_LANGUAGE'] ||
+    process.env['LANG'];
   if (envLang) {
+    const envLangLower = envLang.toLowerCase();
     for (const lang of SUPPORTED_LANGUAGES) {
-      if (envLang.startsWith(lang.code)) return lang.code;
+      if (envLangLower.startsWith(lang.code)) return lang.code;
     }
   }
 
