@@ -62,13 +62,13 @@ export const Onboarding: FC<OnboardingProps> = ({
     if (!codingPlanKey.trim()) return;
     onGetStarted('coding-plan', {
       apiKey: codingPlanKey.trim(),
-      region: codingPlanRegion
+      region: codingPlanRegion,
     });
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-5 md:p-10">
-      <div className="flex flex-col items-center gap-8 w-full max-w-md mx-auto">
+    <div className="flex flex-col items-center justify-center min-h-full p-5 md:p-10">
+      <div className="flex flex-col items-center gap-8 w-full max-w-md m-auto">
         <div className="flex flex-col items-center gap-6 w-full">
           {/* Application icon container */}
           {iconUrl && (
@@ -104,94 +104,102 @@ export const Onboarding: FC<OnboardingProps> = ({
               >
                 {buttonText}
               </button>
+            ) : selectedMethodId === 'coding-plan' ? (
+              <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
+                <h3 className="font-bold text-lg mb-2">
+                  {t('Alibaba Cloud Coding Plan')}
+                </h3>
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm font-semibold">
+                    {t('API Key')}
+                  </label>
+                  <input
+                    type="password"
+                    value={codingPlanKey}
+                    onChange={(e) => setCodingPlanKey(e.target.value)}
+                    placeholder="sk-..."
+                    className="px-3 py-2 bg-[var(--vscode-input-background)] border border-[var(--vscode-input-border)] text-[var(--vscode-input-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)]"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm font-semibold">{t('Region')}</label>
+                  <select
+                    value={codingPlanRegion}
+                    onChange={(e) => setCodingPlanRegion(e.target.value)}
+                    className="px-3 py-2 bg-[var(--vscode-dropdown-background)] border border-[var(--vscode-dropdown-border)] text-[var(--vscode-dropdown-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)] cursor-pointer"
+                  >
+                    <option value="china">阿里云百炼 (aliyun.com)</option>
+                    <option value="global">
+                      Alibaba Cloud (alibabacloud.com)
+                    </option>
+                  </select>
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={() => setSelectedMethodId('')}
+                    className="flex-1 px-4 py-2 border border-[var(--app-button-background)] text-[var(--app-button-background)] bg-transparent font-medium rounded-lg hover:bg-[var(--app-button-background)] hover:bg-opacity-10 transition-colors duration-200"
+                  >
+                    {t('Back')}
+                  </button>
+                  <button
+                    onClick={handleCodingPlanSubmit}
+                    disabled={!codingPlanKey.trim()}
+                    className="flex-1 px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {t('Submit')}
+                  </button>
+                </div>
+              </div>
+            ) : selectedMethodId === 'openai' ? (
+              <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
+                <h3 className="font-bold text-lg mb-2">
+                  {t('Custom Configuration')}
+                </h3>
+                <div className="text-sm text-[var(--app-secondary-foreground)]">
+                  <p className="mb-2">
+                    {t(
+                      'You can configure your API key and models in settings.json',
+                    )}
+                  </p>
+                  <p className="mb-2">
+                    {t('Refer to the documentation for setup instructions.')}
+                  </p>
+                  <a
+                    href="https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[var(--vscode-textLink-foreground)] hover:text-[var(--vscode-textLink-activeForeground)] underline break-all"
+                  >
+                    https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/
+                  </a>
+                </div>
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={() => setSelectedMethodId('')}
+                    className="w-full px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200"
+                  >
+                    {t('Back')}
+                  </button>
+                </div>
+              </div>
             ) : (
-              selectedMethodId === 'coding-plan' ? (
-                <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
-                  <h3 className="font-bold text-lg mb-2">{t('Alibaba Cloud Coding Plan')}</h3>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-semibold">{t('API Key')}</label>
-                    <input
-                      type="password"
-                      value={codingPlanKey}
-                      onChange={(e) => setCodingPlanKey(e.target.value)}
-                      placeholder="sk-..."
-                      className="px-3 py-2 bg-[var(--vscode-input-background)] border border-[var(--vscode-input-border)] text-[var(--vscode-input-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)]"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-semibold">{t('Region')}</label>
-                    <select
-                      value={codingPlanRegion}
-                      onChange={(e) => setCodingPlanRegion(e.target.value)}
-                      className="px-3 py-2 bg-[var(--vscode-dropdown-background)] border border-[var(--vscode-dropdown-border)] text-[var(--vscode-dropdown-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)] cursor-pointer"
-                    >
-                      <option value="china">阿里云百炼 (aliyun.com)</option>
-                      <option value="global">Alibaba Cloud (alibabacloud.com)</option>
-                    </select>
-                  </div>
-                  <div className="flex gap-2 mt-2">
-                    <button
-                      onClick={() => setSelectedMethodId('')}
-                      className="flex-1 px-4 py-2 border border-[var(--app-button-background)] text-[var(--app-button-background)] bg-transparent font-medium rounded-lg hover:bg-[var(--app-button-background)] hover:bg-opacity-10 transition-colors duration-200"
-                    >
-                      {t('Back')}
-                    </button>
-                    <button
-                      onClick={handleCodingPlanSubmit}
-                      disabled={!codingPlanKey.trim()}
-                      className="flex-1 px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {t('Submit')}
-                    </button>
-                  </div>
-                </div>
-              ) : selectedMethodId === 'openai' ? (
-                <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
-                    <h3 className="font-bold text-lg mb-2">
-                      {t('Custom Configuration')}
-                    </h3>
-                  <div className="text-sm text-[var(--app-secondary-foreground)]">
-                    <p className="mb-2">
-                      {t('You can configure your API key and models in settings.json')}
-                    </p>
-                    <p className="mb-2">
-                      {t('Refer to the documentation for setup instructions.')}
-                    </p>
-                    <a
-                      href="https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[var(--vscode-textLink-foreground)] hover:text-[var(--vscode-textLink-activeForeground)] underline break-all"
-                    >
-                      https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/
-                    </a>
-                  </div>
-                  <div className="flex gap-2 mt-4">
-                    <button
-                      onClick={() => setSelectedMethodId('')}
-                      className="w-full px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200"
-                    >
-                      {t('Back')}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-3 w-full">
-                  <h3 className="text-sm font-semibold mb-1 text-[var(--app-secondary-foreground)] uppercase drop-shadow-sm border-b pb-1 border-[var(--app-input-border)]">
-                    {t('Select Authentication Method')}
-                  </h3>
-                  {authMethods.map((method) => (
-                    <button
-                      key={method.id}
-                      onClick={() => handleLogin(method.id)}
-                      className="w-full flex flex-col items-start text-left px-4 py-3 bg-[var(--app-input-background)] text-[var(--app-primary-foreground)] border border-[var(--app-input-border)] hover:border-[var(--vscode-focusBorder)] rounded-lg transition-colors duration-200 relative group overflow-hidden"
-                    >
-                      <div className="font-medium">{method.name}</div>
-                      <div className="text-xs text-[var(--app-secondary-foreground)] mt-1">{method.description}</div>
-                    </button>
-                  ))}
-                </div>
-              )
+              <div className="flex flex-col gap-3 w-full">
+                <h3 className="text-sm font-semibold mb-1 text-[var(--app-secondary-foreground)] uppercase drop-shadow-sm border-b pb-1 border-[var(--app-input-border)]">
+                  {t('Select Authentication Method')}
+                </h3>
+                {authMethods.map((method) => (
+                  <button
+                    key={method.id}
+                    onClick={() => handleLogin(method.id)}
+                    className="w-full flex flex-col items-start text-left px-4 py-3 bg-[var(--app-input-background)] text-[var(--app-primary-foreground)] border border-[var(--app-input-border)] hover:border-[var(--vscode-focusBorder)] rounded-lg transition-colors duration-200 relative group overflow-hidden"
+                  >
+                    <div className="font-medium">{method.name}</div>
+                    <div className="text-xs text-[var(--app-secondary-foreground)] mt-1">
+                      {method.description}
+                    </div>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         </div>
