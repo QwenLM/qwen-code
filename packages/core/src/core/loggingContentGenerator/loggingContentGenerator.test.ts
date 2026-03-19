@@ -35,6 +35,8 @@ vi.mock('../../utils/openaiLogger.js', () => ({
   })),
 }));
 
+const realConvertGeminiRequestToOpenAI =
+  OpenAIContentConverter.prototype.convertGeminiRequestToOpenAI;
 const convertGeminiRequestToOpenAISpy = vi
   .spyOn(OpenAIContentConverter.prototype, 'convertGeminiRequestToOpenAI')
   .mockReturnValue([{ role: 'user', content: 'converted' }]);
@@ -50,6 +52,10 @@ const convertGeminiResponseToOpenAISpy = vi
     model: 'test-model',
     choices: [],
   } as OpenAI.Chat.ChatCompletion);
+const setModalitiesSpy = vi.spyOn(
+  OpenAIContentConverter.prototype,
+  'setModalities',
+);
 
 const createConfig = (overrides: Record<string, unknown> = {}): Config => {
   const configContent = {
@@ -109,6 +115,7 @@ describe('LoggingContentGenerator', () => {
     convertGeminiRequestToOpenAISpy.mockClear();
     convertGeminiToolsToOpenAISpy.mockClear();
     convertGeminiResponseToOpenAISpy.mockClear();
+    setModalitiesSpy.mockClear();
   });
 
   it('logs request/response, normalizes thought parts, and logs OpenAI interaction', async () => {
@@ -393,5 +400,77 @@ describe('LoggingContentGenerator', () => {
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses generator modalities when converting logged OpenAI requests', async () => {
+    convertGeminiRequestToOpenAISpy.mockImplementationOnce(function (
+      this: OpenAIContentConverter,
+      request,
+      options,
+    ) {
+      return realConvertGeminiRequestToOpenAI.call(this, request, options);
+    });
+
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-5', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      modalities: { image: true },
+    };
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig(),
+      generatorConfig,
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Inspect this' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'img-data',
+                displayName: 'diagram.png',
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-5');
+
+    expect(setModalitiesSpy).toHaveBeenCalledWith({ image: true });
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [openaiRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    expect(openaiRequest.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Inspect this' },
+          {
+            type: 'image_url',
+            image_url: {
+              url: 'data:image/png;base64,img-data',
+            },
+          },
+        ],
+      },
+    ]);
   });
 });
