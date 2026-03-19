@@ -7,11 +7,12 @@
 import { StreamingState } from '../types.js';
 import { useTimer } from './useTimer.js';
 import { usePhraseCycler } from './usePhraseCycler.js';
-import { useState, useEffect, useRef } from 'react'; // Added useRef
+import { useState, useEffect, useRef } from 'react';
 
 export const useLoadingIndicator = (
   streamingState: StreamingState,
   customWittyPhrases?: string[],
+  currentCandidatesTokens?: number,
 ) => {
   const [timerResetKey, setTimerResetKey] = useState(0);
   const isTimerActive = streamingState === StreamingState.Responding;
@@ -27,6 +28,7 @@ export const useLoadingIndicator = (
   );
 
   const [retainedElapsedTime, setRetainedElapsedTime] = useState(0);
+  const [taskStartTokens, setTaskStartTokens] = useState(0);
   const prevStreamingStateRef = useRef<StreamingState | null>(null);
 
   useEffect(() => {
@@ -35,21 +37,26 @@ export const useLoadingIndicator = (
       streamingState === StreamingState.Responding
     ) {
       setTimerResetKey((prevKey) => prevKey + 1);
-      setRetainedElapsedTime(0); // Clear retained time when going back to responding
+      setRetainedElapsedTime(0);
+      setTaskStartTokens(currentCandidatesTokens ?? 0);
     } else if (
       streamingState === StreamingState.Idle &&
       prevStreamingStateRef.current === StreamingState.Responding
     ) {
-      setTimerResetKey((prevKey) => prevKey + 1); // Reset timer when becoming idle from responding
+      setTimerResetKey((prevKey) => prevKey + 1);
       setRetainedElapsedTime(0);
+      setTaskStartTokens(0);
+    } else if (
+      streamingState === StreamingState.Responding &&
+      prevStreamingStateRef.current !== StreamingState.Responding
+    ) {
+      setTaskStartTokens(currentCandidatesTokens ?? 0);
     } else if (streamingState === StreamingState.WaitingForConfirmation) {
-      // Capture the time when entering WaitingForConfirmation
-      // elapsedTimeFromTimer will hold the last value from when isTimerActive was true.
       setRetainedElapsedTime(elapsedTimeFromTimer);
     }
 
     prevStreamingStateRef.current = streamingState;
-  }, [streamingState, elapsedTimeFromTimer]);
+  }, [streamingState, elapsedTimeFromTimer, currentCandidatesTokens]);
 
   return {
     elapsedTime:
@@ -57,5 +64,6 @@ export const useLoadingIndicator = (
         ? retainedElapsedTime
         : elapsedTimeFromTimer,
     currentLoadingPhrase,
+    taskStartTokens,
   };
 };

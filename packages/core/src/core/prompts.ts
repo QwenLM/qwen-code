@@ -865,6 +865,16 @@ Plan mode is active. The user indicated that they do not want you to execute yet
 </system-reminder>`;
 }
 
+/**
+ * Generates a system reminder about an active Arena session.
+ *
+ * @param configFilePath - Absolute path to the arena session's `config.json`
+ * @returns A formatted system reminder string wrapped in XML tags
+ */
+export function getArenaSystemReminder(configFilePath: string): string {
+  return `<system-reminder>An Arena session is active. For details, read: ${configFilePath}. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
+}
+
 // ============================================================================
 // Insight Analysis Prompts
 // ============================================================================

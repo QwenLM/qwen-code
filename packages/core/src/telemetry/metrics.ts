@@ -23,6 +23,14 @@ const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
 
+// Arena Metrics
+const ARENA_SESSION_COUNT = `${SERVICE_NAME}.arena.session.count`;
+const ARENA_SESSION_DURATION = `${SERVICE_NAME}.arena.session.duration`;
+const ARENA_AGENT_COUNT = `${SERVICE_NAME}.arena.agent.count`;
+const ARENA_AGENT_DURATION = `${SERVICE_NAME}.arena.agent.duration`;
+const ARENA_AGENT_TOKENS = `${SERVICE_NAME}.arena.agent.tokens`;
+const ARENA_RESULT_SELECTED = `${SERVICE_NAME}.arena.result.selected`;
+
 // Performance Monitoring Metrics
 const STARTUP_TIME = `${SERVICE_NAME}.startup.duration`;
 const MEMORY_USAGE = `${SERVICE_NAME}.memory.usage`;
@@ -345,6 +353,14 @@ let performanceScoreGauge: Histogram | undefined;
 let regressionDetectionCounter: Counter | undefined;
 let regressionPercentageChangeHistogram: Histogram | undefined;
 let baselineComparisonHistogram: Histogram | undefined;
+// Arena Metrics
+let arenaSessionCounter: Counter | undefined;
+let arenaSessionDurationHistogram: Histogram | undefined;
+let arenaAgentCounter: Counter | undefined;
+let arenaAgentDurationHistogram: Histogram | undefined;
+let arenaAgentTokensCounter: Counter | undefined;
+let arenaResultSelectedCounter: Counter | undefined;
+
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
 
@@ -370,6 +386,37 @@ export function initializeMetrics(config: Config): void {
   subagentExecutionCounter = meter.createCounter(SUBAGENT_EXECUTION_COUNT, {
     description:
       'Counts subagent execution events, tagged by status and subagent name.',
+    valueType: ValueType.INT,
+  });
+
+  // Arena metrics
+  arenaSessionCounter = meter.createCounter(ARENA_SESSION_COUNT, {
+    description: 'Counts arena sessions by status and display backend.',
+    valueType: ValueType.INT,
+  });
+  arenaSessionDurationHistogram = meter.createHistogram(
+    ARENA_SESSION_DURATION,
+    {
+      description: 'Duration of arena sessions in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  arenaAgentCounter = meter.createCounter(ARENA_AGENT_COUNT, {
+    description: 'Counts arena agent completions by status and model.',
+    valueType: ValueType.INT,
+  });
+  arenaAgentDurationHistogram = meter.createHistogram(ARENA_AGENT_DURATION, {
+    description: 'Duration of arena agent execution in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+  });
+  arenaAgentTokensCounter = meter.createCounter(ARENA_AGENT_TOKENS, {
+    description: 'Token usage by arena agents.',
+    valueType: ValueType.INT,
+  });
+  arenaResultSelectedCounter = meter.createCounter(ARENA_RESULT_SELECTED, {
+    description: 'Counts arena result selections by model.',
     valueType: ValueType.INT,
   });
 
@@ -746,4 +793,86 @@ export function recordSubagentExecutionMetrics(
   }
 
   subagentExecutionCounter.add(1, attributes);
+}
+
+// ─── Arena Metric Recording Functions ───────────────────────────
+
+export function recordArenaSessionStartedMetrics(config: Config): void {
+  if (!isMetricsInitialized) return;
+  arenaSessionCounter?.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    status: 'started',
+  });
+}
+
+export function recordArenaAgentCompletedMetrics(
+  config: Config,
+  modelId: string,
+  status: string,
+  durationMs: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  if (!isMetricsInitialized) return;
+
+  const common = baseMetricDefinition.getCommonAttributes(config);
+
+  arenaAgentCounter?.add(1, {
+    ...common,
+    status,
+    model_id: modelId,
+  });
+
+  arenaAgentDurationHistogram?.record(durationMs, {
+    ...common,
+    model_id: modelId,
+  });
+
+  if (inputTokens > 0) {
+    arenaAgentTokensCounter?.add(inputTokens, {
+      ...common,
+      model_id: modelId,
+      type: 'input',
+    });
+  }
+
+  if (outputTokens > 0) {
+    arenaAgentTokensCounter?.add(outputTokens, {
+      ...common,
+      model_id: modelId,
+      type: 'output',
+    });
+  }
+}
+
+export function recordArenaSessionEndedMetrics(
+  config: Config,
+  status: string,
+  displayBackend?: string,
+  durationMs?: number,
+  winnerModelId?: string,
+): void {
+  if (!isMetricsInitialized) return;
+
+  const common = baseMetricDefinition.getCommonAttributes(config);
+
+  arenaSessionCounter?.add(1, {
+    ...common,
+    status,
+    ...(displayBackend ? { display_backend: displayBackend } : {}),
+  });
+
+  if (durationMs !== undefined && arenaSessionDurationHistogram) {
+    arenaSessionDurationHistogram.record(durationMs, {
+      ...common,
+      status,
+    });
+  }
+
+  if (winnerModelId) {
+    arenaResultSelectedCounter?.add(1, {
+      ...common,
+      model_id: winnerModelId,
+    });
+  }
 }

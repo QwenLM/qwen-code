@@ -301,7 +301,7 @@ describe('UiTelemetryService', () => {
         'event.name': EVENT_API_ERROR,
         model: 'gemini-2.5-pro',
         duration_ms: 300,
-        error: 'Something went wrong',
+        error_message: 'Something went wrong',
       } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR };
 
       service.addEvent(event);
@@ -342,7 +342,7 @@ describe('UiTelemetryService', () => {
         'event.name': EVENT_API_ERROR,
         model: 'gemini-2.5-pro',
         duration_ms: 300,
-        error: 'Something went wrong',
+        error_message: 'Something went wrong',
       } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR };
 
       service.addEvent(responseEvent);

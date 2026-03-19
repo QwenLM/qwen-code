@@ -59,6 +59,7 @@ export default tseslint.config(
       ...importPlugin.configs.typescript.rules,
       'import/no-default-export': 'warn',
       'import/no-unresolved': 'off', // Disable for now, can be noisy with monorepos/paths
+      'import/namespace': 'off', // Disabled due to https://github.com/import-js/eslint-plugin-import/issues/2866
     },
   },
   {

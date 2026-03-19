@@ -55,6 +55,16 @@ export const formatRelativeTime = (timestamp: number): string => {
   return 'just now';
 };
 
+export const formatTokenCount = (count: number): string => {
+  if (count < 1000) {
+    return `${count}`;
+  }
+  if (count < 10000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return `${Math.floor(count / 1000)}k`;
+};
+
 export const formatDuration = (milliseconds: number): string => {
   if (milliseconds <= 0) {
     return '0s';

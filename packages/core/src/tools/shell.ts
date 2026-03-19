@@ -18,17 +18,12 @@ import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
   ToolConfirmationOutcome,
-  Kind,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { truncateAndSaveToFile } from '../utils/truncation.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -36,14 +31,19 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import {
+  getCommandRoot,
   getCommandRoots,
-  isCommandAllowed,
-  isCommandNeedsPermission,
+  splitCommands,
   stripShellWrapper,
+  detectCommandSubstitution,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isShellCommandReadOnlyAST,
+  extractCommandRules,
+} from '../utils/shellAstParser.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -65,7 +65,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
-    private readonly allowlist: Set<string>,
   ) {
     super(params);
   }
@@ -91,36 +90,96 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
+  /**
+   * AST-based permission check for the shell command.
+   * - Command substitution → 'deny' (security)
+   * - Read-only commands (via AST analysis) → 'allow'
+   * - All other commands → 'ask'
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
     const command = stripShellWrapper(this.params.command);
-    const rootCommands = [...new Set(getCommandRoots(command))];
-    const commandsToConfirm = rootCommands.filter(
-      (command) => !this.allowlist.has(command),
-    );
 
-    if (commandsToConfirm.length === 0) {
-      return false; // already approved and allowlisted
+    // Security: command substitution ($(), ``, <(), >()) → deny
+    if (detectCommandSubstitution(command)) {
+      return 'deny';
     }
 
-    const permissionCheck = isCommandNeedsPermission(command);
-    if (!permissionCheck.requiresPermission) {
-      return false;
+    // AST-based read-only detection
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
+    }
+
+    return 'ask';
+  }
+
+  /**
+   * Constructs confirmation dialog details for a shell command that needs
+   * user approval.  For compound commands (e.g. `cd foo && npm run build`),
+   * sub-commands that are already allowed (read-only) are excluded from both
+   * the displayed root-command list and the suggested permission rules.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const command = stripShellWrapper(this.params.command);
+
+    // Split compound command and filter out already-allowed (read-only) sub-commands
+    const subCommands = splitCommands(command);
+    const nonReadOnlySubCommands: string[] = [];
+    for (const sub of subCommands) {
+      try {
+        const isReadOnly = await isShellCommandReadOnlyAST(sub);
+        if (!isReadOnly) {
+          nonReadOnlySubCommands.push(sub);
+        }
+      } catch {
+        nonReadOnlySubCommands.push(sub); // conservative: include if check fails
+      }
+    }
+
+    // Fallback to all sub-commands if everything was filtered out (shouldn't
+    // normally happen since getDefaultPermission already returned 'ask').
+    const effectiveSubCommands =
+      nonReadOnlySubCommands.length > 0 ? nonReadOnlySubCommands : subCommands;
+
+    const rootCommands = [
+      ...new Set(
+        effectiveSubCommands
+          .map((c) => getCommandRoot(c))
+          .filter((c): c is string => !!c),
+      ),
+    ];
+
+    // Extract minimum-scope permission rules only for sub-commands that
+    // actually need confirmation.
+    let permissionRules: string[] = [];
+    try {
+      const allRules: string[] = [];
+      for (const sub of effectiveSubCommands) {
+        const rules = await extractCommandRules(sub);
+        allRules.push(...rules);
+      }
+      permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
+    } catch (e) {
+      debugLogger.warn('Failed to extract command rules:', e);
     }
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
       command: this.params.command,
-      rootCommand: commandsToConfirm.join(', '),
+      rootCommand: rootCommands.join(', '),
+      permissionRules,
       onConfirm: async (
-        outcome: ToolConfirmationOutcome,
+        _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          commandsToConfirm.forEach((command) => this.allowlist.add(command));
-        }
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
@@ -381,21 +440,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Truncate large output and save full content to a temp file.
-      const truncateThreshold = this.config.getTruncateToolOutputThreshold();
-      const truncateLines = this.config.getTruncateToolOutputLines();
-      if (
-        typeof llmContent === 'string' &&
-        truncateThreshold > 0 &&
-        truncateLines > 0
-      ) {
-        const originalContentLength = llmContent.length;
-        const fileName = `shell_${crypto.randomBytes(6).toString('hex')}`;
-        const truncatedResult = await truncateAndSaveToFile(
+      if (typeof llmContent === 'string') {
+        const truncatedResult = await truncateToolOutput(
+          this.config,
+          ShellTool.Name,
           llmContent,
-          fileName,
-          this.config.storage.getProjectTempDir(),
-          truncateThreshold,
-          truncateLines,
         );
 
         if (truncatedResult.outputFile) {
@@ -403,17 +452,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           returnDisplayMessage +=
             (returnDisplayMessage ? '\n' : '') +
             `Output too long and was saved to: ${truncatedResult.outputFile}`;
-
-          logToolOutputTruncated(
-            this.config,
-            new ToolOutputTruncatedEvent('', {
-              toolName: ShellTool.Name,
-              originalContentLength,
-              truncatedContentLength: truncatedResult.content.length,
-              threshold: truncateThreshold,
-              lines: truncateLines,
-            }),
-          );
         }
       }
 
@@ -565,7 +603,6 @@ export class ShellTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static Name: string = ToolNames.SHELL;
-  private allowlist: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
     super(
@@ -610,16 +647,9 @@ export class ShellTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ShellToolParams,
   ): string | null {
-    const commandCheck = isCommandAllowed(params.command, this.config);
-    if (!commandCheck.allowed) {
-      if (!commandCheck.reason) {
-        debugLogger.error(
-          'Unexpected: isCommandAllowed returned false without a reason',
-        );
-        return `Command is not allowed: ${params.command}`;
-      }
-      return commandCheck.reason;
-    }
+    // NOTE: Permission checks (command substitution, read-only detection, PM rules)
+    // are now handled at L3 (getDefaultPermission) and L4 (PM override) in
+    // coreToolScheduler. This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
@@ -645,10 +675,10 @@ export class ShellTool extends BaseDeclarativeTool<
         return 'Directory must be an absolute path.';
       }
 
-      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
       const resolvedDirectoryPath = path.resolve(params.directory);
-      const isWithinUserSkills = isSubpath(
-        userSkillsDir,
+      const isWithinUserSkills = isSubpaths(
+        userSkillsDirs,
         resolvedDirectoryPath,
       );
       if (isWithinUserSkills) {
@@ -670,6 +700,6 @@ export class ShellTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ShellToolParams,
   ): ToolInvocation<ShellToolParams, ToolResult> {
-    return new ShellToolInvocation(this.config, params, this.allowlist);
+    return new ShellToolInvocation(this.config, params);
   }
 }
