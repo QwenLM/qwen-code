@@ -77,6 +77,7 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
+import { formatShortcut } from '../utils/shortcutFormatter.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -867,8 +868,11 @@ export const useGeminiStream = (
       );
 
       if (!isShowingAutoRetry) {
-        const retryHint = t('Press Ctrl+Y to retry');
-        // Store error with hint as a pending item (not in history).
+        const retryKey = formatShortcut('ctrl+y');
+        const retryHint = t('Press Ctrl+Y to retry').replace(
+          'Ctrl+Y',
+          retryKey,
+        );
         // This allows the hint to be removed when the user retries with Ctrl+Y,
         // since pending items are in the dynamic rendering area (not <Static>).
         setPendingRetryErrorItem({
@@ -1475,8 +1479,10 @@ export const useGeminiStream = (
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
             lastPromptErroredRef.current = true;
-            const retryHint = t('Press Ctrl+Y to retry');
-            // Store error with hint as a pending item (same as handleErrorEvent)
+            const retryHint = t('Press Ctrl+Y to retry').replace(
+              'Ctrl+Y',
+              formatShortcut('ctrl+y'),
+            );
             setPendingRetryErrorItem({
               type: 'error' as const,
               text: parseAndFormatApiError(
