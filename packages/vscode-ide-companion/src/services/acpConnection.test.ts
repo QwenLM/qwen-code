@@ -89,6 +89,7 @@ describe('AcpConnection.isConnected', () => {
   });
 
   it('returns false when child exited on its own (exitCode set)', () => {
+    // 143 = 128 + 15 (SIGTERM)
     const conn = createConnection({
       child: { killed: false, exitCode: 143 },
     });

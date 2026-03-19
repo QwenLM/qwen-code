@@ -65,6 +65,7 @@ export class AcpConnection {
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
+  /** Invoked when the child process exits (expected or unexpected). */
   onDisconnected: (code: number | null, signal: string | null) => void =
     () => {};
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
@@ -153,10 +154,12 @@ export class AcpConnection {
       );
       this.lastExitCode = code;
       this.lastExitSignal = signal;
-      this.sdkConnection = null;
-      this.sessionId = null;
-      this.child = null;
-      this.onDisconnected(code, signal);
+      if (this.child) {
+        this.sdkConnection = null;
+        this.sessionId = null;
+        this.child = null;
+        this.onDisconnected(code, signal);
+      }
     });
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -166,8 +169,10 @@ export class AcpConnection {
     }
 
     if (!this.child || this.child.killed) {
+      const code = this.lastExitCode ?? this.child?.exitCode ?? null;
+      const signal = this.lastExitSignal;
       throw new Error(
-        `Qwen ACP process failed to start (exit code: ${this.lastExitCode}, signal: ${this.lastExitSignal})`,
+        `Qwen ACP process failed to start (exit code: ${code}, signal: ${signal})`,
       );
     }
 
