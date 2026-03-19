@@ -568,7 +568,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
               agentId,
               agentType,
               transcriptPath,
-              subagentScope.getFinalText(),
+              subagent.getFinalText(),
               stopHookActive,
               PermissionMode.Default,
             );
@@ -587,7 +587,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
 
               const continueContext = new ContextState();
               continueContext.set('task_prompt', continueReason);
-              await subagentScope.runNonInteractive(continueContext, signal);
+              await subagent.execute(continueContext, signal);
 
               if (signal?.aborted) {
                 continueExecution = false;

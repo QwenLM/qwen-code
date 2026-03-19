@@ -3071,6 +3071,8 @@ describe('Fire hook functions integration', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getEnableHooks: vi.fn().mockReturnValue(false),
       } as unknown as Config;
 
       return new CoreToolScheduler({

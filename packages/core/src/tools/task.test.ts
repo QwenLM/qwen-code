@@ -298,11 +298,11 @@ describe('TaskTool', () => {
   });
 
   describe('TaskToolInvocation', () => {
-    let mockSubagentScope: AgentHeadless;
+    let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
 
     beforeEach(() => {
-      mockSubagentScope = {
+      mockAgent = {
         execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
         terminateMode: AgentTerminateMode.GOAL,
@@ -361,7 +361,7 @@ describe('TaskTool', () => {
         mockSubagents[0],
       );
       vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
-        mockSubagentScope,
+        mockAgent,
       );
     });
 
@@ -385,7 +385,7 @@ describe('TaskTool', () => {
         config,
         expect.any(Object), // eventEmitter parameter
       );
-      expect(mockSubagentScope.execute).toHaveBeenCalledWith(
+      expect(mockAgent.execute).toHaveBeenCalledWith(
         mockContextState,
         undefined, // signal parameter (undefined when not provided)
       );
@@ -541,15 +541,15 @@ describe('TaskTool', () => {
   });
 
   describe('SubagentStart hook integration', () => {
-    let mockSubagentScope: SubAgentScope;
+    let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockHookSystem: HookSystem;
 
     beforeEach(() => {
-      mockSubagentScope = {
-        runNonInteractive: vi.fn().mockResolvedValue(undefined),
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
-        terminateMode: SubagentTerminateMode.GOAL,
+        terminateMode: AgentTerminateMode.GOAL,
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -572,8 +572,8 @@ describe('TaskTool', () => {
           successfulToolCalls: 1,
           failedToolCalls: 0,
         }),
-        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
-      } as unknown as SubAgentScope;
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
 
       mockContextState = {
         set: vi.fn(),
@@ -584,8 +584,8 @@ describe('TaskTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createSubagentScope).mockResolvedValue(
-        mockSubagentScope,
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
       );
 
       mockHookSystem = {
@@ -719,15 +719,15 @@ describe('TaskTool', () => {
   });
 
   describe('SubagentStop hook integration', () => {
-    let mockSubagentScope: SubAgentScope;
+    let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockHookSystem: HookSystem;
 
     beforeEach(() => {
-      mockSubagentScope = {
-        runNonInteractive: vi.fn().mockResolvedValue(undefined),
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
         result: 'Task completed successfully',
-        terminateMode: SubagentTerminateMode.GOAL,
+        terminateMode: AgentTerminateMode.GOAL,
         getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
         formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
         getExecutionSummary: vi.fn().mockReturnValue({
@@ -750,8 +750,8 @@ describe('TaskTool', () => {
           successfulToolCalls: 1,
           failedToolCalls: 0,
         }),
-        getTerminateMode: vi.fn().mockReturnValue(SubagentTerminateMode.GOAL),
-      } as unknown as SubAgentScope;
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
 
       mockContextState = {
         set: vi.fn(),
@@ -762,8 +762,8 @@ describe('TaskTool', () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
         mockSubagents[0],
       );
-      vi.mocked(mockSubagentManager.createSubagentScope).mockResolvedValue(
-        mockSubagentScope,
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
       );
 
       mockHookSystem = {
@@ -830,8 +830,8 @@ describe('TaskTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
-      // Should have called runNonInteractive twice (initial + re-execution)
-      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+      // Should have called execute twice (initial + re-execution)
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
       // Stop hook should have been called twice
       expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
       // Second call should have stopHookActive=true
@@ -868,7 +868,7 @@ describe('TaskTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
-      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {
@@ -926,15 +926,12 @@ describe('TaskTool', () => {
       );
 
       // Abort after first re-execution
-      vi.mocked(mockSubagentScope.runNonInteractive).mockImplementation(
-        async () => {
-          const callCount = vi.mocked(mockSubagentScope.runNonInteractive).mock
-            .calls.length;
-          if (callCount >= 2) {
-            abortController.abort();
-          }
-        },
-      );
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        const callCount = vi.mocked(mockAgent.execute).mock.calls.length;
+        if (callCount >= 2) {
+          abortController.abort();
+        }
+      });
 
       const params: TaskParams = {
         description: 'Search files',
@@ -948,7 +945,7 @@ describe('TaskTool', () => {
       await invocation.execute(abortController.signal);
 
       // Should have stopped the loop after abort
-      expect(mockSubagentScope.runNonInteractive).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
     });
 
     it('should call both start and stop hooks in correct order', async () => {
