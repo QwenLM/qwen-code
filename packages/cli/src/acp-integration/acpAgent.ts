@@ -64,6 +64,8 @@ import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
+import { applyCodingPlanAuth } from '../utils/codingPlanLogic.js';
+import { CodingPlanRegion } from '../constants/codingPlan.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -136,8 +138,19 @@ class QwenAgent implements Agent {
     };
   }
 
-  async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
+  async authenticate({ methodId, _meta }: AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
+
+    if (method === AuthType.CODING_PLAN) {
+      const apiKey = _meta?.['apiKey'] as string | undefined;
+      const regionStr = _meta?.['region'] as string | undefined;
+      if (!apiKey) {
+        throw new Error('Missing apiKey for Coding Plan authentication');
+      }
+      const region = regionStr === 'global' ? CodingPlanRegion.GLOBAL : CodingPlanRegion.CHINA;
+      await applyCodingPlanAuth(apiKey, region, this.settings, this.config);
+      return;
+    }
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {

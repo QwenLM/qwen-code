@@ -166,7 +166,7 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
+     
     const self = this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
@@ -386,14 +386,15 @@ export class AcpConnection {
     );
   }
 
-  async authenticate(methodId?: string): Promise<AuthenticateResponse> {
+  async authenticate(methodId?: string, _meta?: Record<string, any>): Promise<AuthenticateResponse> {
     const conn = this.ensureConnection();
     const authMethodId = methodId || 'default';
     console.log(
       '[ACP] Sending authenticate request with methodId:',
       authMethodId,
+      _meta
     );
-    const response = await conn.authenticate({ methodId: authMethodId });
+    const response = await conn.authenticate({ methodId: authMethodId, _meta });
     console.log('[ACP] Authenticate successful', response);
     return response;
   }

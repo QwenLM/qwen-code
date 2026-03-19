@@ -81,6 +81,8 @@ export const App: React.FC = () => {
   } | null>(null);
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [loginErrorMessage, setLoginErrorMessage] = useState<string>('');
+  const [authMethods, setAuthMethods] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
@@ -346,7 +348,12 @@ export const App: React.FC = () => {
     inputFieldRef,
     setInputText,
     setEditMode,
-    setIsAuthenticated,
+    setIsAuthenticated: (auth, methods) => {
+      setIsAuthenticated(auth);
+      if (methods) {setAuthMethods(methods);}
+      if (auth) {setLoginErrorMessage('');} // Reset error on successful auth
+    },
+    setLoginErrorMessage: (msg) => setLoginErrorMessage(msg),
     setUsageStats: (stats) => setUsageStats(stats ?? null),
     setModelInfo: (info) => {
       setModelInfo(info);
@@ -936,8 +943,11 @@ export const App: React.FC = () => {
         {!hasContent && !isLoading ? (
           isAuthenticated === false ? (
             <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
+              authMethods={authMethods}
+              errorMessage={loginErrorMessage}
+              onLogin={(methodId, _meta) => {
+                setLoginErrorMessage(''); // Clear previous error upon new login attempt
+                vscode.postMessage({ type: 'login', data: { methodId, _meta } });
                 messageHandling.setWaitingForResponse(
                   'Logging in to Qwen Code...',
                 );

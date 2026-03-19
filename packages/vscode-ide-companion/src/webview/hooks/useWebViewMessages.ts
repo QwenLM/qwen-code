@@ -129,7 +129,9 @@ interface UseWebViewMessagesProps {
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
-  setIsAuthenticated?: (authenticated: boolean | null) => void;
+  setIsAuthenticated?: (authenticated: boolean | null, authMethods?: any[]) => void;
+  // Login error state setter
+  setLoginErrorMessage?: (errorMessage: string) => void;
   // Usage stats setter
   setUsageStats?: (stats: UsageStatsPayload | undefined) => void;
   // Model info setter
@@ -157,6 +159,7 @@ export const useWebViewMessages = ({
   setInputText,
   setEditMode,
   setIsAuthenticated,
+  setLoginErrorMessage,
   setUsageStats,
   setModelInfo,
   setAvailableCommands,
@@ -182,6 +185,7 @@ export const useWebViewMessages = ({
     handlePermissionRequest,
     handleAskUserQuestion,
     setIsAuthenticated,
+    setLoginErrorMessage,
     setUsageStats,
     setModelInfo,
     setAvailableCommands,
@@ -232,6 +236,7 @@ export const useWebViewMessages = ({
       handlePermissionRequest,
       handleAskUserQuestion,
       setIsAuthenticated,
+      setLoginErrorMessage,
       setUsageStats,
       setModelInfo,
       setAvailableCommands,
@@ -398,24 +403,20 @@ export const useWebViewMessages = ({
           const errorMsg =
             (message?.data?.message as string) ||
             'Login failed. Please try again.';
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: errorMsg,
-            timestamp: Date.now(),
-          });
-          // Set authentication state to false
+            
+          // Set error to Onboarding component rather than appending it into the chat messages
+          handlers.setLoginErrorMessage?.(errorMsg);
           handlers.setIsAuthenticated?.(false);
           break;
         }
 
         case 'authState': {
-          const state = (
-            message?.data as { authenticated?: boolean | null } | undefined
-          )?.authenticated;
+          const payload = message?.data as { authenticated?: boolean | null, authMethods?: any[] } | undefined;
+          const state = payload?.authenticated;
           if (typeof state === 'boolean') {
-            handlers.setIsAuthenticated?.(state);
+            handlers.setIsAuthenticated?.(state, payload?.authMethods);
           } else {
-            handlers.setIsAuthenticated?.(null);
+            handlers.setIsAuthenticated?.(null, payload?.authMethods);
           }
           break;
         }

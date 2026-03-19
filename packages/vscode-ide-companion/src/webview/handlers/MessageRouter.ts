@@ -161,7 +161,7 @@ export class MessageRouter {
   /**
    * Set login handler
    */
-  setLoginHandler(handler: () => Promise<void>): void {
+  setLoginHandler(handler: (methodId?: string, _meta?: any) => Promise<void>): void {
     this.authHandler.setLoginHandler(handler);
     this.sessionHandler?.setLoginHandler?.(handler);
   }

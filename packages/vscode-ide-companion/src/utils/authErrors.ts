@@ -69,3 +69,15 @@ export const isAuthenticationRequiredError = (error: unknown): boolean => {
   const code = extractCodeFromUnknown(error);
   return code === ACP_ERROR_CODES.AUTH_REQUIRED;
 };
+
+export const extractAuthMethodsFromError = (error: unknown): any[] | null => {
+  if (!error || typeof error !== 'object') {return null;}
+  const record = error as Record<string, any>;
+  if (record['data'] && Array.isArray(record['data']['authMethods'])) {
+    return record['data']['authMethods'];
+  }
+  if (record['error'] && typeof record['error'] === 'object' && Array.isArray(record['error']['data']?.['authMethods'])) {
+    return record['error']['data']['authMethods'];
+  }
+  return null;
+};
