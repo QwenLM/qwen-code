@@ -18,6 +18,8 @@ import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 
+vi.mock('node:fs/promises');
+
 // Mock @google/genai mcpToTool and CallableTool
 // We only need to mock the parts of CallableTool that DiscoveredMCPTool uses.
 const mockCallTool = vi.fn();
@@ -147,7 +149,7 @@ describe('DiscoveredMCPTool', () => {
       expect(toolResult.returnDisplay).toBe(stringifiedResponseContent);
     });
 
-    it('should handle empty result from getStringifiedResultForDisplay', async () => {
+    it('should handle empty result from getDisplayFromParts', async () => {
       const params = { param: 'testValue' };
       const mockMcpToolResponsePartsEmpty: Part[] = [];
       mockCallTool.mockResolvedValue(mockMcpToolResponsePartsEmpty);
@@ -155,7 +157,9 @@ describe('DiscoveredMCPTool', () => {
       const toolResult: ToolResult = await invocation.execute(
         new AbortController().signal,
       );
-      expect(toolResult.returnDisplay).toBe('```json\n[]\n```');
+      expect(toolResult.returnDisplay).toBe(
+        '[Error: Could not parse tool response]',
+      );
       expect(toolResult.llmContent).toEqual([
         { text: '[Error: Could not parse tool response]' },
       ]);
@@ -339,7 +343,9 @@ describe('DiscoveredMCPTool', () => {
           },
         },
       ]);
-      expect(toolResult.returnDisplay).toBe('[Audio: audio/mp3]');
+      expect(toolResult.returnDisplay).toBe(
+        `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/mp3]\n[audio/mp3]`,
+      );
     });
 
     it('should handle a ResourceLinkBlock response', async () => {
@@ -372,7 +378,7 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        '[Link to My Resource: file:///path/to/thing]',
+        'Resource Link: My Resource at file:///path/to/thing',
       );
     });
 
@@ -446,7 +452,7 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        '[Embedded Resource: application/octet-stream]',
+        `[Tool '${serverToolName}' provided the following embedded resource with mime-type: application/octet-stream]\n[application/octet-stream]`,
       );
     });
 
@@ -489,7 +495,7 @@ describe('DiscoveredMCPTool', () => {
         { text: 'Second part.' },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        'First part.\n[Image: image/jpeg]\nSecond part.',
+        `First part.\n[Tool '${serverToolName}' provided the following image data with mime-type: image/jpeg]\n[image/jpeg]\nSecond part.`,
       );
     });
 
@@ -514,9 +520,7 @@ describe('DiscoveredMCPTool', () => {
       const toolResult = await invocation.execute(new AbortController().signal);
 
       expect(toolResult.llmContent).toEqual([{ text: 'Valid part.' }]);
-      expect(toolResult.returnDisplay).toBe(
-        'Valid part.\n[Unknown content type: future_block]',
-      );
+      expect(toolResult.returnDisplay).toBe('Valid part.');
     });
 
     it('should handle a complex mix of content block types', async () => {
@@ -574,7 +578,7 @@ describe('DiscoveredMCPTool', () => {
         },
       ]);
       expect(toolResult.returnDisplay).toBe(
-        'Here is a resource.\n[Link to My Resource: file:///path/to/resource]\nEmbedded text content.\n[Image: image/jpeg]',
+        `Here is a resource.\nResource Link: My Resource at file:///path/to/resource\nEmbedded text content.\n[Tool '${serverToolName}' provided the following image data with mime-type: image/jpeg]\n[image/jpeg]`,
       );
     });
 
@@ -961,6 +965,223 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('output truncation for large MCP results', () => {
+    const THRESHOLD = 1000;
+    const TRUNCATE_LINES = 50;
+
+    const mockConfigWithTruncation = {
+      getTruncateToolOutputThreshold: () => THRESHOLD,
+      getTruncateToolOutputLines: () => TRUNCATE_LINES,
+      getUsageStatisticsEnabled: () => false,
+      storage: {
+        getProjectTempDir: () => '/tmp/test-project',
+      },
+      isTrustedFolder: () => true,
+    } as any;
+
+    it('should truncate large text results from direct client execution', async () => {
+      const largeText = 'Line of text content\n'.repeat(200); // ~4200 chars, well over THRESHOLD
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: largeText }],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true, // trust
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // The text part in llmContent should be truncated
+      const textParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.text,
+      );
+      const combinedText = textParts.map((p: Part) => p.text).join('');
+      expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText).toContain('CONTENT TRUNCATED');
+      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+    });
+
+    it('should truncate large text results from callable tool execution', async () => {
+      const largeText = 'Line of text content\n'.repeat(200);
+      const mockMcpToolResponseParts: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'text', text: largeText }],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      const textParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.text,
+      );
+      const combinedText = textParts.map((p: Part) => p.text).join('');
+      expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText).toContain('CONTENT TRUNCATED');
+      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+    });
+
+    it('should not truncate small text results', async () => {
+      const smallText = 'Small response';
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: smallText }],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: smallText }]);
+      expect(result.returnDisplay).not.toContain('Output too long');
+    });
+
+    it('should not truncate non-text content (images, audio)', async () => {
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [
+            {
+              type: 'image',
+              data: 'x'.repeat(5000), // large base64 data
+              mimeType: 'image/png',
+            },
+          ],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Image data should not be truncated
+      const inlineDataParts = (result.llmContent as Part[]).filter(
+        (p: Part) => p.inlineData,
+      );
+      expect(inlineDataParts[0].inlineData!.data).toBe('x'.repeat(5000));
+    });
+
+    it('should truncate only text parts in mixed content', async () => {
+      const largeText = 'Line of text content\n'.repeat(200);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [
+            { type: 'text', text: largeText },
+            {
+              type: 'image',
+              data: 'IMAGE_DATA',
+              mimeType: 'image/png',
+            },
+          ],
+        })),
+      };
+
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfigWithTruncation,
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      const parts = result.llmContent as Part[];
+      // Text should be truncated
+      const textPart = parts.find(
+        (p: Part) => p.text && !p.text.startsWith('[Tool'),
+      );
+      expect(textPart!.text!.length).toBeLessThan(largeText.length);
+      expect(textPart!.text).toContain('CONTENT TRUNCATED');
+      // Image should be preserved
+      const imagePart = parts.find((p: Part) => p.inlineData);
+      expect(imagePart!.inlineData!.data).toBe('IMAGE_DATA');
+    });
+
+    it('should not truncate when config is not provided', async () => {
+      const largeText = 'Line of text content\n'.repeat(200);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: largeText }],
+        })),
+      };
+
+      // No cliConfig provided
+      const truncTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined, // no config
+        mockMcpClient,
+      );
+
+      const invocation = truncTool.build({ param: 'test' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Without config, should return untouched
+      expect(result.llmContent).toEqual([{ text: largeText }]);
     });
   });
 

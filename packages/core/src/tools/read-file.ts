@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
@@ -20,7 +21,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
 /**
@@ -186,17 +187,23 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const workspaceContext = this.config.getWorkspaceContext();
     const globalTempDir = Storage.getGlobalTempDir();
     const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDir = this.config.storage.getUserSkillsDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const arenaDir = Storage.getGlobalArenaDir();
     const resolvedFilePath = path.resolve(filePath);
+    const osTempDir = os.tmpdir();
     const isWithinTempDir =
       isSubpath(projectTempDir, resolvedFilePath) ||
-      isSubpath(globalTempDir, resolvedFilePath);
-    const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
+      isSubpath(globalTempDir, resolvedFilePath) ||
+      isSubpath(osTempDir, resolvedFilePath);
+
+    const isWithinUserSkills = isSubpaths(userSkillsDirs, resolvedFilePath);
+    const isWithinArenaDir = isSubpath(arenaDir, resolvedFilePath);
 
     if (
       !workspaceContext.isPathWithinWorkspace(filePath) &&
       !isWithinTempDir &&
-      !isWithinUserSkills
+      !isWithinUserSkills &&
+      !isWithinArenaDir
     ) {
       const directories = workspaceContext.getDirectories();
       return `File path must be within one of the workspace directories: ${directories.join(

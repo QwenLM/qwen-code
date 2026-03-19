@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatMemoryUsage,
   formatRelativeTime,
+  formatTokenCount,
 } from './formatters.js';
 
 describe('formatters', () => {
@@ -152,6 +153,27 @@ describe('formatters', () => {
 
     it('should handle negative durations', () => {
       expect(formatDuration(-100)).toBe('0s');
+    });
+  });
+
+  describe('formatTokenCount', () => {
+    it('should display exact number for counts less than 1000', () => {
+      expect(formatTokenCount(0)).toBe('0');
+      expect(formatTokenCount(100)).toBe('100');
+      expect(formatTokenCount(847)).toBe('847');
+      expect(formatTokenCount(999)).toBe('999');
+    });
+
+    it('should display with k suffix and one decimal for counts 1000-9999', () => {
+      expect(formatTokenCount(1000)).toBe('1.0k');
+      expect(formatTokenCount(5400)).toBe('5.4k');
+      expect(formatTokenCount(9999)).toBe('10.0k');
+    });
+
+    it('should display with k suffix without decimal for counts 10000 and above', () => {
+      expect(formatTokenCount(10000)).toBe('10k');
+      expect(formatTokenCount(15000)).toBe('15k');
+      expect(formatTokenCount(100000)).toBe('100k');
     });
   });
 });

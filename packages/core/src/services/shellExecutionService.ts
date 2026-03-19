@@ -57,14 +57,10 @@ function getWindowsPathFingerprint(
   env: NodeJS.ProcessEnv,
   pathKeys: string[],
 ): string {
-  return pathKeys
-    .map((key) => `${key}=${env[key] ?? ''}`)
-    .join('\0');
+  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
 }
 
-function normalizePathEnvForWindows(
-  env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
+function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (os.platform() !== 'win32') {
     return env;
   }
@@ -110,6 +106,18 @@ function normalizePathEnvForWindows(
   }
 
   return normalized;
+}
+
+/**
+ * On Windows with PowerShell, prefix the command with a statement that forces
+ * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
+ * as UTF-8 regardless of the system codepage.
+ */
+function applyPowerShellUtf8Prefix(command: string, shell: string): string {
+  if (os.platform() === 'win32' && shell === 'powershell') {
+    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  }
+  return command;
 }
 
 /** A structured result from a shell command execution. */
@@ -177,10 +185,6 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
-const REPLAY_TERMINAL_COLS = 1024;
-const REPLAY_TERMINAL_ROWS = 24;
-const REPLAY_TERMINAL_SCROLLBACK = 2000;
-
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
@@ -192,12 +196,16 @@ const getFullBufferText = (terminal: pkg.Terminal): string => {
   return lines.join('\n').trimEnd();
 };
 
-const replayTerminalOutput = async (output: string): Promise<string> => {
+const replayTerminalOutput = async (
+  output: string,
+  cols: number,
+  rows: number,
+): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
-    cols: REPLAY_TERMINAL_COLS,
-    rows: REPLAY_TERMINAL_ROWS,
-    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    cols,
+    rows,
+    scrollback: 10000,
     convertEol: true,
   });
 
@@ -334,6 +342,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -533,6 +542,8 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
       // that contain spaces, which mangles user-provided quoted arguments
@@ -575,7 +586,6 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let outputEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -707,10 +717,8 @@ export class ShellExecutionService {
           const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
-            outputEncoding = encoding;
           } catch {
             decoder = new TextDecoder('utf-8');
-            outputEncoding = 'utf-8';
           }
         };
 
@@ -773,10 +781,19 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  const decodedOutput = new TextDecoder(outputEncoding).decode(
+                  // Re-decode the full buffer with proper encoding detection.
+                  // The streaming decoder used the first-chunk heuristic which
+                  // can misdetect when early output is ASCII-only but later
+                  // output is in a different encoding (e.g. GBK).
+                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                  const decodedOutput = new TextDecoder(finalEncoding).decode(
                     finalBuffer,
                   );
-                  fullOutput = await replayTerminalOutput(decodedOutput);
+                  fullOutput = await replayTerminalOutput(
+                    decodedOutput,
+                    cols,
+                    rows,
+                  );
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);
                 }
