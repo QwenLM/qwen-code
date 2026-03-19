@@ -15,9 +15,11 @@ import { AcpConnection } from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type AcpConnectionInternal = {
-  child: { killed: boolean; exitCode: number | null } | null;
+  child: { killed: boolean; exitCode: number | null; kill?: () => void } | null;
   sdkConnection: unknown;
   sessionId: string | null;
+  lastExitCode: number | null;
+  lastExitSignal: string | null;
   mapReadTextFileError: (error: unknown, filePath: string) => unknown;
   ensureConnection: () => unknown;
 };
@@ -28,6 +30,15 @@ function createConnection(overrides?: Partial<AcpConnectionInternal>) {
     Object.assign(conn, overrides);
   }
   return conn;
+}
+
+function createMockChild(overrides?: Record<string, unknown>) {
+  return {
+    killed: false,
+    exitCode: null,
+    kill: vi.fn(),
+    ...overrides,
+  } as unknown as AcpConnectionInternal['child'];
 }
 
 describe('AcpConnection readTextFile error mapping', () => {
@@ -123,11 +134,7 @@ describe('AcpConnection.ensureConnection', () => {
 describe('AcpConnection child exit cleanup', () => {
   it('disconnect clears child, sdkConnection, and sessionId', () => {
     const conn = createConnection({
-      child: {
-        killed: false,
-        exitCode: null,
-        kill: vi.fn(),
-      } as unknown as AcpConnectionInternal['child'],
+      child: createMockChild(),
       sdkConnection: {},
       sessionId: 'test-session',
     });
@@ -138,5 +145,42 @@ describe('AcpConnection child exit cleanup', () => {
     expect(acpConn.isConnected).toBe(false);
     expect(acpConn.hasActiveSession).toBe(false);
     expect(acpConn.currentSessionId).toBeNull();
+  });
+
+  it('disconnect calls kill on the child process', () => {
+    const mockKill = vi.fn();
+    const conn = createConnection({
+      child: createMockChild({ kill: mockKill }),
+      sdkConnection: {},
+      sessionId: 'test-session',
+    });
+
+    (conn as unknown as AcpConnection).disconnect();
+    expect(mockKill).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AcpConnection onDisconnected callback', () => {
+  it('has a default no-op onDisconnected handler', () => {
+    const acpConn = new AcpConnection();
+    expect(acpConn.onDisconnected).toBeTypeOf('function');
+    expect(() => acpConn.onDisconnected(143, 'SIGTERM')).not.toThrow();
+  });
+
+  it('allows setting a custom onDisconnected handler', () => {
+    const acpConn = new AcpConnection();
+    const spy = vi.fn();
+    acpConn.onDisconnected = spy;
+
+    acpConn.onDisconnected(1, null);
+    expect(spy).toHaveBeenCalledWith(1, null);
+  });
+});
+
+describe('AcpConnection lastExitCode/lastExitSignal', () => {
+  it('initializes exit info as null', () => {
+    const conn = createConnection();
+    expect(conn.lastExitCode).toBeNull();
+    expect(conn.lastExitSignal).toBeNull();
   });
 });
