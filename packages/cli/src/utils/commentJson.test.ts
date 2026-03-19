@@ -167,6 +167,28 @@ describe('commentJson', () => {
       const unchangedContent = fs.readFileSync(testFilePath, 'utf-8');
       expect(unchangedContent).toBe(corruptedContent);
     });
+
+    it('should preserve keys not present in the update object', () => {
+      const originalContent = `{
+        "model": { "name": "old-model" },
+        "modelProviders": [
+          { "name": "provider1" },
+          { "name": "provider2" }
+        ]
+      }`;
+
+      fs.writeFileSync(testFilePath, originalContent, 'utf-8');
+
+      // Only update model.name — modelProviders should be untouched
+      updateSettingsFilePreservingFormat(testFilePath, {
+        model: { name: 'new-model' },
+      });
+
+      const updatedContent = fs.readFileSync(testFilePath, 'utf-8');
+      expect(updatedContent).toContain('"name": "new-model"');
+      expect(updatedContent).toContain('"provider1"');
+      expect(updatedContent).toContain('"provider2"');
+    });
   });
 });
 

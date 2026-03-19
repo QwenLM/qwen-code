@@ -375,7 +375,7 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile);
+    saveSettingsKey(settingsFile.path, key, value);
   }
 }
 
@@ -786,6 +786,33 @@ export function saveSettings(settingsFile: SettingsFile): void {
     );
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
+    debugLogger.error(error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
+/**
+ * Saves only a single key-value pair to the settings file on disk.
+ * Unlike saveSettings(), this builds a minimal update object so that
+ * only the specified key is written — all other content in the file
+ * (including entries added externally while the app was running) is preserved.
+ */
+export function saveSettingsKey(
+  filePath: string,
+  key: string,
+  value: unknown,
+): void {
+  try {
+    const dirPath = path.dirname(filePath);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+
+    const update: Record<string, unknown> = {};
+    setNestedPropertySafe(update, key, value);
+    updateSettingsFilePreservingFormat(filePath, update);
+  } catch (error) {
+    debugLogger.error('Error saving settings key.');
     debugLogger.error(error instanceof Error ? error.message : String(error));
     throw error;
   }
