@@ -932,23 +932,27 @@ export function checkArgumentSafety(args: string): {
   const dangerousPatterns: string[] = [];
 
   // Command substitution patterns
-  if (/\$\(/.test(args)) dangerousPatterns.push('$() command substitution');
-  if (/`/.test(args)) dangerousPatterns.push('backtick command substitution');
-  if (/<\(/.test(args)) dangerousPatterns.push('<() process substitution');
-  if (/>\(/.test(args)) dangerousPatterns.push('>() process substitution');
+  if (args.includes('$(')) dangerousPatterns.push('$() command substitution');
+  if (args.includes('`'))
+    dangerousPatterns.push('backtick command substitution');
+  if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
+  if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
 
   // Command separators (outside of quotes)
-  if (/;/.test(args)) dangerousPatterns.push('; command separator');
-  if (/\|/.test(args)) dangerousPatterns.push('| pipe');
-  if (/&&/.test(args)) dangerousPatterns.push('&& AND operator');
-  if (/\|\|/.test(args)) dangerousPatterns.push('|| OR operator');
+  if (args.includes(';')) dangerousPatterns.push('; command separator');
+  if (args.includes('|')) dangerousPatterns.push('| pipe');
+  if (args.includes('&&')) dangerousPatterns.push('&& AND operator');
+  if (args.includes('||')) dangerousPatterns.push('|| OR operator');
 
   // Background execution (space + &, with optional surrounding)
-  if (/\s+&/.test(args)) dangerousPatterns.push('& background operator');
+  if (args.includes(' &') || args.includes('& '))
+    dangerousPatterns.push('& background operator');
 
   // Input/Output redirection
-  if (/>\s+|\d*>/.test(args)) dangerousPatterns.push('> output redirection');
-  if (/<\s+|\d*</.test(args)) dangerousPatterns.push('< input redirection');
+  if (args.includes('>') || args.includes('<')) {
+    if (/>\s|\d>/.test(args)) dangerousPatterns.push('> output redirection');
+    if (/<\s|\d</.test(args)) dangerousPatterns.push('< input redirection');
+  }
 
   return {
     isSafe: dangerousPatterns.length === 0,
