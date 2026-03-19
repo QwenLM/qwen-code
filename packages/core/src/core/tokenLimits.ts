@@ -175,8 +175,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['128k']],
-  [/^glm-4\.7/, LIMITS['128k']],
+  [/^glm-5/, LIMITS['16k']],
+  [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
   [/^minimax-m2\.5/i, LIMITS['64k']],
