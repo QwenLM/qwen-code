@@ -307,7 +307,10 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile);
+    // Only write the changed key to disk to preserve externally-added settings
+    const updates: Record<string, unknown> = {};
+    setNestedPropertySafe(updates, key, value);
+    saveSettings(settingsFile, updates);
   }
 }
 
@@ -703,7 +706,10 @@ export function loadSettings(
   );
 }
 
-export function saveSettings(settingsFile: SettingsFile): void {
+export function saveSettings(
+  settingsFile: SettingsFile,
+  updates?: Record<string, unknown>,
+): void {
   try {
     // Ensure the directory exists
     const dirPath = path.dirname(settingsFile.path);
@@ -711,10 +717,12 @@ export function saveSettings(settingsFile: SettingsFile): void {
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    // Use the format-preserving update function
+    // Use the format-preserving update function.
+    // When targeted updates are provided, only those keys are written to disk,
+    // preserving any settings that were externally added to the file.
     updateSettingsFilePreservingFormat(
       settingsFile.path,
-      settingsFile.originalSettings as Record<string, unknown>,
+      updates ?? (settingsFile.originalSettings as Record<string, unknown>),
     );
   } catch (error) {
     debugLogger.error('Error saving user settings file.');

@@ -148,6 +148,41 @@ describe('commentJson', () => {
       expect(updatedContent).toContain('"API_KEY": "new-test-key"');
     });
 
+    it('should preserve externally-added settings when updating a single key', () => {
+      // Simulates the scenario from issue #2454: user manually adds custom
+      // models to the config file, then uses /model to switch models.
+      // Only the changed key should be written, preserving the rest.
+      const originalContent = JSON.stringify(
+        {
+          model: { name: 'qwen-2.5' },
+          modelProviders: {
+            'api-key': [
+              { id: 'qwen-2.5', label: 'Qwen 2.5' },
+              { id: 'custom-model', label: 'My Custom Model' },
+            ],
+          },
+        },
+        null,
+        2,
+      );
+
+      fs.writeFileSync(testFilePath, originalContent, 'utf-8');
+
+      // Only update model.name, not the entire settings object
+      updateSettingsFilePreservingFormat(testFilePath, {
+        model: { name: 'qwen-plus' },
+      });
+
+      const updatedContent = fs.readFileSync(testFilePath, 'utf-8');
+      const parsed = JSON.parse(updatedContent);
+
+      // The model name should be updated
+      expect(parsed.model.name).toBe('qwen-plus');
+      // The custom model should still be present
+      expect(parsed.modelProviders['api-key']).toHaveLength(2);
+      expect(parsed.modelProviders['api-key'][1].id).toBe('custom-model');
+    });
+
     it('should handle corrupted JSON files gracefully', () => {
       const corruptedContent = `{
         "model": "gemini-2.5-pro",
@@ -182,5 +217,20 @@ describe('applyUpdates', () => {
     const updates = { b: {} };
     const result = applyUpdates(original, updates);
     expect(result).toEqual({ a: 1, b: {} });
+  });
+  it('should not remove keys from current that are absent in updates', () => {
+    const current = {
+      model: { name: 'qwen-2.5' },
+      modelProviders: {
+        'api-key': [{ id: 'qwen-2.5' }, { id: 'custom-model' }],
+      },
+    };
+    const updates = { model: { name: 'qwen-plus' } };
+    const result = applyUpdates(
+      current as Record<string, unknown>,
+      updates as Record<string, unknown>,
+    );
+    expect((result as any).model.name).toBe('qwen-plus');
+    expect((result as any).modelProviders['api-key']).toHaveLength(2);
   });
 });
