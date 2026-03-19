@@ -115,7 +115,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     readonly displayName: string,
     readonly trust?: boolean,
     params: ToolParams = {},
-    _cliConfig?: Config,
+    private readonly cliConfig?: Config,
     private readonly mcpClient?: McpDirectClient,
     private readonly mcpTimeout?: number,
     private readonly annotations?: McpToolAnnotations,

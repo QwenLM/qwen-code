@@ -725,9 +725,11 @@ function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
-  // Wildcard: "mcp__server__*" matches all tools from that server
-  if (pattern.endsWith('__*')) {
-    const prefix = pattern.slice(0, -1); // "mcp__server__"
+  // Wildcard: patterns ending with "*" match by prefix.
+  // e.g. "mcp__server__*" matches all tools from that server,
+  //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
+  if (pattern.endsWith('*')) {
+    const prefix = pattern.slice(0, -1); // strip trailing "*"
     return toolName.startsWith(prefix);
   }
 

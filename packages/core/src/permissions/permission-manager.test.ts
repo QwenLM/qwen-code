@@ -736,6 +736,14 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
     expect(matchesRule(rule, 'mcp__other__tool')).toBe(false);
   });
+
+  it('MCP intra-segment wildcard match (e.g. mcp__chrome__use_*)', () => {
+    const rule = parseRule('mcp__chrome__use_*');
+    expect(matchesRule(rule, 'mcp__chrome__use_browser')).toBe(true);
+    expect(matchesRule(rule, 'mcp__chrome__use_context')).toBe(true);
+    expect(matchesRule(rule, 'mcp__chrome__navigate')).toBe(false);
+    expect(matchesRule(rule, 'mcp__other__use_browser')).toBe(false);
+  });
 });
 
 // ─── PermissionManager ──────────────────────────────────────────────────────
