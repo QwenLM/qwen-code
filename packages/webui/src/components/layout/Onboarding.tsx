@@ -73,22 +73,23 @@ export const Onboarding: FC<OnboardingProps> = ({
     });
   };
 
+  const trustedIconUrl =
+    iconUrl?.startsWith('data:') ||
+    iconUrl?.startsWith('http') ||
+    iconUrl?.startsWith('vscode-webview-resource:')
+      ? iconUrl
+      : undefined;
+
   return (
     <div className="flex flex-col items-center justify-center min-h-full p-5 md:p-10">
       <div className="flex flex-col items-center gap-8 w-full max-w-md m-auto">
         <div className="flex flex-col items-center gap-6 w-full">
           {/* Application icon container */}
-          {iconUrl && (
+          {trustedIconUrl && (
             <div className="relative">
               <img
-                src={
-                  iconUrl.startsWith('data:image') ||
-                  iconUrl.startsWith('http') ||
-                  iconUrl.startsWith('vscode-webview-resource:')
-                    ? iconUrl
-                    : ''
-                }
-                alt={`${appName || 'Qwen Code'} Logo`}
+                src={trustedIconUrl}
+                alt={`${appName} Logo`}
                 className="w-[80px] h-[80px] object-contain"
               />
             </div>
