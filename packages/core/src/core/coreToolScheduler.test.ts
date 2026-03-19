@@ -2639,25 +2639,25 @@ describe('Concurrent task tool execution', () => {
     });
   }
 
-  it('should execute multiple task tools concurrently', async () => {
+  it('should execute multiple agent tools concurrently', async () => {
     const executionLog: string[] = [];
 
-    const taskTool = new MockTool({
-      name: 'task',
+    const agentTool = new MockTool({
+      name: 'agent',
       execute: async (params) => {
         const id = (params as { id: string }).id;
         executionLog.push(`start:${id}`);
-        // Simulate async work — concurrent tasks will interleave here
+        // Simulate async work — concurrent agents will interleave here
         await new Promise((r) => setTimeout(r, 50));
         executionLog.push(`end:${id}`);
         return {
-          llmContent: `Task ${id} done`,
-          returnDisplay: `Task ${id} done`,
+          llmContent: `Agent ${id} done`,
+          returnDisplay: `Agent ${id} done`,
         };
       },
     });
 
-    const tools = new Map([['task', taskTool]]);
+    const tools = new Map([['agent', agentTool]]);
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
     const scheduler = createScheduler(
@@ -2670,21 +2670,21 @@ describe('Concurrent task tool execution', () => {
     const requests = [
       {
         callId: '1',
-        name: 'task',
+        name: 'agent',
         args: { id: 'A' },
         isClientInitiated: false,
         prompt_id: 'p1',
       },
       {
         callId: '2',
-        name: 'task',
+        name: 'agent',
         args: { id: 'B' },
         isClientInitiated: false,
         prompt_id: 'p1',
       },
       {
         callId: '3',
-        name: 'task',
+        name: 'agent',
         args: { id: 'C' },
         isClientInitiated: false,
         prompt_id: 'p1',
@@ -2693,14 +2693,14 @@ describe('Concurrent task tool execution', () => {
 
     await scheduler.schedule(requests, abortController.signal);
 
-    // All tasks should have completed
+    // All agents should have completed
     expect(onAllToolCallsComplete).toHaveBeenCalled();
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls).toHaveLength(3);
     expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
 
-    // Verify concurrency: all tasks should start before any finishes
+    // Verify concurrency: all agents should start before any finishes
     // With sequential execution, the log would be [start:A, end:A, start:B, end:B, ...]
     // With concurrent execution, all starts happen before any end
     const startIndices = executionLog
@@ -2710,19 +2710,19 @@ describe('Concurrent task tool execution', () => {
     expect(startIndices.every((i) => i < firstEnd)).toBe(true);
   });
 
-  it('should run task tools concurrently while other tools run sequentially', async () => {
+  it('should run agent tools concurrently while other tools run sequentially', async () => {
     const executionLog: string[] = [];
 
-    const taskTool = new MockTool({
-      name: 'task',
+    const agentTool = new MockTool({
+      name: 'agent',
       execute: async (params) => {
         const id = (params as { id: string }).id;
-        executionLog.push(`task:start:${id}`);
+        executionLog.push(`agent:start:${id}`);
         await new Promise((r) => setTimeout(r, 50));
-        executionLog.push(`task:end:${id}`);
+        executionLog.push(`agent:end:${id}`);
         return {
-          llmContent: `Task ${id} done`,
-          returnDisplay: `Task ${id} done`,
+          llmContent: `Agent ${id} done`,
+          returnDisplay: `Agent ${id} done`,
         };
       },
     });
@@ -2742,7 +2742,7 @@ describe('Concurrent task tool execution', () => {
     });
 
     const tools = new Map<string, MockTool>([
-      ['task', taskTool],
+      ['agent', agentTool],
       ['read_file', readTool],
     ]);
     const onAllToolCallsComplete = vi.fn();
@@ -2764,7 +2764,7 @@ describe('Concurrent task tool execution', () => {
       },
       {
         callId: '2',
-        name: 'task',
+        name: 'agent',
         args: { id: 'A' },
         isClientInitiated: false,
         prompt_id: 'p1',
@@ -2778,7 +2778,7 @@ describe('Concurrent task tool execution', () => {
       },
       {
         callId: '4',
-        name: 'task',
+        name: 'agent',
         args: { id: 'B' },
         isClientInitiated: false,
         prompt_id: 'p1',
@@ -2793,19 +2793,19 @@ describe('Concurrent task tool execution', () => {
     expect(completedCalls).toHaveLength(4);
     expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
 
-    // Non-task tools should execute sequentially: read:1 finishes before read:2 starts
+    // Non-agent tools should execute sequentially: read:1 finishes before read:2 starts
     const read1End = executionLog.indexOf('read:end:1');
     const read2Start = executionLog.indexOf('read:start:2');
     expect(read1End).toBeLessThan(read2Start);
 
-    // Task tools should execute concurrently: both start before either ends
-    const taskAStart = executionLog.indexOf('task:start:A');
-    const taskBStart = executionLog.indexOf('task:start:B');
-    const firstTaskEnd = Math.min(
-      executionLog.indexOf('task:end:A'),
-      executionLog.indexOf('task:end:B'),
+    // Agent tools should execute concurrently: both start before either ends
+    const agentAStart = executionLog.indexOf('agent:start:A');
+    const agentBStart = executionLog.indexOf('agent:start:B');
+    const firstAgentEnd = Math.min(
+      executionLog.indexOf('agent:end:A'),
+      executionLog.indexOf('agent:end:B'),
     );
-    expect(taskAStart).toBeLessThan(firstTaskEnd);
-    expect(taskBStart).toBeLessThan(firstTaskEnd);
+    expect(agentAStart).toBeLessThan(firstAgentEnd);
+    expect(agentBStart).toBeLessThan(firstAgentEnd);
   });
 });

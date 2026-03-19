@@ -20,7 +20,7 @@ export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
-import type { TaskTool } from '../tools/task.js';
+import type { AgentTool } from '../tools/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -107,10 +107,10 @@ export class StartSessionEvent implements BaseTelemetryEvent {
         this.skills = skillNames.join(',');
       }
 
-      const taskTool = toolRegistry.getTool(ToolNames.TASK) as
-        | TaskTool
+      const agentTool = toolRegistry.getTool(ToolNames.AGENT) as
+        | AgentTool
         | undefined;
-      const subagentNames = taskTool?.getAvailableSubagentNames?.();
+      const subagentNames = agentTool?.getAvailableSubagentNames?.();
       if (subagentNames && subagentNames.length > 0) {
         this.subagents = subagentNames.join(',');
       }

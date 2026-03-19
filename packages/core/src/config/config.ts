@@ -56,7 +56,7 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
 import { SkillTool } from '../tools/skill.js';
-import { TaskTool } from '../tools/task.js';
+import { AgentTool } from '../tools/agent.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
@@ -1925,7 +1925,7 @@ export class Config {
       }
     };
 
-    registerCoreTool(TaskTool, this);
+    registerCoreTool(AgentTool, this);
     registerCoreTool(SkillTool, this);
     registerCoreTool(LSTool, this);
     registerCoreTool(ReadFileTool, this);

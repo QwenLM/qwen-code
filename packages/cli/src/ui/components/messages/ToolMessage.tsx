@@ -16,7 +16,7 @@ import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
-  TaskResultDisplay,
+  AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
   Config,
@@ -50,7 +50,7 @@ type DisplayRendererResult =
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
-  | { type: 'task'; data: TaskResultDisplay }
+  | { type: 'task'; data: AgentResultDisplay }
   | { type: 'ansi'; data: AnsiOutput };
 
 /**
@@ -98,7 +98,7 @@ const useResultDisplayRenderer = (
     ) {
       return {
         type: 'task',
-        data: resultDisplay as TaskResultDisplay,
+        data: resultDisplay as AgentResultDisplay,
       };
     }
 
@@ -169,7 +169,7 @@ const PlanResultRenderer: React.FC<{
  * Component to render subagent execution results
  */
 const SubagentExecutionRenderer: React.FC<{
-  data: TaskResultDisplay;
+  data: AgentResultDisplay;
   availableHeight?: number;
   childWidth: number;
   config: Config;

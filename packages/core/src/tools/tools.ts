@@ -438,7 +438,7 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export interface TaskResultDisplay {
+export interface AgentResultDisplay {
   type: 'task_execution';
   subagentName: string;
   subagentColor?: string;
@@ -489,7 +489,7 @@ export type ToolResultDisplay =
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
-  | TaskResultDisplay
+  | AgentResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
 

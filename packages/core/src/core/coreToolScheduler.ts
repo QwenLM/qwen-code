@@ -1086,10 +1086,10 @@ export class CoreToolScheduler {
       // sequentially in their original order to preserve any implicit
       // ordering the model may rely on.
       const taskCalls = callsToExecute.filter(
-        (call) => call.request.name === ToolNames.TASK,
+        (call) => call.request.name === ToolNames.AGENT,
       );
       const otherCalls = callsToExecute.filter(
-        (call) => call.request.name !== ToolNames.TASK,
+        (call) => call.request.name !== ToolNames.AGENT,
       );
 
       const taskPromise = Promise.all(

@@ -25,7 +25,7 @@ import type {
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import type { TaskResultDisplay } from '../tools/tools.js';
+import type { AgentResultDisplay } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
@@ -351,7 +351,7 @@ export class ChatRecordingService {
           'type' in toolCallResult.resultDisplay &&
           toolCallResult.resultDisplay.type === 'task_execution'
         ) {
-          const taskResult = toolCallResult.resultDisplay as TaskResultDisplay;
+          const taskResult = toolCallResult.resultDisplay as AgentResultDisplay;
           record.toolCallResult = {
             ...toolCallResult,
             resultDisplay: {

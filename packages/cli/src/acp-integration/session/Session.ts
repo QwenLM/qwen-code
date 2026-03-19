@@ -29,7 +29,7 @@ import {
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  TaskTool,
+  AgentTool,
   UserPromptEvent,
   TodoWriteTool,
   ExitPlanModeTool,
@@ -517,7 +517,7 @@ export class Session implements SessionContext {
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
     const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isTaskTool = tool.name === TaskTool.Name;
+    const isAgentTool = tool.name === AgentTool.Name;
     const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
 
     // Track cleanup functions for sub-agent event listeners
@@ -526,15 +526,15 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isTaskTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from TaskTool invocation
+      if (isAgentTool && 'eventEmitter' in invocation) {
+        // Access eventEmitter from AgentTool invocation
         const taskEventEmitter = (
           invocation as {
             eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
-        // Extract subagent metadata from TaskTool call
+        // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
 
