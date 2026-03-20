@@ -313,13 +313,6 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     return this.operationType === 'create' ? 'Create todos' : 'Update todos';
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<false> {
-    // Todo operations should execute automatically without user confirmation
-    return false;
-  }
-
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const { todos, modified_by_user, modified_content } = this.params;
     const sessionId = this.config.getSessionId();

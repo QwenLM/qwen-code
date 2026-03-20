@@ -142,6 +142,11 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
 
     const { result } = renderHook(() =>

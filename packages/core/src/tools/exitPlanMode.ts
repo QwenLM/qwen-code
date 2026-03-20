@@ -5,6 +5,7 @@
  */
 
 import type { ToolPlanConfirmationDetails, ToolResult } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -76,7 +77,14 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     return 'Plan:';
   }
 
-  override async shouldConfirmExecute(
+  /**
+   * Plan mode exit always requires user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolPlanConfirmationDetails> {
     const details: ToolPlanConfirmationDetails = {

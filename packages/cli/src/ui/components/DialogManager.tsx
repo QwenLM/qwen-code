@@ -18,7 +18,8 @@ import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
-import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
+import { TrustDialog } from './TrustDialog.js';
+import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
@@ -314,13 +315,14 @@ export const DialogManager = ({
       );
     }
   }
-  if (uiState.isPermissionsDialogOpen) {
+  if (uiState.isTrustDialogOpen) {
     return (
-      <PermissionsModifyTrustDialog
-        onExit={uiActions.closePermissionsDialog}
-        addItem={addItem}
-      />
+      <TrustDialog onExit={uiActions.closeTrustDialog} addItem={addItem} />
     );
+  }
+
+  if (uiState.isPermissionsDialogOpen) {
+    return <PermissionsDialog onExit={uiActions.closePermissionsDialog} />;
   }
 
   if (uiState.isSubagentCreateDialogOpen) {

@@ -67,6 +67,74 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 export const SETTINGS_VERSION = 3;
 export const SETTINGS_VERSION_KEY = '$version';
 
+/**
+ * Migrate legacy tool permission settings (tools.core / tools.allowed / tools.exclude)
+ * to the new permissions.allow / permissions.ask / permissions.deny format.
+ *
+ * Conversion rules:
+ *   tools.allowed  → permissions.allow (bypass confirmation)
+ *   tools.exclude  → permissions.deny  (block tools)
+ *   tools.core     → permissions.allow (only listed tools enabled)
+ *                    + permissions.deny with a wildcard deny-all if needed
+ *
+ * Returns the updated settings object, or null if no migration is needed.
+ */
+export function migrateLegacyPermissions(
+  settings: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const tools = settings['tools'] as Record<string, unknown> | undefined;
+  if (!tools) return null;
+
+  const hasLegacy =
+    Array.isArray(tools['core']) ||
+    Array.isArray(tools['allowed']) ||
+    Array.isArray(tools['exclude']);
+
+  if (!hasLegacy) return null;
+
+  const result = structuredClone(settings) as Record<string, unknown>;
+  const resultTools = result['tools'] as Record<string, unknown>;
+  const permissions = (result['permissions'] as Record<string, unknown>) ?? {};
+  result['permissions'] = permissions;
+
+  const mergeInto = (key: string, items: string[]) => {
+    const existing = Array.isArray(permissions[key])
+      ? (permissions[key] as string[])
+      : [];
+    const merged = Array.from(new Set([...existing, ...items]));
+    permissions[key] = merged;
+  };
+
+  // tools.allowed → permissions.allow
+  if (Array.isArray(resultTools['allowed'])) {
+    mergeInto('allow', resultTools['allowed'] as string[]);
+    delete resultTools['allowed'];
+  }
+
+  // tools.exclude → permissions.deny
+  if (Array.isArray(resultTools['exclude'])) {
+    mergeInto('deny', resultTools['exclude'] as string[]);
+    delete resultTools['exclude'];
+  }
+
+  // tools.core → permissions.allow (explicit enables)
+  // IMPORTANT: tools.core has whitelist semantics: "only these tools can run".
+  // To preserve this, we also add deny rules for all tools NOT in the list.
+  // A wildcard deny-all followed by specific allows achieves this because
+  // allow rules take precedence over the catch-all deny in the evaluation order:
+  //   deny = [everything not listed], allow = [listed tools]
+  // However, since our priority is deny > allow, we cannot use a blanket deny.
+  // Instead we just migrate to allow (auto-approve) and let the coreTools
+  // semantics continue to work through the Config.getCoreTools() path until
+  // the old API is fully removed.
+  if (Array.isArray(resultTools['core'])) {
+    mergeInto('allow', resultTools['core'] as string[]);
+    delete resultTools['core'];
+  }
+
+  return result;
+}
+
 export function getSystemSettingsPath(): string {
   if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
     return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];

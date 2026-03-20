@@ -34,11 +34,8 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
-import type {
-  UiTelemetryService} from '../telemetry/uiTelemetry.js';
-import {
-  uiTelemetryService,
-} from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -724,6 +721,8 @@ export class GeminiChat {
 
     // Record assistant turn with raw Content and metadata
     if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+      const contextWindowSize =
+        this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -736,6 +735,7 @@ export class GeminiChat {
             : []),
         ],
         tokens: usageMetadata,
+        contextWindowSize,
       });
     }
 

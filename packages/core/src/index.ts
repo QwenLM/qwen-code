@@ -12,6 +12,9 @@
 export * from './config/config.js';
 export { Storage } from './config/storage.js';
 
+// Permission system
+export * from './permissions/index.js';
+
 // Model configuration
 export {
   DEFAULT_QWEN_MODEL,
@@ -88,6 +91,8 @@ export * from './tools/shell.js';
 export * from './tools/skill.js';
 export * from './tools/agent.js';
 export * from './tools/todoWrite.js';
+export * from './tools/tool-error.js';
+export * from './tools/tool-registry.js';
 export * from './tools/web-fetch.js';
 export * from './tools/web-search/index.js';
 export * from './tools/write-file.js';
@@ -251,3 +256,9 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry } from './hooks/index.js';
+
+// Export hook triggers for notification hooks
+export {
+  fireNotificationHook,
+  type NotificationHookResult,
+} from './core/toolHookTriggers.js';

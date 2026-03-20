@@ -24,7 +24,6 @@ type SkillToolWithProtectedMethods = SkillTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
-    shouldConfirmExecute: () => Promise<boolean>;
   };
 };
 
@@ -393,9 +392,9 @@ describe('SkillTool', () => {
       const invocation = (
         skillTool as SkillToolWithProtectedMethods
       ).createInvocation(params);
-      const shouldConfirm = await invocation.shouldConfirmExecute();
+      const permission = await invocation.getDefaultPermission();
 
-      expect(shouldConfirm).toBe(false);
+      expect(permission).toBe('allow');
     });
 
     it('should provide correct description', () => {

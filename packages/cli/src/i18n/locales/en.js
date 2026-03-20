@@ -1102,6 +1102,8 @@ export default {
   'No, suggest changes (esc)': 'No, suggest changes (esc)',
   "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
   'Yes, allow always ...': 'Yes, allow always ...',
+  'Always allow in this project': 'Always allow in this project',
+  'Always allow for this user': 'Always allow for this user',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',
@@ -1266,6 +1268,73 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': 'Manage folder trust settings',
+  'Manage permission rules': 'Manage permission rules',
+  Allow: 'Allow',
+  Ask: 'Ask',
+  Deny: 'Deny',
+  Workspace: 'Workspace',
+  "Qwen Code won't ask before using allowed tools.":
+    "Qwen Code won't ask before using allowed tools.",
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code will ask before using these tools.',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code is not allowed to use denied tools.',
+  'Manage trusted directories for this workspace.':
+    'Manage trusted directories for this workspace.',
+  'Any use of the {{tool}} tool': 'Any use of the {{tool}} tool',
+  "{{tool}} commands matching '{{pattern}}'":
+    "{{tool}} commands matching '{{pattern}}'",
+  'From user settings': 'From user settings',
+  'From project settings': 'From project settings',
+  'From session': 'From session',
+  'Project settings (local)': 'Project settings (local)',
+  'Saved in .qwen/settings.local.json': 'Saved in .qwen/settings.local.json',
+  'Project settings': 'Project settings',
+  'Checked in at .qwen/settings.json': 'Checked in at .qwen/settings.json',
+  'User settings': 'User settings',
+  'Saved in at ~/.qwen/settings.json': 'Saved in at ~/.qwen/settings.json',
+  'Add a new rule…': 'Add a new rule…',
+  'Add {{type}} permission rule': 'Add {{type}} permission rule',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
+  'e.g.,': 'e.g.,',
+  or: 'or',
+  'Enter permission rule…': 'Enter permission rule…',
+  'Enter to submit · Esc to cancel': 'Enter to submit · Esc to cancel',
+  'Where should this rule be saved?': 'Where should this rule be saved?',
+  'Enter to confirm · Esc to cancel': 'Enter to confirm · Esc to cancel',
+  'Delete {{type}} rule?': 'Delete {{type}} rule?',
+  'Are you sure you want to delete this permission rule?':
+    'Are you sure you want to delete this permission rule?',
+  'Permissions:': 'Permissions:',
+  '(←/→ or tab to cycle)': '(←/→ or tab to cycle)',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel',
+  'Search…': 'Search…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    'Use /trust to manage folder trust settings for this workspace.',
+  // Workspace directory management
+  'Add directory…': 'Add directory…',
+  'Add directory to workspace': 'Add directory to workspace',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+  'Enter the path to the directory:': 'Enter the path to the directory:',
+  'Enter directory path…': 'Enter directory path…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab to complete · Enter to add · Esc to cancel',
+  'Remove directory?': 'Remove directory?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Are you sure you want to remove this directory from the workspace?',
+  '  (Original working directory)': '  (Original working directory)',
+  '  (from settings)': '  (from settings)',
+  'Directory does not exist.': 'Directory does not exist.',
+  'Path is not a directory.': 'Path is not a directory.',
+  'This directory is already in the workspace.':
+    'This directory is already in the workspace.',
+  'Already covered by existing directory: {{dir}}':
+    'Already covered by existing directory: {{dir}}',
 
   // ============================================================================
   // Status Bar

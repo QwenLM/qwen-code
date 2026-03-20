@@ -34,6 +34,8 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { PermissionMode } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
 
 export interface AgentParams {
   description: string;
@@ -412,6 +414,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               ToolConfirmationOutcome.ProceedAlways,
               ToolConfirmationOutcome.ProceedAlwaysServer,
               ToolConfirmationOutcome.ProceedAlwaysTool,
+              ToolConfirmationOutcome.ProceedAlwaysProject,
+              ToolConfirmationOutcome.ProceedAlwaysUser,
             ]);
 
             if (proceedOutcomes.has(outcome)) {
@@ -455,11 +459,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
   getDescription(): string {
     return this.params.description;
-  }
-
-  override async shouldConfirmExecute(): Promise<false> {
-    // Task delegation should execute automatically without user confirmation
-    return false;
   }
 
   async execute(
@@ -515,8 +514,97 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const contextState = new ContextState();
       contextState.set('task_prompt', this.params.prompt);
 
+      // Fire SubagentStart hook before execution
+      const hookSystem = this.config.getHookSystem();
+      const agentId = `${subagentConfig.name}-${Date.now()}`;
+      const agentType = this.params.subagent_type;
+
+      if (hookSystem) {
+        try {
+          const startHookOutput = await hookSystem.fireSubagentStartEvent(
+            agentId,
+            agentType,
+            PermissionMode.Default,
+          );
+
+          // Inject additional context from hook output into subagent context
+          const additionalContext = startHookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            contextState.set('hook_context', additionalContext);
+          }
+        } catch (hookError) {
+          debugLogger.warn(
+            `[TaskTool] SubagentStart hook failed, continuing execution: ${hookError}`,
+          );
+        }
+      }
+
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
+
+      // Fire SubagentStop hook after execution and handle block decisions
+      if (hookSystem && !signal?.aborted) {
+        const transcriptPath = this.config.getTranscriptPath();
+        let stopHookActive = false;
+
+        // Loop to handle "block" decisions (prevent subagent from stopping)
+        let continueExecution = true;
+        let iterationCount = 0;
+        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
+
+        while (continueExecution) {
+          iterationCount++;
+
+          // Safety check to prevent infinite loops
+          if (iterationCount >= maxIterations) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+            );
+            continueExecution = false;
+            break;
+          }
+
+          try {
+            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+              agentId,
+              agentType,
+              transcriptPath,
+              subagent.getFinalText(),
+              stopHookActive,
+              PermissionMode.Default,
+            );
+
+            const typedStopOutput = stopHookOutput as
+              | StopHookOutput
+              | undefined;
+
+            if (
+              typedStopOutput?.isBlockingDecision() ||
+              typedStopOutput?.shouldStopExecution()
+            ) {
+              // Feed the reason back to the subagent and continue execution
+              const continueReason = typedStopOutput.getEffectiveReason();
+              stopHookActive = true;
+
+              const continueContext = new ContextState();
+              continueContext.set('task_prompt', continueReason);
+              await subagent.execute(continueContext, signal);
+
+              if (signal?.aborted) {
+                continueExecution = false;
+              }
+              // Loop continues to re-check SubagentStop hook
+            } else {
+              continueExecution = false;
+            }
+          } catch (hookError) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+            );
+            continueExecution = false;
+          }
+        }
+      }
 
       // Get the results
       const finalText = subagent.getFinalText();

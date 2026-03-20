@@ -1022,7 +1022,7 @@ describe('mergeExcludeTools', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual([]);
+    expect(config.getPermissionsDeny()).toEqual([]);
   });
 
   it('should return default excludes when no excludeTools are specified and it is not interactive', async () => {
@@ -1031,7 +1031,7 @@ describe('mergeExcludeTools', () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
     const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual(defaultExcludes);
+    expect(config.getPermissionsDeny()).toEqual(defaultExcludes);
   });
 
   it('should handle settings with excludeTools but no extensions', async () => {
@@ -1039,10 +1039,10 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = { tools: { exclude: ['tool1', 'tool2'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual(
+    expect(config.getPermissionsDeny()).toEqual(
       expect.arrayContaining(['tool1', 'tool2']),
     );
-    expect(config.getExcludeTools()).toHaveLength(2);
+    expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 });
 
@@ -1067,7 +1067,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1086,7 +1086,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1106,7 +1106,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1123,7 +1123,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1140,7 +1140,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1160,7 +1160,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1180,7 +1180,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1193,7 +1193,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1218,7 +1218,7 @@ describe('Approval mode tool exclusion logic', () => {
 
       const config = await loadCliConfig(settings, argv, undefined, []);
 
-      const excludedTools = config.getExcludeTools();
+      const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ShellTool.Name);
       expect(excludedTools).not.toContain(EditTool.Name);
       expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1238,7 +1238,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = { tools: { exclude: ['custom_tool'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ShellTool.Name); // From approval mode
     expect(excludedTools).not.toContain(EditTool.Name); // Should be allowed in auto-edit
@@ -1834,9 +1834,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 
   it('should not exclude interactive tools in interactive mode with YOLO', async () => {
@@ -1844,9 +1844,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 
   it('should exclude interactive tools in non-interactive mode without YOLO', async () => {
@@ -1854,9 +1854,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).toContain('run_shell_command');
-    expect(config.getExcludeTools()).toContain('edit');
-    expect(config.getExcludeTools()).toContain('write_file');
+    expect(config.getPermissionsDeny()).toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).toContain('edit');
+    expect(config.getPermissionsDeny()).toContain('write_file');
   });
 
   it('should not exclude interactive tools in non-interactive mode with YOLO', async () => {
@@ -1864,9 +1864,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 });
 
