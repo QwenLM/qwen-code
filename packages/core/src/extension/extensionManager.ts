@@ -30,6 +30,7 @@ import {
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   substituteHookVariables,
+  performVariableReplacement,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -666,7 +667,7 @@ export class ExtensionManager {
         `${effectiveExtensionPath}/agents`,
       );
 
-      if (config.hooks) {
+      if (config.hooks && typeof config.hooks !== 'string') {
         // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
         extension.hooks = this.substituteHookVariables(
           config.hooks,
@@ -674,17 +675,31 @@ export class ExtensionManager {
         );
       }
 
-      // Also load hooks from hooks directory if available and not already set
+      // Also load hooks from hooks directory or from config.hooks string path if available and not already set
       if (!extension.hooks) {
         const hooksDir = path.join(effectiveExtensionPath, 'hooks');
         const hooksJsonPath = path.join(hooksDir, 'hooks.json');
 
-        if (fs.existsSync(hooksJsonPath)) {
+        const configHooksPath =
+          typeof config.hooks === 'string'
+            ? path.isAbsolute(config.hooks)
+              ? config.hooks
+              : path.join(effectiveExtensionPath, config.hooks)
+            : null;
+
+        if (
+          fs.existsSync(hooksJsonPath) ||
+          (configHooksPath && fs.existsSync(configHooksPath))
+        ) {
+          const hooksFilePath =
+            configHooksPath && fs.existsSync(configHooksPath)
+              ? configHooksPath
+              : hooksJsonPath;
+
           try {
-            const hooksContent = fs.readFileSync(hooksJsonPath, 'utf-8');
+            const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
             const parsedHooks = JSON.parse(hooksContent);
 
-            // Check if the file has a top-level "hooks" property or if the entire file content is the hooks object
             let hooksData;
             if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
               hooksData = parsedHooks.hooks as {
@@ -985,6 +1000,28 @@ export class ExtensionManager {
 
         if (installMetadata.type !== 'link') {
           await copyExtension(localSourcePath, destinationPath);
+        }
+
+        // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
+        const hooksDir = path.join(destinationPath, 'hooks');
+        const configHooksPath =
+          typeof newExtensionConfig.hooks === 'string'
+            ? path.isAbsolute(newExtensionConfig.hooks)
+              ? newExtensionConfig.hooks
+              : path.join(destinationPath, newExtensionConfig.hooks)
+            : null;
+
+        if (
+          (originSource === 'Claude' && fs.existsSync(hooksDir)) ||
+          (originSource === 'Claude' &&
+            configHooksPath &&
+            fs.existsSync(configHooksPath))
+        ) {
+          try {
+            await performVariableReplacement(destinationPath);
+          } catch (error) {
+            debugLogger.error('Variable replacement failed', error);
+          }
         }
 
         const metadataString = JSON.stringify(installMetadata, null, 2);
