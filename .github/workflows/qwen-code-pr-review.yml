@@ -135,6 +135,27 @@ jobs:
             If ADDITIONAL_INSTRUCTIONS contains text, prioritize those specific areas or focus points in your review.
             Common instruction examples: "focus on security", "check performance", "review error handling", "check for breaking changes"
 
+            ## Visual Evidence Check (REQUIRED - Run First)
+
+            When reviewing a pull request, check if the PR body contains any visual evidence of the change — this could be in a "Screenshots / Video Demo" section, inline images, linked videos, GIFs, or even a Loom/YouTube link anywhere in the body.
+
+            **Only leave a comment if ALL of the following are true:**
+            - There are no images, videos, GIFs, or video links anywhere in the PR body
+            - There is no "N/A", "no user-facing change", "internal change", "refactor", or similar opt-out language anywhere in the body
+            - The PR is not a docs-only change (i.e., only `.md` files changed)
+
+            **If you do comment:**
+            - Be friendly and brief: "Thanks for the PR! A screenshot or short video showing the change in action helps reviewers pick this up faster. If there's nothing visual to show (e.g., refactor or internal change), just note that in the description."
+            - Comment once per PR — do not repeat on subsequent runs
+            - Do **not** block the PR, request changes, or mark any check as failed
+
+            **Implementation:**
+            1. Run: gh pr view $PR_NUMBER --json body -q .body
+            2. Check the body for: images (![...], <img src=, .png, .jpg, .gif), video links (loom.com, youtube.com, youtu.be), or screenshot sections
+            3. Check for opt-out language: "N/A", "no user-facing change", "internal change", "refactor", "docs-only"
+            4. Check if only .md files changed: echo "$CHANGED_FILES" | grep -v '\.md$'
+            5. If all conditions are met, add the comment before your main review
+
             Once you have the information, provide a comprehensive code review by:
             1. Writing your review to a file: write_file("review.md", "<your detailed review feedback here>")
             2. Posting the review: gh pr comment $PR_NUMBER --body-file review.md --repo $REPOSITORY
