@@ -41,6 +41,9 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
+  getGenerator,
+  extractSuggestionContext,
+  type FollowupSuggestion,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -720,6 +723,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const agentViewState = useAgentViewState();
 
+  // Follow-up suggestions state
+  const [followupSuggestions, setFollowupSuggestions] = useState<
+    FollowupSuggestion[]
+  >([]);
+  const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
@@ -912,6 +921,95 @@ export const AppContainer = (props: AppContainerProps) => {
     welcomeBackChoice,
     geminiClient,
   ]);
+
+  // Generate follow-up suggestions when streaming completes
+  useEffect(() => {
+    // Only trigger when transitioning from Responding to Idle
+    if (
+      prevStreamingStateRef.current === StreamingState.Responding &&
+      streamingState === StreamingState.Idle
+    ) {
+      // Get the last gemini message from history
+      const history = historyManager.history;
+
+      // Also check tool_group items in history (these are preserved)
+      const toolGroupItems = history.filter(
+        (item) => item.type === 'tool_group',
+      );
+
+      // Generate suggestions even if pendingToolCalls is empty - use history instead
+      const toolCalls = toolGroupItems
+        .slice(-10) // Get last 10 tool calls
+        .map((item) => {
+          const toolGroup = item as {
+            tools?: Array<{ name: string; status: ToolCallStatus }>;
+          };
+          if (toolGroup.tools) {
+            return toolGroup.tools.map((tool) => ({
+              name: tool.name,
+              input: {} as Record<string, unknown>, // History doesn't store args
+              status:
+                tool.status === ToolCallStatus.Success
+                  ? 'success'
+                  : tool.status === ToolCallStatus.Error
+                    ? 'error'
+                    : 'cancelled',
+            }));
+          }
+          return [];
+        })
+        .flat();
+
+      // Only proceed if we have tool calls
+      if (toolCalls.length > 0) {
+        const lastGeminiIndex = history.findLastIndex(
+          (item) => item.type === 'gemini',
+        );
+
+        if (lastGeminiIndex >= 0) {
+          const lastGeminiItem = history[lastGeminiIndex];
+
+          // Extract modified files from tool calls (based on tool names only)
+          const modifiedFiles = toolCalls
+            .filter((call) => call.name === 'Edit' || call.name === 'WriteFile')
+            .map((call) => {
+              // Can't get filePath from history, so count by tool name
+              const type = call.name === 'WriteFile' ? 'created' : 'edited';
+              return { path: '(file)', type }; // Placeholder path
+            })
+            .filter(
+              (
+                f,
+              ): f is {
+                path: string;
+                type: 'created' | 'edited' | 'deleted';
+              } => f !== null,
+            );
+
+          // Generate suggestions
+          const context = extractSuggestionContext({
+            lastMessage: (lastGeminiItem.text || '').slice(0, 1000),
+            toolCalls,
+            modifiedFiles,
+            hasError: false,
+            wasCancelled: false,
+          });
+
+          const result = getGenerator().generate(context);
+          if (result.shouldShow && result.suggestions.length > 0) {
+            setFollowupSuggestions(result.suggestions);
+          } else {
+            setFollowupSuggestions([]);
+          }
+        }
+      } else {
+        // No tool calls, clear suggestions
+        setFollowupSuggestions([]);
+      }
+    }
+
+    prevStreamingStateRef.current = streamingState;
+  }, [streamingState, historyManager.history]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
@@ -1521,6 +1619,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Follow-up suggestions
+      followupSuggestions,
     }),
     [
       isThemeDialogOpen,
@@ -1619,6 +1719,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Follow-up suggestions
+      followupSuggestions,
     ],
   );
 

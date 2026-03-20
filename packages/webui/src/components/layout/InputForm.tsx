@@ -22,6 +22,7 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
+import type { FollowupState } from '../../hooks/useFollowupSuggestions.js';
 
 /**
  * Edit mode display information
@@ -125,6 +126,16 @@ export interface InputFormProps {
   placeholder?: string;
   /** Whether the current draft is eligible to submit */
   canSubmit?: boolean;
+  /** Follow-up suggestion state */
+  followupState?: FollowupState;
+  /** Callback to accept follow-up suggestion */
+  onAcceptFollowup?: (suggestion: string) => void;
+  /** Callback to dismiss follow-up suggestion */
+  onDismissFollowup?: () => void;
+  /** Callback to cycle to next follow-up suggestion */
+  onNextFollowup?: () => void;
+  /** Callback to cycle to previous follow-up suggestion */
+  onPreviousFollowup?: () => void;
 }
 
 /**
@@ -184,6 +195,11 @@ export const InputForm: FC<InputFormProps> = ({
   extraContent,
   placeholder = 'Ask Qwen Code …',
   canSubmit,
+  followupState,
+  onAcceptFollowup,
+  onDismissFollowup,
+  onNextFollowup,
+  onPreviousFollowup,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
   const hasDraftContent =
@@ -194,6 +210,23 @@ export const InputForm: FC<InputFormProps> = ({
     completionItemsResolved.length > 0 &&
     !!onCompletionSelect &&
     !!onCompletionClose;
+
+  // Follow-up suggestion handling
+  const followupSuggestion =
+    followupState?.isVisible && followupState.suggestion
+      ? followupState.suggestion
+      : null;
+  const hasFollowup = !!followupSuggestion;
+  const suggestionCount = followupState?.isVisible
+    ? followupState.suggestions.length
+    : 0;
+  const suggestionIndex = followupState?.isVisible
+    ? followupState.currentIndex + 1
+    : 0;
+
+  // Compute actual placeholder
+  const actualPlaceholder =
+    hasFollowup && !inputText ? followupSuggestion! : placeholder;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Let the completion menu handle Escape when it's active.
@@ -208,6 +241,43 @@ export const InputForm: FC<InputFormProps> = ({
       e.preventDefault();
       onCancel();
       return;
+    }
+    // Tab to accept follow-up suggestion
+    if (e.key === 'Tab' && hasFollowup && !inputText && !completionActive) {
+      e.preventDefault();
+      e.stopPropagation();
+      onAcceptFollowup?.(followupSuggestion!);
+      return;
+    }
+    // Right arrow to cycle to next suggestion (when input is empty)
+    if (
+      e.key === 'ArrowRight' &&
+      hasFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      const inputEl = inputFieldRef.current;
+      // Only cycle if input is truly empty (no visible text)
+      if (inputEl && !inputEl.textContent) {
+        e.preventDefault();
+        onNextFollowup?.();
+        return;
+      }
+    }
+    // Left arrow to cycle to previous suggestion (when input is empty)
+    if (
+      e.key === 'ArrowLeft' &&
+      hasFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      const inputEl = inputFieldRef.current;
+      // Only cycle if input is truly empty (no visible text)
+      if (inputEl && !inputEl.textContent) {
+        e.preventDefault();
+        onPreviousFollowup?.();
+        return;
+      }
     }
     // If composing (Chinese IME input), don't process Enter key
     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
@@ -269,7 +339,12 @@ export const InputForm: FC<InputFormProps> = ({
               role="textbox"
               aria-label="Message input"
               aria-multiline="true"
-              data-placeholder={placeholder}
+              data-placeholder={actualPlaceholder}
+              // Indicate when a follow-up suggestion is active
+              data-has-suggestion={hasFollowup ? 'true' : 'false'}
+              // Suggestion counter for multiple suggestions
+              data-suggestion-count={String(suggestionCount)}
+              data-suggestion-index={String(suggestionIndex)}
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={
@@ -282,6 +357,10 @@ export const InputForm: FC<InputFormProps> = ({
                 // Filter out zero-width space that we use to maintain height
                 const text = target.textContent?.replace(/\u200B/g, '') || '';
                 onInputChange(text);
+                // Dismiss follow-up suggestion when user starts typing
+                if (hasFollowup && !inputText && text) {
+                  onDismissFollowup?.();
+                }
               }}
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}

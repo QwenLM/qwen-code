@@ -24,7 +24,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
-} from '@qwen-code/qwen-code-core';
+ FollowupSuggestion } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
@@ -136,6 +136,8 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Follow-up suggestions
+  followupSuggestions: FollowupSuggestion[];
 }
 
 export const UIStateContext = createContext<UIState | null>(null);
