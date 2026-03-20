@@ -845,14 +845,12 @@ export class CoreToolScheduler {
           const toolParams = invocation.params as Record<string, unknown>;
           const shellCommand =
             'command' in toolParams ? String(toolParams['command']) : undefined;
-          // Extract file path — tools use 'absolute_path', 'file_path',
-          // or 'path' (LS / grep / glob).
+          // Extract file path — tools use 'file_path' or 'path'
+          // (LS / grep / glob).
           let invocationFilePath =
-            typeof toolParams['absolute_path'] === 'string'
-              ? toolParams['absolute_path']
-              : typeof toolParams['file_path'] === 'string'
-                ? toolParams['file_path']
-                : undefined;
+            typeof toolParams['file_path'] === 'string'
+              ? toolParams['file_path']
+              : undefined;
           if (
             invocationFilePath === undefined &&
             typeof toolParams['path'] === 'string'
@@ -1740,11 +1738,9 @@ export class CoreToolScheduler {
           const shellCommand =
             'command' in params ? String(params['command']) : undefined;
           const filePath =
-            typeof params['absolute_path'] === 'string'
-              ? params['absolute_path']
-              : typeof params['file_path'] === 'string'
-                ? params['file_path']
-                : undefined;
+            typeof params['file_path'] === 'string'
+              ? params['file_path']
+              : undefined;
           let domain: string | undefined;
           if (typeof params['url'] === 'string') {
             try {
