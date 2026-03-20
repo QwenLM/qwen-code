@@ -136,8 +136,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let currentContent: string | null = null;
     let fileExists = await isFilefileExists(params.file_path);
     let isNewFile = false;
-    let finalNewString = params.new_string;
-    let finalOldString = params.old_string;
+    let finalNewString = params.new_string.replace(/\r\n/g, '\n');
+    let finalOldString = params.old_string.replace(/\r\n/g, '\n');
     let occurrences = 0;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
