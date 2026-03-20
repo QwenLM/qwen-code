@@ -412,10 +412,10 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
   const homeDir = homedir();
   const isTrusted = isWorkspaceTrusted(settings).isTrusted;
 
-  // Pre-compute user-level .env paths for fast comparison
+  const globalQwenDir = Storage.getGlobalQwenDir();
   const userLevelPaths = new Set([
     path.normalize(path.join(homeDir, '.env')),
-    path.normalize(path.join(homeDir, QWEN_DIR, '.env')),
+    path.normalize(path.join(globalQwenDir, '.env')),
   ]);
 
   // Determine if we can use this .env file based on trust settings
@@ -437,8 +437,7 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
 
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      // At home directory - check fallback .env files
-      const homeGeminiEnvPath = path.join(homeDir, QWEN_DIR, '.env');
+      const homeGeminiEnvPath = path.join(globalQwenDir, '.env');
       if (fs.existsSync(homeGeminiEnvPath)) {
         return homeGeminiEnvPath;
       }

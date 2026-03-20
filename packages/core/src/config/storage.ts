@@ -118,6 +118,9 @@ export class Storage {
   }
 
   static getGlobalQwenDir(): string {
+    if (process.env.QWEN_CODE_HOME) {
+      return process.env.QWEN_CODE_HOME;
+    }
     const homeDir = os.homedir();
     if (!homeDir) {
       return path.join(os.tmpdir(), '.qwen');
@@ -233,10 +236,14 @@ export class Storage {
   }
 
   getUserSkillsDirs(): string[] {
+    const globalDir = Storage.getGlobalQwenDir();
+    const dirs = [path.join(globalDir, 'skills')];
     const homeDir = os.homedir() || os.tmpdir();
-    return SKILL_PROVIDER_CONFIG_DIRS.map((dir) =>
-      path.join(homeDir, dir, 'skills'),
-    );
+    for (const dir of SKILL_PROVIDER_CONFIG_DIRS) {
+      const p = path.join(homeDir, dir, 'skills');
+      if (!dirs.includes(p)) dirs.push(p);
+    }
+    return dirs;
   }
 
   /**
