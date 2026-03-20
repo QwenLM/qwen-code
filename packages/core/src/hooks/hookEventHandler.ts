@@ -48,13 +48,6 @@ export class HookEventHandler {
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
 
-  /**
-   * Track reported failures to suppress duplicate warnings during streaming.
-   * Uses a WeakMap with the original request object as a key to ensure
-   * failures are only reported once per logical model interaction.
-   */
-  private readonly reportedFailures = new WeakMap<object, Set<string>>();
-
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
@@ -342,7 +335,6 @@ export class HookEventHandler {
     eventName: HookEventName,
     input: HookInput,
     context?: HookEventContext,
-    requestContext?: object,
   ): Promise<AggregatedHookResult> {
     try {
       // Create execution plan
@@ -398,13 +390,7 @@ export class HookEventHandler {
       this.processCommonHookOutputFields(aggregated);
 
       // Log hook execution for telemetry
-      this.logHookExecution(
-        eventName,
-        input,
-        results,
-        aggregated,
-        requestContext,
-      );
+      this.logHookExecution(eventName, input, results, aggregated);
 
       return aggregated;
     } catch (error) {
@@ -469,7 +455,6 @@ export class HookEventHandler {
     input: HookInput,
     results: HookExecutionResult[],
     aggregated: AggregatedHookResult,
-    requestContext?: object,
   ): void {
     const failedHooks = results.filter((r) => !r.success);
     const successCount = results.length - failedHooks.length;
@@ -480,27 +465,9 @@ export class HookEventHandler {
         .map((r) => this.getHookNameFromResult(r))
         .join(', ');
 
-      let shouldEmit = true;
-      if (requestContext) {
-        let reportedSet = this.reportedFailures.get(requestContext);
-        if (!reportedSet) {
-          reportedSet = new Set<string>();
-          this.reportedFailures.set(requestContext, reportedSet);
-        }
-
-        const failureKey = `${eventName}:${failedNames}`;
-        if (reportedSet.has(failureKey)) {
-          shouldEmit = false;
-        } else {
-          reportedSet.add(failureKey);
-        }
-      }
-
-      if (shouldEmit) {
-        debugLogger.warn(
-          `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.`,
-        );
-      }
+      debugLogger.warn(
+        `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.`,
+      );
     } else {
       debugLogger.debug(
         `Hook execution for ${eventName}: ${successCount} hooks executed successfully, ` +
