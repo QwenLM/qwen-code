@@ -57,13 +57,9 @@ import {
   recordSubagentExecutionMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
-<<<<<<< HEAD
-  recordHookCallMetrics,
-=======
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
->>>>>>> main
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
