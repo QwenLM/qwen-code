@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as vscode from 'vscode';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -83,7 +82,6 @@ export class AcpConnection {
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      QWEN_IDE_LANGUAGE: vscode.env.language,
     };
 
     const proxyArg = extraArgs.find(

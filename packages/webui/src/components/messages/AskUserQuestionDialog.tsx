@@ -9,7 +9,6 @@
 
 import type { FC } from 'react';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { t } from '../../utils/i18n.js';
 
 export interface QuestionOption {
   label: string;
@@ -298,7 +297,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
         }`}
         onClick={() => setCurrentQuestionIndex(totalTabs - 1)}
       >
-        <span>{t('Submit')}</span>
+        <span>{'Submit'}</span>
       </button>
     </div>
   );
@@ -365,7 +364,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
             }}
             onClick={onCancel}
           >
-            {t('Cancel')}
+            {'Cancel'}
           </button>
         </div>
       </div>
@@ -518,7 +517,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
           }}
           onClick={onCancel}
         >
-          {t('Cancel')}
+          {'Cancel'}
         </button>
       </div>
     </div>

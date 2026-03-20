@@ -139,18 +139,21 @@ class QwenAgent implements Agent {
   }
 
   async authenticate({ methodId, _meta }: AuthenticateRequest): Promise<void> {
-    const method = z.nativeEnum(AuthType).parse(methodId);
-
-    if (method === AuthType.CODING_PLAN) {
+    if (methodId === 'coding-plan') {
       const apiKey = _meta?.['apiKey'] as string | undefined;
       const regionStr = _meta?.['region'] as string | undefined;
       if (!apiKey) {
         throw new Error('Missing apiKey for Coding Plan authentication');
       }
-      const region = regionStr === 'global' ? CodingPlanRegion.GLOBAL : CodingPlanRegion.CHINA;
+      const region =
+        regionStr === 'global'
+          ? CodingPlanRegion.GLOBAL
+          : CodingPlanRegion.CHINA;
       await applyCodingPlanAuth(apiKey, region, this.settings, this.config);
       return;
     }
+
+    const method = z.nativeEnum(AuthType).parse(methodId);
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {

@@ -9,7 +9,6 @@
 
 import { useState } from 'react';
 import type { FC } from 'react';
-import { t } from '../../utils/i18n.js';
 
 export interface AuthMethodInfo {
   id: string;
@@ -40,15 +39,10 @@ export const Onboarding: FC<OnboardingProps> = ({
   onGetStarted,
   authMethods = [],
   appName = 'Qwen Code',
-  subtitle,
   buttonText,
   errorMessage,
 }) => {
-  const defaultSubtitle = t(
-    'Unlock the power of AI to understand, navigate, and transform your codebase faster than ever before.',
-  );
-  const defaultButtonText = t('Get Started with Qwen Code');
-  const finalSubtitle = subtitle ?? defaultSubtitle;
+  const defaultButtonText = 'Get Started with Qwen Code';
   const finalButtonText = buttonText ?? defaultButtonText;
 
   const [selectedMethodId, setSelectedMethodId] = useState<string>('');
@@ -90,148 +84,156 @@ export const Onboarding: FC<OnboardingProps> = ({
     : undefined;
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-full p-5 md:p-10">
-      <div className="flex flex-col items-center gap-8 w-full max-w-md m-auto">
-        <div className="flex flex-col items-center gap-6 w-full">
-          {/* Application icon container */}
+    <div className="flex flex-col min-h-full p-6 text-[var(--vscode-editor-foreground)] font-sans">
+      <div className="flex flex-col w-full max-w-[460px] m-auto pt-4 pb-10">
+        <div className="flex flex-col gap-6 w-full">
           {trustedIconUrl && (
-            <div className="relative">
+            <div className="flex flex-col items-center w-full">
               <img
                 src={trustedIconUrl}
                 alt={`${appName} Logo`}
-                className="w-[80px] h-[80px] object-contain"
+                className="w-[72px] h-[72px] object-contain mb-5"
               />
+              <div className="w-full border-b border-dashed border-[var(--vscode-widget-border,var(--vscode-editorGroup-border,rgba(255,255,255,0.15)))] opacity-60"></div>
             </div>
           )}
 
-          <div className="text-center">
-            <h1 className="text-2xl font-bold text-[var(--app-primary-foreground)] mb-2">
-              {appName === 'Qwen Code'
-                ? t('Welcome to Qwen Code')
-                : `Welcome to ${appName}`}
-            </h1>
-            <p className="text-[var(--app-secondary-foreground)] max-w-sm">
-              {finalSubtitle}
-            </p>
-          </div>
+          {!selectedMethodId && (
+            <div className="text-[14px] leading-relaxed text-[var(--vscode-editor-foreground)] mb-2 mt-2">
+              <p>
+                {appName === 'Qwen Code' ? 'Qwen Code' : appName} can be used
+                with Qwen OAuth for free daily requests, or you can configure
+                custom API providers and Coding Plan usage.
+              </p>
+            </div>
+          )}
 
           {errorMessage && (
-            <div className="w-full p-3 bg-red-500/10 border border-red-500/30 rounded-md text-red-500 text-sm break-words">
+            <div className="w-full p-3 bg-[var(--vscode-inputValidation-errorBackground,rgba(255,0,0,0.1))] border border-[var(--vscode-inputValidation-errorBorder,rgba(255,0,0,0.3))] rounded-md text-[var(--vscode-errorForeground,#f48771)] text-[13px] break-words">
               {errorMessage === 'Login failed. Please try again.'
-                ? t('Login failed. Please try again.')
+                ? 'Login failed. Please try again.'
                 : errorMessage}
             </div>
           )}
 
-          <div className="w-full flex flex-col gap-4 mt-4">
+          <div className="w-full flex flex-col">
             {!authMethods || authMethods.length === 0 ? (
               <button
                 onClick={() => onGetStarted('qwen-oauth')}
-                className="w-full px-4 py-3 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200"
+                className="w-full py-2.5 px-4 bg-[var(--vscode-button-background,var(--app-button-background))] text-[var(--vscode-button-foreground,#ffffff)] font-medium rounded-md text-[13px] shadow-sm hover:bg-[var(--vscode-button-hoverBackground,var(--app-button-hover-background))] transition-colors duration-200 border border-transparent"
               >
                 {finalButtonText}
               </button>
             ) : selectedMethodId === 'coding-plan' ? (
-              <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
-                <h3 className="font-bold text-lg mb-2">
-                  {t('Alibaba Cloud Coding Plan')}
+              <div className="flex flex-col gap-6 w-full text-left mt-2">
+                <h3 className="font-semibold text-[16px] text-[var(--vscode-editor-foreground)] mb-1">
+                  Configure Alibaba Cloud Coding Plan
                 </h3>
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm font-semibold">
-                    {t('API Key')}
+                <div className="flex flex-col gap-2">
+                  <label className="text-[13px] text-[var(--vscode-editor-foreground)]">
+                    Enter your API Key:
                   </label>
                   <input
                     type="password"
                     value={codingPlanKey}
                     onChange={(e) => setCodingPlanKey(e.target.value)}
                     placeholder="sk-..."
-                    className="px-3 py-2 bg-[var(--vscode-input-background)] border border-[var(--vscode-input-border)] text-[var(--vscode-input-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)]"
+                    className="w-full px-3 py-2.5 bg-[var(--vscode-input-background)] border border-[var(--vscode-inputBorder,rgba(255,255,255,0.1))] text-[var(--vscode-input-foreground)] rounded-md outline-none focus:border-[var(--vscode-focusBorder)] text-[13px]"
                   />
                 </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm font-semibold">{t('Region')}</label>
+                <div className="flex flex-col gap-2">
+                  <label className="text-[13px] text-[var(--vscode-editor-foreground)]">
+                    Select Region:
+                  </label>
                   <select
                     value={codingPlanRegion}
                     onChange={(e) => setCodingPlanRegion(e.target.value)}
-                    className="px-3 py-2 bg-[var(--vscode-dropdown-background)] border border-[var(--vscode-dropdown-border)] text-[var(--vscode-dropdown-foreground)] rounded w-full outline-none focus:border-[var(--vscode-focusBorder)] cursor-pointer"
+                    className="w-full px-3 py-2.5 bg-[var(--vscode-dropdown-background)] border border-[var(--vscode-dropdownBorder,rgba(255,255,255,0.1))] text-[var(--vscode-dropdown-foreground)] rounded-md outline-none focus:border-[var(--vscode-focusBorder)] text-[13px] cursor-pointer"
                   >
-                    <option value="china">
-                      {t('Alibaba Cloud (aliyun.com)')}
-                    </option>
+                    <option value="china">Alibaba Cloud (aliyun.com)</option>
                     <option value="global">
-                      {t('Alibaba Cloud (alibabacloud.com)')}
+                      Alibaba Cloud (alibabacloud.com)
                     </option>
                   </select>
                 </div>
-                <div className="flex gap-2 mt-2">
-                  <button
-                    onClick={() => setSelectedMethodId('')}
-                    className="flex-1 px-4 py-2 border border-[var(--app-button-background)] text-[var(--app-button-background)] bg-transparent font-medium rounded-lg hover:bg-[var(--app-button-background)] hover:bg-opacity-10 transition-colors duration-200"
-                  >
-                    {t('Back')}
-                  </button>
+                <div className="flex flex-col gap-3 mt-2">
                   <button
                     onClick={handleCodingPlanSubmit}
                     disabled={!codingPlanKey.trim()}
-                    className="flex-1 px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full py-2.5 px-4 bg-[var(--vscode-button-background,var(--app-button-background))] text-[var(--vscode-button-foreground,#ffffff)] border border-transparent font-medium rounded-md text-[13px] transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--vscode-button-hoverBackground,var(--app-button-hover-background))]"
                   >
-                    {t('Submit')}
+                    Continue
+                  </button>
+                  <button
+                    onClick={() => setSelectedMethodId('')}
+                    className="w-full py-2.5 px-4 bg-[var(--vscode-button-secondaryBackground,rgba(255,255,255,0.08))] text-[var(--vscode-button-secondaryForeground,var(--vscode-editor-foreground))] border border-transparent font-medium rounded-md text-[13px] transition-colors duration-200 hover:bg-[var(--vscode-button-secondaryHoverBackground,rgba(255,255,255,0.15))]"
+                  >
+                    Back
                   </button>
                 </div>
               </div>
             ) : selectedMethodId === 'openai' ? (
-              <div className="flex flex-col gap-4 w-full text-left bg-[var(--app-input-background)] p-4 rounded-md border border-[var(--app-input-border)]">
-                <h3 className="font-bold text-lg mb-2">
-                  {t('Custom Configuration')}
+              <div className="flex flex-col gap-6 w-full text-left mt-2">
+                <h3 className="font-semibold text-[16px] text-[var(--vscode-editor-foreground)] mb-1">
+                  Custom Configuration
                 </h3>
-                <div className="text-sm text-[var(--app-secondary-foreground)]">
-                  <p className="mb-2">
-                    {t(
-                      'You can configure your API key and models in settings.json',
-                    )}
+                <div className="text-[14px] leading-relaxed text-[var(--vscode-descriptionForeground,#aaa)] flex flex-col gap-4">
+                  <p>
+                    You can configure your API key and models in the{' '}
+                    <code className="bg-[var(--vscode-textCodeBlock-background,rgba(128,128,128,0.2))] text-[var(--vscode-textPreformat-foreground)] px-1.5 py-0.5 rounded font-mono text-[12px]">
+                      settings.json
+                    </code>{' '}
+                    file.
                   </p>
-                  <p className="mb-2">
-                    {t('Refer to the documentation for setup instructions.')}
-                  </p>
+                  <p>Refer to the documentation for setup instructions:</p>
                   <a
-                    href={t(
-                      'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/',
-                    )}
+                    href="https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[var(--vscode-textLink-foreground)] hover:text-[var(--vscode-textLink-activeForeground)] underline break-all"
+                    className="text-[var(--vscode-textLink-foreground)] hover:text-[var(--vscode-textLink-activeForeground)] underline break-all inline-block"
                   >
-                    {t(
-                      'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/',
-                    )}
+                    https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/
                   </a>
                 </div>
-                <div className="flex gap-2 mt-4">
+                <div className="flex flex-col gap-3 mt-4">
                   <button
                     onClick={() => setSelectedMethodId('')}
-                    className="w-full px-4 py-2 bg-[var(--app-primary,var(--app-button-background))] text-[var(--app-button-foreground,#ffffff)] font-medium rounded-lg shadow-sm hover:bg-[var(--app-primary-hover,var(--app-button-hover-background))] transition-colors duration-200"
+                    className="w-full py-2.5 px-4 bg-[var(--vscode-button-secondaryBackground,rgba(255,255,255,0.08))] text-[var(--vscode-button-secondaryForeground,var(--vscode-editor-foreground))] border border-transparent font-medium rounded-md text-[13px] transition-colors duration-200 hover:bg-[var(--vscode-button-secondaryHoverBackground,rgba(255,255,255,0.15))]"
                   >
-                    {t('Back')}
+                    Back
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col gap-3 w-full">
-                <h3 className="text-sm font-semibold mb-1 text-[var(--app-secondary-foreground)] uppercase drop-shadow-sm border-b pb-1 border-[var(--app-input-border)]">
-                  {t('Select Authentication Method')}
-                </h3>
-                {authMethods.map((method) => (
-                  <button
-                    key={method.id}
-                    onClick={() => handleLogin(method.id)}
-                    className="w-full flex flex-col items-start text-left px-4 py-3 bg-[var(--app-input-background)] text-[var(--app-primary-foreground)] border border-[var(--app-input-border)] hover:border-[var(--vscode-focusBorder)] rounded-lg transition-colors duration-200 relative group overflow-hidden"
-                  >
-                    <div className="font-medium">{method.name}</div>
-                    <div className="text-xs text-[var(--app-secondary-foreground)] mt-1">
-                      {method.description}
-                    </div>
-                  </button>
-                ))}
+              <div className="flex flex-col w-full mt-2">
+                <div className="text-[14px] font-medium text-[var(--vscode-editor-foreground)] mb-4">
+                  How do you want to log in?
+                </div>
+                <div className="flex flex-col gap-5">
+                  {authMethods.map((method) => {
+                    const isPrimary = method.id === 'qwen-oauth';
+                    return (
+                      <div
+                        key={method.id}
+                        className="flex flex-col gap-2 w-full"
+                      >
+                        <button
+                          onClick={() => handleLogin(method.id)}
+                          className={`w-full py-2.5 px-4 font-medium rounded-md text-[13px] transition-colors duration-200 border border-transparent flex justify-center items-center ${
+                            isPrimary
+                              ? 'bg-[var(--vscode-button-background,var(--app-button-background))] text-[var(--vscode-button-foreground,#ffffff)] hover:bg-[var(--vscode-button-hoverBackground,var(--app-button-hover-background))] shadow-sm'
+                              : 'bg-[var(--vscode-button-secondaryBackground,rgba(255,255,255,0.08))] text-[var(--vscode-button-secondaryForeground,var(--vscode-editor-foreground))] hover:bg-[var(--vscode-button-secondaryHoverBackground,rgba(255,255,255,0.15))]'
+                          }`}
+                        >
+                          {method.name}
+                        </button>
+                        <div className="text-[13px] text-[var(--vscode-descriptionForeground,#aaa)] leading-relaxed text-left">
+                          {method.description}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>

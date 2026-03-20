@@ -46,7 +46,7 @@ export class WebViewContent {
     const safeScriptUri = escapeHtml(scriptUri.toString());
 
     return `<!DOCTYPE html>
-<html lang="${vscode.env.language}">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">

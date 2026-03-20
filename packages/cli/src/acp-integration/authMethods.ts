@@ -6,27 +6,24 @@
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import type { AuthMethod } from '@agentclientprotocol/sdk';
-import { t } from '../i18n/index.js';
 
 export function buildAuthMethods(): AuthMethod[] {
   return [
     {
       id: AuthType.QWEN_OAUTH,
-      name: t('Qwen OAuth'),
-      description: t(
+      name: 'Qwen OAuth',
+      description:
         'OAuth authentication for Qwen models with free daily requests',
-      ),
       _meta: {
         type: 'terminal',
         args: ['--auth-type=qwen-oauth'],
       },
     },
     {
-      id: AuthType.CODING_PLAN,
-      name: t('Alibaba Cloud Coding Plan'),
-      description: t(
+      id: 'coding-plan',
+      name: 'Alibaba Cloud Coding Plan',
+      description:
         'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
-      ),
       _meta: {
         type: 'terminal',
         args: ['--auth-type=coding-plan'],
@@ -34,10 +31,9 @@ export function buildAuthMethods(): AuthMethod[] {
     },
     {
       id: AuthType.USE_OPENAI,
-      name: t('Bring your own API key'),
-      description: t(
+      name: 'Bring your own API key',
+      description:
         'Use coding plan credentials or your own api-keys/providers.',
-      ),
       _meta: {
         type: 'terminal',
         args: ['--auth-type=openai'],

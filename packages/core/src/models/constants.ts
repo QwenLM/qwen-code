@@ -87,11 +87,6 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
-  'coding-plan': {
-    apiKey: ['BAILIAN_CODING_PLAN_API_KEY'],
-    baseUrl: [],
-    model: [],
-  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
