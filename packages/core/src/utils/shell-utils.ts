@@ -126,6 +126,16 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let i = 0;
 
+  const previousNonWhitespaceChar = (index: number): string | undefined => {
+    for (let j = index - 1; j >= 0; j--) {
+      const ch = command[j];
+      if (ch && !/\s/.test(ch)) {
+        return ch;
+      }
+    }
+    return undefined;
+  };
+
   while (i < command.length) {
     const char = command[i];
     const nextChar = command[i + 1];
@@ -145,14 +155,30 @@ export function splitCommands(command: string): string[] {
     if (!inSingleQuotes && !inDoubleQuotes) {
       if (
         (char === '&' && nextChar === '&') ||
-        (char === '|' && nextChar === '|')
+        (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
         commands.push(currentCommand.trim());
         currentCommand = '';
         i++; // Skip the next character
-      } else if (char === ';' || char === '&' || char === '|') {
+      } else if (char === ';') {
         commands.push(currentCommand.trim());
         currentCommand = '';
+      } else if (char === '&') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>' || prevChar === '<') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
+      } else if (char === '|') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
         commands.push(currentCommand.trim());
