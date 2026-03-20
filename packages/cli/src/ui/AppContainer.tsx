@@ -958,6 +958,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const dialogsVisibleRef = useRef(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1244,8 +1245,9 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Dismiss or cancel btw side-question on Escape
-        if (btwItem) {
+        // Dismiss or cancel btw side-question on Escape,
+        // but only when btw is actually visible (not hidden behind a dialog).
+        if (btwItem && !dialogsVisibleRef.current) {
           cancelBtw();
           return;
         }
@@ -1292,8 +1294,13 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Dismiss completed btw side-question on Space or Enter,
-      // but only when the input buffer is empty so we don't swallow user keystrokes.
-      if (btwItem && !btwItem.btw.isPending && buffer.text.length === 0) {
+      // but only when btw is visible and the input buffer is empty.
+      if (
+        btwItem &&
+        !btwItem.btw.isPending &&
+        !dialogsVisibleRef.current &&
+        buffer.text.length === 0
+      ) {
         if (key.name === 'return' || key.sequence === ' ') {
           setBtwItem(null);
           return;
@@ -1430,6 +1437,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isExtensionsManagerDialogOpen;
+  dialogsVisibleRef.current = dialogsVisible;
 
   const {
     isFeedbackDialogOpen,

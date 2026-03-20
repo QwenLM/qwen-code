@@ -37,6 +37,7 @@ import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
+import { isBtwCommand } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -385,10 +386,12 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
-      addItemWithRecording(
-        { type: MessageType.USER, text: trimmed },
-        userMessageTimestamp,
-      );
+      if (!isBtwCommand(trimmed)) {
+        addItemWithRecording(
+          { type: MessageType.USER, text: trimmed },
+          userMessageTimestamp,
+        );
+      }
 
       let hasError = false;
       const {

@@ -31,12 +31,17 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({ btw }) => (
       </Text>
     </Box>
     {btw.isPending ? (
-      <Box>
-        <Text color={Colors.AccentYellow}>{'+ '}</Text>
-        <Text color={Colors.AccentYellow}>{t('Answering...')}</Text>
+      <Box flexDirection="column" marginTop={1}>
+        <Box>
+          <Text color={Colors.AccentYellow}>{'+ '}</Text>
+          <Text color={Colors.AccentYellow}>{t('Answering...')}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>{t('Press Escape to cancel')}</Text>
+        </Box>
       </Box>
     ) : (
-      <Box flexDirection="column">
+      <Box flexDirection="column" marginTop={1}>
         <Text wrap="wrap">{btw.answer}</Text>
         <Box marginTop={1}>
           <Text dimColor>{t('Press Space, Enter, or Escape to dismiss')}</Text>

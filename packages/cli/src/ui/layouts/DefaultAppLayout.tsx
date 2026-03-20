@@ -55,11 +55,6 @@ export const DefaultAppLayout: React.FC = () => {
         <>
           {/* Main view: conversation history + main composer / dialogs */}
           <MainContent />
-          {uiState.btwItem && (
-            <Box marginX={2} width={uiState.mainAreaWidth}>
-              <BtwMessage btw={uiState.btwItem.btw} />
-            </Box>
-          )}
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {uiState.dialogsVisible ? (
               <Box
@@ -71,6 +66,10 @@ export const DefaultAppLayout: React.FC = () => {
                   terminalWidth={uiState.terminalWidth}
                   addItem={uiState.historyManager.addItem}
                 />
+              </Box>
+            ) : uiState.btwItem ? (
+              <Box marginX={2} width={terminalWidth - 4}>
+                <BtwMessage btw={uiState.btwItem.btw} />
               </Box>
             ) : (
               <Composer />

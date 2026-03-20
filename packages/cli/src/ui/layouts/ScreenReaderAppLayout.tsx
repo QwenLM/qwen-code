@@ -26,18 +26,16 @@ export const ScreenReaderAppLayout: React.FC = () => {
         <MainContent />
       </Box>
 
-      {uiState.btwItem && (
-        <Box marginX={2} width={uiState.mainAreaWidth}>
-          <BtwMessage btw={uiState.btwItem.btw} />
-        </Box>
-      )}
-
       {uiState.dialogsVisible ? (
         <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
           <DialogManager
             terminalWidth={uiState.terminalWidth}
             addItem={uiState.historyManager.addItem}
           />
+        </Box>
+      ) : uiState.btwItem ? (
+        <Box marginX={2} width={uiState.terminalWidth - 4}>
+          <BtwMessage btw={uiState.btwItem.btw} />
         </Box>
       ) : (
         <Composer />
