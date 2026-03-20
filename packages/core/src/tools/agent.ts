@@ -534,7 +534,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }
         } catch (hookError) {
           debugLogger.warn(
-            `[TaskTool] SubagentStart hook failed, continuing execution: ${hookError}`,
+            `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
           );
         }
       }
