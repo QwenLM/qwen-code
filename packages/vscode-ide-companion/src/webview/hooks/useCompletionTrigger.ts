@@ -21,7 +21,7 @@ interface CompletionTriggerState {
  * Based on vscode-copilot-chat's AttachContextAction
  */
 export function useCompletionTrigger(
-  inputRef: RefObject<HTMLDivElement>,
+  inputRef: RefObject<HTMLDivElement | null>,
   getCompletionItems: (
     trigger: '@' | '/',
     query: string,

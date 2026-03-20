@@ -59,7 +59,7 @@ const mockConfig = {
   },
   getTruncateToolOutputThreshold: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-  getAllowedTools: vi.fn(() => []),
+  getPermissionsAllow: vi.fn(() => []),
   getContentGeneratorConfig: () => ({
     model: 'test-model',
     authType: 'gemini',
@@ -83,24 +83,14 @@ const mockTool = new MockTool({
   name: 'mockTool',
   displayName: 'Mock Tool',
   execute: vi.fn(),
-  shouldConfirmExecute: vi.fn(),
-});
-const mockToolWithLiveOutput = new MockTool({
-  name: 'mockToolWithLiveOutput',
-  displayName: 'Mock Tool With Live Output',
-  description: 'A mock tool for testing',
-  params: {},
-  isOutputMarkdown: true,
-  canUpdateOutput: true,
-  execute: vi.fn(),
-  shouldConfirmExecute: vi.fn(),
 });
 let mockOnUserConfirmForToolConfirmation: Mock;
 const mockToolRequiresConfirmation = new MockTool({
   name: 'mockToolRequiresConfirmation',
   displayName: 'Mock Tool Requires Confirmation',
   execute: vi.fn(),
-  shouldConfirmExecute: vi.fn(),
+  getDefaultPermission: () => Promise.resolve('ask' as any),
+  getConfirmationDetails: vi.fn(),
 });
 
 describe('useReactToolScheduler in YOLO Mode', () => {
@@ -112,7 +102,7 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     setPendingHistoryItem = vi.fn();
     mockToolRegistry.getTool.mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
-    (mockToolRequiresConfirmation.shouldConfirmExecute as Mock).mockClear();
+    (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
     // IMPORTANT: Enable YOLO mode for this test suite
     (mockConfig.getApprovalMode as Mock).mockReturnValue(ApprovalMode.YOLO);
@@ -218,17 +208,14 @@ describe('useReactToolScheduler', () => {
 
     mockToolRegistry.getTool.mockClear();
     (mockTool.execute as Mock).mockClear();
-    (mockTool.shouldConfirmExecute as Mock).mockClear();
-    (mockToolWithLiveOutput.execute as Mock).mockClear();
-    (mockToolWithLiveOutput.shouldConfirmExecute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
-    (mockToolRequiresConfirmation.shouldConfirmExecute as Mock).mockClear();
+    (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
     mockOnUserConfirmForToolConfirmation = vi.fn();
     (
-      mockToolRequiresConfirmation.shouldConfirmExecute as Mock
+      mockToolRequiresConfirmation.getConfirmationDetails as Mock
     ).mockImplementation(
-      async (): Promise<ToolCallConfirmationDetails | null> =>
+      async (): Promise<ToolCallConfirmationDetails> =>
         ({
           onConfirm: mockOnUserConfirmForToolConfirmation,
           fileName: 'mockToolRequiresConfirmation.ts',
@@ -267,7 +254,6 @@ describe('useReactToolScheduler', () => {
       llmContent: 'Tool output',
       returnDisplay: 'Formatted tool output',
     } as ToolResult);
-    (mockTool.shouldConfirmExecute as Mock).mockResolvedValue(null);
 
     const { result } = renderScheduler();
     const schedule = result.current[1];
@@ -352,10 +338,11 @@ describe('useReactToolScheduler', () => {
     expect(result.current[0]).toEqual([]);
   });
 
-  it('should handle error during shouldConfirmExecute', async () => {
+  it('should handle error during getDefaultPermission', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
     const confirmError = new Error('Confirmation check failed');
-    (mockTool.shouldConfirmExecute as Mock).mockRejectedValue(confirmError);
+    const originalGetDefaultPermission = mockTool.getDefaultPermission;
+    mockTool.getDefaultPermission = () => Promise.reject(confirmError);
 
     const { result } = renderScheduler();
     const schedule = result.current[1];
@@ -385,11 +372,11 @@ describe('useReactToolScheduler', () => {
       }),
     ]);
     expect(result.current[0]).toEqual([]);
+    mockTool.getDefaultPermission = originalGetDefaultPermission;
   });
 
   it('should handle error during execute', async () => {
     mockToolRegistry.getTool.mockReturnValue(mockTool);
-    (mockTool.shouldConfirmExecute as Mock).mockResolvedValue(null);
     const execError = new Error('Execution failed');
     (mockTool.execute as Mock).mockRejectedValue(execError);
 
@@ -532,7 +519,6 @@ describe('mapToDisplay', () => {
     name: 'testTool',
     displayName: 'Test Tool Display',
     execute: vi.fn(),
-    shouldConfirmExecute: vi.fn(),
   });
 
   const baseResponse: ToolCallResponseInfo = {
@@ -767,7 +753,6 @@ describe('mapToDisplay', () => {
       displayName: baseTool.displayName,
       isOutputMarkdown: true,
       execute: vi.fn(),
-      shouldConfirmExecute: vi.fn(),
     });
     const toolCall2: ToolCall = {
       request: { ...baseRequest, callId: 'call2' },

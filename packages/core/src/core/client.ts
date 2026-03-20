@@ -46,7 +46,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { TaskTool } from '../tools/task.js';
+import { AgentTool } from '../tools/agent.js';
 
 // Telemetry
 import {
@@ -128,9 +128,9 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      this.chat = await this.startChat(resumedHistory);
+      await this.startChat(resumedHistory);
     } else {
-      this.chat = await this.startChat();
+      await this.startChat();
     }
   }
 
@@ -173,7 +173,11 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
-  async setTools(): Promise<void> {
+  setTools(): void {
+    if (!this.isInitialized()) {
+      return;
+    }
+
     const toolRegistry = this.config.getToolRegistry();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
@@ -181,7 +185,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
-    this.chat = await this.startChat();
+    await this.startChat();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -223,25 +227,24 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
     this.hasFailedCompressionAttempt = false;
 
-    const toolRegistry = this.config.getToolRegistry();
-    const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
-
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
       const systemInstruction = this.getMainSessionSystemInstruction();
 
-      return new GeminiChat(
+      this.chat = new GeminiChat(
         this.config,
         {
           systemInstruction,
-          tools,
         },
         history,
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      this.setTools();
+
+      return this.chat;
     } catch (error) {
       await reportError(
         error,
@@ -605,12 +608,14 @@ export class GeminiClient {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
-      const hasTaskTool = this.config.getToolRegistry().getTool(TaskTool.Name);
+      const hasAgentTool = this.config
+        .getToolRegistry()
+        .getTool(AgentTool.Name);
       const subagents = (await this.config.getSubagentManager().listSubagents())
         .filter((subagent) => subagent.level !== 'builtin')
         .map((subagent) => subagent.name);
 
-      if (hasTaskTool && subagents.length > 0) {
+      if (hasAgentTool && subagents.length > 0) {
         systemReminders.push(getSubagentSystemReminder(subagents));
       }
 
@@ -857,7 +862,7 @@ export class GeminiClient {
           compressedHistory: newHistory,
         });
 
-        this.chat = await this.startChat(newHistory);
+        await this.startChat(newHistory);
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }

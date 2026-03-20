@@ -316,7 +316,8 @@ describe('subagent.ts', () => {
           name: 'risky_tool',
           schema: { parametersJsonSchema: { type: 'object', properties: {} } },
           build: vi.fn().mockReturnValue({
-            shouldConfirmExecute: vi.fn().mockResolvedValue({
+            getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
               type: 'exec',
               title: 'Confirm',
               command: 'rm -rf /',
@@ -347,7 +348,7 @@ describe('subagent.ts', () => {
           name: 'safe_tool',
           schema: { parametersJsonSchema: { type: 'object', properties: {} } },
           build: vi.fn().mockReturnValue({
-            shouldConfirmExecute: vi.fn().mockResolvedValue(null),
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           }),
         };
         const { config } = await createMockConfig({
@@ -722,7 +723,7 @@ describe('subagent.ts', () => {
           params: { path: '.' },
           getDescription: vi.fn().mockReturnValue('List files'),
           toolLocations: vi.fn().mockReturnValue([]),
-          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           execute: vi.fn().mockResolvedValue({
             llmContent: 'file1.txt\nfile2.ts',
             returnDisplay: 'Listed 2 files',
@@ -1056,7 +1057,7 @@ describe('subagent.ts', () => {
           params: { path: 'test.txt' },
           getDescription: vi.fn().mockReturnValue('Read file'),
           toolLocations: vi.fn().mockReturnValue([]),
-          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           execute: vi.fn().mockImplementation(async () => {
             executedTools.push('read_file');
             return {
@@ -1070,7 +1071,7 @@ describe('subagent.ts', () => {
           params: { path: 'test.txt', content: 'malicious content' },
           getDescription: vi.fn().mockReturnValue('Edit file'),
           toolLocations: vi.fn().mockReturnValue([]),
-          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           execute: vi.fn().mockImplementation(async () => {
             executedTools.push('edit_file');
             return {

@@ -785,6 +785,8 @@ export default {
   'No, suggest changes (esc)': 'いいえ、変更を提案 (Esc)',
   "Allow execution of: '{{command}}'?": "'{{command}}' の実行を許可しますか?",
   'Yes, allow always ...': 'はい、常に許可...',
+  'Always allow in this project': 'このプロジェクトで常に許可',
+  'Always allow for this user': 'このユーザーに常に許可',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -905,6 +907,73 @@ export default {
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
   'Manage folder trust settings': 'フォルダ信頼設定を管理',
+  'Manage permission rules': '権限ルールを管理',
+  Allow: '許可',
+  Ask: '確認',
+  Deny: '拒否',
+  Workspace: 'ワークスペース',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code は許可されたツールを使用する前に確認しません。',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code はこれらのツールを使用する前に確認します。',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code は拒否されたツールを使用できません。',
+  'Manage trusted directories for this workspace.':
+    'このワークスペースの信頼済みディレクトリを管理します。',
+  'Any use of the {{tool}} tool': '{{tool}} ツールのすべての使用',
+  "{{tool}} commands matching '{{pattern}}'":
+    "'{{pattern}}' に一致する {{tool}} コマンド",
+  'From user settings': 'ユーザー設定から',
+  'From project settings': 'プロジェクト設定から',
+  'From session': 'セッションから',
+  'Project settings (local)': 'プロジェクト設定（ローカル）',
+  'Saved in .qwen/settings.local.json': '.qwen/settings.local.json に保存',
+  'Project settings': 'プロジェクト設定',
+  'Checked in at .qwen/settings.json': '.qwen/settings.json にチェックイン',
+  'User settings': 'ユーザー設定',
+  'Saved in at ~/.qwen/settings.json': '~/.qwen/settings.json に保存',
+  'Add a new rule…': '新しいルールを追加…',
+  'Add {{type}} permission rule': '{{type}}権限ルールを追加',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    '権限ルールはツール名で、オプションで括弧内に指定子を付けます。',
+  'e.g.,': '例：',
+  or: 'または',
+  'Enter permission rule…': '権限ルールを入力…',
+  'Enter to submit · Esc to cancel': 'Enter で送信 · Esc でキャンセル',
+  'Where should this rule be saved?': 'このルールをどこに保存しますか？',
+  'Enter to confirm · Esc to cancel': 'Enter で確認 · Esc でキャンセル',
+  'Delete {{type}} rule?': '{{type}}ルールを削除しますか？',
+  'Are you sure you want to delete this permission rule?':
+    'この権限ルールを削除してもよろしいですか？',
+  'Permissions:': '権限：',
+  '(←/→ or tab to cycle)': '（←/→ または Tab で切替）',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '↑↓ でナビゲート · Enter で選択 · 入力で検索 · Esc でキャンセル',
+  'Search…': '検索…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    '/trust を使用してこのワークスペースのフォルダ信頼設定を管理します。',
+  // Workspace directory management
+  'Add directory…': 'ディレクトリを追加…',
+  'Add directory to workspace': 'ワークスペースにディレクトリを追加',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code はワークスペース内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code はこのディレクトリ内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Enter the path to the directory:': 'ディレクトリのパスを入力してください:',
+  'Enter directory path…': 'ディレクトリパスを入力…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab で補完 · Enter で追加 · Esc でキャンセル',
+  'Remove directory?': 'ディレクトリを削除しますか？',
+  'Are you sure you want to remove this directory from the workspace?':
+    'このディレクトリをワークスペースから削除してもよろしいですか？',
+  '  (Original working directory)': '  （元の作業ディレクトリ）',
+  '  (from settings)': '  （設定より）',
+  'Directory does not exist.': 'ディレクトリが存在しません。',
+  'Path is not a directory.': 'パスはディレクトリではありません。',
+  'This directory is already in the workspace.':
+    'このディレクトリはすでにワークスペースに含まれています。',
+  'Already covered by existing directory: {{dir}}':
+    '既存のディレクトリによって既にカバーされています: {{dir}}',
   // Status Bar
   'Using:': '使用中:',
   '{{count}} open file': '{{count}} 個のファイルを開いています',

@@ -9,7 +9,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ToolResult,
   ToolResultDisplay,
-  TaskResultDisplay,
+  AgentResultDisplay,
 } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type {
@@ -32,28 +32,30 @@ import type {
   AgentErrorEvent,
   AgentApprovalRequestEvent,
 } from '../agents/runtime/agent-events.js';
+import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { PermissionMode } from '../hooks/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
 
-export interface TaskParams {
+export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type: string;
 }
 
-const debugLogger = createDebugLogger('TASK');
+const debugLogger = createDebugLogger('AGENT');
 
 /**
- * Task tool that enables primary agents to delegate tasks to specialized subagents.
- * The tool dynamically loads available subagents and includes them in its description
+ * Agent tool that enables primary agents to delegate tasks to specialized agents.
+ * The tool dynamically loads available agents and includes them in its description
  * for the model to choose from.
  */
-export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
-  static readonly Name: string = ToolNames.TASK;
+export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
+  static readonly Name: string = ToolNames.AGENT;
 
   private subagentManager: SubagentManager;
-  private availableSubagents: SubagentConfig[] = [];
+  private availableSubagents: SubagentConfig[] =
+    BuiltinAgentRegistry.getBuiltinAgents();
   private readonly removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
@@ -80,9 +82,9 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     };
 
     super(
-      TaskTool.Name,
-      ToolDisplayNames.TASK,
-      'Delegate tasks to specialized subagents. Loading available subagents...', // Initial description
+      AgentTool.Name,
+      ToolDisplayNames.AGENT,
+      'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
       Kind.Other,
       initialSchema,
       true, // isOutputMarkdown
@@ -111,13 +113,13 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
       this.availableSubagents = await this.subagentManager.listSubagents();
       this.updateDescriptionAndSchema();
     } catch (error) {
-      debugLogger.warn('Failed to load subagents for Task tool:', error);
-      this.availableSubagents = [];
+      debugLogger.warn('Failed to load agents for Agent tool:', error);
+      this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient && geminiClient.isInitialized()) {
+      if (geminiClient) {
         await geminiClient.setTools();
       }
     }
@@ -137,37 +139,40 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         .join('\n');
     }
 
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
+    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
+The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
 When NOT to use the Agent tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
+- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
 
+
 Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+- Always include a short description (3-5 words) summarizing what the agent will do
+- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
+- The agent's outputs should generally be trusted
+- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
+- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 
 Example usage:
+
 <example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a signficant piece of code
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
+"test-runner": use this agent after you are done writing code to run tests
+"greeting-responder": use this agent to respond to user greetings with a friendly joke
+</example_agent_descriptions>
 
 <example>
 user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the Write tool to write a function that checks if a number is prime
 assistant: I'm going to use the Write tool to write the following code:
 <code>
 function isPrime(n) {
@@ -179,10 +184,9 @@ function isPrime(n) {
 }
 </code>
 <commentary>
-Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
 </commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the with the code-reviewer agent 
+assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
 </example>
 
 <example>
@@ -190,13 +194,12 @@ user: "Hello"
 <commentary>
 Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
 </commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-responder agent"
 </example>
 `;
 
     // Update description using object property assignment since it's readonly
-    (this as { description: string }).description =
-      baseDescription + subagentDescriptions;
+    (this as { description: string }).description = baseDescription;
 
     // Generate dynamic schema with enum of available subagent names
     const subagentNames = this.availableSubagents.map((s) => s.name);
@@ -218,7 +221,7 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
     }
   }
 
-  override validateToolParams(params: TaskParams): string | null {
+  override validateToolParams(params: AgentParams): string | null {
     // Validate required fields
     if (
       !params.description ||
@@ -244,9 +247,10 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
       return 'Parameter "subagent_type" must be a non-empty string.';
     }
 
-    // Validate that the subagent exists
+    // Validate that the subagent exists (case-insensitive)
+    const lowerType = params.subagent_type.toLowerCase();
     const subagentExists = this.availableSubagents.some(
-      (subagent) => subagent.name === params.subagent_type,
+      (subagent) => subagent.name.toLowerCase() === lowerType,
     );
 
     if (!subagentExists) {
@@ -257,8 +261,8 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
     return null;
   }
 
-  protected createInvocation(params: TaskParams) {
-    return new TaskToolInvocation(this.config, this.subagentManager, params);
+  protected createInvocation(params: AgentParams) {
+    return new AgentToolInvocation(this.config, this.subagentManager, params);
   }
 
   getAvailableSubagentNames(): string[] {
@@ -266,15 +270,15 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
   }
 }
 
-class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
+class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
-  private currentDisplay: TaskResultDisplay | null = null;
-  private currentToolCalls: TaskResultDisplay['toolCalls'] = [];
+  private currentDisplay: AgentResultDisplay | null = null;
+  private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
-    params: TaskParams,
+    params: AgentParams,
   ) {
     super(params);
   }
@@ -283,7 +287,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
    * Updates the current display state and calls updateOutput if provided
    */
   private updateDisplay(
-    updates: Partial<TaskResultDisplay>,
+    updates: Partial<AgentResultDisplay>,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
     if (!this.currentDisplay) return;
@@ -410,6 +414,8 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
               ToolConfirmationOutcome.ProceedAlways,
               ToolConfirmationOutcome.ProceedAlwaysServer,
               ToolConfirmationOutcome.ProceedAlwaysTool,
+              ToolConfirmationOutcome.ProceedAlwaysProject,
+              ToolConfirmationOutcome.ProceedAlwaysUser,
             ]);
 
             if (proceedOutcomes.has(outcome)) {
@@ -452,12 +458,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `${this.params.subagent_type} subagent: "${this.params.description}"`;
-  }
-
-  override async shouldConfirmExecute(): Promise<false> {
-    // Task delegation should execute automatically without user confirmation
-    return false;
+    return this.params.description;
   }
 
   async execute(
@@ -533,7 +534,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
           }
         } catch (hookError) {
           debugLogger.warn(
-            `[TaskTool] SubagentStart hook failed, continuing execution: ${hookError}`,
+            `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
           );
         }
       }
@@ -615,7 +616,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
         this.updateDisplay(
           {
             status: 'cancelled',
-            terminateReason: 'Task was cancelled by user',
+            terminateReason: 'Agent was cancelled by user',
             executionSummary,
           },
           updateOutput,
@@ -639,9 +640,9 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      debugLogger.error(`[TaskTool] Error running subagent: ${errorMessage}`);
+      debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
 
-      const errorDisplay: TaskResultDisplay = {
+      const errorDisplay: AgentResultDisplay = {
         ...this.currentDisplay!,
         status: 'failed',
         terminateReason: `Failed to run subagent: ${errorMessage}`,

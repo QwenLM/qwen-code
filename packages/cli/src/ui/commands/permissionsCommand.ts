@@ -11,7 +11,7 @@ import { t } from '../../i18n/index.js';
 export const permissionsCommand: SlashCommand = {
   name: 'permissions',
   get description() {
-    return t('Manage folder trust settings');
+    return t('Manage permission rules');
   },
   kind: CommandKind.BUILT_IN,
   action: (): OpenDialogActionReturn => ({

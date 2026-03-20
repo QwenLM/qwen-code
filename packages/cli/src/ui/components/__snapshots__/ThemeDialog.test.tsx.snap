@@ -5,7 +5,7 @@ exports[`ThemeDialog Snapshots > should render correctly in scope selector mode 
 │                                                                                                  │
 │ > Apply To                                                                                       │
 │                                                                                                  │
-│ ● 1. User Settings                                                                               │
+│ › 1. User Settings                                                                               │
 │   2. Workspace Settings                                                                          │
 │                                                                                                  │
 │ (Use Enter to apply scope, Tab to go back)                                                       │
@@ -19,7 +19,7 @@ exports[`ThemeDialog Snapshots > should render correctly in theme selection mode
 │ > Select Theme                               Preview                                             │
 │ ▲                                            ┌─────────────────────────────────────────────────┐ │
 │    1. Qwen Light Light                       │                                                 │ │
-│ ●  2. Qwen Dark Dark                         │ 1 # function                                    │ │
+│ ›  2. Qwen Dark Dark                         │ 1 # function                                    │ │
 │    3. ANSI Dark                              │ 2 def fibonacci(n):                             │ │
 │    4. Atom One Dark                          │ 3     a, b = 0, 1                               │ │
 │    5. Ayu Dark                               │ 4     for _ in range(n):                        │ │

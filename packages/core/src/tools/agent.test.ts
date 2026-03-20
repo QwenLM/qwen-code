@@ -5,9 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TaskTool, type TaskParams } from './task.js';
+import { AgentTool, type AgentParams } from './agent.js';
 import type { PartListUnion } from '@google/genai';
-import type { ToolResultDisplay, TaskResultDisplay } from './tools.js';
+import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
@@ -21,8 +21,8 @@ import type { HookSystem } from '../hooks/hookSystem.js';
 import { PermissionMode } from '../hooks/types.js';
 
 // Type for accessing protected methods in tests
-type TaskToolWithProtectedMethods = TaskTool & {
-  createInvocation: (params: TaskParams) => {
+type AgentToolWithProtectedMethods = AgentTool & {
+  createInvocation: (params: AgentParams) => {
     execute: (
       signal?: AbortSignal,
       liveOutputCallback?: (chunk: string) => void,
@@ -31,7 +31,6 @@ type TaskToolWithProtectedMethods = TaskTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
-    shouldConfirmExecute: () => Promise<boolean>;
   };
 };
 
@@ -42,9 +41,9 @@ vi.mock('../agents/runtime/agent-headless.js');
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
 
-describe('TaskTool', () => {
+describe('AgentTool', () => {
   let config: Config;
-  let taskTool: TaskTool;
+  let agentTool: AgentTool;
   let mockSubagentManager: SubagentManager;
   let changeListeners: Array<() => void>;
 
@@ -102,8 +101,8 @@ describe('TaskTool', () => {
     // Make config return the mock SubagentManager
     vi.mocked(config.getSubagentManager).mockReturnValue(mockSubagentManager);
 
-    // Create TaskTool instance
-    taskTool = new TaskTool(config);
+    // Create AgentTool instance
+    agentTool = new AgentTool(config);
 
     // Allow async initialization to complete
     await vi.runAllTimersAsync();
@@ -115,9 +114,9 @@ describe('TaskTool', () => {
 
   describe('initialization', () => {
     it('should initialize with correct name and properties', () => {
-      expect(taskTool.name).toBe('task');
-      expect(taskTool.displayName).toBe('Task');
-      expect(taskTool.kind).toBe('other');
+      expect(agentTool.name).toBe('agent');
+      expect(agentTool.displayName).toBe('Agent');
+      expect(agentTool.kind).toBe('other');
     });
 
     it('should load available subagents during initialization', () => {
@@ -129,12 +128,12 @@ describe('TaskTool', () => {
     });
 
     it('should update description with available subagents', () => {
-      expect(taskTool.description).toContain('file-search');
-      expect(taskTool.description).toContain(
+      expect(agentTool.description).toContain('file-search');
+      expect(agentTool.description).toContain(
         'Specialized agent for searching and analyzing files',
       );
-      expect(taskTool.description).toContain('code-review');
-      expect(taskTool.description).toContain(
+      expect(agentTool.description).toContain('code-review');
+      expect(agentTool.description).toContain(
         'Agent for reviewing code quality and best practices',
       );
     });
@@ -142,10 +141,10 @@ describe('TaskTool', () => {
     it('should handle empty subagents list gracefully', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
-      const emptyTaskTool = new TaskTool(config);
+      const emptyAgentTool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
-      expect(emptyTaskTool.description).toContain(
+      expect(emptyAgentTool.description).toContain(
         'No subagents are currently configured',
       );
     });
@@ -155,18 +154,18 @@ describe('TaskTool', () => {
         new Error('Loading failed'),
       );
 
-      const failedTaskTool = new TaskTool(config);
+      const failedAgentTool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
-      expect(failedTaskTool.description).toContain(
-        'No subagents are currently configured',
-      );
+      // Should fall back to built-in agents instead of showing "no subagents"
+      expect(failedAgentTool.description).toContain('general-purpose');
+      expect(failedAgentTool.description).toContain('Explore');
     });
   });
 
   describe('schema generation', () => {
     it('should generate schema with subagent names as enum', () => {
-      const schema = taskTool.schema;
+      const schema = agentTool.schema;
       const properties = schema.parametersJsonSchema as {
         properties: {
           subagent_type: {
@@ -183,10 +182,10 @@ describe('TaskTool', () => {
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
-      const emptyTaskTool = new TaskTool(config);
+      const emptyAgentTool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
-      const schema = emptyTaskTool.schema;
+      const schema = emptyAgentTool.schema;
       const properties = schema.parametersJsonSchema as {
         properties: {
           subagent_type: {
@@ -199,19 +198,19 @@ describe('TaskTool', () => {
   });
 
   describe('validateToolParams', () => {
-    const validParams: TaskParams = {
+    const validParams: AgentParams = {
       description: 'Search files',
       prompt: 'Find all TypeScript files in the project',
       subagent_type: 'file-search',
     };
 
     it('should validate valid parameters', async () => {
-      const result = taskTool.validateToolParams(validParams);
+      const result = agentTool.validateToolParams(validParams);
       expect(result).toBeNull();
     });
 
     it('should reject empty description', async () => {
-      const result = taskTool.validateToolParams({
+      const result = agentTool.validateToolParams({
         ...validParams,
         description: '',
       });
@@ -221,7 +220,7 @@ describe('TaskTool', () => {
     });
 
     it('should reject empty prompt', async () => {
-      const result = taskTool.validateToolParams({
+      const result = agentTool.validateToolParams({
         ...validParams,
         prompt: '',
       });
@@ -229,7 +228,7 @@ describe('TaskTool', () => {
     });
 
     it('should reject empty subagent_type', async () => {
-      const result = taskTool.validateToolParams({
+      const result = agentTool.validateToolParams({
         ...validParams,
         subagent_type: '',
       });
@@ -239,7 +238,7 @@ describe('TaskTool', () => {
     });
 
     it('should reject non-existent subagent', async () => {
-      const result = taskTool.validateToolParams({
+      const result = agentTool.validateToolParams({
         ...validParams,
         subagent_type: 'non-existent',
       });
@@ -271,8 +270,8 @@ describe('TaskTool', () => {
       listener?.();
       await vi.runAllTimersAsync();
 
-      expect(taskTool.description).toContain('new-agent');
-      expect(taskTool.description).toContain('A brand new agent');
+      expect(agentTool.description).toContain('new-agent');
+      expect(agentTool.description).toContain('A brand new agent');
     });
 
     it('should refresh available subagents and update description', async () => {
@@ -290,14 +289,14 @@ describe('TaskTool', () => {
         newSubagents,
       );
 
-      await taskTool.refreshSubagents();
+      await agentTool.refreshSubagents();
 
-      expect(taskTool.description).toContain('test-agent');
-      expect(taskTool.description).toContain('A test agent');
+      expect(agentTool.description).toContain('test-agent');
+      expect(agentTool.description).toContain('A test agent');
     });
   });
 
-  describe('TaskToolInvocation', () => {
+  describe('AgentToolInvocation', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
 
@@ -366,14 +365,14 @@ describe('TaskTool', () => {
     });
 
     it('should execute subagent successfully', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
@@ -392,7 +391,7 @@ describe('TaskTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
@@ -401,20 +400,20 @@ describe('TaskTool', () => {
     it('should handle subagent not found error', async () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'non-existent',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Subagent "non-existent" not found');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('failed');
       expect(display.subagentName).toBe('non-existent');
     });
@@ -424,33 +423,33 @@ describe('TaskTool', () => {
         new Error('Creation failed'),
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to run subagent: Creation failed');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
 
       expect(display.status).toBe('failed');
     });
 
     it('should execute subagent without live output callback', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
@@ -461,20 +460,20 @@ describe('TaskTool', () => {
       // Verify the result has the expected structure
       const text = partToString(result.llmContent);
       expect(text).toBe('Task completed successfully');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
     });
 
     it('should set context variables correctly', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -485,14 +484,14 @@ describe('TaskTool', () => {
     });
 
     it('should return structured display object', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
@@ -510,33 +509,33 @@ describe('TaskTool', () => {
     });
 
     it('should not require confirmation', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const shouldConfirm = await invocation.shouldConfirmExecute();
+      const permission = await invocation.getDefaultPermission();
 
-      expect(shouldConfirm).toBe(false);
+      expect(permission).toBe('allow');
     });
 
     it('should provide correct description', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const description = invocation.getDescription();
 
-      expect(description).toBe('file-search subagent: "Search files"');
+      expect(description).toBe('Search files');
     });
   });
 
@@ -603,14 +602,14 @@ describe('TaskTool', () => {
     });
 
     it('should call fireSubagentStartEvent before execution', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -631,14 +630,14 @@ describe('TaskTool', () => {
         mockStartOutput as never,
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -656,14 +655,14 @@ describe('TaskTool', () => {
         mockStartOutput as never,
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -678,21 +677,21 @@ describe('TaskTool', () => {
         new Error('Hook failed'),
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
       // Should still complete successfully despite hook failure
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('completed');
     });
 
@@ -701,14 +700,14 @@ describe('TaskTool', () => {
         .fn()
         .mockReturnValue(undefined);
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
@@ -781,14 +780,14 @@ describe('TaskTool', () => {
     });
 
     it('should call fireSubagentStopEvent after execution', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -819,14 +818,14 @@ describe('TaskTool', () => {
         .mockResolvedValueOnce(mockBlockOutput as never)
         .mockResolvedValueOnce(undefined as never);
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -857,14 +856,14 @@ describe('TaskTool', () => {
         .mockResolvedValueOnce(mockStopOutput as never)
         .mockResolvedValueOnce(undefined as never);
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -876,21 +875,21 @@ describe('TaskTool', () => {
         new Error('Stop hook failed'),
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       const result = await invocation.execute();
 
       // Should still complete successfully despite hook failure
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
-      const display = result.returnDisplay as TaskResultDisplay;
+      const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('completed');
     });
 
@@ -898,14 +897,14 @@ describe('TaskTool', () => {
       const abortController = new AbortController();
       abortController.abort();
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute(abortController.signal);
 
@@ -933,14 +932,14 @@ describe('TaskTool', () => {
         }
       });
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute(abortController.signal);
 
@@ -964,14 +963,14 @@ describe('TaskTool', () => {
         },
       );
 
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 
@@ -979,14 +978,14 @@ describe('TaskTool', () => {
     });
 
     it('should pass consistent agentId to both start and stop hooks', async () => {
-      const params: TaskParams = {
+      const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
         subagent_type: 'file-search',
       };
 
       const invocation = (
-        taskTool as TaskToolWithProtectedMethods
+        agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
       await invocation.execute();
 

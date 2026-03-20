@@ -94,7 +94,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient && geminiClient.isInitialized()) {
+      if (geminiClient) {
         await geminiClient.setTools();
       }
     }
@@ -228,11 +228,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
   getDescription(): string {
     return `Use skill: "${this.params.skill}"`;
-  }
-
-  override async shouldConfirmExecute(): Promise<false> {
-    // Skill loading is a read-only operation, no confirmation needed
-    return false;
   }
 
   async execute(

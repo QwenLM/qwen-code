@@ -65,7 +65,7 @@ const basicPermissionOptions: readonly PermissionOptionConfig[] = [
 ] as const;
 
 /**
- * Tracks and emits events for sub-agent tool calls within TaskTool execution.
+ * Tracks and emits events for sub-agent tool calls within AgentTool execution.
  *
  * Uses the unified ToolCallEmitter for consistency with normal flow
  * and history replay. Also handles permission requests for tools that
@@ -106,7 +106,7 @@ export class SubAgentTracker {
   /**
    * Sets up event listeners for a sub-agent's tool events.
    *
-   * @param eventEmitter - The AgentEventEmitter from TaskTool
+   * @param eventEmitter - The AgentEventEmitter from AgentTool
    * @param abortSignal - Signal to abort tracking if parent is cancelled
    * @returns Array of cleanup functions to remove listeners
    */
@@ -330,6 +330,8 @@ export class SubAgentTracker {
   private toPermissionOptions(
     confirmation: ToolCallConfirmationDetails,
   ): PermissionOption[] {
+    const hideAlwaysAllow =
+      'hideAlwaysAllow' in confirmation && confirmation.hideAlwaysAllow;
     switch (confirmation.type) {
       case 'edit':
         return [
@@ -342,34 +344,56 @@ export class SubAgentTracker {
         ];
       case 'exec':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: `Always Allow ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: `Always Allow in project: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: `Always Allow for user: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'mcp':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-            name: `Always Allow ${(confirmation as { serverName?: string }).serverName ?? 'server'}`,
-            kind: 'allow_always',
-          },
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-            name: `Always Allow ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: `Always Allow in project: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: `Always Allow for user: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'info':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: 'Always Allow',
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: 'Always Allow in project',
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: 'Always Allow for user',
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'plan':

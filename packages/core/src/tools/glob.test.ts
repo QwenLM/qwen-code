@@ -244,13 +244,14 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 2 file(s)');
     });
 
-    it('should return error if path is outside workspace', async () => {
-      // Bypassing validation to test execute method directly
-      vi.spyOn(globTool, 'validateToolParams').mockReturnValue(null);
-      const params: GlobToolParams = { pattern: '*.txt', path: '/etc' };
+    it('should allow path outside workspace (external path support)', async () => {
+      const params: GlobToolParams = { pattern: '*.txt', path: '/tmp' };
       const invocation = globTool.build(params);
+      // External path is now allowed - it should not return a workspace error
       const result = await invocation.execute(abortSignal);
-      expect(result.returnDisplay).toBe('Error: Path is not within workspace');
+      expect(result.returnDisplay).not.toContain(
+        'Path is not within workspace',
+      );
     });
 
     it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
@@ -322,9 +323,8 @@ describe('GlobTool', () => {
         pattern: '*.txt',
         path: '../../../../../../../../../../tmp', // Definitely outside
       };
-      expect(specificGlobTool.validateToolParams(paramsOutside)).toContain(
-        'Path is not within workspace',
-      );
+      // External paths are now allowed (permission handled at runtime)
+      expect(specificGlobTool.validateToolParams(paramsOutside)).toBeNull();
     });
 
     it('should return error if specified search path does not exist', async () => {
@@ -351,9 +351,8 @@ describe('GlobTool', () => {
       const invalidPath = { pattern: '*.ts', path: '../..' };
 
       expect(globTool.validateToolParams(validPath)).toBeNull();
-      expect(globTool.validateToolParams(invalidPath)).toContain(
-        'Path is not within workspace',
-      );
+      // External paths are now allowed (permission handled at runtime)
+      expect(globTool.validateToolParams(invalidPath)).toBeNull();
     });
 
     it('should work with paths in workspace subdirectories', async () => {

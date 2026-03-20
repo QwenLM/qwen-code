@@ -20,7 +20,7 @@ export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
-import type { TaskTool } from '../tools/task.js';
+import type { AgentTool } from '../tools/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -63,10 +63,11 @@ export class StartSessionEvent implements BaseTelemetryEvent {
     this.model = config.getModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    const coreTools = (config.getCoreTools() ?? []).join(',');
-    if (coreTools) {
-      this.core_tools_enabled = coreTools;
-    }
+    this.core_tools_enabled = (
+      config.getPermissionManager?.()?.getAllowRawStrings() ??
+      config.getCoreTools() ??
+      []
+    ).join(',');
     this.approval_mode = config.getApprovalMode();
     this.debug_enabled = config.getDebugMode();
     this.truncate_tool_output_threshold =
@@ -107,10 +108,10 @@ export class StartSessionEvent implements BaseTelemetryEvent {
         this.skills = skillNames.join(',');
       }
 
-      const taskTool = toolRegistry.getTool(ToolNames.TASK) as
-        | TaskTool
+      const agentTool = toolRegistry.getTool(ToolNames.AGENT) as
+        | AgentTool
         | undefined;
-      const subagentNames = taskTool?.getAvailableSubagentNames?.();
+      const subagentNames = agentTool?.getAvailableSubagentNames?.();
       if (subagentNames && subagentNames.length > 0) {
         this.subagents = subagentNames.join(',');
       }

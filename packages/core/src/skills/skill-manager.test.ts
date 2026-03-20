@@ -449,7 +449,7 @@ You are a helpful assistant.
             },
           ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
         }
-        // Other provider dirs (.agent, .cursor, .codex, .claude) return empty
+        // Other provider dirs (.agents, .cursor, .codex, .claude) return empty
         return Promise.resolve(
           [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
         );
@@ -511,10 +511,10 @@ Skill 3 content`);
     });
 
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
-      // Override readdir to return the same skill name from both .qwen and .agent dirs
+      // Override readdir to return the same skill name from both .qwen and .agents dirs
       vi.mocked(fs.readdir).mockReset();
       const projectQwenDir = path.join('/test/project', '.qwen', 'skills');
-      const projectAgentDir = path.join('/test/project', '.agent', 'skills');
+      const projectAgentDir = path.join('/test/project', '.agents', 'skills');
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
@@ -551,9 +551,9 @@ Skill 3 content`);
             `---\nname: shared-skill\ndescription: From qwen dir\n---\nQwen content`,
           );
         }
-        if (pathStr.includes('.agent') && pathStr.includes('shared-skill')) {
+        if (pathStr.includes('.agents') && pathStr.includes('shared-skill')) {
           return Promise.resolve(
-            `---\nname: shared-skill\ndescription: From agent dir\n---\nAgent content`,
+            `---\nname: shared-skill\ndescription: From agents dir\n---\nAgents content`,
           );
         }
         return Promise.reject(new Error('File not found'));
@@ -598,7 +598,7 @@ Skill 3 content`);
       expect(baseDirs).toHaveLength(2);
       expect(baseDirs).toContain(path.join('/test/project', '.qwen', 'skills'));
       expect(baseDirs).toContain(
-        path.join('/test/project', '.agent', 'skills'),
+        path.join('/test/project', '.agents', 'skills'),
       );
     });
 
@@ -607,7 +607,7 @@ Skill 3 content`);
 
       expect(baseDirs).toHaveLength(2);
       expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
-      expect(baseDirs).toContain(path.join('/home/user', '.agent', 'skills'));
+      expect(baseDirs).toContain(path.join('/home/user', '.agents', 'skills'));
     });
 
     it('should return bundled-level base dir', () => {

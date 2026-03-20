@@ -138,17 +138,17 @@ describe('ToolConfirmationMessage', () => {
       {
         description: 'for exec confirmations',
         details: execConfirmationDetails,
-        alwaysAllowText: 'Yes, allow always',
+        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for info confirmations',
         details: infoConfirmationDetails,
-        alwaysAllowText: 'Yes, allow always',
+        alwaysAllowText: 'Always allow in this project',
       },
       {
         description: 'for mcp confirmations',
         details: mcpConfirmationDetails,
-        alwaysAllowText: 'always allow',
+        alwaysAllowText: 'Always allow in this project',
       },
     ])('$description', ({ details, alwaysAllowText }) => {
       it('should show "allow always" when folder is trusted', () => {
