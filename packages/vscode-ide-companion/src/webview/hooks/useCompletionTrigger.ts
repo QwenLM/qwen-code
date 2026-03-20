@@ -325,8 +325,11 @@ export function useCompletionTrigger(
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
-          // Only show if query doesn't contain spaces (still typing the reference)
-          if (!query.includes(' ') && !query.includes('\n')) {
+          // For @ mentions: no spaces allowed (still typing the reference).
+          // For / commands: allow spaces when typing sub-command arguments
+          // (e.g., "/skills review" triggers the secondary skill picker).
+          const allowSpaces = triggerChar === '/' && /^skills\s/i.test(query);
+          if (!query.includes('\n') && (allowSpaces || !query.includes(' '))) {
             // Get precise cursor position for menu
             const cursorPos = getCursorPosition();
             if (cursorPos) {

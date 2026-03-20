@@ -210,6 +210,28 @@ export class QwenSessionUpdateHandler {
         break;
       }
 
+      case 'available_skills_update': {
+        try {
+          const skills = (
+            update as unknown as {
+              availableSkills?: Array<{
+                name: string;
+                description: string;
+              }>;
+            }
+          ).availableSkills;
+          if (skills && this.callbacks.onAvailableSkills) {
+            this.callbacks.onAvailableSkills(skills);
+          }
+        } catch (err) {
+          console.warn(
+            '[SessionUpdateHandler] Failed to handle available skills update',
+            err,
+          );
+        }
+        break;
+      }
+
       default:
         console.log('[QwenAgentManager] Unhandled session update type');
         break;

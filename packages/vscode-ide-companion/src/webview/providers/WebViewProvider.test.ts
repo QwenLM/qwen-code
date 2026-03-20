@@ -161,6 +161,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         availableCommandsCallbackRef.current = callback;
       },
     );
+    onAvailableSkills = vi.fn();
     onAvailableModels = vi.fn();
     onSlashCommandNotification = vi.fn(
       (

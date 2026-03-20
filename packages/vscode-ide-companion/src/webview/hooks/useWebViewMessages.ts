@@ -130,6 +130,10 @@ interface UseWebViewMessagesProps {
   setModelInfo?: (info: ModelInfo | null) => void;
   // Available commands setter
   setAvailableCommands?: (commands: AvailableCommand[]) => void;
+  // Available skills setter
+  setAvailableSkills?: (
+    skills: Array<{ name: string; description: string }>,
+  ) => void;
   // Available models setter
   setAvailableModels?: (models: ModelInfo[]) => void;
   // Account info setter (triggers dialog)
@@ -219,6 +223,7 @@ export const useWebViewMessages = ({
   setUsageStats,
   setModelInfo,
   setAvailableCommands,
+  setAvailableSkills,
   setAvailableModels,
   setAccountInfo,
   setInsightReportPath,
@@ -259,6 +264,7 @@ export const useWebViewMessages = ({
     setUsageStats,
     setModelInfo,
     setAvailableCommands,
+    setAvailableSkills,
     setAvailableModels,
     setAccountInfo,
     setInsightReportPath,
@@ -335,6 +341,7 @@ export const useWebViewMessages = ({
       setUsageStats,
       setModelInfo,
       setAvailableCommands,
+      setAvailableSkills,
       setAvailableModels,
       setAccountInfo,
       setInsightReportPath,
@@ -393,6 +400,20 @@ export const useWebViewMessages = ({
             }
           } catch (_error) {
             // Ignore error when setting available commands
+          }
+          break;
+        }
+
+        case 'availableSkills': {
+          try {
+            const skills = message.data?.skills as
+              | Array<{ name: string; description: string }>
+              | undefined;
+            if (skills) {
+              handlers.setAvailableSkills?.(skills);
+            }
+          } catch (_error) {
+            // Ignore error when setting available skills
           }
           break;
         }
