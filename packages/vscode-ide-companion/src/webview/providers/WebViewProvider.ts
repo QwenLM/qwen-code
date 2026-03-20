@@ -190,6 +190,14 @@ export class WebViewProvider {
       });
     });
 
+    // Surface available skills (from ACP available_skills_update)
+    this.agentManager.onAvailableSkills((skills) => {
+      this.sendMessageToWebView({
+        type: 'availableSkills',
+        data: { skills },
+      });
+    });
+
     // Surface available models (from session/new response)
     this.agentManager.onAvailableModels((models) => {
       console.log(

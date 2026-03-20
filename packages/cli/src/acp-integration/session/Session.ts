@@ -395,6 +395,24 @@ export class Session implements SessionContext {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
     }
+
+    // Send available skills list for secondary picker in IDE clients
+    try {
+      const skillManager = this.config.getSkillManager();
+      if (skillManager) {
+        const skills = await skillManager.listSkills();
+        const availableSkills = skills.map((s) => ({
+          name: s.name,
+          description: s.description,
+        }));
+        await this.sendUpdate({
+          sessionUpdate: 'available_skills_update',
+          availableSkills,
+        } as unknown as SessionUpdate);
+      }
+    } catch (error) {
+      debugLogger.error('Error sending available skills update:', error);
+    }
   }
 
   /**

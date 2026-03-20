@@ -77,6 +77,9 @@ export interface QwenAgentCallbacks {
   onModelInfo?: (info: ModelInfo) => void;
   onModelChanged?: (model: ModelInfo) => void;
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableSkills?: (
+    skills: Array<{ name: string; description: string }>,
+  ) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
 }
 
