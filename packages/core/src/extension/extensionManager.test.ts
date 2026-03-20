@@ -755,6 +755,20 @@ describe('extension tests', () => {
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('https://github.com/owner/repo'));
       });
+
+      it('should use source as-is for non-GitHub git URLs (e.g., GitLab)', () => {
+        // For non-GitHub git servers, fall back to using the source URL directly
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const metadata = {
+          type: 'git' as const,
+          source: 'https://gitlab.company.com/team/extension-repo',
+        };
+
+        const id = getExtensionId(config, metadata);
+        expect(id).toBe(
+          hashValue('https://gitlab.company.com/team/extension-repo'),
+        );
+      });
     });
   });
 
