@@ -23,6 +23,7 @@
     "scripts/postinstall.js"
   ],
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@anthropic-ai/sdk": "^0.36.1",
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
@@ -42,7 +43,6 @@
     "ajv-formats": "^3.0.0",
     "async-mutex": "^0.5.0",
     "chardet": "^2.1.0",
-    "iconv-lite": "^0.6.3",
     "chokidar": "^4.0.3",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
@@ -55,6 +55,7 @@
     "google-auth-library": "^10.5.0",
     "html-to-text": "^9.0.5",
     "https-proxy-agent": "^7.0.6",
+    "iconv-lite": "^0.6.3",
     "ignore": "^7.0.0",
     "jsonrepair": "^3.13.0",
     "marked": "^15.0.12",

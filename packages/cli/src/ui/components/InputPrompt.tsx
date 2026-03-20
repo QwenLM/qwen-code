@@ -18,7 +18,7 @@ import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
-import type { FollowupSuggestion , Config } from '@qwen-code/qwen-code-core';
+import type { FollowupSuggestion, Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -726,7 +726,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.state.suggestion
       ) {
         followup.accept();
-        return;
+        return true;
       }
 
       // Right arrow to cycle to next follow-up suggestion (when buffer is empty)
@@ -739,7 +739,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.state.suggestions.length > 1
       ) {
         followup.next();
-        return;
+        return true;
       }
 
       // Left arrow to cycle to previous follow-up suggestion (when buffer is empty)
@@ -752,7 +752,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.state.suggestions.length > 1
       ) {
         followup.previous();
-        return;
+        return true;
       }
 
       if (completion.showSuggestions) {
@@ -1186,147 +1186,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={placeholder}
+        placeholder={followup.state.suggestion || placeholder}
         prefix={prefixNode}
         borderColor={borderColor}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
-      >
-        <Text
-          color={statusColor ?? theme.text.accent}
-          aria-label={statusText || undefined}
-        >
-          {shellModeActive ? (
-            reverseSearchActive ? (
-              <Text
-                color={theme.text.link}
-                aria-label={SCREEN_READER_USER_PREFIX}
-              >
-                (r:){' '}
-              </Text>
-            ) : (
-              '!'
-            )
-          ) : commandSearchActive ? (
-            <Text color={theme.text.accent}>(r:) </Text>
-          ) : showYoloStyling ? (
-            '*'
-          ) : (
-            '>'
-          )}{' '}
-        </Text>
-        <Box flexGrow={1} flexDirection="column">
-          {buffer.text.length === 0 &&
-          (followup.state.suggestion || placeholder) ? (
-            showCursor ? (
-              <Text>
-                {chalk.inverse(
-                  (followup.state.suggestion || placeholder || '').slice(0, 1),
-                )}
-                <Text color={theme.text.secondary}>
-                  {(followup.state.suggestion || placeholder || '').slice(1)}
-                </Text>
-              </Text>
-            ) : (
-              <Text color={theme.text.secondary}>
-                {followup.state.suggestion || placeholder || ''}
-              </Text>
-            )
-          ) : (
-            linesToRender.map((lineText, visualIdxInRenderedSet) => {
-              const absoluteVisualIdx =
-                scrollVisualRow + visualIdxInRenderedSet;
-              const mapEntry = buffer.visualToLogicalMap[absoluteVisualIdx];
-              const cursorVisualRow = cursorVisualRowAbsolute - scrollVisualRow;
-              const isOnCursorLine =
-                focus && visualIdxInRenderedSet === cursorVisualRow;
-
-              const renderedLine: React.ReactNode[] = [];
-
-              const [logicalLineIdx, logicalStartCol] = mapEntry;
-              const logicalLine = buffer.lines[logicalLineIdx] || '';
-              const tokens = parseInputForHighlighting(
-                logicalLine,
-                logicalLineIdx,
-              );
-
-              const visualStart = logicalStartCol;
-              const visualEnd = logicalStartCol + cpLen(lineText);
-              const segments = buildSegmentsForVisualSlice(
-                tokens,
-                visualStart,
-                visualEnd,
-              );
-
-              let charCount = 0;
-              segments.forEach((seg, segIdx) => {
-                const segLen = cpLen(seg.text);
-                let display = seg.text;
-
-                if (isOnCursorLine) {
-                  const relativeVisualColForHighlight = cursorVisualColAbsolute;
-                  const segStart = charCount;
-                  const segEnd = segStart + segLen;
-                  if (
-                    relativeVisualColForHighlight >= segStart &&
-                    relativeVisualColForHighlight < segEnd
-                  ) {
-                    const charToHighlight = cpSlice(
-                      seg.text,
-                      relativeVisualColForHighlight - segStart,
-                      relativeVisualColForHighlight - segStart + 1,
-                    );
-                    const highlighted = showCursor
-                      ? chalk.inverse(charToHighlight)
-                      : charToHighlight;
-                    display =
-                      cpSlice(
-                        seg.text,
-                        0,
-                        relativeVisualColForHighlight - segStart,
-                      ) +
-                      highlighted +
-                      cpSlice(
-                        seg.text,
-                        relativeVisualColForHighlight - segStart + 1,
-                      );
-                  }
-                  charCount = segEnd;
-                }
-
-                const color =
-                  seg.type === 'command' || seg.type === 'file'
-                    ? theme.text.accent
-                    : theme.text.primary;
-
-                renderedLine.push(
-                  <Text key={`token-${segIdx}`} color={color}>
-                    {display}
-                  </Text>,
-                );
-              });
-
-              if (
-                isOnCursorLine &&
-                cursorVisualColAbsolute === cpLen(lineText)
-              ) {
-                // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
-                renderedLine.push(
-                  <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-                    {showCursor ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
-                  </Text>,
-                );
-              }
-
-              return (
-                <Box key={`line-${visualIdxInRenderedSet}`} height={1}>
-                  <Text>{renderedLine}</Text>
-                </Box>
-              );
-            })
-          )}
-        </Box>
-      </Box>
+      />
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay
