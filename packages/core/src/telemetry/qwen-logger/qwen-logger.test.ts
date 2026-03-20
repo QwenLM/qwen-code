@@ -557,8 +557,11 @@ describe('QwenLogger', () => {
       );
     });
 
-    it('should log a failed hook call event with error', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
+    it('should log a failed hook call event with error when telemetry log prompts enabled', () => {
+      const configWithLogPrompts = makeFakeConfig({
+        getTelemetryLogPromptsEnabled: () => true,
+      });
+      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
 
       const event = new HookCallEvent(
@@ -593,6 +596,49 @@ describe('QwenLogger', () => {
           }),
         }),
       );
+    });
+
+    it('should not include error when telemetry log prompts disabled', () => {
+      const configWithoutLogPrompts = makeFakeConfig({
+        getTelemetryLogPromptsEnabled: () => false,
+      });
+      // Clear singleton to create new instance with different config
+      (QwenLogger as unknown as { instance: undefined }).instance = undefined;
+      const logger = QwenLogger.getInstance(configWithoutLogPrompts)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'PostToolUse',
+        'command',
+        'cleanup.sh',
+        { tool_name: 'shell' },
+        200,
+        false,
+        undefined,
+        1,
+        '',
+        'error output',
+        'Command failed with sensitive data',
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            hook_event_name: 'PostToolUse',
+            hook_type: 'command',
+            hook_name: 'cleanup.sh',
+            duration_ms: 200,
+            success: 0,
+            exit_code: 1,
+          }),
+        }),
+      );
+
+      // Error should NOT be in properties
+      const callArgs = enqueueSpy.mock.calls[0][0];
+      expect(callArgs.properties).not.toHaveProperty('error');
     });
 
     it('should sanitize hook name to remove sensitive information', () => {

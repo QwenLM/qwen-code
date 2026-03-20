@@ -1005,20 +1005,23 @@ export class QwenLogger {
     // Sanitize hook name to remove potentially sensitive information
     const sanitizedHookName = sanitizeHookName(event.hook_name);
 
+    const properties: Record<string, unknown> = {
+      hook_event_name: event.hook_event_name,
+      hook_type: event.hook_type,
+      hook_name: sanitizedHookName,
+      duration_ms: event.duration_ms,
+      success: event.success ? 1 : 0,
+      exit_code: event.exit_code,
+    };
+
+    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
+      properties['error'] = event.error;
+    }
+
     const rumEvent = this.createActionEvent(
       'hook',
       `hook_call#${event.hook_event_name}`,
-      {
-        properties: {
-          hook_event_name: event.hook_event_name,
-          hook_type: event.hook_type,
-          hook_name: sanitizedHookName,
-          duration_ms: event.duration_ms,
-          success: event.success ? 1 : 0,
-          exit_code: event.exit_code,
-          error: event.error,
-        },
-      },
+      { properties },
     );
 
     this.enqueueLogEvent(rumEvent);
