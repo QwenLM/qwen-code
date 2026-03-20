@@ -21,10 +21,6 @@ import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { TaskTool } from '../tools/task.js';
-import type { Attributes } from '@opentelemetry/api';
-import { sanitizeHookName } from './sanitize.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { getCommonAttributes } from './loggers.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -806,8 +802,6 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
-export const EVENT_HOOK_CALL = 'qwen_code.hook_call';
-
 /**
  * Hook call telemetry event
  */
@@ -852,44 +846,6 @@ export class HookCallEvent implements BaseTelemetryEvent {
     this.duration_ms = durationMs;
     this.success = success;
     this.error = error;
-  }
-
-  toOpenTelemetryAttributes(config: Config): Attributes {
-    const attributes: Attributes = {
-      ...getCommonAttributes(config),
-      'event.name': EVENT_HOOK_CALL,
-      'event.timestamp': this['event.timestamp'],
-      hook_event_name: this.hook_event_name,
-      hook_type: this.hook_type,
-      // Sanitize hook_name unless full logging is enabled
-      hook_name: config.getTelemetryLogPromptsEnabled()
-        ? this.hook_name
-        : sanitizeHookName(this.hook_name),
-      duration_ms: this.duration_ms,
-      success: this.success,
-      exit_code: this.exit_code,
-    };
-
-    // Only include potentially sensitive data if telemetry logging of prompts is enabled
-    if (config.getTelemetryLogPromptsEnabled()) {
-      attributes['hook_input'] = safeJsonStringify(this.hook_input, 2);
-      attributes['hook_output'] = safeJsonStringify(this.hook_output, 2);
-      attributes['stdout'] = this.stdout;
-      attributes['stderr'] = this.stderr;
-    }
-
-    if (this.error) {
-      // Always log errors (but sanitize them if needed)
-      attributes['error'] = this.error;
-    }
-
-    return attributes;
-  }
-
-  toLogBody(): string {
-    const hookId = `${this.hook_event_name}.${this.hook_name}`;
-    const status = `${this.success ? 'succeeded' : 'failed'}`;
-    return `Hook call ${hookId} ${status} in ${this.duration_ms}ms`;
   }
 }
 
