@@ -43,6 +43,7 @@ import {
   fileExists as isFilefileExists,
 } from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -366,7 +367,7 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem.
+      `Writes content to a specified file in the local filesystem. IMPORTANT: When overwriting an existing file, you MUST first read the file using ${ReadFileTool.Name} to understand its current content. Failure to do so may result in data loss. For targeted changes to existing files, prefer using the ${ToolNames.EDIT} tool instead.
 
       The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
