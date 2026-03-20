@@ -138,7 +138,7 @@ export function BaseSelectionList<
                 color={isSelected ? theme.status.success : theme.text.primary}
                 aria-hidden
               >
-                {isSelected ? '●' : ' '}
+                {isSelected ? '›' : ' '}
               </Text>
             </Box>
 

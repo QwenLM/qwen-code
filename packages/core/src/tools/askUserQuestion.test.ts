@@ -100,8 +100,8 @@ describe('AskUserQuestionTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
-    it('should return confirmation details in interactive mode', async () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
+    it('should return ask permission and confirmation details in interactive mode', async () => {
       const params = {
         questions: [
           {
@@ -117,19 +117,20 @@ describe('AskUserQuestionTool', () => {
       };
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-
-      expect(confirmation).not.toBe(false);
-      if (confirmation && confirmation.type === 'ask_user_question') {
-        expect(confirmation.type).toBe('ask_user_question');
+      expect(confirmation.type).toBe('ask_user_question');
+      if (confirmation.type === 'ask_user_question') {
         expect(confirmation.questions).toEqual(params.questions);
         expect(confirmation.onConfirm).toBeDefined();
       }
     });
 
-    it('should return false in non-interactive mode', async () => {
+    it('should return allow permission in non-interactive mode', async () => {
       (mockConfig.isInteractive as Mock).mockReturnValue(false);
 
       const params = {
@@ -147,11 +148,8 @@ describe('AskUserQuestionTool', () => {
       };
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-
-      expect(confirmation).toBe(false);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
     });
   });
 
@@ -196,14 +194,12 @@ describe('AskUserQuestionTool', () => {
       };
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
 
-      if (confirmation !== false) {
-        // Simulate user cancellation
-        await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
-      }
+      // Simulate user cancellation
+      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
 
       const result = await invocation.execute(new AbortController().signal);
       expect(result.llmContent).toContain('declined to answer');
@@ -234,19 +230,17 @@ describe('AskUserQuestionTool', () => {
       };
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
 
-      if (confirmation !== false) {
-        // Simulate user providing answers
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
-          answers: {
-            '0': 'React',
-            '1': 'TypeScript',
-          },
-        });
-      }
+      // Simulate user providing answers
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '0': 'React',
+          '1': 'TypeScript',
+        },
+      });
 
       const result = await invocation.execute(new AbortController().signal);
 

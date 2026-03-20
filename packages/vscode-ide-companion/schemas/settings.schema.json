@@ -361,6 +361,33 @@
         }
       }
     },
+    "permissions": {
+      "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Tools or commands that are auto-approved without confirmation. Examples: \"ShellTool\", \"Bash(git *)\", \"ReadFileTool\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "description": "Tools or commands that always require user confirmation. Takes precedence over allow rules.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Tools or commands that are always blocked. Highest priority rule. Examples: \"ShellTool\", \"Bash(rm -rf *)\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "tools": {
       "description": "Settings for built-in and custom tools.",
       "type": "object",
@@ -392,21 +419,21 @@
           }
         },
         "core": {
-          "description": "Paths to core tool definitions.",
+          "description": "Deprecated. Use permissions.allow instead.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "allowed": {
-          "description": "A list of tool names that will bypass the confirmation dialog.",
+          "description": "Deprecated. Use permissions.allow instead.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "exclude": {
-          "description": "Tool names to exclude from discovery.",
+          "description": "Deprecated. Use permissions.deny instead.",
           "type": "array",
           "items": {
             "type": "string"
@@ -564,6 +591,51 @@
       "type": "object",
       "additionalProperties": true
     },
+    "agents": {
+      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "type": "object",
+      "properties": {
+        "displayMode": {
+          "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
+          "enum": [
+            "in-process"
+          ]
+        },
+        "arena": {
+          "description": "Settings for Arena (multi-model competitive execution).",
+          "type": "object",
+          "properties": {
+            "worktreeBaseDir": {
+              "description": "Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.",
+              "type": "string"
+            },
+            "preserveArtifacts": {
+              "description": "When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.",
+              "type": "boolean",
+              "default": false
+            },
+            "maxRoundsPerAgent": {
+              "description": "Maximum number of rounds (turns) each agent can execute. No limit if unset.",
+              "type": "number"
+            },
+            "timeoutSeconds": {
+              "description": "Total timeout in seconds for the Arena session. No limit if unset.",
+              "type": "number"
+            }
+          }
+        },
+        "team": {
+          "description": "Settings for Agent Team (role-based collaborative execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "swarm": {
+          "description": "Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
     "hooksConfig": {
       "description": "Hook configurations for intercepting and customizing agent behavior.",
       "type": "object",
@@ -715,8 +787,83 @@
               "hooks"
             ]
           }
+        },
+        "Notification": {
+          "description": "Hooks that execute when notifications are sent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreToolUse": {
+          "description": "Hooks that execute before tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUse": {
+          "description": "Hooks that execute after successful tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUseFailure": {
+          "description": "Hooks that execute when tool execution fails. ",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionStart": {
+          "description": "Hooks that execute when a new session starts or resumes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionEnd": {
+          "description": "Hooks that execute when a session ends.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreCompact": {
+          "description": "Hooks that execute before conversation compaction.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStart": {
+          "description": "Hooks that execute when a subagent (Task tool call) is started.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStop": {
+          "description": "Hooks that execute right before a subagent (Task tool call) concludes its response.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PermissionRequest": {
+          "description": "Hooks that execute when a permission dialog is displayed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
+    },
+    "experimental": {
+      "description": "Setting to enable experimental features",
+      "type": "object",
+      "properties": {}
     },
     "$version": {
       "type": "number",

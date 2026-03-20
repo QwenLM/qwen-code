@@ -7,7 +7,6 @@
 import { convert } from 'html-to-text';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type { Config } from '../config/config.js';
-import { ApprovalMode } from '../config/config.js';
 import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { ToolErrorType } from './tool-error.js';
@@ -15,12 +14,14 @@ import type {
   ToolCallConfirmationDetails,
   ToolInvocation,
   ToolResult,
-} from './tools.js';
+  ToolConfirmationPayload,
+
+  ToolConfirmationOutcome} from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
-  Kind,
-  ToolConfirmationOutcome,
+  Kind
 } from './tools.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -151,26 +152,40 @@ ${textContent}
     return `Fetching content from ${this.params.url} and processing with prompt: "${displayPrompt}"`;
   }
 
-  override async shouldConfirmExecute(): Promise<
-    ToolCallConfirmationDetails | false
-  > {
-    // Auto-execute in AUTO_EDIT mode and PLAN mode (read-only tool)
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT ||
-      this.config.getApprovalMode() === ApprovalMode.PLAN
-    ) {
-      return false;
+  /**
+   * WebFetch is a read-like tool (fetches content) but requires confirmation
+   * because it makes external network requests.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  /**
+   * Constructs the web fetch confirmation details.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    // Extract the domain for the permission rule.
+    let domain: string;
+    try {
+      domain = new URL(this.params.url).hostname;
+    } catch {
+      domain = this.params.url;
     }
+    const permissionRules = [`WebFetch(${domain})`];
 
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'info',
       title: `Confirm Web Fetch`,
       prompt: `Fetch content from ${this.params.url} and process with: ${this.params.prompt}`,
       urls: [this.params.url],
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-        }
+      permissionRules,
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;

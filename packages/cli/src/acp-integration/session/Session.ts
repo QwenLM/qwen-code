@@ -16,7 +16,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
-  SubAgentEventEmitter,
+  AgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -34,6 +34,7 @@ import {
   TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -530,7 +531,7 @@ export class Session implements SessionContext {
         // Access eventEmitter from TaskTool invocation
         const taskEventEmitter = (
           invocation as {
-            eventEmitter: SubAgentEventEmitter;
+            eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
@@ -539,7 +540,7 @@ export class Session implements SessionContext {
         const subagentType = (args['subagent_type'] as string) ?? '';
 
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(
+        const subSubAgentTracker = new SubAgentTracker(
           this,
           this.client,
           parentToolCallId,
@@ -547,24 +548,23 @@ export class Session implements SessionContext {
         );
 
         // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subAgentTracker.setup(
+        subAgentCleanupFunctions = subSubAgentTracker.setup(
           taskEventEmitter,
           abortSignal,
         );
       }
 
-      const confirmationDetails =
-        await invocation.shouldConfirmExecute(abortSignal);
+      // Use the new permission flow: getDefaultPermission + getConfirmationDetails
+      // ask_user_question must always go through confirmation even in YOLO mode
+      // so the user always has a chance to respond to questions.
+      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
+      const defaultPermission =
+        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
+        isAskUserQuestionTool
+          ? await invocation.getDefaultPermission()
+          : 'allow';
 
-      // In YOLO mode, auto-approve everything except ask_user_question
-      // (the user must always have a chance to respond to questions)
-      const isAskUserQuestionTool =
-        confirmationDetails && confirmationDetails.type === 'ask_user_question';
-      const effectiveConfirmationDetails =
-        this.config.getApprovalMode() === ApprovalMode.YOLO &&
-        !isAskUserQuestionTool
-          ? false
-          : confirmationDetails;
+      const needsConfirmation = defaultPermission === 'ask';
 
       // Check for plan mode enforcement - block non-read-only tools
       // but allow ask_user_question so users can answer clarification questions
@@ -573,7 +573,7 @@ export class Session implements SessionContext {
         isPlanMode &&
         !isExitPlanModeTool &&
         !isAskUserQuestionTool &&
-        effectiveConfirmationDetails
+        needsConfirmation
       ) {
         // In plan mode, block any tool that requires confirmation (write operations)
         return errorResponse(
@@ -584,25 +584,35 @@ export class Session implements SessionContext {
         );
       }
 
-      if (effectiveConfirmationDetails) {
+      if (defaultPermission === 'deny') {
+        return errorResponse(
+          new Error(
+            `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`,
+          ),
+        );
+      }
+
+      if (needsConfirmation) {
+        const confirmationDetails =
+          await invocation.getConfirmationDetails(abortSignal);
         const content: ToolCallContent[] = [];
 
-        if (effectiveConfirmationDetails.type === 'edit') {
+        if (confirmationDetails.type === 'edit') {
           content.push({
             type: 'diff',
-            path: effectiveConfirmationDetails.fileName,
-            oldText: effectiveConfirmationDetails.originalContent,
-            newText: effectiveConfirmationDetails.newContent,
+            path: confirmationDetails.fileName,
+            oldText: confirmationDetails.originalContent,
+            newText: confirmationDetails.newContent,
           });
         }
 
         // Add plan content for exit_plan_mode
-        if (effectiveConfirmationDetails.type === 'plan') {
+        if (confirmationDetails.type === 'plan') {
           content.push({
             type: 'content',
             content: {
               type: 'text',
-              text: effectiveConfirmationDetails.plan,
+              text: confirmationDetails.plan,
             },
           });
         }
@@ -612,7 +622,7 @@ export class Session implements SessionContext {
 
         const params: RequestPermissionRequest = {
           sessionId: this.sessionId,
-          options: toPermissionOptions(effectiveConfirmationDetails),
+          options: toPermissionOptions(confirmationDetails),
           toolCall: {
             toolCallId: callId,
             status: 'pending',
@@ -636,7 +646,7 @@ export class Session implements SessionContext {
                 .nativeEnum(ToolConfirmationOutcome)
                 .parse(output.outcome.optionId);
 
-        await effectiveConfirmationDetails.onConfirm(outcome, {
+        await confirmationDetails.onConfirm(outcome, {
           answers: output.answers,
         });
 
@@ -652,6 +662,8 @@ export class Session implements SessionContext {
             );
           case ToolConfirmationOutcome.ProceedOnce:
           case ToolConfirmationOutcome.ProceedAlways:
+          case ToolConfirmationOutcome.ProceedAlwaysProject:
+          case ToolConfirmationOutcome.ProceedAlwaysUser:
           case ToolConfirmationOutcome.ProceedAlwaysServer:
           case ToolConfirmationOutcome.ProceedAlwaysTool:
           case ToolConfirmationOutcome.ModifyWithEditor:
@@ -1041,8 +1053,13 @@ function toPermissionOptions(
     case 'exec':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow ${confirmation.rootCommand}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project: ${confirmation.rootCommand}`,
+          kind: 'allow_always',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user: ${confirmation.rootCommand}`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,
@@ -1050,13 +1067,13 @@ function toPermissionOptions(
     case 'mcp':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-          name: `Always Allow ${confirmation.serverName}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project: ${confirmation.toolName}`,
           kind: 'allow_always',
         },
         {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-          name: `Always Allow ${confirmation.toolName}`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user: ${confirmation.toolName}`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,
@@ -1064,8 +1081,13 @@ function toPermissionOptions(
     case 'info':
       return [
         {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow`,
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+          name: `Always Allow in project`,
+          kind: 'allow_always',
+        },
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+          name: `Always Allow for user`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,

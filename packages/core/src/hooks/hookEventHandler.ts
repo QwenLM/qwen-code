@@ -15,7 +15,24 @@ import type {
   HookExecutionResult,
   UserPromptSubmitInput,
   StopInput,
+  SessionStartInput,
+  SessionEndInput,
+  SessionStartSource,
+  SessionEndReason,
+  AgentType,
+  PreToolUseInput,
+  PostToolUseInput,
+  PostToolUseFailureInput,
+  PreCompactInput,
+  PreCompactTrigger,
+  NotificationInput,
+  NotificationType,
+  PermissionRequestInput,
+  PermissionSuggestion,
+  SubagentStartInput,
+  SubagentStopInput,
 } from './types.js';
+import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
@@ -80,6 +97,241 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input);
+  }
+
+  /**
+   * Fire a SessionStart event
+   * Called when a new session starts or resumes
+   */
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+    model: string,
+    permissionMode?: PermissionMode,
+    agentType?: AgentType,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionStartInput = {
+      ...this.createBaseInput(HookEventName.SessionStart),
+      permission_mode: permissionMode ?? PermissionMode.Default,
+      source,
+      model,
+      agent_type: agentType,
+    };
+
+    // Pass source as context for matcher filtering
+    return this.executeHooks(HookEventName.SessionStart, input, {
+      trigger: source,
+    });
+  }
+
+  /**
+   * Fire a SessionEnd event
+   * Called when a session ends
+   */
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+  ): Promise<AggregatedHookResult> {
+    const input: SessionEndInput = {
+      ...this.createBaseInput(HookEventName.SessionEnd),
+      reason,
+    };
+
+    // Pass reason as context for matcher filtering
+    return this.executeHooks(HookEventName.SessionEnd, input, {
+      trigger: reason,
+    });
+  }
+
+  /**
+   * Fire a PreToolUse event
+   * Called before tool execution begins
+   */
+  async firePreToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PreToolUseInput = {
+      ...this.createBaseInput(HookEventName.PreToolUse),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PreToolUse, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a PostToolUse event
+   * Called after successful tool execution
+   */
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseInput = {
+      ...this.createBaseInput(HookEventName.PostToolUse),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_response: toolResponse,
+      tool_use_id: toolUseId,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PostToolUse, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a PostToolUseFailure event
+   * Called when tool execution fails
+   */
+  async firePostToolUseFailureEvent(
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    errorMessage: string,
+    isInterrupt?: boolean,
+    permissionMode?: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolUseFailureInput = {
+      ...this.createBaseInput(HookEventName.PostToolUseFailure),
+      permission_mode: permissionMode ?? PermissionMode.Default,
+      tool_use_id: toolUseId,
+      tool_name: toolName,
+      tool_input: toolInput,
+      error: errorMessage,
+      is_interrupt: isInterrupt,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PostToolUseFailure, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a PreCompact event
+   * Called before conversation compaction begins
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+    customInstructions: string = '',
+  ): Promise<AggregatedHookResult> {
+    const input: PreCompactInput = {
+      ...this.createBaseInput(HookEventName.PreCompact),
+      trigger,
+      custom_instructions: customInstructions,
+    };
+
+    // Pass trigger as context for matcher filtering
+    return this.executeHooks(HookEventName.PreCompact, input, {
+      trigger,
+    });
+  }
+
+  /**
+   * Fire a Notification event
+   */
+  async fireNotificationEvent(
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+  ): Promise<AggregatedHookResult> {
+    const input: NotificationInput = {
+      ...this.createBaseInput(HookEventName.Notification),
+      message,
+      notification_type: notificationType,
+      title,
+    };
+
+    // Pass notification_type as context for matcher filtering
+    return this.executeHooks(HookEventName.Notification, input, {
+      notificationType,
+    });
+  }
+
+  /**
+   * Fire a PermissionRequest event
+   * Called when a permission dialog is about to be shown to the user
+   */
+  async firePermissionRequestEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    permissionMode: PermissionMode,
+    permissionSuggestions?: PermissionSuggestion[],
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionRequestInput = {
+      ...this.createBaseInput(HookEventName.PermissionRequest),
+      permission_mode: permissionMode,
+      tool_name: toolName,
+      tool_input: toolInput,
+      permission_suggestions: permissionSuggestions,
+    };
+
+    // Pass tool name as context for matcher filtering
+    return this.executeHooks(HookEventName.PermissionRequest, input, {
+      toolName,
+    });
+  }
+
+  /**
+   * Fire a SubagentStart event
+   * Called when a subagent is spawned via the Agent tool
+   */
+  async fireSubagentStartEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: SubagentStartInput = {
+      ...this.createBaseInput(HookEventName.SubagentStart),
+      permission_mode: permissionMode,
+      agent_id: agentId,
+      agent_type: agentType,
+    };
+
+    // Pass agentType as context for matcher filtering
+    return this.executeHooks(HookEventName.SubagentStart, input, {
+      agentType: String(agentType),
+    });
+  }
+
+  /**
+   * Fire a SubagentStop event
+   * Called when a subagent has finished responding
+   */
+  async fireSubagentStopEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    agentTranscriptPath: string,
+    lastAssistantMessage: string,
+    stopHookActive: boolean,
+    permissionMode: PermissionMode,
+  ): Promise<AggregatedHookResult> {
+    const input: SubagentStopInput = {
+      ...this.createBaseInput(HookEventName.SubagentStop),
+      permission_mode: permissionMode,
+      stop_hook_active: stopHookActive,
+      agent_id: agentId,
+      agent_type: agentType,
+      agent_transcript_path: agentTranscriptPath,
+      last_assistant_message: lastAssistantMessage,
+    };
+
+    // Pass agentType as context for matcher filtering
+    return this.executeHooks(HookEventName.SubagentStop, input, {
+      agentType: String(agentType),
+    });
   }
 
   /**

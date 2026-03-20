@@ -228,7 +228,7 @@ export async function readFileWithEncodingInfo(
     return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
   }
 
-  // Not valid UTF-8 — try chardet-based encoding detection
+  // Not valid UTF-8 — try chardet statistical detection
   const detected = detectEncodingFromBuffer(full);
   if (detected && !isUtf8CompatibleEncoding(detected)) {
     try {

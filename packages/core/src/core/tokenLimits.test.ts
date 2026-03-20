@@ -192,8 +192,8 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
-    it('should return 1M for MiniMax-M2.5 (latest)', () => {
-      expect(tokenLimit('MiniMax-M2.5')).toBe(1000000);
+    it('should return 196608 for MiniMax-M2.5 (latest)', () => {
+      expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
     });
 
     it('should return 200K for MiniMax fallback', () => {
@@ -290,8 +290,8 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return correct output limits for GLM', () => {
-      expect(tokenLimit('glm-5', 'output')).toBe(131072);
-      expect(tokenLimit('glm-4.7', 'output')).toBe(131072);
+      expect(tokenLimit('glm-5', 'output')).toBe(16384);
+      expect(tokenLimit('glm-4.7', 'output')).toBe(16384);
     });
 
     it('should return correct output limits for MiniMax', () => {
