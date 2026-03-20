@@ -118,8 +118,8 @@ export class Storage {
   }
 
   static getGlobalQwenDir(): string {
-    if (process.env.QWEN_CODE_HOME) {
-      return process.env.QWEN_CODE_HOME;
+    if (process.env['QWEN_CODE_HOME']) {
+      return process.env['QWEN_CODE_HOME'];
     }
     const homeDir = os.homedir();
     if (!homeDir) {

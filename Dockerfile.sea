@@ -10,7 +10,7 @@ WORKDIR /build
 
 COPY . .
 
-RUN npm ci
+RUN npm ci --ignore-scripts
 RUN npm run build
 RUN npm run bundle
 RUN BUNDLE_NATIVE_MODULES=false node scripts/build_binary.js
