@@ -65,7 +65,7 @@ const basicPermissionOptions: readonly PermissionOptionConfig[] = [
 ] as const;
 
 /**
- * Tracks and emits events for sub-agent tool calls within TaskTool execution.
+ * Tracks and emits events for sub-agent tool calls within AgentTool execution.
  *
  * Uses the unified ToolCallEmitter for consistency with normal flow
  * and history replay. Also handles permission requests for tools that
@@ -106,7 +106,7 @@ export class SubAgentTracker {
   /**
    * Sets up event listeners for a sub-agent's tool events.
    *
-   * @param eventEmitter - The AgentEventEmitter from TaskTool
+   * @param eventEmitter - The AgentEventEmitter from AgentTool
    * @param abortSignal - Signal to abort tracking if parent is cancelled
    * @returns Array of cleanup functions to remove listeners
    */

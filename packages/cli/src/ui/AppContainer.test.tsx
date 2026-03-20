@@ -268,7 +268,7 @@ describe('AppContainer State Management', () => {
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
-    // Mock GeminiClient to prevent unhandled errors from TaskTool.refreshSubagents
+    // Mock GeminiClient to prevent unhandled errors from AgentTool.refreshSubagents
     const mockGeminiClient: Partial<GeminiClient> = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
@@ -278,7 +278,7 @@ describe('AppContainer State Management', () => {
       mockGeminiClient as GeminiClient,
     );
 
-    // Mock SubagentManager to prevent errors during TaskTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
