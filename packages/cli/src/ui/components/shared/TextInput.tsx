@@ -20,7 +20,7 @@ import { useCallback, useRef, useEffect } from 'react';
 export interface TextInputProps {
   value: string;
   onChange: (text: string) => void;
-  onSubmit?: () => void;
+  onSubmit?: (key?: Key) => void;
   /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
   onTab?: () => void;
   /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
@@ -68,9 +68,9 @@ export function TextInput({
     onChange: stableOnChange,
   });
 
-  const handleSubmit = () => {
+  const handleSubmit = (key?: Key) => {
     if (!onSubmit) return;
-    onSubmit();
+    onSubmit(key);
   };
 
   useKeypress(
@@ -103,10 +103,10 @@ export function TextInput({
             buffer.backspace();
             buffer.newline();
           } else {
-            handleSubmit();
+            handleSubmit(key);
           }
         } else {
-          handleSubmit();
+          handleSubmit(key);
         }
         return;
       }

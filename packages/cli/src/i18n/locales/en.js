@@ -1797,6 +1797,14 @@ export default {
   'Ready to submit your answers?': 'Ready to submit your answers?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
