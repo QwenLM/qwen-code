@@ -594,12 +594,8 @@ function extractLocations(rawInput, toolCallResult) {
 
   // Extract from rawInput - common path field names used by various tools
   if (rawInput && typeof rawInput === 'object') {
-    // read_file, write_file use absolute_path
-    if (typeof rawInput.absolute_path === 'string' && rawInput.absolute_path) {
-      locations.push({ path: rawInput.absolute_path });
-    }
-    // edit tool uses file_path
-    else if (typeof rawInput.file_path === 'string' && rawInput.file_path) {
+    // read_file, write_file, edit tool use file_path
+    if (typeof rawInput.file_path === 'string' && rawInput.file_path) {
       locations.push({ path: rawInput.file_path });
     }
     // some tools use just 'path'

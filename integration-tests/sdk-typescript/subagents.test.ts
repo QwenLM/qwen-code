@@ -305,7 +305,7 @@ OTHER AGENTS CANNOT:
 
           if (isSDKAssistantMessage(message)) {
             // Check for task tool use in content blocks (main agent calling subagent)
-            const taskToolBlocks = findToolUseBlocks(message, 'task');
+            const taskToolBlocks = findToolUseBlocks(message, 'agent');
             if (taskToolBlocks.length > 0) {
               foundTaskTool = true;
               taskToolUseId = taskToolBlocks[0].id;
@@ -399,7 +399,7 @@ OTHER AGENTS CANNOT:
             // Check for task tool use (main agent delegating to subagent)
             const toolUseBlock = message.message.content.find(
               (block: ContentBlock): block is ToolUseBlock =>
-                block.type === 'tool_use' && block.name === 'task',
+                block.type === 'tool_use' && block.name === 'agent',
             );
             if (toolUseBlock) {
               foundTaskTool = true;

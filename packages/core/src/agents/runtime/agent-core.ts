@@ -57,7 +57,7 @@ import type {
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { TaskTool } from '../../tools/task.js';
+import { AgentTool } from '../../tools/agent.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 
@@ -267,7 +267,7 @@ export class AgentCore {
    * Prepares the list of tools available to this agent.
    *
    * If no explicit toolConfig or it contains "*" or is empty,
-   * inherits all tools (excluding TaskTool to prevent recursion).
+   * inherits all tools (excluding AgentTool to prevent recursion).
    */
   prepareTools(): FunctionDeclaration[] {
     const toolRegistry = this.runtimeContext.getToolRegistry();
@@ -286,7 +286,7 @@ export class AgentCore {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()
-            .filter((t) => t.name !== TaskTool.Name),
+            .filter((t) => t.name !== AgentTool.Name),
         );
       } else {
         toolsList.push(
@@ -299,7 +299,7 @@ export class AgentCore {
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations()
-          .filter((t) => t.name !== TaskTool.Name),
+          .filter((t) => t.name !== AgentTool.Name),
       );
     }
 

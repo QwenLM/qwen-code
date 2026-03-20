@@ -188,21 +188,20 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    const getSelf = () => this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
-        sessionUpdate(params: SessionNotification): Promise<void> {
+        sessionUpdate: (params: SessionNotification): Promise<void> => {
           console.log(
             '[ACP] >>> Processing session_update:',
             JSON.stringify(params).substring(0, 300),
           );
-          getSelf().onSessionUpdate(params as unknown as SessionNotification);
+          this.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
 
-        async requestPermission(
+        requestPermission: async (
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> {
+        ): Promise<RequestPermissionResponse> => {
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -218,7 +217,7 @@ export class AcpConnection {
               const metadata =
                 rawInput?.metadata as AskUserQuestionRequest['metadata'];
 
-              const response = await getSelf().onAskUserQuestion({
+              const response = await this.onAskUserQuestion({
                 sessionId: permissionData.sessionId,
                 questions,
                 metadata,
@@ -251,8 +250,7 @@ export class AcpConnection {
             }
 
             // Handle regular permission request
-            const response =
-              await getSelf().onPermissionRequest(permissionData);
+            const response = await this.onPermissionRequest(permissionData);
             const optionId = response?.optionId;
             console.log('[ACP] Permission request:', optionId);
             let outcome: 'selected' | 'cancelled';
@@ -269,7 +267,7 @@ export class AcpConnection {
             if (outcome === 'cancelled') {
               return { outcome: { outcome: 'cancelled' } };
             }
-            const selectedOptionId = getSelf().resolvePermissionOptionId(
+            const selectedOptionId = this.resolvePermissionOptionId(
               permissionData,
               optionId,
             );
@@ -287,11 +285,11 @@ export class AcpConnection {
           }
         },
 
-        async readTextFile(
+        readTextFile: async (
           params: ReadTextFileRequest,
-        ): Promise<ReadTextFileResponse> {
+        ): Promise<ReadTextFileResponse> => {
           try {
-            const result = await getSelf().fileHandler.handleReadTextFile({
+            const result = await this.fileHandler.handleReadTextFile({
               path: params.path,
               sessionId: params.sessionId,
               line: params.line ?? null,
@@ -299,14 +297,14 @@ export class AcpConnection {
             });
             return { content: result.content };
           } catch (error) {
-            throw getSelf().mapReadTextFileError(error, params.path);
+            throw this.mapReadTextFileError(error, params.path);
           }
         },
 
-        async writeTextFile(
+        writeTextFile: async (
           params: WriteTextFileRequest,
-        ): Promise<WriteTextFileResponse> {
-          await getSelf().fileHandler.handleWriteTextFile({
+        ): Promise<WriteTextFileResponse> => {
+          await this.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
             sessionId: params.sessionId,
@@ -314,16 +312,16 @@ export class AcpConnection {
           return {};
         },
 
-        async extNotification(
+        extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> {
+        ): Promise<void> => {
           if (method === 'authenticate/update') {
             console.log(
               '[ACP] >>> Processing authenticate_update:',
               JSON.stringify(params).substring(0, 300),
             );
-            getSelf().onAuthenticateUpdate(
+            this.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
           } else {

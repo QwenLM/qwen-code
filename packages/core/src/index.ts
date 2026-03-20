@@ -89,7 +89,7 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/shell.js';
 export * from './tools/skill.js';
-export * from './tools/task.js';
+export * from './tools/agent.js';
 export * from './tools/todoWrite.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';

@@ -7,7 +7,7 @@
 import type {
   Config,
   ToolResultDisplay,
-  TaskResultDisplay,
+  AgentResultDisplay,
   OutputUpdateHandler,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -335,25 +335,25 @@ export function createToolProgressHandler(
 }
 
 /**
- * Creates an output update handler specifically for Task tool subagent execution.
- * This handler monitors TaskResultDisplay updates and converts them to protocol messages
+ * Creates an output update handler specifically for Agent tool subagent execution.
+ * This handler monitors AgentResultDisplay updates and converts them to protocol messages
  * using the unified adapter's subagent APIs. All emitted messages will have parent_tool_use_id set to
- * the task tool's callId.
+ * the agent tool's callId.
  *
  * @param config - Config instance for getting output format
- * @param taskToolCallId - The task tool's callId to use as parent_tool_use_id for all subagent messages
+ * @param agentToolCallId - The agent tool's callId to use as parent_tool_use_id for all subagent messages
  * @param adapter - The unified adapter instance (JsonOutputAdapter or StreamJsonOutputAdapter)
  * @returns An object containing the output update handler
  */
-export function createTaskToolProgressHandler(
+export function createAgentToolProgressHandler(
   config: Config,
-  taskToolCallId: string,
+  agentToolCallId: string,
   adapter: JsonOutputAdapterInterface,
 ): {
   handler: OutputUpdateHandler;
 } {
-  // Track previous TaskResultDisplay states per tool call to detect changes
-  const previousTaskStates = new Map<string, TaskResultDisplay>();
+  // Track previous AgentResultDisplay states per tool call to detect changes
+  const previousTaskStates = new Map<string, AgentResultDisplay>();
   // Track which tool call IDs have already emitted tool_use to prevent duplicates
   const emittedToolUseIds = new Set<string>();
   // Track which tool call IDs have already emitted tool_result to prevent duplicates
@@ -366,7 +366,7 @@ export function createTaskToolProgressHandler(
    * @returns ToolCallRequestInfo object
    */
   const buildRequest = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
   ): ToolCallRequestInfo => ({
     callId: toolCall.callId,
     name: toolCall.name,
@@ -383,7 +383,7 @@ export function createTaskToolProgressHandler(
    * @returns ToolCallResponseInfo object
    */
   const buildResponse = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
   ): ToolCallResponseInfo => ({
     callId: toolCall.callId,
     error:
@@ -403,7 +403,7 @@ export function createTaskToolProgressHandler(
    * @returns True if the tool call has result content to emit
    */
   const hasResultContent = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
   ): boolean => {
     // Check resultDisplay string
     if (
@@ -429,14 +429,14 @@ export function createTaskToolProgressHandler(
    * @param fallbackStatus - Optional fallback status if toolCall.status should be overridden
    */
   const emitToolUseIfNeeded = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     fallbackStatus?: 'executing' | 'awaiting_approval',
   ): void => {
     if (emittedToolUseIds.has(toolCall.callId)) {
       return;
     }
 
-    const toolCallToEmit: NonNullable<TaskResultDisplay['toolCalls']>[number] =
+    const toolCallToEmit: NonNullable<AgentResultDisplay['toolCalls']>[number] =
       fallbackStatus
         ? {
             ...toolCall,
@@ -449,7 +449,7 @@ export function createTaskToolProgressHandler(
       toolCallToEmit.status === 'awaiting_approval'
     ) {
       if (adapter.processSubagentToolCall) {
-        adapter.processSubagentToolCall(toolCallToEmit, taskToolCallId);
+        adapter.processSubagentToolCall(toolCallToEmit, agentToolCallId);
         emittedToolUseIds.add(toolCall.callId);
       }
     }
@@ -461,7 +461,7 @@ export function createTaskToolProgressHandler(
    * @param toolCall - The tool call information
    */
   const emitToolResultIfNeeded = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
   ): void => {
     if (emittedToolResultIds.has(toolCall.callId)) {
       return;
@@ -482,7 +482,7 @@ export function createTaskToolProgressHandler(
       'emitToolResult' in adapter &&
       typeof adapter.emitToolResult === 'function'
     ) {
-      adapter.emitToolResult(request, response, taskToolCallId);
+      adapter.emitToolResult(request, response, agentToolCallId);
     } else {
       adapter.emitToolResult(request, response);
     }
@@ -495,8 +495,8 @@ export function createTaskToolProgressHandler(
    * @param previousCall - The previous state of the tool call (if any)
    */
   const processToolCall = (
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
-    previousCall?: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
+    previousCall?: NonNullable<AgentResultDisplay['toolCalls']>[number],
   ): void => {
     const isCompleted =
       toolCall.status === 'success' || toolCall.status === 'failed';
@@ -531,14 +531,14 @@ export function createTaskToolProgressHandler(
     callId: string,
     outputChunk: ToolResultDisplay,
   ) => {
-    // Only process TaskResultDisplay (Task tool updates)
+    // Only process AgentResultDisplay (Task tool updates)
     if (
       typeof outputChunk === 'object' &&
       outputChunk !== null &&
       'type' in outputChunk &&
       outputChunk.type === 'task_execution'
     ) {
-      const taskDisplay = outputChunk as TaskResultDisplay;
+      const taskDisplay = outputChunk as AgentResultDisplay;
       const previous = previousTaskStates.get(callId);
 
       // Only process if adapter supports subagent APIs
@@ -585,7 +585,7 @@ export function createTaskToolProgressHandler(
               ? 'Task was cancelled'
               : 'Task execution failed');
           // Use subagent adapter's emitSubagentErrorResult method
-          adapter.emitSubagentErrorResult(errorMessage, 0, taskToolCallId);
+          adapter.emitSubagentErrorResult(errorMessage, 0, agentToolCallId);
         }
       }
 
@@ -601,7 +601,7 @@ export function createTaskToolProgressHandler(
         // Emit the user message with the correct parent_tool_use_id
         adapter.emitUserMessage(
           [{ text: taskDisplay.taskPrompt }],
-          taskToolCallId,
+          agentToolCallId,
         );
       }
 
@@ -610,7 +610,7 @@ export function createTaskToolProgressHandler(
     }
   };
 
-  // No longer need to attach adapter to handler - task.ts uses TaskResultDisplay.message instead
+  // No longer need to attach adapter to handler - task.ts uses AgentResultDisplay.message instead
 
   return {
     handler: outputUpdateHandler,

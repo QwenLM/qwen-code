@@ -192,7 +192,7 @@ export class InProcessBackend implements Backend {
     await Promise.race([Promise.allSettled(promises), timeout]);
     clearTimeout(timerId!);
 
-    // Stop per-agent tool registries so tools like TaskTool can release
+    // Stop per-agent tool registries so tools like AgentTool can release
     // listeners registered on shared managers (e.g. SubagentManager).
     for (const registry of this.agentRegistries) {
       await registry.stop().catch(() => {});

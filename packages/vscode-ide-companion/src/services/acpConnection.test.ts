@@ -97,6 +97,7 @@ describe('AcpConnection readTextFile error mapping', () => {
     conn.sdkConnection = { prompt };
     conn.sessionId = 'session-1';
     conn.onEndTurn = onEndTurn;
+    (conn as unknown as AcpConnectionInternal).child = createMockChild();
 
     await conn.sendPrompt(promptBlocks);
 
