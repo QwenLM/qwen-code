@@ -15,6 +15,7 @@ exports[`Core System Prompt (prompts.ts) > should append userMemory with separat
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -237,6 +238,7 @@ exports[`Core System Prompt (prompts.ts) > should include git instructions when 
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -469,6 +471,7 @@ exports[`Core System Prompt (prompts.ts) > should include non-sandbox instructio
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -686,6 +689,7 @@ exports[`Core System Prompt (prompts.ts) > should include sandbox-specific instr
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -903,6 +907,7 @@ exports[`Core System Prompt (prompts.ts) > should include seatbelt-specific inst
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -1120,6 +1125,7 @@ exports[`Core System Prompt (prompts.ts) > should not include git instructions w
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -1337,6 +1343,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when no
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -1554,6 +1561,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when us
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -1771,6 +1779,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when us
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -1988,6 +1997,7 @@ exports[`Model-specific tool call formats > should preserve model-specific forma
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -2228,6 +2238,7 @@ exports[`Model-specific tool call formats > should preserve model-specific forma
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -2531,6 +2542,7 @@ exports[`Model-specific tool call formats > should use JSON format for qwen-vl m
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -2771,6 +2783,7 @@ exports[`Model-specific tool call formats > should use XML format for qwen3-code
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -3070,6 +3083,7 @@ exports[`Model-specific tool call formats > should use bracket format for generi
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
@@ -3287,6 +3301,7 @@ exports[`Model-specific tool call formats > should use bracket format when no mo
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., read_file' or 'write_file'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Read Before Write:** Before overwriting an existing file with 'write_file', always read it first using 'read_file' to understand its current content. For targeted changes to existing files, prefer the 'edit' tool. Writing to an existing file without reading it first risks data loss.
 
 # Task Management
 You have access to the todo_write tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
