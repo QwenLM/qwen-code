@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   Config,
   SessionMetrics,
-  TaskResultDisplay,
+  AgentResultDisplay,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -30,7 +30,7 @@ import {
   computeUsageFromMetrics,
   buildSystemMessage,
   createToolProgressHandler,
-  createTaskToolProgressHandler,
+  createAgentToolProgressHandler,
   functionResponsePartsToString,
   toolResultContent,
 } from './nonInteractiveHelpers.js';
@@ -731,7 +731,7 @@ describe('createToolProgressHandler', () => {
   });
 });
 
-describe('createTaskToolProgressHandler', () => {
+describe('createAgentToolProgressHandler', () => {
   let mockAdapter: JsonOutputAdapterInterface;
   let mockConfig: Config;
 
@@ -751,13 +751,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should create handler that processes task tool calls', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -786,13 +786,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should emit tool_result when tool call completes', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -825,13 +825,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should not duplicate tool_use emissions', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -855,13 +855,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should not duplicate tool_result emissions', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -886,14 +886,14 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should handle status transitions from executing to completed', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
     // First: executing state
-    const executingDisplay: TaskResultDisplay = {
+    const executingDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -910,7 +910,7 @@ describe('createTaskToolProgressHandler', () => {
     };
 
     // Second: completed state
-    const completedDisplay: TaskResultDisplay = {
+    const completedDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -935,13 +935,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should emit error result for failed task status', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const runningDisplay: TaskResultDisplay = {
+    const runningDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -950,7 +950,7 @@ describe('createTaskToolProgressHandler', () => {
       toolCalls: [],
     };
 
-    const failedDisplay: TaskResultDisplay = {
+    const failedDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -971,13 +971,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should emit error result for cancelled task status', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const runningDisplay: TaskResultDisplay = {
+    const runningDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -986,7 +986,7 @@ describe('createTaskToolProgressHandler', () => {
       toolCalls: [],
     };
 
-    const cancelledDisplay: TaskResultDisplay = {
+    const cancelledDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -1006,7 +1006,7 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should not process non-task-execution displays', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
@@ -1017,20 +1017,20 @@ describe('createTaskToolProgressHandler', () => {
       content: 'some content',
     };
 
-    handler('call-id', nonTaskDisplay as unknown as TaskResultDisplay);
+    handler('call-id', nonTaskDisplay as unknown as AgentResultDisplay);
 
     expect(mockAdapter.processSubagentToolCall).not.toHaveBeenCalled();
     expect(mockAdapter.emitToolResult).not.toHaveBeenCalled();
   });
 
   it('should handle tool calls with failed status', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -1061,13 +1061,13 @@ describe('createTaskToolProgressHandler', () => {
   });
 
   it('should handle tool calls without result content', () => {
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       mockAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',
@@ -1096,13 +1096,13 @@ describe('createTaskToolProgressHandler', () => {
       emitToolResult: vi.fn(),
     } as unknown as JsonOutputAdapterInterface;
 
-    const { handler } = createTaskToolProgressHandler(
+    const { handler } = createAgentToolProgressHandler(
       mockConfig,
       'parent-tool-id',
       limitedAdapter,
     );
 
-    const taskDisplay: TaskResultDisplay = {
+    const taskDisplay: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'test-agent',
       taskDescription: 'Test task',

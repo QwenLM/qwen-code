@@ -32,7 +32,7 @@ export interface ReadFileToolParams {
   /**
    * The absolute path to the file to read
    */
-  absolute_path: string;
+  file_path: string;
 
   /**
    * The line number to start reading from (optional)
@@ -58,7 +58,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const relativePath = makeRelative(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config.getTargetDir(),
     );
     const shortPath = shortenPath(relativePath);
@@ -76,7 +76,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   override toolLocations(): ToolLocation[] {
-    return [{ path: this.params.absolute_path, line: this.params.offset }];
+    return [{ path: this.params.file_path, line: this.params.offset }];
   }
 
   /**
@@ -84,7 +84,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
    * so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const filePath = path.resolve(this.params.absolute_path);
+    const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
     const globalTempDir = Storage.getGlobalTempDir();
     const projectTempDir = this.config.storage.getProjectTempDir();
@@ -107,7 +107,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   async execute(): Promise<ToolResult> {
     const result = await processSingleFileContent(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config,
       this.params.offset,
       this.params.limit,
@@ -137,9 +137,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       typeof result.llmContent === 'string'
         ? result.llmContent.split('\n').length
         : undefined;
-    const mimetype = getSpecificMimeType(this.params.absolute_path);
+    const mimetype = getSpecificMimeType(this.params.file_path);
     const programming_language = getProgrammingLanguage({
-      absolute_path: this.params.absolute_path,
+      file_path: this.params.file_path,
     });
     logFileOperation(
       this.config,
@@ -148,7 +148,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         FileOperation.READ,
         lines,
         mimetype,
-        path.extname(this.params.absolute_path),
+        path.extname(this.params.file_path),
         programming_language,
       ),
     );
@@ -177,7 +177,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
       Kind.Read,
       {
         properties: {
-          absolute_path: {
+          file_path: {
             description:
               "The absolute path to the file to read (e.g., '/home/user/project/file.txt'). Relative paths are not supported. You must provide an absolute path.",
             type: 'string',
@@ -193,7 +193,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             type: 'number',
           },
         },
-        required: ['absolute_path'],
+        required: ['file_path'],
         type: 'object',
       },
     );
@@ -202,9 +202,9 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ReadFileToolParams,
   ): string | null {
-    const filePath = params.absolute_path;
-    if (params.absolute_path.trim() === '') {
-      return "The 'absolute_path' parameter must be non-empty.";
+    const filePath = params.file_path;
+    if (params.file_path.trim() === '') {
+      return "The 'file_path' parameter must be non-empty.";
     }
 
     if (!path.isAbsolute(filePath)) {
@@ -219,7 +219,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
 
     const fileService = this.config.getFileService();
-    if (fileService.shouldQwenIgnoreFile(params.absolute_path)) {
+    if (fileService.shouldQwenIgnoreFile(params.file_path)) {
       return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 

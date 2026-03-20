@@ -43,7 +43,7 @@ import {
   extractPartsFromUserMessage,
   buildSystemMessage,
   createToolProgressHandler,
-  createTaskToolProgressHandler,
+  createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
 
@@ -320,12 +320,12 @@ export async function runNonInteractive(
                 : undefined;
 
             // Build outputUpdateHandler for this tool call.
-            // Task tool has its own complex handler (subagent messages).
+            // Agent tool has its own complex handler (subagent messages).
             // All other tools with canUpdateOutput=true (e.g., MCP tools)
             // get a generic handler that emits progress via the adapter.
-            const isTaskTool = finalRequestInfo.name === 'task';
-            const { handler: outputUpdateHandler } = isTaskTool
-              ? createTaskToolProgressHandler(
+            const isAgentTool = finalRequestInfo.name === 'agent';
+            const { handler: outputUpdateHandler } = isAgentTool
+              ? createAgentToolProgressHandler(
                   config,
                   finalRequestInfo.callId,
                   adapter,
