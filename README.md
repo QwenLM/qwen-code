@@ -457,7 +457,7 @@ To report a bug from within the CLI, run `/bug` and include a short title and re
 
 ## Connect with Us
 
-- Discord: https://discord.gg/ycKBjdNd
+- Discord: https://discord.gg/RN7tqZCeDK
 - Dingtalk: https://qr.dingtalk.com/action/joingroup?code=v1,k1,+FX6Gf/ZDlTahTIRi8AEQhIaBlqykA0j+eBKKdhLeAE=&_dt_no_comment=1&origin=1
 
 ## Acknowledgments
