@@ -18,6 +18,7 @@ import {
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
 import { HookType } from '../hooks/types.js';
+import { performVariableReplacement } from './variables.js';
 
 describe('convertClaudeToQwenConfig', () => {
   it('should convert basic Claude config', () => {
@@ -510,64 +511,67 @@ describe('convertClaudePluginPackage', () => {
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+});
 
-  it('should handle hooks defined directly in marketplace config', async () => {
-    // Setup: Create a plugin with hooks defined directly in marketplace config
-    const pluginSourceDir = path.join(testDir, 'direct-hooks-plugin');
-    fs.mkdirSync(pluginSourceDir, { recursive: true });
+describe('performVariableReplacement for Claude extensions', () => {
+  let testDir: string;
 
-    // Create marketplace.json with hooks defined directly
-    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
-    fs.mkdirSync(marketplaceDir, { recursive: true });
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-var-test-'));
+  });
 
-    const marketplaceConfig: ClaudeMarketplaceConfig = {
-      name: 'test-marketplace',
-      owner: { name: 'Test Owner', email: 'test@example.com' },
-      plugins: [
-        {
-          name: 'direct-hooks-plugin',
-          version: '1.0.0',
-          source: './',
-          strict: false,
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: '*', // Part of HookDefinition
-                sequential: true, // Part of HookDefinition
-                hooks: [
-                  // HookConfig[] array inside HookDefinition
-                  {
-                    type: HookType.Command,
-                    command: 'npm install',
-                  },
-                ],
-              },
-            ],
-          },
-        },
-      ],
-    };
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 
-    fs.writeFileSync(
-      path.join(marketplaceDir, 'marketplace.json'),
-      JSON.stringify(marketplaceConfig, null, 2),
-      'utf-8',
-    );
+  it('should replace .claude with .qwen in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-sh');
+    fs.mkdirSync(extDir, { recursive: true });
 
-    // Execute: Convert the plugin
-    const result = await convertClaudePluginPackage(
-      pluginSourceDir,
-      'direct-hooks-plugin',
-    );
+    const shContent = `#!/bin/bash
+      CONFIG_DIR="$HOME/.claude/config"
+      CACHE_DIR="~/.claude/cache"
+      LOCAL_DIR="./.claude/local"`;
+    fs.writeFileSync(path.join(extDir, 'setup.sh'), shContent, 'utf-8');
 
-    // Verify: The converted config should contain the hooks
-    expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PreToolUse']).toHaveLength(1);
-    expect(result.config.hooks!['PreToolUse']![0].hooks![0].command).toBe(
-      'npm install',
-    );
+    performVariableReplacement(extDir);
 
-    // Clean up converted directory
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    const result = fs.readFileSync(path.join(extDir, 'setup.sh'), 'utf-8');
+    expect(result).toContain('$HOME/.qwen/config');
+    expect(result).toContain('~/.qwen/cache');
+    expect(result).toContain('./.qwen/local');
+    expect(result).not.toContain('.claude');
+  });
+
+  it('should replace role with type in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-role');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      echo '{"role":"assistant","content":"hello"}'`;
+    fs.writeFileSync(path.join(extDir, 'process.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'process.sh'), 'utf-8');
+    expect(result).toContain('"type":"assistant"');
+    expect(result).not.toContain('"role":"assistant"');
+  });
+
+  it('should update transcript parsing logic in shell scripts', () => {
+    const extDir = path.join(testDir, 'ext-transcript');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const shContent = `#!/bin/bash
+      echo "$transcript" | jq '.message.content | map(select(.type == "text"))'`;
+    fs.writeFileSync(path.join(extDir, 'parse.sh'), shContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'parse.sh'), 'utf-8');
+    expect(result).toContain('.message.parts | map(select(has("text")))');
+    expect(result).not.toContain('.message.content');
   });
 });

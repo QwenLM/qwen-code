@@ -11,7 +11,7 @@ import type {
   ToolCallResponseInfo,
   SessionMetrics,
   ServerGeminiStreamEvent,
-  TaskResultDisplay,
+  AgentResultDisplay,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -110,7 +110,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void;
   finalizeSubagentAssistantMessage?(
@@ -693,7 +693,7 @@ export abstract class BaseJsonOutputAdapter {
    * @param parentToolUseId - Parent tool use ID
    */
   processSubagentToolCall(
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void {
     const state = this.getMessageState(parentToolUseId);
@@ -744,7 +744,7 @@ export abstract class BaseJsonOutputAdapter {
   protected processSubagentToolUseBlock(
     state: MessageState,
     index: number,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ): void {
     // Emit tool_use block creation event (with empty input)
@@ -937,7 +937,7 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected createSubagentToolUseBlock(
     state: MessageState,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     _parentToolUseId: string,
   ): { block: ToolUseBlock; index: number } {
     const index = state.blocks.length;

@@ -93,6 +93,7 @@ describe('AcpConnection readTextFile error mapping', () => {
     // Set sessionId via the public property
     (conn as unknown as { sessionId: string | null }).sessionId = 'session-1';
     conn.onEndTurn = onEndTurn;
+    (conn as unknown as AcpConnectionInternal).child = createMockChild();
 
     await conn.sendPrompt(promptBlocks);
 
