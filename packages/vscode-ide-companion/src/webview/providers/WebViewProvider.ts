@@ -962,6 +962,19 @@ export class WebViewProvider {
           await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
           if (methodId && methodId !== 'default') {
+            // If we are about to re-authenticate with a specific method, ensure
+            // the webview stays on the Onboarding page.  The preceding
+            // doInitializeAgentConnection may have sent `agentConnected` (when
+            // cached credentials are still valid), which would prematurely
+            // transition to the chat view.  Override that here.
+            this.sendMessageToWebView({
+              type: 'authState',
+              data: {
+                authenticated: false,
+                authMethods: this.agentManager.availableAuthMethods,
+              },
+            });
+
             progress.report({
               message: 'Authenticating...',
             });

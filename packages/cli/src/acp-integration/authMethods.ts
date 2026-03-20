@@ -13,7 +13,7 @@ export function buildAuthMethods(): AuthMethod[] {
       id: AuthType.QWEN_OAUTH,
       name: 'Qwen OAuth',
       description:
-        'OAuth authentication for Qwen models with free daily requests',
+        'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
       _meta: {
         type: 'terminal',
         args: ['--auth-type=qwen-oauth'],
@@ -31,9 +31,8 @@ export function buildAuthMethods(): AuthMethod[] {
     },
     {
       id: AuthType.USE_OPENAI,
-      name: 'Bring your own API key',
-      description:
-        'Use coding plan credentials or your own api-keys/providers.',
+      name: 'API Key',
+      description: 'Bring your own API key',
       _meta: {
         type: 'terminal',
         args: ['--auth-type=openai'],

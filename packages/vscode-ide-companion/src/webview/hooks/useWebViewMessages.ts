@@ -388,18 +388,17 @@ export const useWebViewMessages = ({
         }
 
         case 'agentConnectionError': {
-          // Agent connection failed; surface the error and unblock the UI
+          // Agent connection failed; show the error on the Onboarding page
+          // instead of adding it as a chat message (which would prevent
+          // Onboarding from rendering due to hasContent becoming true).
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
             (message?.data?.message as string) ||
             'Failed to connect to Qwen agent.';
 
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: `Failed to connect to Qwen agent: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
-            timestamp: Date.now(),
-          });
-          // Set authentication state to false
+          handlers.setLoginErrorMessage?.(
+            `Failed to connect to Qwen agent: ${errorMsg}`,
+          );
           handlers.setIsAuthenticated?.(false);
           break;
         }
