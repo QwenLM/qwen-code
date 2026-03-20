@@ -30,117 +30,6 @@ import { substituteHookVariables } from './variables.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
-/**
- * Perform variable replacement in all markdown and shell script files of the extension.
- * This is done during the conversion phase to avoid modifying files during every extension load.
- * @param extensionPath - The path to the extension directory
- */
-export function performVariableReplacement(extensionPath: string): void {
-  // Process markdown files
-  const mdGlobPattern = '**/*.md';
-  const mdGlobOptions = {
-    cwd: extensionPath,
-    nodir: true,
-  };
-
-  try {
-    const mdFiles = glob.sync(mdGlobPattern, mdGlobOptions);
-
-    for (const file of mdFiles) {
-      const filePath = path.join(extensionPath, file);
-
-      try {
-        const content = fs.readFileSync(filePath, 'utf8');
-
-        // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
-        const updatedContent = content.replace(
-          /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-          extensionPath,
-        );
-
-        // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax
-        // This regex finds code blocks with ! language identifier and captures their content
-        const updatedMdContent = updatedContent.replace(
-          /```!(?:\s*\n)?([\s\S]*?)\n*```/g,
-          '!{$1}',
-        );
-
-        // Only write if content was actually changed
-        if (updatedMdContent !== content) {
-          fs.writeFileSync(filePath, updatedMdContent, 'utf8');
-          debugLogger.debug(
-            `Updated variables and syntax in file: ${filePath}`,
-          );
-        }
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  } catch (error) {
-    debugLogger.warn(
-      `Failed to scan markdown files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  // Process shell script files
-  const scriptGlobPattern = '**/*.sh';
-  const scriptGlobOptions = {
-    cwd: extensionPath,
-    nodir: true,
-  };
-
-  try {
-    const scriptFiles = glob.sync(scriptGlobPattern, scriptGlobOptions);
-
-    for (const file of scriptFiles) {
-      const filePath = path.join(extensionPath, file);
-
-      try {
-        const content = fs.readFileSync(filePath, 'utf8');
-
-        // Replace references to "role":"assistant" with "type":"assistant" in shell scripts
-        const updatedScriptContent = content.replace(
-          /"role":"assistant"/g,
-          '"type":"assistant"',
-        );
-
-        // Replace transcript parsing logic to adapt to actual transcript structure
-        // Change from .message.content | map(select(.type == "text")) to .message.parts | map(select(has("text")))
-        const adaptedScriptContent = updatedScriptContent.replace(
-          /\.message\.content\s*\|\s*map\(select\(\.type\s*==\s*"text"\)\)/g,
-          '.message.parts | map(select(has("text")))',
-        );
-
-        // Replace references to ".claude" directory with ".qwen" in shell scripts
-        // Only match path references (e.g., ~/.claude/, $HOME/.claude, ./.claude/)
-        // Avoid matching URLs, comments, or string literals containing .claude
-        const finalScriptContent = adaptedScriptContent.replace(
-          /(\$\{?HOME\}?\/|~\/)?\.claude(\/|$)/g,
-          '$1.qwen$2',
-        );
-
-        // Only write if content was actually changed
-        if (finalScriptContent !== content) {
-          fs.writeFileSync(filePath, finalScriptContent, 'utf8');
-          debugLogger.debug(
-            `Updated transcript format and replaced .claude with .qwen in shell script: ${filePath}`,
-          );
-        }
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to process shell script file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  } catch (error) {
-    debugLogger.warn(
-      `Failed to scan shell script files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
 export interface ClaudePluginConfig {
   name: string;
   version: string;
@@ -619,13 +508,9 @@ export async function convertClaudePluginPackage(
       }
     }
 
-    // Step 9.1: Convert collected agent files from Claude format to Qwen format
+    // Step 9: Convert collected agent files from Claude format to Qwen format
     const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
-
-    // Step 9.2: Perform variable replacement in markdown and shell script files
-    // This is done during conversion to avoid modifying files during every extension load
-    performVariableReplacement(tmpDir);
 
     // Step 10: Convert to Qwen format config
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);

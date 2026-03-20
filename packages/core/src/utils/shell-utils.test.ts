@@ -6,6 +6,7 @@
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
 import {
+  checkArgumentSafety,
   checkCommandPermissions,
   escapeShellArg,
   getCommandRoots,
@@ -615,5 +616,138 @@ describe('isCommandNeedPermission', () => {
     const result = isCommandNeedsPermission('rm -rf temp');
     expect(result.requiresPermission).toBe(true);
     expect(result.reason).toContain('requires permission to execute');
+  });
+});
+
+describe('checkArgumentSafety', () => {
+  describe('command substitution patterns', () => {
+    it('should detect $() command substitution', () => {
+      const result = checkArgumentSafety('$(whoami)');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('$() command substitution');
+    });
+
+    it('should detect backtick command substitution', () => {
+      const result = checkArgumentSafety('`whoami`');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain(
+        'backtick command substitution',
+      );
+    });
+
+    it('should detect <() process substitution', () => {
+      const result = checkArgumentSafety('<(cat file)');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('<() process substitution');
+    });
+
+    it('should detect >() process substitution', () => {
+      const result = checkArgumentSafety('>(tee file)');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('>() process substitution');
+    });
+  });
+
+  describe('command separators', () => {
+    it('should detect semicolon separator', () => {
+      const result = checkArgumentSafety('arg1; rm -rf /');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('; command separator');
+    });
+
+    it('should detect pipe', () => {
+      const result = checkArgumentSafety('arg1 | cat file');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('| pipe');
+    });
+
+    it('should detect && operator', () => {
+      const result = checkArgumentSafety('arg1 && ls');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('&& AND operator');
+    });
+
+    it('should detect || operator', () => {
+      const result = checkArgumentSafety('arg1 || ls');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('|| OR operator');
+    });
+  });
+
+  describe('background execution', () => {
+    it('should detect background operator', () => {
+      const result = checkArgumentSafety('arg1 & ls');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('& background operator');
+    });
+  });
+
+  describe('input/output redirection', () => {
+    it('should detect output redirection', () => {
+      const result = checkArgumentSafety('arg1 > file');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('> output redirection');
+    });
+
+    it('should detect input redirection', () => {
+      const result = checkArgumentSafety('arg1 < file');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('< input redirection');
+    });
+
+    it('should detect append redirection', () => {
+      const result = checkArgumentSafety('arg1 >> file');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('> output redirection');
+    });
+  });
+
+  describe('safe inputs', () => {
+    it('should accept simple arguments', () => {
+      const result = checkArgumentSafety('arg1 arg2');
+      expect(result.isSafe).toBe(true);
+      expect(result.dangerousPatterns).toHaveLength(0);
+    });
+
+    it('should accept arguments with numbers', () => {
+      const result = checkArgumentSafety('file123.txt');
+      expect(result.isSafe).toBe(true);
+    });
+
+    it('should accept arguments with hyphens', () => {
+      const result = checkArgumentSafety('--flag=value');
+      expect(result.isSafe).toBe(true);
+    });
+
+    it('should accept arguments with underscores', () => {
+      const result = checkArgumentSafety('my_file_name');
+      expect(result.isSafe).toBe(true);
+    });
+
+    it('should accept arguments with dots', () => {
+      const result = checkArgumentSafety('path/to/file.txt');
+      expect(result.isSafe).toBe(true);
+    });
+
+    it('should accept empty string', () => {
+      const result = checkArgumentSafety('');
+      expect(result.isSafe).toBe(true);
+    });
+
+    it('should accept arguments with spaces (quoted)', () => {
+      const result = checkArgumentSafety('hello world');
+      expect(result.isSafe).toBe(true);
+    });
+  });
+
+  describe('multiple dangerous patterns', () => {
+    it('should detect multiple dangerous patterns', () => {
+      const result = checkArgumentSafety('$(whoami); rm -rf / &');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain('$() command substitution');
+      expect(result.dangerousPatterns).toContain('; command separator');
+      expect(result.dangerousPatterns).toContain('& background operator');
+      expect(result.dangerousPatterns).toHaveLength(3);
+    });
   });
 });

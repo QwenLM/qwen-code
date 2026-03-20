@@ -891,5 +891,169 @@ describe('extension tests', () => {
         `${extensionDir}/scripts/setup.sh`,
       );
     });
+
+    it('should load hooks from config.hooks string path', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-from-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create custom hooks directory and hooks file
+      const customHooksDir = path.join(extensionDir, 'custom-hooks');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+
+      const hooksJson = {
+        PreToolUse: [
+          {
+            description: 'Run from custom path',
+            hooks: [
+              {
+                type: 'command',
+                command: 'echo "custom hooks path"',
+              },
+            ],
+          },
+        ],
+      };
+
+      fs.writeFileSync(
+        path.join(customHooksDir, 'hooks.json'),
+        JSON.stringify(hooksJson),
+      );
+
+      // Create qwen-extension.json with hooks as string path
+      const configWithHooksPath = {
+        name: 'hooks-from-config-path',
+        version: '1.0.0',
+        hooks: 'custom-hooks/hooks.json',
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooksPath),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(extensions[0].hooks!['PreToolUse']![0].hooks![0].command).toBe(
+        'echo "custom hooks path"',
+      );
+    });
+
+    it('should prefer config.hooks string path over hooks/hooks.json', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-prefer-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // Create hooks/hooks.json
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              description: 'From hooks directory',
+              hooks: [{ type: 'command', command: 'echo "hooks dir"' }],
+            },
+          ],
+        }),
+      );
+
+      // Create custom hooks file
+      const customHooksDir = path.join(extensionDir, 'custom');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(customHooksDir, 'my-hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              description: 'From config path',
+              hooks: [{ type: 'command', command: 'echo "config path"' }],
+            },
+          ],
+        }),
+      );
+
+      // Create qwen-extension.json with hooks as string path
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'hooks-prefer-config-path',
+          version: '1.0.0',
+          hooks: 'custom/my-hooks.json',
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']![0].hooks![0].command).toBe(
+        'echo "config path"',
+      );
+    });
+
+    it('should substitute ${CLAUDE_PLUGIN_ROOT} in hooks file from config.hooks string path', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-var-from-config-path',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      const customHooksDir = path.join(extensionDir, 'my-hooks');
+      fs.mkdirSync(customHooksDir, { recursive: true });
+
+      const hooksJson = {
+        PreToolUse: [
+          {
+            description: 'Run with variable',
+            hooks: [
+              {
+                type: 'command',
+                command: '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
+              },
+            ],
+          },
+        ],
+      };
+
+      fs.writeFileSync(
+        path.join(customHooksDir, 'hooks.json'),
+        JSON.stringify(hooksJson),
+      );
+
+      const configWithHooksPath = {
+        name: 'hooks-var-from-config-path',
+        version: '1.0.0',
+        hooks: 'my-hooks/hooks.json',
+      };
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(configWithHooksPath),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(extensions[0].hooks!['PreToolUse']![0].hooks![0].command).toBe(
+        `${extensionDir}/scripts/setup.sh`,
+      );
+    });
   });
 });

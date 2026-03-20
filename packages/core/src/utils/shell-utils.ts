@@ -1000,6 +1000,52 @@ export function isCommandNeedsPermission(command: string): {
   };
 }
 
+/**
+ * Checks user arguments for potentially dangerous shell characters.
+ * This is used to validate arguments before they are substituted into
+ * shell command templates (e.g., $ARGUMENTS placeholder).
+ *
+ * Note: This does NOT remove outer quotes - it validates the raw input.
+ * Use escapeShellArg() for safe shell argument escaping.
+ *
+ * @param args - The raw user arguments string
+ * @returns Object with isSafe flag and list of dangerous patterns found
+ */
+export function checkArgumentSafety(args: string): {
+  isSafe: boolean;
+  dangerousPatterns: string[];
+} {
+  const dangerousPatterns: string[] = [];
+
+  // Command substitution patterns
+  if (args.includes('$(')) dangerousPatterns.push('$() command substitution');
+  if (args.includes('`'))
+    dangerousPatterns.push('backtick command substitution');
+  if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
+  if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
+
+  // Command separators (outside of quotes)
+  if (args.includes(';')) dangerousPatterns.push('; command separator');
+  if (args.includes('|')) dangerousPatterns.push('| pipe');
+  if (args.includes('&&')) dangerousPatterns.push('&& AND operator');
+  if (args.includes('||')) dangerousPatterns.push('|| OR operator');
+
+  // Background execution (space + &, with optional surrounding)
+  if (args.includes(' &') || args.includes('& '))
+    dangerousPatterns.push('& background operator');
+
+  // Input/Output redirection
+  if (args.includes('>') || args.includes('<')) {
+    if (/>\s|\d>/.test(args)) dangerousPatterns.push('> output redirection');
+    if (/<\s|\d</.test(args)) dangerousPatterns.push('< input redirection');
+  }
+
+  return {
+    isSafe: dangerousPatterns.length === 0,
+    dangerousPatterns,
+  };
+}
+
 // ConPTY on Windows builds <= 19041 has known reliability issues (missing
 // output, hangs). VS Code uses the same cutoff: microsoft/vscode#123725.
 const CONPTY_MIN_WINDOWS_BUILD = 19042;
