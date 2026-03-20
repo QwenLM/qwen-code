@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { memo } from 'react';
 import { Box, Text } from 'ink';
 import type { BtwProps } from '../../types.js';
 import { Colors } from '../../colors.js';
@@ -14,7 +15,7 @@ export interface BtwDisplayProps {
   btw: BtwProps;
 }
 
-export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
+const BtwMessageInner: React.FC<BtwDisplayProps> = ({ btw }) => (
   <Box
     flexDirection="column"
     borderStyle="round"
@@ -45,3 +46,5 @@ export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
     )}
   </Box>
 );
+
+export const BtwMessage = memo(BtwMessageInner);
