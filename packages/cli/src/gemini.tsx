@@ -81,7 +81,27 @@ export function validateDnsResolutionOrder(
   return defaultValue;
 }
 
+let _isSEA: boolean | undefined;
+function isSEABinary(): boolean {
+  if (_isSEA !== undefined) return _isSEA;
+  try {
+    // node:sea exists only in Single Executable Application builds.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax
+    const sea = require('node:sea') as { isSea?: () => boolean };
+    _isSEA = typeof sea.isSea === 'function' && sea.isSea();
+  } catch {
+    _isSEA = false;
+  }
+  return _isSEA;
+}
+
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
+  // SEA binaries can't be relaunched with V8 flags via argv — they'd be
+  // parsed as CLI arguments by yargs. Skip memory tuning entirely.
+  if (isSEABinary() || process.env['QWEN_CODE_NO_RELAUNCH']) {
+    return [];
+  }
+
   const totalMemoryMB = os.totalmem() / (1024 * 1024);
   const heapStats = v8.getHeapStatistics();
   const currentMaxOldSpaceSizeMb = Math.floor(
@@ -94,10 +114,6 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
     writeStderrLine(
       `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
     );
-  }
-
-  if (process.env['QWEN_CODE_NO_RELAUNCH']) {
-    return [];
   }
 
   if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
