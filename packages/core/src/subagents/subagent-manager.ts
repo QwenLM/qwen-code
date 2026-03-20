@@ -155,6 +155,8 @@ export class SubagentManager {
     name: string,
     level?: SubagentLevel,
   ): Promise<SubagentConfig | null> {
+    const lowerName = name.toLowerCase();
+
     if (level) {
       // Search only the specified level
       if (level === 'builtin') {
@@ -163,7 +165,11 @@ export class SubagentManager {
 
       if (level === 'session') {
         const sessionSubagents = this.subagentsCache?.get('session') || [];
-        return sessionSubagents.find((agent) => agent.name === name) || null;
+        return (
+          sessionSubagents.find(
+            (agent) => agent.name.toLowerCase() === lowerName,
+          ) || null
+        );
       }
 
       return this.findSubagentByNameAtLevel(name, level);
@@ -171,7 +177,9 @@ export class SubagentManager {
 
     // Try session level first (highest priority for runtime)
     const sessionSubagents = this.subagentsCache?.get('session') || [];
-    const sessionConfig = sessionSubagents.find((agent) => agent.name === name);
+    const sessionConfig = sessionSubagents.find(
+      (agent) => agent.name.toLowerCase() === lowerName,
+    );
     if (sessionConfig) {
       return sessionConfig;
     }
@@ -842,9 +850,9 @@ export class SubagentManager {
   ): Promise<SubagentConfig | null> {
     const allSubagents = await this.listSubagentsAtLevel(level);
 
-    // Find the subagent with matching name
+    const lowerName = name.toLowerCase();
     for (const subagent of allSubagents) {
-      if (subagent.name === name) {
+      if (subagent.name.toLowerCase() === lowerName) {
         return subagent;
       }
     }

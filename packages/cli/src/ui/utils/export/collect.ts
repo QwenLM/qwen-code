@@ -181,10 +181,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
       let filePath: string;
       if (typeof display.fileName === 'string') {
         // Prefer args.file_path for full path, fallback to fileName (which may be basename)
-        filePath =
-          (args?.['file_path'] as string) ||
-          (args?.['absolute_path'] as string) ||
-          display.fileName;
+        filePath = (args?.['file_path'] as string) || display.fileName;
       } else {
         // Fallback if fileName is not a string
         filePath = 'unknown';

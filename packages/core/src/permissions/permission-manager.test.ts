@@ -49,7 +49,15 @@ describe('resolveToolName', () => {
   });
 
   it('resolves Agent category', () => {
-    expect(resolveToolName('Agent')).toBe('task');
+    expect(resolveToolName('Agent')).toBe('agent');
+    expect(resolveToolName('agent')).toBe('agent');
+    expect(resolveToolName('AgentTool')).toBe('agent');
+  });
+
+  it('resolves legacy task aliases to agent', () => {
+    expect(resolveToolName('task')).toBe('agent');
+    expect(resolveToolName('Task')).toBe('agent');
+    expect(resolveToolName('TaskTool')).toBe('agent');
   });
 
   it('returns unknown names unchanged', () => {
@@ -158,7 +166,7 @@ describe('parseRule', () => {
 
   it('parses Agent with literal specifier', () => {
     const r = parseRule('Agent(Explore)');
-    expect(r.toolName).toBe('task');
+    expect(r.toolName).toBe('agent');
     expect(r.specifier).toBe('Explore');
     expect(r.specifierKind).toBe('literal');
   });
@@ -798,7 +806,7 @@ describe('PermissionManager', () => {
     it('returns default for unmatched tool', () => {
       // Note: 'glob' is covered by ReadFileTool via Read meta-category,
       // so use a tool not in any rule or meta-category
-      expect(pm.evaluate({ toolName: 'task' })).toBe('default');
+      expect(pm.evaluate({ toolName: 'agent' })).toBe('default');
     });
 
     it('deny takes precedence over ask and allow', () => {
@@ -1294,8 +1302,8 @@ describe('getRuleDisplayName', () => {
     expect(getRuleDisplayName('web_fetch')).toBe('WebFetch');
   });
 
-  it('maps task to "Task" and skill to "Skill"', () => {
-    expect(getRuleDisplayName('task')).toBe('Task');
+  it('maps agent to "Agent" and skill to "Skill"', () => {
+    expect(getRuleDisplayName('agent')).toBe('Agent');
     expect(getRuleDisplayName('skill')).toBe('Skill');
   });
 
@@ -1488,12 +1496,12 @@ describe('buildPermissionRules', () => {
       expect(rules).toEqual(['Skill(Explore)']);
     });
 
-    it('generates Task rule with specifier', () => {
+    it('generates Agent rule with specifier', () => {
       const rules = buildPermissionRules({
-        toolName: 'task',
+        toolName: 'agent',
         specifier: 'research',
       });
-      expect(rules).toEqual(['Task(research)']);
+      expect(rules).toEqual(['Agent(research)']);
     });
 
     it('falls back to bare display name when no specifier', () => {
