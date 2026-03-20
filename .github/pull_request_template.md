@@ -6,6 +6,19 @@
 
 <!-- more thoughts and in-depth discussion here -->
 
+## Screenshots / Video Demo
+
+<!--
+Please attach a screenshot or short video showing your change in action.
+This helps reviewers understand the change quickly and prioritize reviews.
+
+- For bug fixes: show the before/after behavior.
+- For features: show the new functionality in use.
+- For refactors or internal changes with no visible effect: write "N/A — no user-facing change" and briefly explain why.
+
+PRs with visual demos typically get reviewed much faster!
+-->
+
 ## Reviewer Test Plan
 
 <!-- when a person reviews your code they should ideally be pulling and running that code. How would they validate your change works and if relevant what are some good classes of example prompts and ways they can exercise your changes -->
