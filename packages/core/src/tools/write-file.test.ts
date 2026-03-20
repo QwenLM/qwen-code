@@ -844,4 +844,97 @@ describe('WriteFileTool', () => {
       }
     });
   });
+
+  describe('content-loss guard', () => {
+    const abortSignal = new AbortController().signal;
+
+    it('should block overwrite when proposed content is significantly shorter than existing file', async () => {
+      const filePath = path.join(rootDir, 'guard-large-file.txt');
+      const originalContent = 'a'.repeat(200);
+      fs.writeFileSync(filePath, originalContent, 'utf-8');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'short replacement',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeDefined();
+      expect(result.error!.type).toBe(ToolErrorType.WRITE_CONTENT_LOSS_WARNING);
+      // Verify original file is not modified
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
+    });
+
+    it('should allow overwrite when proposed content is similar length', async () => {
+      const filePath = path.join(rootDir, 'guard-similar-length.txt');
+      fs.writeFileSync(filePath, 'a'.repeat(200), 'utf-8');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'b'.repeat(150),
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should allow creation of new files regardless of content length', async () => {
+      const filePath = path.join(rootDir, 'guard-new-file.txt');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'short',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('short');
+    });
+
+    it('should allow overwrite of small files even with shorter content', async () => {
+      const filePath = path.join(rootDir, 'guard-small-file.txt');
+      fs.writeFileSync(filePath, 'a'.repeat(50), 'utf-8');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'tiny',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should allow overwrite of empty files', async () => {
+      const filePath = path.join(rootDir, 'guard-empty-file.txt');
+      fs.writeFileSync(filePath, '', 'utf-8');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should skip guard when content was modified by user', async () => {
+      const filePath = path.join(rootDir, 'guard-user-modified.txt');
+      fs.writeFileSync(filePath, 'a'.repeat(200), 'utf-8');
+
+      const params: WriteFileToolParams = {
+        file_path: filePath,
+        content: 'short user edit',
+        modified_by_user: true,
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+    });
+  });
 });

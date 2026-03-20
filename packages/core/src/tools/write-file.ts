@@ -217,6 +217,28 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Content-loss guard: detect potential data loss when overwriting existing files.
+    // If proposed content is significantly shorter than original, refuse the write
+    // and instruct the LLM to read the file first.
+    if (fileExists && originalContent.length >= 100 && !modified_by_user) {
+      const ratio = content.length / originalContent.length;
+      if (ratio < 0.5) {
+        const warningMsg =
+          `Warning: Proposed content (${content.length} chars) is significantly shorter than the existing file ` +
+          `(${originalContent.length} chars), which may indicate data loss. ` +
+          `Please use ${ReadFileTool.Name} to read the current file content before overwriting. ` +
+          `If you intend to replace the file with shorter content, read the file first to confirm your intent.`;
+        return {
+          llmContent: warningMsg,
+          returnDisplay: warningMsg,
+          error: {
+            message: warningMsg,
+            type: ToolErrorType.WRITE_CONTENT_LOSS_WARNING,
+          },
+        };
+      }
+    }
+
     if (!fileExists) {
       fs.mkdirSync(dirName, { recursive: true });
       const userEncoding = this.config.getDefaultFileEncoding();
