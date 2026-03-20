@@ -49,6 +49,7 @@ import type {
   ArenaSessionStartedEvent,
   ArenaAgentCompletedEvent,
   ArenaSessionEndedEvent,
+  HookCallEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -65,6 +66,7 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
+import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -990,6 +992,34 @@ export class QwenLogger {
         winner_model_id: event.winner_model_id,
       },
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  /**
+   * Log a hook call event
+   * Records hook execution telemetry for observability
+   */
+  logHookCallEvent(event: HookCallEvent): void {
+    // Sanitize hook name to remove potentially sensitive information
+    const sanitizedHookName = sanitizeHookName(event.hook_name);
+
+    const rumEvent = this.createActionEvent(
+      'hook',
+      `hook_call#${event.hook_event_name}`,
+      {
+        properties: {
+          hook_event_name: event.hook_event_name,
+          hook_type: event.hook_type,
+          hook_name: sanitizedHookName,
+          duration_ms: event.duration_ms,
+          success: event.success ? 1 : 0,
+          exit_code: event.exit_code,
+          error: event.error,
+        },
+      },
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

@@ -358,16 +358,16 @@ export class HookEventHandler {
       }
 
       const onHookStart = (config: HookConfig, index: number) => {
-        // Hook start event
+        const hookName = this.getHookName(config);
         debugLogger.debug(
-          `Hook ${this.getHookName(config)} started for event ${eventName} (${index + 1}/${plan.hookConfigs.length})`,
+          `Hook ${hookName} started for event ${eventName} (${index + 1}/${plan.hookConfigs.length})`,
         );
       };
 
       const onHookEnd = (config: HookConfig, result: HookExecutionResult) => {
-        // Hook end event
+        const hookName = this.getHookName(config);
         debugLogger.debug(
-          `Hook ${this.getHookName(config)} ended for event ${eventName}: ${result.success ? 'success' : 'failed'}`,
+          `Hook ${hookName} ended for event ${eventName}: ${result.success ? 'success' : 'failed'}`,
         );
       };
 
@@ -496,15 +496,9 @@ export class HookEventHandler {
         }
       }
 
-      debugLogger.warn(
-        `Hook execution for ${eventName}: ${successCount} succeeded, ${errorCount} failed (${failedNames}), ` +
-          `total duration: ${aggregated.totalDuration}ms`,
-      );
-
       if (shouldEmit) {
-        // Emit feedback event for failed hooks
         debugLogger.warn(
-          `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.\n`,
+          `Hook(s) [${failedNames}] failed for event ${eventName}. Check debug logs for more details.`,
         );
       }
     } else {
@@ -514,9 +508,7 @@ export class HookEventHandler {
       );
     }
 
-    // Log individual hook calls to telemetry
     for (const result of results) {
-      // Determine hook name and type for telemetry
       const hookName = this.getHookNameFromResult(result);
       const hookType = this.getHookTypeFromResult(result);
 
@@ -537,7 +529,6 @@ export class HookEventHandler {
       logHookCall(this.config, hookCallEvent);
     }
 
-    // Log individual errors
     for (const error of aggregated.errors) {
       debugLogger.warn(`Hook execution error: ${error.message}`);
     }

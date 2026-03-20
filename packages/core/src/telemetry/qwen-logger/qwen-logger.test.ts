@@ -23,6 +23,7 @@ import {
   IdeConnectionEvent,
   KittySequenceOverflowEvent,
   IdeConnectionType,
+  HookCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -515,6 +516,268 @@ describe('QwenLogger', () => {
       expect(TEST_ONLY.MAX_EVENTS).toBe(1000);
       expect(TEST_ONLY.MAX_RETRY_EVENTS).toBe(100);
       expect(TEST_ONLY.FLUSH_INTERVAL_MS).toBe(60000);
+    });
+  });
+
+  describe('logHookCallEvent', () => {
+    it('should log a successful hook call event', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'PreToolUse',
+        'command',
+        'check-secrets.sh',
+        { tool_name: 'read_file' },
+        150,
+        true,
+        { result: 'valid' },
+        0,
+        'stdout',
+        'stderr',
+        undefined,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'hook',
+          name: 'hook_call#PreToolUse',
+          properties: expect.objectContaining({
+            hook_event_name: 'PreToolUse',
+            hook_type: 'command',
+            hook_name: 'check-secrets.sh',
+            duration_ms: 150,
+            success: 1,
+            exit_code: 0,
+          }),
+        }),
+      );
+    });
+
+    it('should log a failed hook call event with error', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'PostToolUse',
+        'command',
+        'cleanup.sh',
+        { tool_name: 'shell' },
+        200,
+        false,
+        undefined,
+        1,
+        '',
+        'error output',
+        'Command failed',
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'hook',
+          name: 'hook_call#PostToolUse',
+          properties: expect.objectContaining({
+            hook_event_name: 'PostToolUse',
+            hook_type: 'command',
+            hook_name: 'cleanup.sh',
+            duration_ms: 200,
+            success: 0,
+            exit_code: 1,
+            error: 'Command failed',
+          }),
+        }),
+      );
+    });
+
+    it('should sanitize hook name to remove sensitive information', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      // Hook name with full path and sensitive arguments
+      const event = new HookCallEvent(
+        'PreToolUse',
+        'command',
+        '/home/user/.qwen/hooks/check-secrets.sh --api-key=secret123',
+        { tool_name: 'read_file' },
+        100,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            // Should be sanitized to just the basename without arguments
+            hook_name: 'check-secrets.sh',
+          }),
+        }),
+      );
+    });
+
+    it('should sanitize hook name with Windows path', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'Stop',
+        'command',
+        'C:\\Users\\user\\hooks\\cleanup.bat --token=xyz',
+        {},
+        50,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            hook_name: 'cleanup.bat',
+          }),
+        }),
+      );
+    });
+
+    it('should handle empty hook name', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'SessionStart',
+        'command',
+        '',
+        {},
+        10,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            hook_name: 'unknown-command',
+          }),
+        }),
+      );
+    });
+
+    it('should handle hook name with only whitespace', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'SessionEnd',
+        'command',
+        '   ',
+        {},
+        10,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            hook_name: 'unknown-command',
+          }),
+        }),
+      );
+    });
+
+    it('should handle hook name that is just a command without path', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'Notification',
+        'command',
+        'python --arg=value',
+        {},
+        100,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            // Should be sanitized to just the command name
+            hook_name: 'python',
+          }),
+        }),
+      );
+    });
+
+    it('should call flushIfNeeded after logging', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const flushSpy = vi.spyOn(logger, 'flushIfNeeded');
+
+      const event = new HookCallEvent(
+        'PreToolUse',
+        'command',
+        'test-hook.sh',
+        {},
+        100,
+        true,
+      );
+
+      logger.logHookCallEvent(event);
+
+      expect(flushSpy).toHaveBeenCalled();
+    });
+
+    it('should handle all hook event types', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const eventTypes = [
+        'PreToolUse',
+        'PostToolUse',
+        'PostToolUseFailure',
+        'Notification',
+        'UserPromptSubmit',
+        'SessionStart',
+        'SessionEnd',
+        'Stop',
+        'SubagentStart',
+        'SubagentStop',
+        'PreCompact',
+        'PermissionRequest',
+      ];
+
+      for (const eventType of eventTypes) {
+        enqueueSpy.mockClear();
+
+        const event = new HookCallEvent(
+          eventType,
+          'command',
+          'test-hook.sh',
+          {},
+          100,
+          true,
+        );
+
+        logger.logHookCallEvent(event);
+
+        expect(enqueueSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: `hook_call#${eventType}`,
+            properties: expect.objectContaining({
+              hook_event_name: eventType,
+            }),
+          }),
+        );
+      }
     });
   });
 });

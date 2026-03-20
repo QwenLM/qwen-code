@@ -1293,17 +1293,18 @@ describe('loggers', () => {
       getTelemetryLogPromptsEnabled: () => true,
     } as unknown as Config;
 
-    const mockMetrics = {
-      recordHookCallMetrics: vi.fn(),
+    const mockQwenLogger = {
+      logHookCallEvent: vi.fn(),
     };
 
     beforeEach(() => {
-      vi.spyOn(metrics, 'recordHookCallMetrics').mockImplementation(
-        mockMetrics.recordHookCallMetrics,
+      vi.spyOn(QwenLogger, 'getInstance').mockReturnValue(
+        mockQwenLogger as unknown as QwenLogger,
       );
+      mockQwenLogger.logHookCallEvent.mockClear();
     });
 
-    it('should log a successful hook call with all fields', () => {
+    it('should log a successful hook call to QwenLogger', () => {
       const event = new HookCallEvent(
         'UserPromptSubmit',
         'command',
@@ -1320,32 +1321,8 @@ describe('loggers', () => {
 
       logHookCall(mockConfig, event);
 
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: 'Hook call UserPromptSubmit.check-secrets.sh succeeded in 150ms',
-        attributes: {
-          'session.id': 'test-session-id',
-          'event.name': 'qwen_code.hook_call',
-          'event.timestamp': '2025-01-01T00:00:00.000Z',
-          hook_event_name: 'UserPromptSubmit',
-          hook_type: 'command',
-          hook_name: 'check-secrets.sh',
-          duration_ms: 150,
-          success: true,
-          exit_code: 0,
-          hook_input: '{\n  "prompt": "test prompt"\n}',
-          hook_output: '{\n  "output": "success"\n}',
-          stdout: 'stdout message',
-          stderr: 'stderr message',
-        },
-      });
-
-      expect(mockMetrics.recordHookCallMetrics).toHaveBeenCalledWith(
-        mockConfig,
-        'UserPromptSubmit',
-        'check-secrets.sh',
-        150,
-        true,
-      );
+      // Should call QwenLogger
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
     });
 
     it('should log a failed hook call with error', () => {
@@ -1365,102 +1342,171 @@ describe('loggers', () => {
 
       logHookCall(mockConfig, event);
 
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: 'Hook call Stop.cleanup.sh failed in 200ms',
-        attributes: {
-          'session.id': 'test-session-id',
-          'event.name': 'qwen_code.hook_call',
-          'event.timestamp': '2025-01-01T00:00:00.000Z',
-          hook_event_name: 'Stop',
-          hook_type: 'command',
-          hook_name: 'cleanup.sh',
-          duration_ms: 200,
-          success: false,
-          exit_code: 1,
-          hook_input: '{\n  "last_assistant_message": "final message"\n}',
-          hook_output: undefined,
-          stdout: 'stdout message',
-          stderr: 'stderr message',
-          error: 'Error occurred',
-        },
-      });
-
-      expect(mockMetrics.recordHookCallMetrics).toHaveBeenCalledWith(
-        mockConfig,
-        'Stop',
-        'cleanup.sh',
-        200,
-        false,
-      );
+      // Should call QwenLogger
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
     });
 
-    it('should sanitize hook names when prompt logging is disabled', () => {
-      const mockConfigNoLogging = {
-        getSessionId: () => 'test-session-id',
-        getTargetDir: () => 'target-dir',
-        getUsageStatisticsEnabled: () => true,
-        getTelemetryEnabled: () => true,
-        getTelemetryLogPromptsEnabled: () => false, // Disabled
-      } as unknown as Config;
-
-      const event = new HookCallEvent(
-        'UserPromptSubmit',
-        'command',
-        '/full/path/to/.gemini/hooks/secrets-check.sh --api-key=secret123',
-        { prompt: 'test prompt' },
-        100,
-        true,
-        { result: 'valid' },
-        0,
-        '',
-        '',
-        undefined,
-      );
-
-      logHookCall(mockConfigNoLogging, event);
-
-      // Check that the attributes were sanitized in the attributes but the log body shows the original
-      const emittedEvent = mockLogger.emit.mock.calls[0][0];
-      expect(emittedEvent.body).toBe(
-        'Hook call UserPromptSubmit./full/path/to/.gemini/hooks/secrets-check.sh --api-key=secret123 succeeded in 100ms',
-      );
-      // In the attributes, the hook name should be sanitized when logging is disabled
-      expect(emittedEvent.attributes.hook_name).toBe('secrets-check.sh'); // Sanitized
-    });
-
-    it('should not include sensitive data when prompt logging is disabled', () => {
-      const mockConfigNoLogging = {
-        getSessionId: () => 'test-session-id',
-        getTargetDir: () => 'target-dir',
-        getUsageStatisticsEnabled: () => true,
-        getTelemetryEnabled: () => true,
-        getTelemetryLogPromptsEnabled: () => false, // Disabled
-      } as unknown as Config;
+    it('should handle when QwenLogger is not available', () => {
+      vi.spyOn(QwenLogger, 'getInstance').mockReturnValue(undefined);
 
       const event = new HookCallEvent(
         'UserPromptSubmit',
         'command',
         'test-hook.sh',
-        { prompt: 'secret data', api_key: 'secret123' },
-        50,
+        { prompt: 'test' },
+        100,
         true,
-        { result: 'success' },
+      );
+
+      // Should not throw when QwenLogger is not available
+      expect(() => logHookCall(mockConfig, event)).not.toThrow();
+    });
+
+    it('should log hook call with all optional fields', () => {
+      const event = new HookCallEvent(
+        'PreToolUse',
+        'command',
+        'validator.sh',
+        { tool_name: 'read_file', path: '/test/file.txt' },
+        250,
+        true,
+        { decision: 'allow', reason: 'validated' },
         0,
-        'secret output',
-        'error output',
+        'validation passed',
+        '',
         undefined,
       );
 
-      logHookCall(mockConfigNoLogging, event);
+      logHookCall(mockConfig, event);
 
-      const emittedEvent = mockLogger.emit.mock.calls[0][0];
-      // When logging is disabled, hook_input, hook_output, stdout, stderr should not be included
-      expect(emittedEvent.attributes['hook_input']).toBeUndefined();
-      expect(emittedEvent.attributes['hook_output']).toBeUndefined();
-      expect(emittedEvent.attributes['stdout']).toBeUndefined();
-      expect(emittedEvent.attributes['stderr']).toBeUndefined();
-      // But hook_name should be sanitized
-      expect(emittedEvent.attributes.hook_name).toBe('test-hook.sh');
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+    });
+
+    it('should log hook call with minimal fields', () => {
+      const event = new HookCallEvent(
+        'SessionStart',
+        'command',
+        'init.sh',
+        {},
+        10,
+        true,
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+    });
+
+    it('should log hook call with exit code', () => {
+      const event = new HookCallEvent(
+        'PostToolUseFailure',
+        'command',
+        'error-handler.sh',
+        { tool_name: 'shell' },
+        50,
+        false,
+        undefined,
+        1,
+        '',
+        'error output',
+        'Command failed with exit code 1',
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+    });
+
+    it('should log hook call with zero exit code on success', () => {
+      const event = new HookCallEvent(
+        'PostToolUse',
+        'command',
+        'success-handler.sh',
+        { tool_name: 'write_file' },
+        100,
+        true,
+        { result: 'ok' },
+        0,
+        'done',
+        '',
+        undefined,
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+    });
+
+    it('should log hook call with non-zero exit code on failure', () => {
+      const event = new HookCallEvent(
+        'PostToolUseFailure',
+        'command',
+        'failure-handler.sh',
+        { tool_name: 'shell' },
+        75,
+        false,
+        undefined,
+        127,
+        '',
+        'command not found',
+        'Hook command not found',
+      );
+
+      logHookCall(mockConfig, event);
+
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+    });
+
+    it('should log all hook event types', () => {
+      const eventTypes = [
+        'PreToolUse',
+        'PostToolUse',
+        'PostToolUseFailure',
+        'Notification',
+        'UserPromptSubmit',
+        'SessionStart',
+        'SessionEnd',
+        'Stop',
+        'SubagentStart',
+        'SubagentStop',
+        'PreCompact',
+        'PermissionRequest',
+      ];
+
+      for (const eventType of eventTypes) {
+        mockQwenLogger.logHookCallEvent.mockClear();
+
+        const event = new HookCallEvent(
+          eventType,
+          'command',
+          'test-hook.sh',
+          {},
+          100,
+          true,
+        );
+
+        logHookCall(mockConfig, event);
+
+        expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledWith(event);
+      }
+    });
+
+    it('should pass the exact event object to QwenLogger', () => {
+      const event = new HookCallEvent(
+        'PreToolUse',
+        'command',
+        'test-hook.sh',
+        { tool_name: 'read_file' },
+        100,
+        true,
+      );
+
+      logHookCall(mockConfig, event);
+
+      // Verify the exact event object is passed
+      expect(mockQwenLogger.logHookCallEvent).toHaveBeenCalledTimes(1);
+      const passedEvent = mockQwenLogger.logHookCallEvent.mock.calls[0][0];
+      expect(passedEvent).toBe(event);
     });
   });
 });
