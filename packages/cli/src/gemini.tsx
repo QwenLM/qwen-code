@@ -259,8 +259,11 @@ export async function main() {
     }
   }
 
-  // hop into sandbox if we are outside and sandboxing is enabled
-  if (!process.env['SANDBOX']) {
+  // hop into sandbox if we are outside and sandboxing is enabled.
+  // SEA binaries skip this entirely — relaunchAppInChildProcess passes
+  // process.argv[1] (undefined in SEA) as a positional arg, which yargs
+  // treats as a one-shot prompt, breaking interactive mode.
+  if (!process.env['SANDBOX'] && !isSEABinary()) {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
