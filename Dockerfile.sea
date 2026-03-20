@@ -1,0 +1,19 @@
+# Dockerfile.sea — Build qwen-code SEA binary for linux/amd64
+#
+# Usage:
+#   docker buildx build --platform linux/amd64 -f Dockerfile.sea -o type=local,dest=.bin/ .
+#
+# Output: .bin/qwen-code-linux-amd64
+FROM docker.repo.eng.netapp.com/node:22.15.0 AS builder
+
+WORKDIR /build
+
+COPY . .
+
+RUN npm ci
+RUN npm run build
+RUN npm run bundle
+RUN BUNDLE_NATIVE_MODULES=false node scripts/build_binary.js
+
+FROM scratch AS output
+COPY --from=builder /build/dist/binary/linux-x64/qwen-code /qwen-code-linux-amd64

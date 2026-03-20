@@ -83,3 +83,15 @@ integration-tests/terminal-capture/scenarios/screenshots/
 # storybook
 *storybook.log
 storybook-static
+
+# SEA binary build artifacts
+.bin/
+sea-config.json
+
+# Local scratch files
+*.md.bak
+tmp*.md
+CONTAP-*.md
+RCAs/
+AGENT-PROMPTS.md
+CONTRIBUTION-ROADMAP.md
