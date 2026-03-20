@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
@@ -11,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
@@ -20,7 +22,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
 /**
@@ -75,6 +77,32 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   override toolLocations(): ToolLocation[] {
     return [{ path: this.params.absolute_path, line: this.params.offset }];
+  }
+
+  /**
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const filePath = path.resolve(this.params.absolute_path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const globalTempDir = Storage.getGlobalTempDir();
+    const projectTempDir = this.config.storage.getProjectTempDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+    const osTempDir = os.tmpdir();
+
+    if (
+      workspaceContext.isPathWithinWorkspace(filePath) ||
+      isSubpath(projectTempDir, filePath) ||
+      isSubpath(globalTempDir, filePath) ||
+      isSubpath(osTempDir, filePath) ||
+      isSubpaths(userSkillsDirs, filePath) ||
+      isSubpath(userExtensionsDir, filePath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
   }
 
   async execute(): Promise<ToolResult> {
@@ -183,26 +211,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    const globalTempDir = Storage.getGlobalTempDir();
-    const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDir = this.config.storage.getUserSkillsDir();
-    const resolvedFilePath = path.resolve(filePath);
-    const isWithinTempDir =
-      isSubpath(projectTempDir, resolvedFilePath) ||
-      isSubpath(globalTempDir, resolvedFilePath);
-    const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
-
-    if (
-      !workspaceContext.isPathWithinWorkspace(filePath) &&
-      !isWithinTempDir &&
-      !isWithinUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )} or within the project temp directory: ${projectTempDir}`;
-    }
     if (params.offset !== undefined && params.offset < 0) {
       return 'Offset must be a non-negative number';
     }

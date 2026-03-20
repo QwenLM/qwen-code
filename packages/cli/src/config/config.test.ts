@@ -14,6 +14,7 @@ import {
   DEFAULT_QWEN_MODEL,
   OutputFormat,
   NativeLspService,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
 import type { Settings } from './settings.js';
@@ -241,6 +242,30 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('should parse --system-prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--system-prompt',
+      'You are a test system prompt.',
+    ];
+    const argv = await parseArguments();
+    expect(argv.systemPrompt).toBe('You are a test system prompt.');
+    expect(argv.appendSystemPrompt).toBeUndefined();
+  });
+
+  it('should parse --append-system-prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--append-system-prompt',
+      'Be extra concise.',
+    ];
+    const argv = await parseArguments();
+    expect(argv.appendSystemPrompt).toBe('Be extra concise.');
+    expect(argv.systemPrompt).toBeUndefined();
+  });
+
   it('should allow -r flag as alias for --resume', async () => {
     process.argv = [
       'node',
@@ -430,6 +455,21 @@ describe('parseArguments', () => {
     );
 
     mockExit.mockRestore();
+  });
+
+  it('should allow --system-prompt and --append-system-prompt together', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--system-prompt',
+      'Override prompt',
+      '--append-system-prompt',
+      'Append prompt',
+    ];
+
+    const argv = await parseArguments();
+    expect(argv.systemPrompt).toBe('Override prompt');
+    expect(argv.appendSystemPrompt).toBe('Append prompt');
   });
 
   it('should throw an error when include-partial-messages is used without stream-json output', async () => {
@@ -983,7 +1023,7 @@ describe('mergeExcludeTools', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual([]);
+    expect(config.getPermissionsDeny()).toEqual([]);
   });
 
   it('should return default excludes when no excludeTools are specified and it is not interactive', async () => {
@@ -992,7 +1032,7 @@ describe('mergeExcludeTools', () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
     const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual(defaultExcludes);
+    expect(config.getPermissionsDeny()).toEqual(defaultExcludes);
   });
 
   it('should handle settings with excludeTools but no extensions', async () => {
@@ -1000,10 +1040,10 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const settings: Settings = { tools: { exclude: ['tool1', 'tool2'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getExcludeTools()).toEqual(
+    expect(config.getPermissionsDeny()).toEqual(
       expect.arrayContaining(['tool1', 'tool2']),
     );
-    expect(config.getExcludeTools()).toHaveLength(2);
+    expect(config.getPermissionsDeny()).toHaveLength(2);
   });
 });
 
@@ -1028,7 +1068,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1047,7 +1087,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1067,7 +1107,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1084,7 +1124,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1101,7 +1141,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
@@ -1121,7 +1161,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1141,7 +1181,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1154,7 +1194,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).not.toContain(EditTool.Name);
     expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1179,7 +1219,7 @@ describe('Approval mode tool exclusion logic', () => {
 
       const config = await loadCliConfig(settings, argv, undefined, []);
 
-      const excludedTools = config.getExcludeTools();
+      const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ShellTool.Name);
       expect(excludedTools).not.toContain(EditTool.Name);
       expect(excludedTools).not.toContain(WriteFileTool.Name);
@@ -1199,7 +1239,7 @@ describe('Approval mode tool exclusion logic', () => {
     const settings: Settings = { tools: { exclude: ['custom_tool'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    const excludedTools = config.getExcludeTools();
+    const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ShellTool.Name); // From approval mode
     expect(excludedTools).not.toContain(EditTool.Name); // Should be allowed in auto-edit
@@ -1795,9 +1835,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 
   it('should not exclude interactive tools in interactive mode with YOLO', async () => {
@@ -1805,9 +1845,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 
   it('should exclude interactive tools in non-interactive mode without YOLO', async () => {
@@ -1815,9 +1855,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).toContain('run_shell_command');
-    expect(config.getExcludeTools()).toContain('edit');
-    expect(config.getExcludeTools()).toContain('write_file');
+    expect(config.getPermissionsDeny()).toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).toContain('edit');
+    expect(config.getPermissionsDeny()).toContain('write_file');
   });
 
   it('should not exclude interactive tools in non-interactive mode with YOLO', async () => {
@@ -1825,9 +1865,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getPermissionsDeny()).not.toContain('run_shell_command');
+    expect(config.getPermissionsDeny()).not.toContain('replace');
+    expect(config.getPermissionsDeny()).not.toContain('write_file');
   });
 });
 
@@ -2398,5 +2438,81 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+});
+
+describe('loadCliConfig runtimeOutputDir', () => {
+  const originalArgv = process.argv;
+  const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
+
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+    Storage.setRuntimeBaseDir(null);
+    delete process.env['QWEN_RUNTIME_DIR'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    Storage.setRuntimeBaseDir(null);
+    if (originalRuntimeEnv !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should set runtime base dir from settings with absolute path', async () => {
+    const runtimeDir = path.resolve('custom', 'runtime');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      advanced: { runtimeOutputDir: runtimeDir },
+    };
+    await loadCliConfig(settings, argv);
+    expect(Storage.getRuntimeBaseDir()).toBe(runtimeDir);
+  });
+
+  it('should resolve relative runtimeOutputDir against cwd', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      advanced: { runtimeOutputDir: '.qwen' },
+    };
+    const cwd = path.resolve('workspace', 'my-project');
+    await loadCliConfig(settings, argv, cwd);
+    expect(Storage.getRuntimeBaseDir()).toBe(path.join(cwd, '.qwen'));
+  });
+
+  it('should not set runtime base dir when runtimeOutputDir is absent', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    await loadCliConfig(settings, argv);
+    expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
+  });
+
+  it('should let QWEN_RUNTIME_DIR env var take priority over settings', async () => {
+    const envDir = path.resolve('from-env');
+    const settingsDir = path.resolve('from-settings');
+    process.env['QWEN_RUNTIME_DIR'] = envDir;
+    const argv = await parseArguments();
+    const settings: Settings = {
+      advanced: { runtimeOutputDir: settingsDir },
+    };
+    await loadCliConfig(settings, argv);
+    // getRuntimeBaseDir checks env var first at call time
+    expect(Storage.getRuntimeBaseDir()).toBe(envDir);
+  });
+
+  it('should reset runtime base dir on subsequent load when runtimeOutputDir is absent', async () => {
+    const argv = await parseArguments();
+    const firstRuntimeDir = path.resolve('first', 'runtime');
+    await loadCliConfig(
+      { advanced: { runtimeOutputDir: firstRuntimeDir } },
+      argv,
+    );
+    expect(Storage.getRuntimeBaseDir()).toBe(firstRuntimeDir);
+
+    await loadCliConfig({}, argv);
+    expect(Storage.getRuntimeBaseDir()).toBe(Storage.getGlobalQwenDir());
   });
 });

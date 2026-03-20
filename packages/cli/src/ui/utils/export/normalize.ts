@@ -28,6 +28,14 @@ export function normalizeSessionData(
     }
   });
 
+  // Build index of assistant messages by uuid for usageMetadata merging
+  const assistantMessageIndexByUuid = new Map<string, number>();
+  normalized.forEach((message, index) => {
+    if (message.type === 'assistant') {
+      assistantMessageIndexByUuid.set(message.uuid, index);
+    }
+  });
+
   // Merge tool result information into tool call messages
   for (const record of originalRecords) {
     if (record.type !== 'tool_result') continue;
@@ -56,6 +64,20 @@ export function normalizeSessionData(
     }
 
     mergeToolCallData(existingMessage.toolCall, toolCallMessage.toolCall);
+  }
+
+  // Merge usageMetadata from assistant records
+  for (const record of originalRecords) {
+    if (record.type !== 'assistant') continue;
+    if (!record.usageMetadata) continue;
+
+    const existingIndex = assistantMessageIndexByUuid.get(record.uuid);
+    if (existingIndex !== undefined) {
+      // Only set if not already present from collect phase
+      if (!normalized[existingIndex].usageMetadata) {
+        normalized[existingIndex].usageMetadata = record.usageMetadata;
+      }
+    }
   }
 
   return {

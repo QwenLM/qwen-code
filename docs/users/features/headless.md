@@ -58,6 +58,40 @@ qwen --resume 123e4567-e89b-12d3-a456-426614174000 -p "Apply the follow-up refac
 > - Session data is project-scoped JSONL under `~/.qwen/projects/<sanitized-cwd>/chats`.
 > - Restores conversation history, tool outputs, and chat-compression checkpoints before sending the new prompt.
 
+## Customize the Main Session Prompt
+
+You can change the main session system prompt for a single CLI run without editing shared memory files.
+
+### Override the Built-in System Prompt
+
+Use `--system-prompt` to replace Qwen Code's built-in main-session prompt for the current run:
+
+```bash
+qwen -p "Review this patch" --system-prompt "You are a terse release reviewer. Report only blocking issues."
+```
+
+### Append Extra Instructions
+
+Use `--append-system-prompt` to keep the built-in prompt and add extra instructions for this run:
+
+```bash
+qwen -p "Review this patch" --append-system-prompt "Be terse and focus on concrete findings."
+```
+
+You can combine both flags when you want a custom base prompt plus an extra run-specific instruction:
+
+```bash
+qwen -p "Summarize this repository" \
+  --system-prompt "You are a migration planner." \
+  --append-system-prompt "Return exactly three bullets."
+```
+
+> [!note]
+>
+> - `--system-prompt` applies only to the current run's main session.
+> - Loaded memory and context files such as `QWEN.md` are still appended after `--system-prompt`.
+> - `--append-system-prompt` is applied after the built-in prompt and loaded memory, and can be used together with `--system-prompt`.
+
 ## Output Formats
 
 Qwen Code supports multiple output formats for different use cases:
@@ -189,19 +223,21 @@ qwen -p "Write code" --output-format stream-json --include-partial-messages | jq
 
 Key command-line options for headless usage:
 
-| Option                       | Description                                         | Example                                                                  |
-| ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| `--prompt`, `-p`             | Run in headless mode                                | `qwen -p "query"`                                                        |
-| `--output-format`, `-o`      | Specify output format (text, json, stream-json)     | `qwen -p "query" --output-format json`                                   |
-| `--input-format`             | Specify input format (text, stream-json)            | `qwen --input-format text --output-format stream-json`                   |
-| `--include-partial-messages` | Include partial messages in stream-json output      | `qwen -p "query" --output-format stream-json --include-partial-messages` |
-| `--debug`, `-d`              | Enable debug mode                                   | `qwen -p "query" --debug`                                                |
-| `--all-files`, `-a`          | Include all files in context                        | `qwen -p "query" --all-files`                                            |
-| `--include-directories`      | Include additional directories                      | `qwen -p "query" --include-directories src,docs`                         |
-| `--yolo`, `-y`               | Auto-approve all actions                            | `qwen -p "query" --yolo`                                                 |
-| `--approval-mode`            | Set approval mode                                   | `qwen -p "query" --approval-mode auto_edit`                              |
-| `--continue`                 | Resume the most recent session for this project     | `qwen --continue -p "Pick up where we left off"`                         |
-| `--resume [sessionId]`       | Resume a specific session (or choose interactively) | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| Option                       | Description                                                              | Example                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `--prompt`, `-p`             | Run in headless mode                                                     | `qwen -p "query"`                                                        |
+| `--output-format`, `-o`      | Specify output format (text, json, stream-json)                          | `qwen -p "query" --output-format json`                                   |
+| `--input-format`             | Specify input format (text, stream-json)                                 | `qwen --input-format text --output-format stream-json`                   |
+| `--include-partial-messages` | Include partial messages in stream-json output                           | `qwen -p "query" --output-format stream-json --include-partial-messages` |
+| `--system-prompt`            | Override the main session system prompt for this run                     | `qwen -p "query" --system-prompt "You are a terse reviewer."`            |
+| `--append-system-prompt`     | Append extra instructions to the main session system prompt for this run | `qwen -p "query" --append-system-prompt "Focus on concrete findings."`   |
+| `--debug`, `-d`              | Enable debug mode                                                        | `qwen -p "query" --debug`                                                |
+| `--all-files`, `-a`          | Include all files in context                                             | `qwen -p "query" --all-files`                                            |
+| `--include-directories`      | Include additional directories                                           | `qwen -p "query" --include-directories src,docs`                         |
+| `--yolo`, `-y`               | Auto-approve all actions                                                 | `qwen -p "query" --yolo`                                                 |
+| `--approval-mode`            | Set approval mode                                                        | `qwen -p "query" --approval-mode auto_edit`                              |
+| `--continue`                 | Resume the most recent session for this project                          | `qwen --continue -p "Pick up where we left off"`                         |
+| `--resume [sessionId]`       | Resume a specific session (or choose interactively)                      | `qwen --resume 123e... -p "Finish the refactor"`                         |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 

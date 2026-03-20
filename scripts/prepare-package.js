@@ -150,7 +150,15 @@ const distPackageJson = {
   bin: {
     qwen: 'cli.js',
   },
-  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE', 'locales'],
+  files: [
+    'cli.js',
+    'vendor',
+    '*.sb',
+    'README.md',
+    'LICENSE',
+    'locales',
+    'bundled',
+  ],
   config: rootPackageJson.config,
   dependencies: {},
   optionalDependencies: {

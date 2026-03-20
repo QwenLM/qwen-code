@@ -1,6 +1,7 @@
 export default {
   commands: 'Commands',
   'sub-agents': 'SubAgents',
+  arena: 'Agent Arena',
   skills: 'Skills',
   headless: 'Headless Mode',
   checkpointing: {

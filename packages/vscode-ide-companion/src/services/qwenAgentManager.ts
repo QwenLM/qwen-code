@@ -7,6 +7,7 @@ import { AcpConnection } from './acpConnection.js';
 import type {
   ModelInfo,
   AvailableCommand,
+  ContentBlock,
   RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
@@ -354,7 +355,7 @@ export class QwenAgentManager {
    *
    * @param message - Message content
    */
-  async sendMessage(message: string): Promise<void> {
+  async sendMessage(message: string | ContentBlock[]): Promise<void> {
     await this.connection.sendPrompt(message);
   }
 

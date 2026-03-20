@@ -242,11 +242,19 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder) {
+    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+      const rulesLabel = executionProps.permissionRules?.length
+        ? ` [${executionProps.permissionRules.join(', ')}]`
+        : '';
       options.push({
-        label: t('Yes, allow always ...'),
-        value: ToolConfirmationOutcome.ProceedAlways,
-        key: 'Yes, allow always ...',
+        label: t('Always allow in this project') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysProject,
+        key: 'Always allow in this project',
+      });
+      options.push({
+        label: t('Always allow for this user') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysUser,
+        key: 'Always allow for this user',
       });
     }
     options.push({
@@ -315,11 +323,21 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder) {
+    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+      const rulesLabel =
+        'permissionRules' in infoProps &&
+        (infoProps as { permissionRules?: string[] }).permissionRules?.length
+          ? ` [${(infoProps as { permissionRules?: string[] }).permissionRules!.join(', ')}]`
+          : '';
       options.push({
-        label: t('Yes, allow always'),
-        value: ToolConfirmationOutcome.ProceedAlways,
-        key: 'Yes, allow always',
+        label: t('Always allow in this project') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysProject,
+        key: 'Always allow in this project',
+      });
+      options.push({
+        label: t('Always allow for this user') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysUser,
+        key: 'Always allow for this user',
       });
     }
     options.push({
@@ -382,21 +400,19 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder) {
+    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+      const rulesLabel = mcpProps.permissionRules?.length
+        ? ` [${mcpProps.permissionRules.join(', ')}]`
+        : '';
       options.push({
-        label: t('Yes, always allow tool "{{tool}}" from server "{{server}}"', {
-          tool: mcpProps.toolName,
-          server: mcpProps.serverName,
-        }),
-        value: ToolConfirmationOutcome.ProceedAlwaysTool, // Cast until types are updated
-        key: `Yes, always allow tool "${mcpProps.toolName}" from server "${mcpProps.serverName}"`,
+        label: t('Always allow in this project') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysProject,
+        key: 'Always allow in this project',
       });
       options.push({
-        label: t('Yes, always allow all tools from server "{{server}}"', {
-          server: mcpProps.serverName,
-        }),
-        value: ToolConfirmationOutcome.ProceedAlwaysServer,
-        key: `Yes, always allow all tools from server "${mcpProps.serverName}"`,
+        label: t('Always allow for this user') + rulesLabel,
+        value: ToolConfirmationOutcome.ProceedAlwaysUser,
+        key: 'Always allow for this user',
       });
     }
     options.push({

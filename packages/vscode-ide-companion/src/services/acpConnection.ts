@@ -13,6 +13,7 @@ import {
 import type {
   Client,
   Agent,
+  ContentBlock,
   SessionNotification,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -52,6 +53,8 @@ export class AcpConnection {
   private sessionId: string | null = null;
   private workingDir: string = process.cwd();
   private fileHandler = new AcpFileHandler();
+  private lastExitCode: number | null = null;
+  private lastExitSignal: string | null = null;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -63,6 +66,9 @@ export class AcpConnection {
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
+  /** Invoked when the child process exits (expected or unexpected). */
+  onDisconnected: (code: number | null, signal: string | null) => void =
+    () => {};
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
     optionId: string;
     answers?: Record<string, string>;
@@ -78,6 +84,8 @@ export class AcpConnection {
       this.disconnect();
     }
 
+    this.lastExitCode = null;
+    this.lastExitSignal = null;
     this.workingDir = workingDir;
 
     const env: NodeJS.ProcessEnv = {
@@ -147,6 +155,14 @@ export class AcpConnection {
       console.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
+      this.lastExitCode = code;
+      this.lastExitSignal = signal;
+      if (this.child) {
+        this.sdkConnection = null;
+        this.sessionId = null;
+        this.child = null;
+        this.onDisconnected(code, signal);
+      }
     });
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -156,7 +172,11 @@ export class AcpConnection {
     }
 
     if (!this.child || this.child.killed) {
-      throw new Error(`Qwen ACP process failed to start`);
+      const code = this.lastExitCode ?? this.child?.exitCode ?? null;
+      const signal = this.lastExitSignal;
+      throw new Error(
+        `Qwen ACP process failed to start (exit code: ${code}, signal: ${signal})`,
+      );
     }
 
     // Convert Node.js child process streams to Web Streams for SDK
@@ -336,7 +356,9 @@ export class AcpConnection {
   }
 
   private ensureConnection(): ClientSideConnection {
-    if (!this.sdkConnection) {
+    // sdkConnection is cleared asynchronously by the exit handler;
+    // isConnected (via exitCode) catches the race window before the exit event fires.
+    if (!this.sdkConnection || !this.isConnected) {
       throw new Error('Not connected to ACP agent');
     }
     return this.sdkConnection;
@@ -416,14 +438,16 @@ export class AcpConnection {
     return response;
   }
 
-  async sendPrompt(prompt: string): Promise<PromptResponse> {
+  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
+    const promptBlocks =
+      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
     const response: PromptResponse = await conn.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text: prompt }],
+      prompt: promptBlocks,
     });
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
@@ -547,7 +571,9 @@ export class AcpConnection {
   }
 
   get isConnected(): boolean {
-    return this.child !== null && !this.child.killed;
+    return (
+      this.child !== null && !this.child.killed && this.child.exitCode === null
+    );
   }
 
   get hasActiveSession(): boolean {

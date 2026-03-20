@@ -38,6 +38,10 @@ export function isAbortError(error: unknown): boolean {
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
+    const cause = error.cause;
+    if (cause instanceof Error && cause.message !== error.message) {
+      return `${error.message} (cause: ${cause.message})`;
+    }
     return error.message;
   }
   try {
@@ -45,6 +49,80 @@ export function getErrorMessage(error: unknown): string {
   } catch {
     return 'Failed to get error details';
   }
+}
+
+/**
+ * Extracts the HTTP status code from an error object.
+ *
+ * Checks the following properties in order of priority:
+ * 1. `error.status` - OpenAI, Anthropic, Gemini SDK errors
+ * 2. `error.statusCode` - Some HTTP client libraries
+ * 3. `error.response.status` - Axios-style errors
+ * 4. `error.error.code` - Nested error objects
+ *
+ * @returns The HTTP status code (100-599), or undefined if not found.
+ */
+export function getErrorStatus(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const err = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+    error?: { code?: unknown };
+  };
+
+  const value =
+    err.status ?? err.statusCode ?? err.response?.status ?? err.error?.code;
+
+  return typeof value === 'number' && value >= 100 && value <= 599
+    ? value
+    : undefined;
+}
+
+/**
+ * Extracts a descriptive error type string from an error object.
+ *
+ * Uses the error's constructor name (e.g. "APIConnectionError",
+ * "APIConnectionTimeoutError") which is more specific than the generic
+ * `.type` field. Falls back to `.type` for SDK errors that set it,
+ * then to `error.name`, then "unknown".
+ *
+ * For network errors, appends the cause code (e.g. "ECONNREFUSED")
+ * when available.
+ *
+ * @returns A string identifying the error type.
+ */
+export function getErrorType(error: unknown): string {
+  if (typeof error !== 'object' || error === null) {
+    return 'unknown';
+  }
+
+  // Prefer the constructor name — SDK subclasses like APIConnectionError,
+  // RateLimitError etc. have meaningful names.
+  const constructorName =
+    error instanceof Error && error.constructor.name !== 'Error'
+      ? error.constructor.name
+      : undefined;
+
+  // .type is set by OpenAI SDK (e.g. "invalid_request_error")
+  const sdkType = (error as { type?: string }).type;
+
+  const baseType =
+    constructorName ??
+    sdkType ??
+    (error instanceof Error ? error.name : 'unknown');
+
+  // For network errors, append the cause code (e.g. ECONNREFUSED, ETIMEDOUT)
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeCode =
+    cause && typeof cause === 'object' && 'code' in cause
+      ? (cause as { code?: string }).code
+      : undefined;
+
+  return causeCode ? `${baseType}:${causeCode}` : baseType;
 }
 
 export class FatalError extends Error {
