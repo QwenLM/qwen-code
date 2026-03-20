@@ -2,10 +2,6 @@
 
 <!-- Add a brief description of what this pull request changes and why and any important things for reviewers to look at -->
 
-## Dive Deeper
-
-<!-- more thoughts and in-depth discussion here -->
-
 ## Screenshots / Video Demo
 
 <!--
@@ -18,6 +14,10 @@ This helps reviewers understand the change quickly and prioritize reviews.
 
 PRs with visual demos typically get reviewed much faster!
 -->
+
+## Dive Deeper
+
+<!-- more thoughts and in-depth discussion here -->
 
 ## Reviewer Test Plan
 
