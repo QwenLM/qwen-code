@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import React from 'react';
 import { Box, Text } from 'ink';
 import type { BtwProps } from '../../types.js';
 import { Colors } from '../../colors.js';
@@ -14,7 +14,7 @@ export interface BtwDisplayProps {
   btw: BtwProps;
 }
 
-export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
+const BtwMessageInternal: React.FC<BtwDisplayProps> = ({ btw }) => (
   <Box
     flexDirection="column"
     borderStyle="round"
@@ -45,3 +45,5 @@ export const BtwMessage: React.FC<BtwDisplayProps> = ({ btw }) => (
     )}
   </Box>
 );
+
+export const BtwMessage = React.memo(BtwMessageInternal);
