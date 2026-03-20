@@ -112,8 +112,8 @@ export default {
   // ============================================================================
   // Commands - General
   // ============================================================================
-  'Analyzes the project and creates a tailored QWEN.md file.':
-    '分析项目并创建定制的 QWEN.md 文件',
+  'Analyzes the project and creates a tailored AGENTS.md file.':
+    '分析项目并创建定制的 AGENTS.md 文件',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
   'List available skills.': '列出可用技能。',

@@ -20,7 +20,7 @@ import { t } from '../../i18n/index.js';
 export const initCommand: SlashCommand = {
   name: 'init',
   get description() {
-    return t('Analyzes the project and creates a tailored QWEN.md file.');
+    return t('Analyzes the project and creates a tailored AGENTS.md file.');
   },
   kind: CommandKind.BUILT_IN,
   action: async (
@@ -127,7 +127,7 @@ You are Qwen Code, an interactive CLI agent. Analyze the current directory and g
 
 **Final Output:**
 
-Write the complete content to the \`${contextFileName}\` file. The output must be well-formatted Markdown.
+Write the complete content to the \`${contextFileName}\` file. If AGENTS.md already exists, update it. Otherwise create AGENTS.md. The output must be well-formatted Markdown.
 `,
     };
   },

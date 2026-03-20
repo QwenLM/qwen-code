@@ -107,8 +107,8 @@ export default {
   // ============================================================================
   // Commands - General
   // ============================================================================
-  'Analyzes the project and creates a tailored QWEN.md file.':
-    'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
+  'Analyzes the project and creates a tailored AGENTS.md file.':
+    'Analisa o projeto e cria um arquivo AGENTS.md personalizado.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
   'List available skills.': 'Listar habilidades disponíveis.',
