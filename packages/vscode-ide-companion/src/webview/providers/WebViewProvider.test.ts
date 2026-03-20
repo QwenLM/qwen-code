@@ -61,6 +61,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onModelInfo = vi.fn();
     onModelChanged = vi.fn();
     onAvailableCommands = vi.fn();
+    onAvailableSkills = vi.fn();
     onAvailableModels = vi.fn();
     onEndTurn = vi.fn();
     onToolCall = vi.fn();

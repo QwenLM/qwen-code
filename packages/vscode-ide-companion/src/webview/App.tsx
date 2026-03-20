@@ -93,6 +93,9 @@ export const App: React.FC = () => {
   const [availableCommands, setAvailableCommands] = useState<
     AvailableCommand[]
   >([]);
+  const [availableSkills, setAvailableSkills] = useState<
+    Array<{ name: string; description: string }>
+  >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -151,6 +154,27 @@ export const App: React.FC = () => {
 
         return allItems;
       } else {
+        // Secondary picker: if query starts with "skills " (after /),
+        // show skill list instead of top-level commands
+        const skillsMatch = query.match(/^skills\s+(.*)/i);
+        if (skillsMatch && availableSkills.length > 0) {
+          const skillQuery = skillsMatch[1].toLowerCase();
+          const skillItems: CompletionItem[] = availableSkills.map((skill) => ({
+            id: `skill:${skill.name}`,
+            label: skill.name,
+            description: skill.description,
+            type: 'command' as const,
+            group: 'Skills',
+            value: `skills ${skill.name}`,
+          }));
+          return skillItems.filter(
+            (item) =>
+              item.label.toLowerCase().includes(skillQuery) ||
+              (item.description &&
+                item.description.toLowerCase().includes(skillQuery)),
+          );
+        }
+
         // Handle slash commands with grouping
         // Model group - special items without / prefix
         const modelGroupItems: CompletionItem[] = [
@@ -203,7 +227,7 @@ export const App: React.FC = () => {
         );
       }
     },
-    [fileContext, availableCommands, modelInfo?.name],
+    [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
@@ -362,6 +386,9 @@ export const App: React.FC = () => {
     },
     setAvailableCommands: (commands) => {
       setAvailableCommands(commands);
+    },
+    setAvailableSkills: (skills) => {
+      setAvailableSkills(skills);
     },
     setAvailableModels: (models) => {
       setAvailableModels(models);
@@ -621,14 +648,31 @@ export const App: React.FC = () => {
         // Handle server-provided slash commands by sending them as messages.
         // Skip when fillOnly (Tab) — let the generic insertion path fill the
         // command text so the user can keep typing arguments.
+        // Special case: /skills always uses fill behavior (Enter = Tab) to
+        // allow the secondary skill picker to appear.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd && !fillOnly) {
+        const isSkillsCmd = itemId === 'skills';
+        if (serverCmd && !fillOnly && !isSkillsCmd) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
           vscode.postMessage({
             type: 'sendMessage',
             data: { text: `/${serverCmd.name}` },
+          });
+          completion.closeCompletion();
+          return;
+        }
+
+        // Handle secondary skill selection — send `/skills <name>` with
+        // optional trailing user text
+        if (itemId.startsWith('skill:') && !fillOnly) {
+          clearTriggerText();
+          const value =
+            typeof item.value === 'string' ? item.value : itemId.slice(6);
+          vscode.postMessage({
+            type: 'sendMessage',
+            data: { text: `/${value}` },
           });
           completion.closeCompletion();
           return;
