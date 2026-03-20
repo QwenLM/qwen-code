@@ -64,6 +64,7 @@ import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
+import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -214,8 +215,14 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const sessionService = new SessionService(params.cwd);
-    const exists = await sessionService.sessionExists(params.sessionId);
+    const exists = await runWithAcpRuntimeOutputDir(
+      this.settings,
+      params.cwd,
+      async () => {
+        const sessionService = new SessionService(params.cwd);
+        return sessionService.sessionExists(params.sessionId);
+      },
+    );
     if (!exists) {
       throw RequestError.invalidParams(
         undefined,
@@ -256,10 +263,12 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const sessionService = new SessionService(cwd);
     const numericCursor = params.cursor ? Number(params.cursor) : undefined;
-    const result = await sessionService.listSessions({
-      cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+    const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
+      const sessionService = new SessionService(cwd);
+      return sessionService.listSessions({
+        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+      });
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
