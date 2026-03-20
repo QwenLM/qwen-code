@@ -244,6 +244,33 @@ describe('useCommandCompletion', () => {
           );
         });
       });
+
+      it('should enable AT completion when @ appears after a slash command', async () => {
+        // Regression test for #2518: typing @ after a custom slash command
+        // should trigger file search, not remain in SLASH mode.
+        const text = '/qc:create-issue @readme';
+
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testDirs,
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: true,
+              pattern: 'readme',
+            }),
+          );
+        });
+      });
     });
 
     describe('Navigation', () => {

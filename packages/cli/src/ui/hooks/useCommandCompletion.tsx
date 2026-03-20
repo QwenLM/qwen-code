@@ -74,15 +74,10 @@ export function useCommandCompletion(
   const { completionMode, query, completionStart, completionEnd } =
     useMemo(() => {
       const currentLine = buffer.lines[cursorRow] || '';
-      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: currentLine,
-          completionStart: 0,
-          completionEnd: currentLine.length,
-        };
-      }
 
+      // Check for @ file reference first — it takes priority over slash
+      // command completion so that typing `@` after a slash command on the
+      // same line still triggers file search (see #2518).
       const codePoints = toCodePoints(currentLine);
       for (let i = cursorCol - 1; i >= 0; i--) {
         const char = codePoints[i];
@@ -119,6 +114,15 @@ export function useCommandCompletion(
             completionEnd: end,
           };
         }
+      }
+
+      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+        return {
+          completionMode: CompletionMode.SLASH,
+          query: currentLine,
+          completionStart: 0,
+          completionEnd: currentLine.length,
+        };
       }
 
       return {
