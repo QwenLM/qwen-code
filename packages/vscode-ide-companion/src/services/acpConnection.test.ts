@@ -71,7 +71,9 @@ describe('AcpConnection readTextFile error mapping', () => {
   it('passes structured ACP prompt blocks through without wrapping them as text', async () => {
     const prompt = vi.fn().mockResolvedValue({});
     const onEndTurn = vi.fn();
-    const conn = new AcpConnection() as unknown as {
+    const conn = createConnection({
+      child: createMockChild(),
+    }) as unknown as {
       sdkConnection: {
         prompt: (params: {
           sessionId: string;
