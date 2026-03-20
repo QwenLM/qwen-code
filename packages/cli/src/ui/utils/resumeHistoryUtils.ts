@@ -100,6 +100,10 @@ function formatToolDescription(
     const invocation = tool.build(args);
     return invocation.getDescription();
   } catch {
+    // Fallback: use the description arg directly if available
+    if (typeof args['description'] === 'string') {
+      return args['description'];
+    }
     return '';
   }
 }

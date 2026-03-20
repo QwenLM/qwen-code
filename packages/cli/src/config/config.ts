@@ -708,6 +708,11 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
+  // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
+  // is auto-detected inside getRuntimeBaseDir() at each call site).
+  // Pass cwd so that relative paths like ".qwen" resolve per-project.
+  Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
+
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;

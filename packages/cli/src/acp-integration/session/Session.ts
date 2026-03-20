@@ -29,11 +29,12 @@ import {
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  TaskTool,
+  AgentTool,
   UserPromptEvent,
   TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
+  Storage,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 
@@ -100,6 +101,7 @@ export class Session implements SessionContext {
    */
   private pendingPromptCompletion: Promise<void> | null = null;
   private turn: number = 0;
+  private readonly runtimeBaseDir: string;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -118,6 +120,7 @@ export class Session implements SessionContext {
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
+    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -189,150 +192,170 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
-    // Increment turn counter for each user prompt
-    this.turn += 1;
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        // Increment turn counter for each user prompt
+        this.turn += 1;
 
-    const chat = this.chat;
-    const promptId = this.config.getSessionId() + '########' + this.turn;
+        const chat = this.chat;
+        const promptId = this.config.getSessionId() + '########' + this.turn;
 
-    // Extract text from all text blocks to construct the full prompt text for logging
-    const promptText = params.prompt
-      .filter((block) => block.type === 'text')
-      .map((block) => (block.type === 'text' ? block.text : ''))
-      .join(' ');
+        // Extract text from all text blocks to construct the full prompt text for logging
+        const promptText = params.prompt
+          .filter((block) => block.type === 'text')
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join(' ');
 
-    // Log user prompt
-    logUserPrompt(
-      this.config,
-      new UserPromptEvent(
-        promptText.length,
-        promptId,
-        this.config.getContentGeneratorConfig()?.authType,
-        promptText,
-      ),
-    );
-
-    // record user message for session management
-    this.config.getChatRecordingService()?.recordUserMessage(promptText);
-
-    // Check if the input contains a slash command
-    // Extract text from the first text block if present
-    const firstTextBlock = params.prompt.find((block) => block.type === 'text');
-    const inputText = firstTextBlock?.text || '';
-
-    let parts: Part[] | null;
-
-    if (isSlashCommand(inputText)) {
-      // Handle slash command - uses default allowed commands (init, summary, compress)
-      const slashCommandResult = await handleSlashCommand(
-        inputText,
-        pendingSend,
-        this.config,
-        this.settings,
-      );
-
-      parts = await this.#processSlashCommandResult(
-        slashCommandResult,
-        params.prompt,
-      );
-
-      // If parts is null, the command was fully handled (e.g., /summary completed)
-      // Return early without sending to the model
-      if (parts === null) {
-        return { stopReason: 'end_turn' };
-      }
-    } else {
-      // Normal processing for non-slash commands
-      parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
-    }
-
-    let nextMessage: Content | null = { role: 'user', parts };
-
-    while (nextMessage !== null) {
-      if (pendingSend.signal.aborted) {
-        chat.addHistory(nextMessage);
-        return { stopReason: 'cancelled' };
-      }
-
-      const functionCalls: FunctionCall[] = [];
-      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-      const streamStartTime = Date.now();
-
-      try {
-        const responseStream = await chat.sendMessageStream(
-          this.config.getModel(),
-          {
-            message: nextMessage?.parts ?? [],
-            config: {
-              abortSignal: pendingSend.signal,
-            },
-          },
-          promptId,
+        // Log user prompt
+        logUserPrompt(
+          this.config,
+          new UserPromptEvent(
+            promptText.length,
+            promptId,
+            this.config.getContentGeneratorConfig()?.authType,
+            promptText,
+          ),
         );
-        nextMessage = null;
 
-        for await (const resp of responseStream) {
+        // record user message for session management
+        this.config.getChatRecordingService()?.recordUserMessage(promptText);
+
+        // Check if the input contains a slash command
+        // Extract text from the first text block if present
+        const firstTextBlock = params.prompt.find(
+          (block) => block.type === 'text',
+        );
+        const inputText = firstTextBlock?.text || '';
+
+        let parts: Part[] | null;
+
+        if (isSlashCommand(inputText)) {
+          // Handle slash command - uses default allowed commands (init, summary, compress)
+          const slashCommandResult = await handleSlashCommand(
+            inputText,
+            pendingSend,
+            this.config,
+            this.settings,
+          );
+
+          parts = await this.#processSlashCommandResult(
+            slashCommandResult,
+            params.prompt,
+          );
+
+          // If parts is null, the command was fully handled (e.g., /summary completed)
+          // Return early without sending to the model
+          if (parts === null) {
+            return { stopReason: 'end_turn' };
+          }
+        } else {
+          // Normal processing for non-slash commands
+          parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+        }
+
+        let nextMessage: Content | null = { role: 'user', parts };
+
+        while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
+            chat.addHistory(nextMessage);
             return { stopReason: 'cancelled' };
           }
 
-          if (
-            resp.type === StreamEventType.CHUNK &&
-            resp.value.candidates &&
-            resp.value.candidates.length > 0
-          ) {
-            const candidate = resp.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) {
-                continue;
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const responseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId,
+            );
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
               }
 
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) {
+                    continue;
+                  }
+
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            if (getErrorStatus(error) === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
               );
             }
+
+            throw error;
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
-            usageMetadata = resp.value.usageMetadata;
+          if (usageMetadata) {
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
-            functionCalls.push(...resp.value.functionCalls);
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const response = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...response);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
-      } catch (error) {
-        if (getErrorStatus(error) === 429) {
-          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
-        }
-
-        throw error;
-      }
-
-      if (usageMetadata) {
-        const durationMs = Date.now() - streamStartTime;
-        await this.messageEmitter.emitUsageMetadata(
-          usageMetadata,
-          '',
-          durationMs,
-        );
-      }
-
-      if (functionCalls.length > 0) {
-        const toolResponseParts: Part[] = [];
-
-        for (const fc of functionCalls) {
-          const response = await this.runTool(pendingSend.signal, promptId, fc);
-          toolResponseParts.push(...response);
-        }
-
-        nextMessage = { role: 'user', parts: toolResponseParts };
-      }
-    }
-
-    return { stopReason: 'end_turn' };
+        return { stopReason: 'end_turn' };
+      },
+    );
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -518,7 +541,7 @@ export class Session implements SessionContext {
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
     const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isTaskTool = tool.name === TaskTool.Name;
+    const isAgentTool = tool.name === AgentTool.Name;
     const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
 
     // Track cleanup functions for sub-agent event listeners
@@ -527,15 +550,15 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isTaskTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from TaskTool invocation
+      if (isAgentTool && 'eventEmitter' in invocation) {
+        // Access eventEmitter from AgentTool invocation
         const taskEventEmitter = (
           invocation as {
             eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
-        // Extract subagent metadata from TaskTool call
+        // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
 
@@ -867,13 +890,12 @@ export class Session implements SessionContext {
       }
 
       case 'no_command':
-        // No command was found or executed, use original prompt
-        return originalPrompt.map((block) => {
-          if (block.type === 'text') {
-            return { text: block.text };
-          }
-          throw new Error(`Unsupported block type: ${block.type}`);
-        });
+        // No command was found or executed, resolve the original prompt
+        // through the standard path that handles all block types
+        return this.#resolvePrompt(
+          originalPrompt,
+          new AbortController().signal,
+        );
 
       default: {
         // Exhaustiveness check

@@ -7,7 +7,7 @@
  * This allows local ApprovalModeValue to work with webui's EditModeInfo
  */
 
-import type { FC } from 'react';
+import type { ClipboardEvent, FC, ReactNode } from 'react';
 import { InputForm as BaseInputForm, getEditModeIcon } from '@qwen-code/webui';
 import type {
   InputFormProps as BaseInputFormProps,
@@ -26,6 +26,10 @@ export interface InputFormProps
   extends Omit<BaseInputFormProps, 'editModeInfo' | 'onCompletionFill'> {
   /** Edit mode value (local type) */
   editMode: ApprovalModeValue;
+  /** Optional paste handler forwarded to the base input */
+  onPaste?: (e: ClipboardEvent) => void;
+  /** Optional content rendered between the input and actions */
+  extraContent?: ReactNode;
   /** Completion fill callback (Tab or equivalent) */
   onCompletionFill?: (item: CompletionItem) => void;
   /** Whether to show model selector */

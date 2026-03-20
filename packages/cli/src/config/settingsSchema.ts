@@ -1263,6 +1263,17 @@ const SETTINGS_SCHEMA = {
         description: 'Configuration for the bug report command.',
         showInDialog: false,
       },
+      runtimeOutputDir: {
+        type: 'string',
+        label: 'Runtime Output Directory',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). ' +
+          'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
+        showInDialog: false,
+      },
       tavilyApiKey: {
         type: 'string',
         label: 'Tavily API Key (Deprecated)',

@@ -513,9 +513,10 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
 
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // New token count formula: originalTokenCount - (compressionInputTokenCount - 1000) + compressionOutputTokenCount
       const estimatedNewTokenCount = Math.max(
@@ -817,9 +818,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 501 - (1400 - 1000) + 50 = 501 - 400 + 50 = 151 <= 501 (success)
@@ -911,9 +913,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 700 - (1500 - 1000) + 50 = 700 - 500 + 50 = 250 <= 700 (success)
@@ -987,9 +990,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 100 - (1060 - 1000) + 20 = 100 - 60 + 20 = 60 <= 100 (success)

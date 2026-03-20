@@ -67,6 +67,7 @@ describe('registerChatViewProviders', () => {
       'qwen-code.chatView.sidebar',
       'qwen-code.chatView.secondary',
     ]);
+    expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
     expect(calls[0]?.[2]).toEqual({
       webviewOptions: { retainContextWhenHidden: true },
     });
