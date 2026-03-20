@@ -27,10 +27,9 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
       { text: 'review changes', description: 'Review what was changed' },
       { text: 'undo', description: 'Undo the last change' },
     ],
-    condition: (context) => 
+    condition: (context) =>
       // Only suggest if files were actually modified
-       context.modifiedFiles.length > 0
-    ,
+      context.modifiedFiles.length > 0,
     priority: 100,
   },
   // After running tests
@@ -65,7 +64,8 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
       { text: 'create PR', description: 'Create a pull request' },
       { text: 'amend commit', description: 'Amend the last commit' },
     ],
-    condition: (context) => context.toolCalls.some((call) => {
+    condition: (context) =>
+      context.toolCalls.some((call) => {
         const cmdInput = call.input as Record<string, unknown>;
         const command = String(cmdInput['command'] || '');
         return (
@@ -83,7 +83,8 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
       { text: 'document this', description: 'Add documentation' },
       { text: 'review file', description: 'Review the new file' },
     ],
-    condition: (context) => context.modifiedFiles.some((f) => f.type === 'created'),
+    condition: (context) =>
+      context.modifiedFiles.some((f) => f.type === 'created'),
     priority: 80,
   },
   // After fixing bugs
