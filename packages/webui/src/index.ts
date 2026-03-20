@@ -92,6 +92,16 @@ export type {
   Question,
   QuestionOption,
 } from './components/messages/AskUserQuestionDialog';
+export {
+  ImagePreview,
+  ImageMessageRenderer,
+} from './components/messages/ImageComponents';
+export type {
+  ImagePreviewProps,
+  ImagePreviewItem,
+  ImageMessageRendererProps,
+  ImageMessageLike,
+} from './components/messages/ImageComponents';
 
 // ChatViewer - standalone chat display component
 export {

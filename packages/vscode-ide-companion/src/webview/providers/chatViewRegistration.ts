@@ -43,17 +43,18 @@ export function registerChatViewProviders(params: {
     );
   }
 
-  const chatViewProvider = new ChatWebviewViewProvider(createViewProvider);
+  const sidebarViewProvider = new ChatWebviewViewProvider(createViewProvider);
+  const secondaryViewProvider = new ChatWebviewViewProvider(createViewProvider);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       CHAT_VIEW_ID_SIDEBAR,
-      chatViewProvider,
+      sidebarViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
     vscode.window.registerWebviewViewProvider(
       CHAT_VIEW_ID_SECONDARY,
-      chatViewProvider,
+      secondaryViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );

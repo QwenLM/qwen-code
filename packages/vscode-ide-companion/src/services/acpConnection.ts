@@ -13,6 +13,7 @@ import {
 import type {
   Client,
   Agent,
+  ContentBlock,
   SessionNotification,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -431,14 +432,16 @@ export class AcpConnection {
     return response;
   }
 
-  async sendPrompt(prompt: string): Promise<PromptResponse> {
+  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
+    const promptBlocks =
+      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
     const response: PromptResponse = await conn.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text: prompt }],
+      prompt: promptBlocks,
     });
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
