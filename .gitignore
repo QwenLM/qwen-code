@@ -85,7 +85,8 @@ integration-tests/terminal-capture/scenarios/screenshots/
 storybook-static
 
 # SEA binary build artifacts
-.bin/
+.bin/*
+!.bin/.gitkeep
 sea-config.json
 
 # Local scratch files
