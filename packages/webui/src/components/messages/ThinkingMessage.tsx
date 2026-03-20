@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
-import { useState } from 'react';
+import { type FC, memo, useState } from 'react';
 import { MessageContent } from './MessageContent.js';
 import { ChevronIcon } from '../icons/index.js';
 import './ThinkingMessage.css';
@@ -35,7 +34,7 @@ export interface ThinkingMessageProps {
  * - Expanded: solid dot + "Thinking" + up arrow + thinking content
  * - Aligned with other message items, with status icon and connector line
  */
-export const ThinkingMessage: FC<ThinkingMessageProps> = ({
+const ThinkingMessageBase: FC<ThinkingMessageProps> = ({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -53,7 +52,6 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
       className={`qwen-message message-item thinking-message thinking-status-${status}`}
     >
       <div className="thinking-content-wrapper">
-        {/* Clickable title bar */}
         <button
           type="button"
           onClick={handleToggle}
@@ -61,9 +59,7 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
           aria-expanded={isExpanded}
           aria-label={isExpanded ? 'Collapse thinking' : 'Expand thinking'}
         >
-          {/* Thinking label text */}
           <span className="thinking-label">Thinking</span>
-          {/* Expand/collapse arrow */}
           <ChevronIcon
             size={12}
             direction={isExpanded ? 'up' : 'down'}
@@ -71,7 +67,6 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
           />
         </button>
 
-        {/* Thinking content displayed when expanded */}
         {isExpanded && (
           <div className="thinking-content">
             <MessageContent content={content} onFileClick={onFileClick} />
@@ -81,3 +76,7 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
     </div>
   );
 };
+
+ThinkingMessageBase.displayName = 'ThinkingMessage';
+
+export const ThinkingMessage = memo(ThinkingMessageBase);

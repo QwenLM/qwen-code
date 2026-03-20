@@ -58,6 +58,110 @@ import {
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 
+/**
+ * Memoized message list that only re-renders when messages or callbacks change,
+ * not on every keystroke in the input field.
+ */
+interface MessageListItem {
+  type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
+  data: TextMessage | ToolCallData;
+  timestamp: number;
+}
+
+interface MessageListProps {
+  allMessages: MessageListItem[];
+  onFileClick: (path: string) => void;
+}
+
+const MessageList = React.memo<MessageListProps>(
+  ({ allMessages, onFileClick }) => {
+    let imageIndex = 0;
+    return (
+      <>
+        {allMessages.map((item, index) => {
+          switch (item.type) {
+            case 'message': {
+              const msg = item.data as TextMessage;
+
+              if (msg.kind === 'image' && msg.imagePath) {
+                imageIndex += 1;
+                return (
+                  <ImageMessageRenderer
+                    key={`message-${index}`}
+                    msg={msg as WebViewImageMessage}
+                    imageIndex={imageIndex}
+                  />
+                );
+              }
+
+              if (msg.role === 'thinking') {
+                return (
+                  <ThinkingMessage
+                    key={`message-${index}`}
+                    content={msg.content || ''}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                  />
+                );
+              }
+
+              if (msg.role === 'user') {
+                return (
+                  <UserMessage
+                    key={`message-${index}`}
+                    content={msg.content || ''}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                    fileContext={msg.fileContext}
+                  />
+                );
+              }
+
+              {
+                const content = (msg.content || '').trim();
+                if (
+                  content === 'Interrupted' ||
+                  content === 'Tool interrupted'
+                ) {
+                  return (
+                    <InterruptedMessage
+                      key={`message-${index}`}
+                      text={content}
+                    />
+                  );
+                }
+                return (
+                  <AssistantMessage
+                    key={`message-${index}`}
+                    content={content}
+                    timestamp={msg.timestamp || 0}
+                    onFileClick={onFileClick}
+                  />
+                );
+              }
+            }
+
+            case 'in-progress-tool-call':
+            case 'completed-tool-call': {
+              return (
+                <ToolCall
+                  key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
+                  toolCall={item.data as ToolCallData}
+                />
+              );
+            }
+
+            default:
+              return null;
+          }
+        })}
+      </>
+    );
+  },
+);
+
+MessageList.displayName = 'MessageList';
+
 export const App: React.FC = () => {
   const vscode = useVSCode();
 
@@ -767,10 +871,9 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  // Handle toggle thinking
-  const handleToggleThinking = () => {
+  const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => !prev);
-  };
+  }, []);
 
   // When user sends a message after scrolling up, re-pin and jump to the bottom
   const handleSubmitWithScroll = useCallback(
@@ -825,89 +928,15 @@ export const App: React.FC = () => {
     );
   }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
 
-  console.log('[App] Rendering messages:', allMessages);
-
-  // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(() => {
-    let imageIndex = 0;
-    return allMessages.map((item, index) => {
-      switch (item.type) {
-        case 'message': {
-          const msg = item.data as TextMessage;
-          const handleFileClick = (path: string): void => {
-            vscode.postMessage({
-              type: 'openFile',
-              data: { path },
-            });
-          };
-
-          if (msg.kind === 'image' && msg.imagePath) {
-            imageIndex += 1;
-            return (
-              <ImageMessageRenderer
-                key={`message-${index}`}
-                msg={msg as WebViewImageMessage}
-                imageIndex={imageIndex}
-              />
-            );
-          }
-
-          if (msg.role === 'thinking') {
-            return (
-              <ThinkingMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
-          }
-
-          if (msg.role === 'user') {
-            return (
-              <UserMessage
-                key={`message-${index}`}
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-                fileContext={msg.fileContext}
-              />
-            );
-          }
-
-          {
-            const content = (msg.content || '').trim();
-            if (content === 'Interrupted' || content === 'Tool interrupted') {
-              return (
-                <InterruptedMessage key={`message-${index}`} text={content} />
-              );
-            }
-            return (
-              <AssistantMessage
-                key={`message-${index}`}
-                content={content}
-                timestamp={msg.timestamp || 0}
-                onFileClick={handleFileClick}
-              />
-            );
-          }
-        }
-
-        case 'in-progress-tool-call':
-        case 'completed-tool-call': {
-          return (
-            <ToolCall
-              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-              toolCall={item.data as ToolCallData}
-            />
-          );
-        }
-
-        default:
-          return null;
-      }
-    });
-  }, [allMessages, vscode]);
+  const handleFileClick = useCallback(
+    (path: string): void => {
+      vscode.postMessage({
+        type: 'openFile',
+        data: { path },
+      });
+    },
+    [vscode],
+  );
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -975,7 +1004,10 @@ export const App: React.FC = () => {
         ) : (
           <>
             {/* Render all messages and tool calls */}
-            {renderMessages()}
+            <MessageList
+              allMessages={allMessages}
+              onFileClick={handleFileClick}
+            />
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&
