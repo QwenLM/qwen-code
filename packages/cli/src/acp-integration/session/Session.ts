@@ -867,13 +867,12 @@ export class Session implements SessionContext {
       }
 
       case 'no_command':
-        // No command was found or executed, use original prompt
-        return originalPrompt.map((block) => {
-          if (block.type === 'text') {
-            return { text: block.text };
-          }
-          throw new Error(`Unsupported block type: ${block.type}`);
-        });
+        // No command was found or executed, resolve the original prompt
+        // through the standard path that handles all block types
+        return this.#resolvePrompt(
+          originalPrompt,
+          new AbortController().signal,
+        );
 
       default: {
         // Exhaustiveness check
