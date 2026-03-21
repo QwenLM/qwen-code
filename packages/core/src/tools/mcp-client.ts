@@ -30,6 +30,19 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
+
+function resolvedMcpToolAnnotations(
+  mcpServerConfig: MCPServerConfig,
+  fromListTools: McpToolAnnotations | undefined,
+): McpToolAnnotations | undefined {
+  if (mcpServerConfig.readOnlyTools !== true) {
+    return fromListTools;
+  }
+  if (fromListTools?.readOnlyHint === false) {
+    return fromListTools;
+  }
+  return { ...fromListTools, readOnlyHint: true };
+}
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
@@ -676,7 +689,10 @@ export async function discoverTools(
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
-            annotationsMap.get(funcDecl.name!),
+            resolvedMcpToolAnnotations(
+              mcpServerConfig,
+              annotationsMap.get(funcDecl.name!),
+            ),
           ),
         );
       } catch (error) {
