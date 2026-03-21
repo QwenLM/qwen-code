@@ -283,7 +283,7 @@ describe('AnthropicContentGenerator', () => {
       expect(anthropicRequest).toEqual(
         expect.objectContaining({
           model: 'claude-test',
-          max_tokens: 1000,
+          max_tokens: 9000,
           temperature: 0.7,
           top_p: 0.9,
           top_k: 20,
@@ -423,7 +423,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 32000 }),
+          expect.objectContaining({ max_tokens: 40000 }),
         );
       });
 
@@ -488,7 +488,7 @@ describe('AnthropicContentGenerator', () => {
         const [anthropicRequest] =
           anthropicState.lastCreateArgs as AnthropicCreateArgs;
         expect(anthropicRequest).toEqual(
-          expect.objectContaining({ max_tokens: 32000 }),
+          expect.objectContaining({ max_tokens: 40000 }),
         );
       });
     });
