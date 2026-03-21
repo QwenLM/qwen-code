@@ -682,6 +682,29 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ToolOutputMaskingEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_output_masking';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tokens_before: number;
+  tokens_after: number;
+  masked_count: number;
+  total_prunable_tokens: number;
+
+  constructor(details: {
+    tokens_before: number;
+    tokens_after: number;
+    masked_count: number;
+    total_prunable_tokens: number;
+  }) {
+    this['event.name'] = this.eventName;
+    this.tokens_before = details.tokens_before;
+    this.tokens_after = details.tokens_after;
+    this.masked_count = details.masked_count;
+    this.total_prunable_tokens = details.total_prunable_tokens;
+  }
+}
+
 export class ExtensionUninstallEvent implements BaseTelemetryEvent {
   'event.name': 'extension_uninstall';
   'event.timestamp': string;
@@ -875,6 +898,7 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolOutputMaskingEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | SkillLaunchEvent

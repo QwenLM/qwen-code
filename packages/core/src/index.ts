@@ -102,6 +102,7 @@ export * from './tools/write-file.js';
 // ============================================================================
 
 export * from './services/chatRecordingService.js';
+export * from './services/toolOutputMaskingService.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';

@@ -1586,7 +1586,59 @@ const SETTINGS_SCHEMA = {
     default: {},
     description: 'Setting to enable experimental features',
     showInDialog: false,
-    properties: {},
+    properties: {
+      toolOutputMasking: {
+        type: 'object',
+        label: 'Tool Output Masking',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Mask older bulky tool outputs to save context (full output kept on disk).',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Tool Output Masking',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: true,
+            description: 'Enables tool output masking to save tokens.',
+            showInDialog: false,
+          },
+          toolProtectionThreshold: {
+            type: 'number',
+            label: 'Tool Protection Threshold',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 50_000,
+            description:
+              'Token budget of the newest tool outputs to keep unmasked.',
+            showInDialog: false,
+          },
+          minPrunableTokensThreshold: {
+            type: 'number',
+            label: 'Min Prunable Tokens Threshold',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 30_000,
+            description:
+              'Minimum prunable tokens required before a masking pass runs.',
+            showInDialog: false,
+          },
+          protectLatestTurn: {
+            type: 'boolean',
+            label: 'Protect Latest Turn',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: true,
+            description:
+              'When true, the most recent conversation turn is never masked.',
+            showInDialog: false,
+          },
+        },
+      },
+    },
   },
 } as const satisfies SettingsSchema;
 
