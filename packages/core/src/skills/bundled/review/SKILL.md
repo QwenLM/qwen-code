@@ -34,7 +34,7 @@ Your goal here is to understand the scope of changes so you can dispatch agents 
 
 Launch **parallel review agents** (one per dimension listed below) to analyze the changes from different angles. Each agent should focus exclusively on its dimension.
 
-**IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it 4x. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, and its review focus. Each agent can read files and search the codebase on its own.
+**IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it across agents. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, and its review focus. Each agent can read files and search the codebase on its own.
 
 ### Agent 1: Correctness & Security
 
