@@ -264,7 +264,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         (normalizedKey.name === 'return' && !normalizedKey.ctrl) ||
         normalizedKey.name === 'up' ||
         normalizedKey.name === 'down' ||
-        (normalizedKey.ctrl && normalizedKey.name === 'r')
+        (normalizedKey.ctrl && normalizedKey.name === 'r') ||
+        (normalizedKey.ctrl &&
+          (normalizedKey.name === 'n' || normalizedKey.name === 'p'))
       ) {
         return false; // Let InputPrompt handle completion
       }

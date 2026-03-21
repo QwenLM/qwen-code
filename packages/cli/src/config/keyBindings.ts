@@ -123,10 +123,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
-  // Completion navigation uses only arrow keys
-  // Ctrl+P/N are reserved for history navigation (HISTORY_UP/DOWN)
-  [Command.COMPLETION_UP]: [{ key: 'up' }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down' }],
+  [Command.COMPLETION_UP]: [{ key: 'up' }, { key: 'p', ctrl: true }],
+  [Command.COMPLETION_DOWN]: [{ key: 'down' }, { key: 'n', ctrl: true }],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
