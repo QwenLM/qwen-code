@@ -1119,7 +1119,7 @@ describe('Server Config (config.ts)', () => {
   describe('getTruncateToolOutputThreshold', () => {
     it('should return the default threshold', () => {
       const config = new Config(baseParams);
-      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.getTruncateToolOutputThreshold()).toBe(80_000);
     });
 
     it('should use a custom truncateToolOutputThreshold if provided', () => {

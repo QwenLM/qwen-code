@@ -83,6 +83,7 @@ import {
   StartSessionEvent,
   type TelemetryTarget,
 } from '../telemetry/index.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
   ExtensionManager,
   type Extension,
@@ -237,8 +238,8 @@ export interface ExtensionInstallMetadata {
   pluginName?: string;
 }
 
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 80_000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 2000;
 
 export class MCPServerConfig {
   constructor(
@@ -1987,12 +1988,28 @@ export class Config {
       return Number.POSITIVE_INFINITY;
     }
 
+    const contextWindow = this.contentGeneratorConfig?.contextWindowSize;
+    const lastTokenCount = uiTelemetryService.getLastPromptTokenCount();
+    if (contextWindow && lastTokenCount > 0) {
+      const remainingTokens = contextWindow - lastTokenCount;
+      const remainingChars = Math.max(0, 4 * remainingTokens);
+      return Math.min(remainingChars, this.truncateToolOutputThreshold);
+    }
+
     return this.truncateToolOutputThreshold;
   }
 
   getTruncateToolOutputLines(): number {
     if (this.truncateToolOutputLines <= 0) {
       return Number.POSITIVE_INFINITY;
+    }
+
+    const contextWindow = this.contentGeneratorConfig?.contextWindowSize;
+    const lastTokenCount = uiTelemetryService.getLastPromptTokenCount();
+    if (contextWindow && lastTokenCount > 0) {
+      const usageRatio = lastTokenCount / contextWindow;
+      const scale = Math.max(0.25, 1 - usageRatio);
+      return Math.max(500, Math.floor(this.truncateToolOutputLines * scale));
     }
 
     return this.truncateToolOutputLines;
