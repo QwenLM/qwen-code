@@ -10,8 +10,12 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MCPServerConfig } from '../config/config.js';
-import { AuthProviderType, type Config } from '../config/config.js';
+import type {
+  MCPServerConfig} from '../config/config.js';
+import {
+  AuthProviderType,
+  type Config,
+} from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';

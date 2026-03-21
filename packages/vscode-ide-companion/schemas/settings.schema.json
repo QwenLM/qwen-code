@@ -475,12 +475,12 @@
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
-          "default": 25000
+          "default": 80000
         },
         "truncateToolOutputLines": {
           "description": "The number of lines to keep when truncating tool output.",
           "type": "number",
-          "default": 1000
+          "default": 2000
         }
       }
     },
@@ -867,7 +867,34 @@
     "experimental": {
       "description": "Setting to enable experimental features",
       "type": "object",
-      "properties": {}
+      "properties": {
+        "toolOutputMasking": {
+          "description": "Mask older bulky tool outputs to save context (full output kept on disk).",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enables tool output masking to save tokens.",
+              "type": "boolean",
+              "default": true
+            },
+            "toolProtectionThreshold": {
+              "description": "Token budget of the newest tool outputs to keep unmasked.",
+              "type": "number",
+              "default": 50000
+            },
+            "minPrunableTokensThreshold": {
+              "description": "Minimum prunable tokens required before a masking pass runs.",
+              "type": "number",
+              "default": 30000
+            },
+            "protectLatestTurn": {
+              "description": "When true, the most recent conversation turn is never masked.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
     },
     "$version": {
       "type": "number",

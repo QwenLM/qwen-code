@@ -38,6 +38,7 @@ export {
   logConversationFinishedEvent,
   logKittySequenceOverflow,
   logChatCompression,
+  logToolOutputMasking,
   logToolOutputTruncated,
   logExtensionEnable,
   logExtensionInstallEvent,
