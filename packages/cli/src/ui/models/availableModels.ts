@@ -115,7 +115,8 @@ export function getAvailableModelsForAuthType(
     case AuthType.QWEN_OAUTH: {
       return [...getQwenOAuthModels()];
     }
-    case AuthType.USE_OPENAI: {
+    case AuthType.USE_OPENAI:
+    case AuthType.USE_LM_STUDIO: {
       const openAIModel = getOpenAIAvailableModelFromEnv();
       return openAIModel ? [openAIModel] : [];
     }

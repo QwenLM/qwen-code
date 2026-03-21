@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { updateSettingsFilePreservingFormat } from '../../utils/commentJson.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
 export interface OpenAICredentials {
   apiKey: string;
@@ -209,13 +210,27 @@ export const useAuthCommand = (
   const handleAuthSelect = useCallback(
     async (authType: AuthType | undefined, credentials?: OpenAICredentials) => {
       if (!authType) {
+        const authTypeScope = getPersistScopeForModelSelection(settings);
+        settings.setValue(authTypeScope, 'security.auth', undefined);
+        settings.setValue(authTypeScope, 'model.name', undefined);
+        updateSettingsFilePreservingFormat(
+          settings.user.path,
+          settings.user.originalSettings as Record<string, unknown>,
+        );
+        config.updateCredentials({
+          apiKey: undefined,
+          baseUrl: undefined,
+          model: undefined,
+        });
         setIsAuthDialogOpen(false);
         setAuthError(null);
+        process.exit(0);
         return;
       }
 
       if (
-        authType === AuthType.USE_OPENAI &&
+        (authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_LM_STUDIO) &&
         credentials?.model &&
         isProviderManagedModel(authType, credentials.model)
       ) {
@@ -233,7 +248,11 @@ export const useAuthCommand = (
       setIsAuthDialogOpen(false);
       setIsAuthenticating(true);
 
-      if (authType === AuthType.USE_OPENAI) {
+      if (
+        authType === AuthType.USE_OPENAI ||
+        authType === AuthType.USE_LM_STUDIO ||
+        authType === AuthType.USE_OLLAMA
+      ) {
         if (credentials) {
           // Pass settings.model.generationConfig to updateCredentials so it can be merged
           // after clearing provider-sourced config. This ensures settings.json generationConfig
@@ -248,6 +267,31 @@ export const useAuthCommand = (
             },
             settingsGenerationConfig,
           );
+
+          if (authType === AuthType.USE_OLLAMA && credentials.model) {
+            const authTypeScope = getPersistScopeForModelSelection(settings);
+            settings.setValue(authTypeScope, 'security.auth', {
+              selectedType: authType,
+            });
+            settings.setValue(authTypeScope, 'model.name', credentials.model);
+            updateSettingsFilePreservingFormat(
+              settings.user.path,
+              settings.user.originalSettings as Record<string, unknown>,
+            );
+          }
+
+          if (authType === AuthType.USE_LM_STUDIO && credentials.model) {
+            const authTypeScope = getPersistScopeForModelSelection(settings);
+            settings.setValue(authTypeScope, 'security.auth', {
+              selectedType: authType,
+            });
+            settings.setValue(authTypeScope, 'model.name', credentials.model);
+            updateSettingsFilePreservingFormat(
+              settings.user.path,
+              settings.user.originalSettings as Record<string, unknown>,
+            );
+          }
+
           await performAuth(authType, credentials);
         }
         return;

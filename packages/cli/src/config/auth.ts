@@ -18,6 +18,8 @@ import { t } from '../i18n/index.js';
  */
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
+  [AuthType.USE_LM_STUDIO]: 'LMSTUDIO_API_KEY',
+  [AuthType.USE_OLLAMA]: 'OLLAMA_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -165,6 +167,48 @@ export function validateAuthMethod(
         { envKeyHint },
       );
     }
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_LM_STUDIO) {
+    const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
+      authMethod,
+      settings.merged,
+      config,
+    );
+    if (!hasKey) {
+      const envKeyHint = checkedEnvKey
+        ? `'${checkedEnvKey}'`
+        : "'LMSTUDIO_API_KEY'";
+      if (isExplicitEnvKey) {
+        return t(
+          'Missing API key for LM Studio auth. Set the {{envKeyHint}} environment variable.',
+          { envKeyHint },
+        );
+      }
+      return t(
+        'Missing API key for LM Studio auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.',
+        { envKeyHint },
+      );
+    }
+    // Check baseUrl - can come from modelProviders or settings.security.auth.baseUrl
+    const modelProviders = settings.merged.modelProviders as
+      | ModelProvidersConfig
+      | undefined;
+    const modelId =
+      config?.getModelsConfig().getModel() ?? settings.merged.model?.name;
+    const modelConfig = findModelConfig(modelProviders, authMethod, modelId);
+    const baseUrl =
+      modelConfig?.baseUrl || settings.merged.security?.auth?.baseUrl;
+    if (!baseUrl) {
+      return t(
+        'LM Studio provider missing baseUrl. Please configure baseUrl in modelProviders or settings.security.auth.baseUrl.',
+      );
+    }
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_OLLAMA) {
     return null;
   }
 
