@@ -227,7 +227,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'insight_progress' && (
         <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
-      {itemForDisplay.type === 'btw' && <BtwMessage btw={itemForDisplay.btw} />}
+      {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
+        <BtwMessage btw={itemForDisplay.btw} />
+      )}
     </Box>
   );
 };

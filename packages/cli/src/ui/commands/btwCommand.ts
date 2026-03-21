@@ -21,7 +21,8 @@ function makeBtwPromptId(sessionId: string): string {
 
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
-    error: error instanceof Error ? error.message : String(error),
+    error:
+      error instanceof Error ? error.message : String(error || 'Unknown error'),
   });
 }
 
