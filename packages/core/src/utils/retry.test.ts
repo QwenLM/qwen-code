@@ -101,38 +101,34 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(3);
   });
 
-  it('should default to 7 maxAttempts if no options are provided', async () => {
-    // This function will fail more than 7 times to ensure all retries are used.
-    const mockFn = createFailingFunction(10);
+  it('should default to 10 maxAttempts if no options are provided', async () => {
+    const mockFn = createFailingFunction(15);
 
     const promise = retryWithBackoff(mockFn);
 
-    // Expect it to fail with the error from the 7th attempt.
     // eslint-disable-next-line vitest/valid-expect
     const assertionPromise = expect(promise).rejects.toThrow(
-      'Simulated error attempt 7',
+      'Simulated error attempt 10',
     );
     await vi.runAllTimersAsync();
     await assertionPromise;
 
-    expect(mockFn).toHaveBeenCalledTimes(7);
+    expect(mockFn).toHaveBeenCalledTimes(10);
   });
 
-  it('should default to 7 maxAttempts if options.maxAttempts is undefined', async () => {
-    // This function will fail more than 7 times to ensure all retries are used.
-    const mockFn = createFailingFunction(10);
+  it('should default to 10 maxAttempts if options.maxAttempts is undefined', async () => {
+    const mockFn = createFailingFunction(15);
 
     const promise = retryWithBackoff(mockFn, { maxAttempts: undefined });
 
-    // Expect it to fail with the error from the 7th attempt.
     // eslint-disable-next-line vitest/valid-expect
     const assertionPromise = expect(promise).rejects.toThrow(
-      'Simulated error attempt 7',
+      'Simulated error attempt 10',
     );
     await vi.runAllTimersAsync();
     await assertionPromise;
 
-    expect(mockFn).toHaveBeenCalledTimes(7);
+    expect(mockFn).toHaveBeenCalledTimes(10);
   });
 
   it('should not retry if shouldRetry returns false', async () => {
