@@ -56,6 +56,8 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
 import { ShellKillTool } from '../tools/shell-kill.js';
+import { ShellSendInputTool } from '../tools/shell-send-input.js';
+import { ShellReadOutputTool } from '../tools/shell-read-output.js';
 import { SkillTool } from '../tools/skill.js';
 import { AgentTool } from '../tools/agent.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
@@ -2159,6 +2161,8 @@ export class Config {
     registerCoreTool(WriteFileTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(ShellKillTool);
+    registerCoreTool(ShellSendInputTool);
+    registerCoreTool(ShellReadOutputTool);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
     registerCoreTool(AskUserQuestionTool, this);
