@@ -36,6 +36,7 @@ import {
   DEFAULT_OUTPUT_TOKEN_LIMIT,
   hasExplicitOutputLimit,
 } from '../tokenLimits.js';
+import { trimAnthropicMessagesForContextBudget } from './contextBudgetTrim.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -193,14 +194,29 @@ export class AnthropicContentGenerator implements ContentGenerator {
       ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
       : undefined;
 
+    const contextLimit =
+      this.contentGeneratorConfig.contextWindowSize ??
+      tokenLimit(this.contentGeneratorConfig.model, 'input');
+    const { messages: trimmedMessages, system: trimmedSystem } =
+      trimAnthropicMessagesForContextBudget(
+        messages,
+        system,
+        tools,
+        contextLimit,
+      );
+
     const sampling = this.buildSamplingParameters(request);
     const thinking = this.buildThinkingConfig(request);
     const outputConfig = this.buildOutputConfig();
 
+    if (thinking && sampling.max_tokens <= thinking.budget_tokens) {
+      sampling.max_tokens = thinking.budget_tokens + 8_000;
+    }
+
     return {
       model: this.contentGeneratorConfig.model,
-      system,
-      messages,
+      system: trimmedSystem,
+      messages: trimmedMessages,
       tools,
       ...sampling,
       ...(thinking ? { thinking } : {}),
