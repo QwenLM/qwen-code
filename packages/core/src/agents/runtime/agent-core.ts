@@ -557,7 +557,8 @@ export class AgentCore {
 
       if (!allowedToolNames.has(fc.name)) {
         const toolName = String(fc.name);
-        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+        const availableToolsList = Array.from(allowedToolNames).join(', ');
+        const errorMessage = `Tool "${toolName}" is not available. You must acknowledge this, rethink your strategy, and use only the available tools: [${availableToolsList}]. Do NOT retry with the same tool name.`;
 
         // Emit TOOL_CALL event for visibility
         this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {

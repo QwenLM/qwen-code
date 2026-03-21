@@ -1184,7 +1184,7 @@ describe('subagent.ts', () => {
         const editResult = toolResultEvents.find((e) => e.name === 'edit_file');
         expect(editResult).toBeDefined();
         expect(editResult!.success).toBe(false);
-        expect(editResult!.error).toContain('not found');
+        expect(editResult!.error).toContain('not available');
         expect(editResult!.callId).toBe('call_edit');
 
         // 5. Verify allowed tool result has success=true
