@@ -145,8 +145,9 @@ describe('ToolOutputMaskingService', () => {
     const result = await service.mask(history, config);
     const maskedHistory = result.newHistory;
     const skillResponse = maskedHistory[1].parts![0].functionResponse;
-    const skillOutput = (skillResponse!.response as Record<string, unknown>)
-      .output;
+    const skillOutput = (skillResponse!.response as Record<string, unknown>)[
+      'output'
+    ];
     expect(typeof skillOutput === 'string' && skillOutput).toBe(bigOutput);
   });
 
@@ -180,7 +181,7 @@ describe('ToolOutputMaskingService', () => {
         string,
         unknown
       >
-    ).output;
+    )['output'];
     expect(firstToolOutput).toBe(maskedContent);
   });
 
