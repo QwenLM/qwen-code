@@ -1335,32 +1335,61 @@ export class CoreToolScheduler {
 
     if (allCallsFinalOrScheduled) {
       const callsToExecute = this.toolCalls.filter(
-        (call) => call.status === 'scheduled',
+        (call): call is ScheduledToolCall => call.status === 'scheduled',
       );
 
-      // Task tools are safe to run concurrently — they spawn independent
-      // sub-agents with no shared mutable state.  All other tools run
-      // sequentially in their original order to preserve any implicit
-      // ordering the model may rely on.
-      const taskCalls = callsToExecute.filter(
-        (call) => call.request.name === ToolNames.AGENT,
+      const agentCalls = callsToExecute.filter((call) =>
+        this.isAgentScheduledCall(call),
       );
-      const otherCalls = callsToExecute.filter(
-        (call) => call.request.name !== ToolNames.AGENT,
+      const nonAgentCalls = callsToExecute.filter(
+        (call) => !this.isAgentScheduledCall(call),
       );
 
-      const taskPromise = Promise.all(
-        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
+      const agentPromise = Promise.all(
+        agentCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
       );
 
-      const othersPromise = (async () => {
-        for (const toolCall of otherCalls) {
-          await this.executeSingleToolCall(toolCall, signal);
+      const nonAgentPromise = (async () => {
+        let i = 0;
+        while (i < nonAgentCalls.length) {
+          if (this.isReadOnlyParallelizableScheduledCall(nonAgentCalls[i])) {
+            const batch: ScheduledToolCall[] = [];
+            while (
+              i < nonAgentCalls.length &&
+              this.isReadOnlyParallelizableScheduledCall(nonAgentCalls[i])
+            ) {
+              batch.push(nonAgentCalls[i]);
+              i++;
+            }
+            await Promise.all(
+              batch.map((tc) => this.executeSingleToolCall(tc, signal)),
+            );
+          } else {
+            await this.executeSingleToolCall(nonAgentCalls[i], signal);
+            i++;
+          }
         }
       })();
 
-      await Promise.all([taskPromise, othersPromise]);
+      await Promise.all([agentPromise, nonAgentPromise]);
     }
+  }
+
+  private isAgentScheduledCall(call: ScheduledToolCall): boolean {
+    const name = call.request.name;
+    return name === ToolNames.AGENT || name === 'task';
+  }
+
+  private isReadOnlyParallelizableScheduledCall(
+    call: ScheduledToolCall,
+  ): boolean {
+    if (this.isAgentScheduledCall(call)) {
+      return false;
+    }
+    if (call.request.name === ToolNames.SKILL) {
+      return false;
+    }
+    return call.tool.isReadOnly;
   }
 
   private async executeSingleToolCall(

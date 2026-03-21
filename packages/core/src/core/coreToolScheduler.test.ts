@@ -2227,6 +2227,112 @@ describe('CoreToolScheduler Sequential Execution', () => {
   });
 });
 
+describe('CoreToolScheduler contiguous read-only parallel execution', () => {
+  it('should run consecutive Kind.Read tools concurrently (non-agent)', async () => {
+    const executionLog: string[] = [];
+
+    const readTool = new MockTool({
+      name: 'read_file',
+      kind: Kind.Read,
+      execute: async (params) => {
+        const id = (params as { id: string }).id;
+        executionLog.push(`read:start:${id}`);
+        await new Promise((r) => setTimeout(r, 40));
+        executionLog.push(`read:end:${id}`);
+        return {
+          llmContent: `Read ${id} done`,
+          returnDisplay: `Read ${id} done`,
+        };
+      },
+    });
+
+    const tools = new Map<string, MockTool>([['read_file', readTool]]);
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockToolRegistry = {
+      getTool: (name: string) => tools.get(name),
+      getFunctionDeclarations: () => [],
+      tools,
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) => tools.get(name),
+      getToolByDisplayName: () => undefined,
+      getTools: () => [...tools.values()],
+      discoverTools: async () => {},
+      getAllTools: () => [...tools.values()],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getAllowedTools: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getEnableHooks: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'read_file',
+          args: { id: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'read_file',
+          args: { id: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      abortController.signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const readAStart = executionLog.indexOf('read:start:a');
+    const readBStart = executionLog.indexOf('read:start:b');
+    const firstReadEnd = Math.min(
+      executionLog.indexOf('read:end:a'),
+      executionLog.indexOf('read:end:b'),
+    );
+    expect(readAStart).toBeLessThan(firstReadEnd);
+    expect(readBStart).toBeLessThan(firstReadEnd);
+  });
+});
+
 describe('CoreToolScheduler plan mode with ask_user_question', () => {
   function createAskUserQuestionMockTool() {
     let wasAnswered = false;
