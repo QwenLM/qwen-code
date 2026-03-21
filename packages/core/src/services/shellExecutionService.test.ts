@@ -373,6 +373,13 @@ describe('ShellExecutionService', () => {
         ptyProcess: mockPtyProcess as any,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         headlessTerminal: mockHeadlessTerminal as any,
+        outputBuffer: [],
+        startedAt: new Date(),
+        command: 'test-command',
+        cwd: '/test/dir',
+        exited: false,
+        exitCode: null,
+        signal: null,
       });
     });
 
