@@ -84,7 +84,6 @@ export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/memoryTool.js';
-export * from './tools/omissionPlaceholderDetector.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
@@ -103,6 +102,7 @@ export * from './tools/write-file.js';
 // ============================================================================
 
 export * from './services/chatRecordingService.js';
+export * from './services/toolOutputMaskingService.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';

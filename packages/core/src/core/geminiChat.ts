@@ -17,7 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent } from '@google/genai';
-import { retryWithBackoff, isRetryableError } from '../utils/retry.js';
+import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -54,15 +54,15 @@ export type StreamEvent =
 /**
  * Options for retrying due to invalid content from the model.
  */
-interface MidStreamRetryOptions {
+interface ContentRetryOptions {
   /** Total number of attempts to make (1 initial + N retries). */
   maxAttempts: number;
   /** The base delay in milliseconds for linear backoff. */
   initialDelayMs: number;
 }
 
-const MID_STREAM_RETRY_OPTIONS: MidStreamRetryOptions = {
-  maxAttempts: 4, // 1 initial call + 3 retries mid-stream
+const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
+  maxAttempts: 2, // 1 initial call + 1 retry
   initialDelayMs: 500,
 };
 
@@ -311,7 +311,7 @@ export class GeminiChat {
 
         for (
           let attempt = 0;
-          attempt < MID_STREAM_RETRY_OPTIONS.maxAttempts;
+          attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
           attempt++
         ) {
           try {
@@ -409,20 +409,21 @@ export class GeminiChat {
             // Other content validation errors (e.g. NO_FINISH_REASON).
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
-              if (attempt < MID_STREAM_RETRY_OPTIONS.maxAttempts - 1) {
+              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
                     attempt,
                     (error as InvalidStreamError).type,
-                    MID_STREAM_RETRY_OPTIONS.initialDelayMs,
+                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
                     model,
                   ),
                 );
                 await new Promise((res) =>
                   setTimeout(
                     res,
-                    MID_STREAM_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
+                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs *
+                      (attempt + 1),
                   ),
                 );
                 continue;
@@ -454,7 +455,7 @@ export class GeminiChat {
 
   private async makeApiCallAndProcessStream(
     model: string,
-    requestContents: readonly Content[],
+    requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
@@ -462,7 +463,7 @@ export class GeminiChat {
       this.config.getContentGenerator().generateContentStream(
         {
           model,
-          contents: [...requestContents],
+          contents: requestContents,
           config: { ...this.generationConfig, ...params.config },
         },
         prompt_id,
@@ -479,7 +480,7 @@ export class GeminiChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
-        return isRetryableError(error);
+        return false;
       },
       authType: this.config.getContentGeneratorConfig()?.authType,
     });
@@ -510,13 +511,14 @@ export class GeminiChat {
    * @return History contents alternating between user and model for the entire
    * chat session.
    */
-  getHistory(curated: boolean = false): readonly Content[] {
+  getHistory(curated: boolean = false): Content[] {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
-    // Deep copy the history to avoid mutating the history outside of the
-    // chat session.
-    return structuredClone(history);
+    // Shallow copy of the array only. Content objects are shared references —
+    // callers MUST NOT mutate them in place (matches upstream Gemini CLI fix
+    // for OOM from structuredClone on long sessions).
+    return [...history];
   }
 
   /**
@@ -533,8 +535,8 @@ export class GeminiChat {
     this.history.push(content);
   }
 
-  setHistory(history: readonly Content[]): void {
-    this.history = [...history];
+  setHistory(history: Content[]): void {
+    this.history = history;
   }
 
   stripThoughtsFromHistory(): void {

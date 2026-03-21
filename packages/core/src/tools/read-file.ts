@@ -17,6 +17,7 @@ import {
   processSingleFileContent,
   getSpecificMimeType,
 } from '../utils/fileUtils.js';
+import { discoverJitContext, appendJitContext } from './jit-context.js';
 import type { Config } from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
@@ -152,6 +153,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         programming_language,
       ),
     );
+
+    const jitContext = await discoverJitContext(
+      this.config,
+      this.params.file_path,
+    );
+    if (jitContext && typeof llmContent === 'string') {
+      llmContent = appendJitContext(llmContent, jitContext);
+    }
 
     return {
       llmContent,

@@ -30,7 +30,6 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { detectOmissionPlaceholders } from './omissionPlaceholderDetector.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
@@ -413,11 +412,6 @@ export class WriteFileTool
       return `Error accessing path properties for validation: ${filePath}. Reason: ${
         statError instanceof Error ? statError.message : String(statError)
       }`;
-    }
-
-    const omissionPlaceholders = detectOmissionPlaceholders(params.content);
-    if (omissionPlaceholders.length > 0) {
-      return "`content` contains an omission placeholder (for example 'rest of methods ...'). Provide complete file content.";
     }
 
     return null;

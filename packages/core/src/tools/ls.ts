@@ -13,6 +13,7 @@ import { isSubpaths, isSubpath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { discoverJitContext, appendJitContext } from './jit-context.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -278,6 +279,14 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       }
       if (truncated) {
         displayMessage += ' (truncated)';
+      }
+
+      const jitContext = await discoverJitContext(
+        this.config,
+        this.params.path,
+      );
+      if (jitContext) {
+        resultMessage = appendJitContext(resultMessage, jitContext);
       }
 
       return {

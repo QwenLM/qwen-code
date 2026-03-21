@@ -25,7 +25,6 @@ import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { detectOmissionPlaceholders } from './omissionPlaceholderDetector.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
@@ -577,19 +576,6 @@ Expectation for required parameters:
 
     if (!path.isAbsolute(params.file_path)) {
       return `File path must be absolute: ${params.file_path}`;
-    }
-
-    const newPlaceholders = detectOmissionPlaceholders(params.new_string);
-    if (newPlaceholders.length > 0) {
-      const oldPlaceholders = new Set(
-        detectOmissionPlaceholders(params.old_string),
-      );
-
-      for (const placeholder of newPlaceholders) {
-        if (!oldPlaceholders.has(placeholder)) {
-          return "`new_string` contains an omission placeholder (for example 'rest of methods ...'). Provide exact literal replacement text.";
-        }
-      }
     }
 
     return null;
