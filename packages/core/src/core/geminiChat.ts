@@ -17,7 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent } from '@google/genai';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isRetryableError } from '../utils/retry.js';
 import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -54,15 +54,15 @@ export type StreamEvent =
 /**
  * Options for retrying due to invalid content from the model.
  */
-interface ContentRetryOptions {
+interface MidStreamRetryOptions {
   /** Total number of attempts to make (1 initial + N retries). */
   maxAttempts: number;
   /** The base delay in milliseconds for linear backoff. */
   initialDelayMs: number;
 }
 
-const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
-  maxAttempts: 2, // 1 initial call + 1 retry
+const MID_STREAM_RETRY_OPTIONS: MidStreamRetryOptions = {
+  maxAttempts: 4, // 1 initial call + 3 retries mid-stream
   initialDelayMs: 500,
 };
 
@@ -311,7 +311,7 @@ export class GeminiChat {
 
         for (
           let attempt = 0;
-          attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
+          attempt < MID_STREAM_RETRY_OPTIONS.maxAttempts;
           attempt++
         ) {
           try {
@@ -409,21 +409,20 @@ export class GeminiChat {
             // Other content validation errors (e.g. NO_FINISH_REASON).
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
-              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
+              if (attempt < MID_STREAM_RETRY_OPTIONS.maxAttempts - 1) {
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
                     attempt,
                     (error as InvalidStreamError).type,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
+                    MID_STREAM_RETRY_OPTIONS.initialDelayMs,
                     model,
                   ),
                 );
                 await new Promise((res) =>
                   setTimeout(
                     res,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs *
-                      (attempt + 1),
+                    MID_STREAM_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
                   ),
                 );
                 continue;
@@ -480,7 +479,7 @@ export class GeminiChat {
         if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
-        return false;
+        return isRetryableError(error);
       },
       authType: this.config.getContentGeneratorConfig()?.authType,
     });

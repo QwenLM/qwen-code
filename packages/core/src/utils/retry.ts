@@ -26,23 +26,88 @@ export interface RetryOptions {
 }
 
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
-  maxAttempts: 7,
+  maxAttempts: 10,
   initialDelayMs: 1500,
   maxDelayMs: 30000, // 30 seconds
   shouldRetryOnError: defaultShouldRetry,
 };
 
+const RETRYABLE_NETWORK_CODES = [
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+  'ERR_SSL_BAD_RECORD_MAC',
+  'EPROTO',
+];
+
+const FETCH_FAILED_MESSAGE = 'fetch failed';
+const INCOMPLETE_JSON_MESSAGE = 'incomplete json segment';
+
+function getCode(obj: unknown): string | undefined {
+  if (typeof obj !== 'object' || obj === null) return undefined;
+  const code = (obj as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function getNetworkErrorCode(error: unknown): string | undefined {
+  const directCode = getCode(error);
+  if (directCode) return directCode;
+
+  let current: unknown = error;
+  const maxDepth = 5;
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      !('cause' in current)
+    ) {
+      break;
+    }
+    current = (current as { cause: unknown }).cause;
+    const code = getCode(current);
+    if (code) return code;
+  }
+
+  return undefined;
+}
+
 /**
- * Default predicate function to determine if a retry should be attempted.
- * Retries on 429 (Too Many Requests) and 5xx server errors.
- * @param error The error object.
- * @returns True if the error is a transient error, false otherwise.
+ * Checks whether an error is a transient network/SSL/TLS error
+ * that should be retried.
  */
-function defaultShouldRetry(error: Error | unknown): boolean {
+export function isRetryableError(
+  error: Error | unknown,
+  retryFetchErrors?: boolean,
+): boolean {
+  const errorCode = getNetworkErrorCode(error);
+  if (errorCode && RETRYABLE_NETWORK_CODES.includes(errorCode)) {
+    return true;
+  }
+
+  if (retryFetchErrors && error instanceof Error) {
+    const lowerMessage = error.message.toLowerCase();
+    if (
+      lowerMessage.includes(FETCH_FAILED_MESSAGE) ||
+      lowerMessage.includes(INCOMPLETE_JSON_MESSAGE)
+    ) {
+      return true;
+    }
+  }
+
   const status = getErrorStatus(error);
   return (
     status === 429 || (status !== undefined && status >= 500 && status < 600)
   );
+}
+
+function defaultShouldRetry(error: Error | unknown): boolean {
+  return isRetryableError(error, false);
 }
 
 /**
