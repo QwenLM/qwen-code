@@ -515,9 +515,10 @@ export class GeminiChat {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
-    // Deep copy the history to avoid mutating the history outside of the
-    // chat session.
-    return structuredClone(history);
+    // Shallow copy of the array only. Content objects are shared references —
+    // callers MUST NOT mutate them in place (matches upstream Gemini CLI fix
+    // for OOM from structuredClone on long sessions).
+    return [...history];
   }
 
   /**
