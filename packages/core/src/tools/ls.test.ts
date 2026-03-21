@@ -43,7 +43,7 @@ describe('LSTool', () => {
       }),
       getTruncateToolOutputLines: () => 1000,
       storage: {
-        getUserSkillsDir: () => userSkillsBase,
+        getUserSkillsDirs: () => [userSkillsBase],
       },
     } as unknown as Config;
 
@@ -71,10 +71,9 @@ describe('LSTool', () => {
       );
     });
 
-    it('should reject paths outside workspace with clear error message', () => {
-      expect(() => lsTool.build({ path: '/etc/passwd' })).toThrow(
-        `Path must be within one of the workspace directories: ${tempRootDir}, ${tempSecondaryDir}`,
-      );
+    it('should allow paths outside workspace (external path support)', () => {
+      const invocation = lsTool.build({ path: '/etc' });
+      expect(invocation).toBeDefined();
     });
 
     it('should accept paths in secondary workspace directory', async () => {
@@ -84,6 +83,20 @@ describe('LSTool', () => {
       const invocation = lsTool.build({ path: testPath });
 
       expect(invocation).toBeDefined();
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const invocation = lsTool.build({ path: tempRootDir });
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths outside workspace', async () => {
+      const invocation = lsTool.build({ path: '/tmp' });
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 
@@ -361,11 +374,10 @@ describe('LSTool', () => {
       expect(lsTool.build(params)).toBeDefined();
     });
 
-    it('should reject paths outside all workspace directories', () => {
-      const params = { path: '/etc/passwd' };
-      expect(() => lsTool.build(params)).toThrow(
-        'Path must be within one of the workspace directories',
-      );
+    it('should allow paths outside all workspace directories (external path support)', () => {
+      const params = { path: '/etc' };
+      const invocation = lsTool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should list files from secondary workspace directory', async () => {

@@ -606,22 +606,19 @@ export function detectCommandSubstitution(command: string): boolean {
 }
 
 /**
- * Checks a shell command against security policies and allowlists.
+ * Checks a shell command against security policies and permission rules.
  *
- * This function operates in one of two modes depending on the presence of
- * the `sessionAllowlist` parameter:
+ * Uses PermissionManager (via config.getPermissionManager()) to evaluate each
+ * sub-command.  The function operates in two modes:
  *
- * 1.  **"Default Deny" Mode (sessionAllowlist is provided):** This is the
- *     strictest mode, used for user-defined scripts like custom commands.
- *     A command is only permitted if it is found on the global `coreTools`
- *     allowlist OR the provided `sessionAllowlist`. It must not be on the
- *     global `excludeTools` blocklist.
+ * 1.  **"Default Deny" Mode (sessionAllowlist is provided):** Used for
+ *     user-defined scripts / custom commands. A command is only permitted if
+ *     it is found in the allow rules OR the provided `sessionAllowlist`.
+ *     Commands not explicitly allowed are treated as a soft denial.
  *
- * 2.  **"Default Allow" Mode (sessionAllowlist is NOT provided):** This mode
- *     is used for direct tool invocations (e.g., by the model). If a strict
- *     global `coreTools` allowlist exists, commands must be on it. Otherwise,
- *     any command is permitted as long as it is not on the `excludeTools`
- *     blocklist.
+ * 2.  **"Default Allow" Mode (sessionAllowlist is NOT provided):** Used for
+ *     direct tool invocations by the model. Commands with a 'deny' decision
+ *     are hard-blocked; 'ask' requires confirmation; all others are allowed.
  *
  * @param command The shell command string to validate.
  * @param config The application configuration.
@@ -656,8 +653,71 @@ export function checkCommandPermissions(
     params: { command: '' },
   } as AnyToolInvocation & { params: { command: string } };
 
+  const pm = config.getPermissionManager?.();
+
+  // When PermissionManager is available, use PM-based evaluation.
+  if (pm) {
+    const disallowedCommands: string[] = [];
+
+    for (const cmd of commandsToValidate) {
+      // 1. Session allowlist always wins (checked first regardless of PM rules)
+      if (sessionAllowlist) {
+        invocation.params['command'] = cmd;
+        const isSessionAllowed = doesToolInvocationMatch(
+          'run_shell_command',
+          invocation,
+          [...sessionAllowlist].flatMap((c) =>
+            SHELL_TOOL_NAMES.map((name) => `${name}(${c})`),
+          ),
+        );
+        if (isSessionAllowed) continue;
+      }
+
+      const decision = pm.isCommandAllowed(cmd);
+
+      if (decision === 'deny') {
+        return {
+          allAllowed: false,
+          disallowedCommands: [cmd],
+          blockReason: `Command '${cmd}' is blocked by permission rules`,
+          isHardDenial: true,
+        };
+      }
+
+      if (decision === 'allow') continue;
+
+      // 'ask' → always requires confirmation
+      if (decision === 'ask') {
+        disallowedCommands.push(cmd);
+        continue;
+      }
+
+      // 'default': behaviour depends on mode
+      if (sessionAllowlist !== undefined) {
+        // Default Deny mode: unrecognised commands require confirmation
+        disallowedCommands.push(cmd);
+      }
+      // Default Allow mode: not matched by any rule → allowed
+    }
+
+    if (disallowedCommands.length > 0) {
+      return {
+        allAllowed: false,
+        disallowedCommands,
+        blockReason: `Command(s) require confirmation. Disallowed commands: ${disallowedCommands.map((c) => JSON.stringify(c)).join(', ')}`,
+        isHardDenial: false,
+      };
+    }
+
+    return { allAllowed: true, disallowedCommands: [] };
+  }
+
+  // ── Legacy fallback (no PermissionManager) ──────────────────────────────
+  // Used by SDK consumers that have not yet migrated to the permissions system,
+  // or in unit tests that mock only getCoreTools/getPermissionsDeny.
+
   // 1. Blocklist Check (Highest Priority)
-  const excludeTools = config.getExcludeTools() || [];
+  const excludeTools = config.getPermissionsDeny() || [];
   const isWildcardBlocked = SHELL_TOOL_NAMES.some((name) =>
     excludeTools.includes(name),
   );
@@ -911,6 +971,52 @@ export function isCommandNeedsPermission(command: string): {
   return {
     requiresPermission: true,
     reason: 'Command requires permission to execute.',
+  };
+}
+
+/**
+ * Checks user arguments for potentially dangerous shell characters.
+ * This is used to validate arguments before they are substituted into
+ * shell command templates (e.g., $ARGUMENTS placeholder).
+ *
+ * Note: This does NOT remove outer quotes - it validates the raw input.
+ * Use escapeShellArg() for safe shell argument escaping.
+ *
+ * @param args - The raw user arguments string
+ * @returns Object with isSafe flag and list of dangerous patterns found
+ */
+export function checkArgumentSafety(args: string): {
+  isSafe: boolean;
+  dangerousPatterns: string[];
+} {
+  const dangerousPatterns: string[] = [];
+
+  // Command substitution patterns
+  if (args.includes('$(')) dangerousPatterns.push('$() command substitution');
+  if (args.includes('`'))
+    dangerousPatterns.push('backtick command substitution');
+  if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
+  if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
+
+  // Command separators (outside of quotes)
+  if (args.includes(';')) dangerousPatterns.push('; command separator');
+  if (args.includes('|')) dangerousPatterns.push('| pipe');
+  if (args.includes('&&')) dangerousPatterns.push('&& AND operator');
+  if (args.includes('||')) dangerousPatterns.push('|| OR operator');
+
+  // Background execution (space + &, with optional surrounding)
+  if (args.includes(' &') || args.includes('& '))
+    dangerousPatterns.push('& background operator');
+
+  // Input/Output redirection
+  if (args.includes('>') || args.includes('<')) {
+    if (/>\s|\d>/.test(args)) dangerousPatterns.push('> output redirection');
+    if (/<\s|\d</.test(args)) dangerousPatterns.push('< input redirection');
+  }
+
+  return {
+    isSafe: dangerousPatterns.length === 0,
+    dangerousPatterns,
   };
 }
 

@@ -10,7 +10,7 @@ import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { FileDiff } from '../tools/tools.js';
-import { AuthType } from '../core/contentGenerator.js';
+import type { AuthType } from '../core/contentGenerator.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
@@ -20,7 +20,7 @@ export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
-import type { TaskTool } from '../tools/task.js';
+import type { AgentTool } from '../tools/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -35,55 +35,61 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   session_id: string;
   model: string;
-  embedding_model: string;
   sandbox_enabled: boolean;
-  core_tools_enabled: string;
+  core_tools_enabled?: string;
   approval_mode: string;
-  api_key_enabled: boolean;
-  vertex_ai_enabled: boolean;
   debug_enabled: boolean;
+  truncate_tool_output_threshold: number;
+  truncate_tool_output_lines: number;
   mcp_servers: string;
   telemetry_enabled: boolean;
-  telemetry_log_user_prompts_enabled: boolean;
   file_filtering_respect_git_ignore: boolean;
   mcp_servers_count: number;
   mcp_tools_count?: number;
   mcp_tools?: string;
   output_format: OutputFormat;
+  hooks?: string;
+  ide_enabled: boolean;
+  interactive_shell_enabled: boolean;
   skills?: string;
   subagents?: string;
 
   constructor(config: Config) {
-    const generatorConfig = config.getContentGeneratorConfig();
     const mcpServers = config.getMcpServers();
     const toolRegistry = config.getToolRegistry();
-
-    let useGemini = false;
-    let useVertex = false;
-    if (generatorConfig && generatorConfig.authType) {
-      useGemini = generatorConfig.authType === AuthType.USE_GEMINI;
-      useVertex = generatorConfig.authType === AuthType.USE_VERTEX_AI;
-    }
 
     this['event.name'] = 'cli_config';
     this.session_id = config.getSessionId();
     this.model = config.getModel();
-    this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =
       typeof config.getSandbox() === 'string' || !!config.getSandbox();
-    this.core_tools_enabled = (config.getCoreTools() ?? []).join(',');
+    this.core_tools_enabled = (
+      config.getPermissionManager?.()?.getAllowRawStrings() ??
+      config.getCoreTools() ??
+      []
+    ).join(',');
     this.approval_mode = config.getApprovalMode();
-    this.api_key_enabled = useGemini || useVertex;
-    this.vertex_ai_enabled = useVertex;
     this.debug_enabled = config.getDebugMode();
+    this.truncate_tool_output_threshold =
+      config.getTruncateToolOutputThreshold();
+    this.truncate_tool_output_lines = config.getTruncateToolOutputLines();
     this.mcp_servers = mcpServers ? Object.keys(mcpServers).join(',') : '';
     this.telemetry_enabled = config.getTelemetryEnabled();
-    this.telemetry_log_user_prompts_enabled =
-      config.getTelemetryLogPromptsEnabled();
     this.file_filtering_respect_git_ignore =
       config.getFileFilteringRespectGitIgnore();
     this.mcp_servers_count = mcpServers ? Object.keys(mcpServers).length : 0;
     this.output_format = config.getOutputFormat();
+    this.ide_enabled = config.getIdeMode();
+    this.interactive_shell_enabled = config.getShouldUseNodePtyShell();
+
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const allHooks = hookSystem.getAllHooks();
+      const uniqueEventNames = [...new Set(allHooks.map((h) => h.eventName))];
+      if (uniqueEventNames.length > 0) {
+        this.hooks = uniqueEventNames.join(',');
+      }
+    }
 
     if (toolRegistry) {
       const mcpTools = toolRegistry
@@ -102,10 +108,10 @@ export class StartSessionEvent implements BaseTelemetryEvent {
         this.skills = skillNames.join(',');
       }
 
-      const taskTool = toolRegistry.getTool(ToolNames.TASK) as
-        | TaskTool
+      const agentTool = toolRegistry.getTool(ToolNames.AGENT) as
+        | AgentTool
         | undefined;
-      const subagentNames = taskTool?.getAvailableSubagentNames?.();
+      const subagentNames = agentTool?.getAvailableSubagentNames?.();
       if (subagentNames && subagentNames.length > 0) {
         this.subagents = subagentNames.join(',');
       }
@@ -145,6 +151,18 @@ export class UserPromptEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_Id;
     this.auth_type = auth_type;
     this.prompt = prompt;
+  }
+}
+
+export class UserRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'user_retry';
+  'event.timestamp': string;
+  prompt_id: string;
+
+  constructor(prompt_id: string) {
+    this['event.name'] = 'user_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = prompt_id;
   }
 }
 
@@ -237,33 +255,36 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.timestamp': string; // ISO 8601
   response_id?: string;
   model: string;
-  error: string;
-  error_type?: string;
-  status_code?: number | string;
   duration_ms: number;
   prompt_id: string;
   auth_type?: string;
+  // Human-readable error message (e.g. "Request failed with status 429")
+  error_message: string;
+  // Error class or category (e.g. "RateLimitError", "invalid_request_error")
+  error_type?: string;
+  // HTTP status code from the API response (e.g. 429, 500)
+  status_code?: number | string;
 
-  constructor(
-    response_id: string | undefined,
-    model: string,
-    error: string,
-    duration_ms: number,
-    prompt_id: string,
-    auth_type?: string,
-    error_type?: string,
-    status_code?: number | string,
-  ) {
+  constructor(opts: {
+    responseId?: string;
+    model: string;
+    durationMs: number;
+    promptId: string;
+    authType?: string;
+    errorMessage: string;
+    errorType?: string;
+    statusCode?: number | string;
+  }) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
-    this.response_id = response_id;
-    this.model = model;
-    this.error = error;
-    this.error_type = error_type;
-    this.status_code = status_code;
-    this.duration_ms = duration_ms;
-    this.prompt_id = prompt_id;
-    this.auth_type = auth_type;
+    this.response_id = opts.responseId;
+    this.model = opts.model;
+    this.duration_ms = opts.durationMs;
+    this.prompt_id = opts.promptId;
+    this.auth_type = opts.authType;
+    this.error_message = opts.errorMessage;
+    this.error_type = opts.errorType;
+    this.status_code = opts.statusCode;
   }
 }
 
@@ -857,7 +878,128 @@ export type TelemetryEvent =
   | ModelSlashCommandEvent
   | AuthEvent
   | SkillLaunchEvent
-  | UserFeedbackEvent;
+  | UserFeedbackEvent
+  | ArenaSessionStartedEvent
+  | ArenaAgentCompletedEvent
+  | ArenaSessionEndedEvent;
+
+// ─── Arena Telemetry Events ────────────────────────────────────
+
+export interface ArenaSessionStartedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_session_started';
+  arena_session_id: string;
+  model_ids: string[];
+  task_length: number;
+}
+
+export function makeArenaSessionStartedEvent({
+  arena_session_id,
+  model_ids,
+  task_length,
+}: Omit<ArenaSessionStartedEvent, CommonFields>): ArenaSessionStartedEvent {
+  return {
+    'event.name': 'arena_session_started',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    model_ids,
+    task_length,
+  };
+}
+
+export type ArenaAgentCompletedStatus = 'completed' | 'failed' | 'cancelled';
+
+export interface ArenaAgentCompletedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_agent_completed';
+  arena_session_id: string;
+  agent_session_id: string;
+  agent_model_id: string;
+  status: ArenaAgentCompletedStatus;
+  duration_ms: number;
+  rounds: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  tool_calls: number;
+  successful_tool_calls: number;
+  failed_tool_calls: number;
+}
+
+export function makeArenaAgentCompletedEvent({
+  arena_session_id,
+  agent_session_id,
+  agent_model_id,
+  status,
+  duration_ms,
+  rounds,
+  total_tokens,
+  input_tokens,
+  output_tokens,
+  tool_calls,
+  successful_tool_calls,
+  failed_tool_calls,
+}: Omit<ArenaAgentCompletedEvent, CommonFields>): ArenaAgentCompletedEvent {
+  return {
+    'event.name': 'arena_agent_completed',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    agent_session_id,
+    agent_model_id,
+    status,
+    duration_ms,
+    rounds,
+    total_tokens,
+    input_tokens,
+    output_tokens,
+    tool_calls,
+    successful_tool_calls,
+    failed_tool_calls,
+  };
+}
+
+export type ArenaSessionEndedStatus =
+  | 'selected'
+  | 'discarded'
+  | 'failed'
+  | 'cancelled';
+
+export interface ArenaSessionEndedEvent extends BaseTelemetryEvent {
+  'event.name': 'arena_session_ended';
+  arena_session_id: string;
+  status: ArenaSessionEndedStatus;
+  duration_ms: number;
+  display_backend?: string;
+  agent_count: number;
+  completed_agents: number;
+  failed_agents: number;
+  cancelled_agents: number;
+  winner_model_id?: string;
+}
+
+export function makeArenaSessionEndedEvent({
+  arena_session_id,
+  status,
+  duration_ms,
+  display_backend,
+  agent_count,
+  completed_agents,
+  failed_agents,
+  cancelled_agents,
+  winner_model_id,
+}: Omit<ArenaSessionEndedEvent, CommonFields>): ArenaSessionEndedEvent {
+  return {
+    'event.name': 'arena_session_ended',
+    'event.timestamp': new Date().toISOString(),
+    arena_session_id,
+    status,
+    duration_ms,
+    display_backend,
+    agent_count,
+    completed_agents,
+    failed_agents,
+    cancelled_agents,
+    winner_model_id,
+  };
+}
 
 export class ExtensionDisableEvent implements BaseTelemetryEvent {
   'event.name': 'extension_disable';

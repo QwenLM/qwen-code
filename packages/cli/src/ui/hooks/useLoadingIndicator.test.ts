@@ -133,4 +133,119 @@ describe('useLoadingIndicator', () => {
     });
     expect(result.current.elapsedTime).toBe(0);
   });
+
+  describe('token tracking', () => {
+    it('should capture token snapshot when task starts', () => {
+      const { result, rerender } = renderHook(
+        ({ streamingState, currentCandidatesTokens }) =>
+          useLoadingIndicator(
+            streamingState,
+            undefined,
+            currentCandidatesTokens,
+          ),
+        {
+          initialProps: {
+            streamingState: StreamingState.Idle,
+            currentCandidatesTokens: 100,
+          },
+        },
+      );
+
+      expect(result.current.taskStartTokens).toBe(0);
+
+      act(() => {
+        rerender({
+          streamingState: StreamingState.Responding,
+          currentCandidatesTokens: 100,
+        });
+      });
+
+      expect(result.current.taskStartTokens).toBe(100);
+    });
+
+    it('should reset token snapshot when transitioning from Responding to Idle', async () => {
+      const { result, rerender } = renderHook(
+        ({ streamingState, currentCandidatesTokens }) =>
+          useLoadingIndicator(
+            streamingState,
+            undefined,
+            currentCandidatesTokens,
+          ),
+        {
+          initialProps: {
+            streamingState: StreamingState.Idle,
+            currentCandidatesTokens: 0,
+          },
+        },
+      );
+
+      act(() => {
+        rerender({
+          streamingState: StreamingState.Responding,
+          currentCandidatesTokens: 0,
+        });
+      });
+      expect(result.current.taskStartTokens).toBe(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+        rerender({
+          streamingState: StreamingState.Responding,
+          currentCandidatesTokens: 500,
+        });
+      });
+
+      act(() => {
+        rerender({
+          streamingState: StreamingState.Idle,
+          currentCandidatesTokens: 500,
+        });
+      });
+
+      expect(result.current.taskStartTokens).toBe(0);
+    });
+
+    it('should reset token snapshot when transitioning from WaitingForConfirmation to Responding', async () => {
+      const { result, rerender } = renderHook(
+        ({ streamingState, currentCandidatesTokens }) =>
+          useLoadingIndicator(
+            streamingState,
+            undefined,
+            currentCandidatesTokens,
+          ),
+        {
+          initialProps: {
+            streamingState: StreamingState.Responding,
+            currentCandidatesTokens: 100,
+          },
+        },
+      );
+
+      expect(result.current.taskStartTokens).toBe(100);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+        rerender({
+          streamingState: StreamingState.Responding,
+          currentCandidatesTokens: 500,
+        });
+      });
+
+      act(() => {
+        rerender({
+          streamingState: StreamingState.WaitingForConfirmation,
+          currentCandidatesTokens: 500,
+        });
+      });
+
+      act(() => {
+        rerender({
+          streamingState: StreamingState.Responding,
+          currentCandidatesTokens: 500,
+        });
+      });
+
+      expect(result.current.taskStartTokens).toBe(500);
+    });
+  });
 });

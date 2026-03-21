@@ -21,7 +21,6 @@ vi.mock('../services/shellExecutionService.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
-vi.mock('../utils/summarizer.js');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
@@ -35,9 +34,7 @@ import * as os from 'node:os';
 import { EOL } from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import * as summarizer from '../utils/summarizer.js';
 import { ToolErrorType } from './tool-error.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
@@ -52,16 +49,18 @@ describe('ShellTool', () => {
 
     mockConfig = {
       getCoreTools: vi.fn().mockReturnValue([]),
-      getExcludeTools: vi.fn().mockReturnValue([]),
+      getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
-      getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
+      getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
+      getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -94,7 +93,7 @@ describe('ShellTool', () => {
   describe('isCommandAllowed', () => {
     it('should allow a command if no restrictions are provided', () => {
       (mockConfig.getCoreTools as Mock).mockReturnValue(undefined);
-      (mockConfig.getExcludeTools as Mock).mockReturnValue(undefined);
+      (mockConfig.getPermissionsDeny as Mock).mockReturnValue(undefined);
       expect(isCommandAllowed('ls -l', mockConfig).allowed).toBe(true);
     });
 
@@ -474,42 +473,6 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should summarize output when configured', async () => {
-      (mockConfig.getSummarizeToolOutputConfig as Mock).mockReturnValue({
-        [shellTool.name]: { tokenBudget: 1000 },
-      });
-      vi.mocked(summarizer.summarizeToolOutput).mockResolvedValue(
-        'summarized output',
-      );
-
-      const invocation = shellTool.build({
-        command: 'ls',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveExecutionPromise({
-        output: 'long output',
-        rawOutput: Buffer.from('long output'),
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      const result = await promise;
-
-      expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
-        expect.any(String),
-        mockConfig.getGeminiClient(),
-        expect.any(AbortSignal),
-        1000,
-      );
-      expect(result.llmContent).toBe('summarized output');
-      expect(result.returnDisplay).toBe('long output');
     });
 
     it('should clean up the temp file on synchronous execution error', async () => {
@@ -933,44 +896,57 @@ describe('ShellTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
     it('should not request confirmation for read-only commands', async () => {
       const invocation = shellTool.build({
         command: 'ls -la',
         is_background: false,
       });
 
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
+      const permission = await invocation.getDefaultPermission();
 
-      expect(confirmation).toBe(false);
+      expect(permission).toBe('allow');
     });
 
-    it('should request confirmation for a new command and whitelist it on "Always"', async () => {
+    it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
+      expect(details.type).toBe('exec');
+    });
 
-      expect(confirmation).not.toBe(false);
-      expect(confirmation && confirmation.type).toBe('exec');
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (confirmation as any).onConfirm(
-        ToolConfirmationOutcome.ProceedAlways,
-      );
-
-      // Should now be whitelisted
-      const secondInvocation = shellTool.build({
-        command: 'npm test',
+    it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
+      // "cd" is read-only, "npm run build" is not
+      const params = {
+        command: 'cd packages/core && npm run build',
         is_background: false,
-      });
-      const secondConfirmation = await secondInvocation.shouldConfirmExecute(
+      };
+      const invocation = shellTool.build(params);
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = (await invocation.getConfirmationDetails(
         new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      // rootCommand should only include 'npm', not 'cd'
+      expect(details.rootCommand).not.toContain('cd');
+      expect(details.rootCommand).toContain('npm');
+
+      // permissionRules should not include Bash(cd *)
+      expect(details.permissionRules).not.toContainEqual(
+        expect.stringContaining('cd'),
       );
-      expect(secondConfirmation).toBe(false);
+      expect(details.permissionRules).toContainEqual(
+        expect.stringContaining('npm'),
+      );
     });
 
     it('should throw an error if validation fails', () => {

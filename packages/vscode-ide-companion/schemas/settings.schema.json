@@ -242,11 +242,6 @@
           "type": "number",
           "default": -1
         },
-        "summarizeToolOutput": {
-          "description": "Settings for summarizing tool output.",
-          "type": "object",
-          "additionalProperties": true
-        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",
@@ -366,6 +361,33 @@
         }
       }
     },
+    "permissions": {
+      "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Tools or commands that are auto-approved without confirmation. Examples: \"ShellTool\", \"Bash(git *)\", \"ReadFileTool\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "description": "Tools or commands that always require user confirmation. Takes precedence over allow rules.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Tools or commands that are always blocked. Highest priority rule. Examples: \"ShellTool\", \"Bash(rm -rf *)\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "tools": {
       "description": "Settings for built-in and custom tools.",
       "type": "object",
@@ -397,21 +419,21 @@
           }
         },
         "core": {
-          "description": "Paths to core tool definitions.",
+          "description": "Deprecated. Use permissions.allow instead.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "allowed": {
-          "description": "A list of tool names that will bypass the confirmation dialog.",
+          "description": "Deprecated. Use permissions.allow instead.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "exclude": {
-          "description": "Tool names to exclude from discovery.",
+          "description": "Deprecated. Use permissions.deny instead.",
           "type": "array",
           "items": {
             "type": "string"
@@ -447,11 +469,6 @@
         },
         "useBuiltinRipgrep": {
           "description": "Use the bundled ripgrep binary. When set to false, the system-level \"rg\" command will be used instead. This setting is only effective when useRipgrep is true.",
-          "type": "boolean",
-          "default": true
-        },
-        "enableToolOutputTruncation": {
-          "description": "Enable truncation of large tool outputs.",
           "type": "boolean",
           "default": true
         },
@@ -563,6 +580,10 @@
           "type": "object",
           "additionalProperties": true
         },
+        "runtimeOutputDir": {
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
+          "type": "string"
+        },
         "tavilyApiKey": {
           "description": "⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.",
           "type": "string"
@@ -573,6 +594,51 @@
       "description": "Configuration for web search providers.",
       "type": "object",
       "additionalProperties": true
+    },
+    "agents": {
+      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+      "type": "object",
+      "properties": {
+        "displayMode": {
+          "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
+          "enum": [
+            "in-process"
+          ]
+        },
+        "arena": {
+          "description": "Settings for Arena (multi-model competitive execution).",
+          "type": "object",
+          "properties": {
+            "worktreeBaseDir": {
+              "description": "Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.",
+              "type": "string"
+            },
+            "preserveArtifacts": {
+              "description": "When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.",
+              "type": "boolean",
+              "default": false
+            },
+            "maxRoundsPerAgent": {
+              "description": "Maximum number of rounds (turns) each agent can execute. No limit if unset.",
+              "type": "number"
+            },
+            "timeoutSeconds": {
+              "description": "Total timeout in seconds for the Arena session. No limit if unset.",
+              "type": "number"
+            }
+          }
+        },
+        "team": {
+          "description": "Settings for Agent Team (role-based collaborative execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "swarm": {
+          "description": "Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
     },
     "hooksConfig": {
       "description": "Hook configurations for intercepting and customizing agent behavior.",
@@ -600,17 +666,208 @@
           "description": "Hooks that execute before agent processing. Can modify prompts or inject context.",
           "type": "array",
           "items": {
-            "type": "string"
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a command to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook.",
+                      "type": "string",
+                      "enum": [
+                        "command"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in milliseconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "command"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
           }
         },
         "Stop": {
           "description": "Hooks that execute after agent processing. Can post-process responses or log interactions.",
           "type": "array",
           "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a command to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook.",
+                      "type": "string",
+                      "enum": [
+                        "command"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in milliseconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "command"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "Notification": {
+          "description": "Hooks that execute when notifications are sent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreToolUse": {
+          "description": "Hooks that execute before tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUse": {
+          "description": "Hooks that execute after successful tool execution.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PostToolUseFailure": {
+          "description": "Hooks that execute when tool execution fails. ",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionStart": {
+          "description": "Hooks that execute when a new session starts or resumes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SessionEnd": {
+          "description": "Hooks that execute when a session ends.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PreCompact": {
+          "description": "Hooks that execute before conversation compaction.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStart": {
+          "description": "Hooks that execute when a subagent (Task tool call) is started.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "SubagentStop": {
+          "description": "Hooks that execute right before a subagent (Task tool call) concludes its response.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "PermissionRequest": {
+          "description": "Hooks that execute when a permission dialog is displayed.",
+          "type": "array",
+          "items": {
             "type": "string"
           }
         }
       }
+    },
+    "experimental": {
+      "description": "Setting to enable experimental features",
+      "type": "object",
+      "properties": {}
     },
     "$version": {
       "type": "number",

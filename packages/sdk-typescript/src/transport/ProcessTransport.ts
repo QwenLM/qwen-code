@@ -232,6 +232,14 @@ export class ProcessTransport implements Transport {
       args.push('--model', this.options.model);
     }
 
+    if (this.options.systemPrompt) {
+      args.push('--system-prompt', this.options.systemPrompt);
+    }
+
+    if (this.options.appendSystemPrompt) {
+      args.push('--append-system-prompt', this.options.appendSystemPrompt);
+    }
+
     if (this.options.permissionMode) {
       args.push('--approval-mode', this.options.permissionMode);
     }

@@ -43,7 +43,6 @@
     "maxSessionTurns": 50,
     "preferredEditor": "vscode",
     "sandbox": false,
-    "summarizeToolOutput": true,
     "telemetry": {
       "enabled": false
     },

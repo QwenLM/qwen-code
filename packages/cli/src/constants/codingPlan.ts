@@ -97,7 +97,7 @@ export function generateCodingPlanTemplate(
           extra_body: {
             enable_thinking: true,
           },
-          contextWindowSize: 1000000,
+          contextWindowSize: 196608,
         },
       },
       {
@@ -222,7 +222,7 @@ export function generateCodingPlanTemplate(
         extra_body: {
           enable_thinking: true,
         },
-        contextWindowSize: 1000000,
+        contextWindowSize: 196608,
       },
     },
     {

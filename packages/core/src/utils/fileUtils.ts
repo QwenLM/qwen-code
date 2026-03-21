@@ -18,6 +18,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
@@ -227,7 +228,7 @@ export async function readFileWithEncodingInfo(
     return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
   }
 
-  // Not valid UTF-8 — try chardet-based encoding detection
+  // Not valid UTF-8 — try chardet statistical detection
   const detected = detectEncodingFromBuffer(full);
   if (detected && !isUtf8CompatibleEncoding(detected)) {
     try {
@@ -508,6 +509,42 @@ export interface ProcessedFileReadResult {
 }
 
 /**
+ * For media file types, returns the corresponding modality key.
+ * Returns undefined for non-media types (text, binary, svg) which are always supported.
+ */
+function mediaModalityKey(
+  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+): keyof InputModalities | undefined {
+  if (
+    fileType === 'image' ||
+    fileType === 'pdf' ||
+    fileType === 'audio' ||
+    fileType === 'video'
+  ) {
+    return fileType;
+  }
+  return undefined;
+}
+
+/**
+ * Build the same unsupported-modality message used by the converter,
+ * so the LLM sees a consistent hint regardless of where the check fires.
+ */
+function unsupportedModalityMessage(
+  modality: string,
+  displayName: string,
+): string {
+  let hint: string;
+  if (modality === 'pdf') {
+    hint =
+      'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
+  } else {
+    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+  }
+  return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
+}
+
+/**
  * Reads and processes a single file, handling text, images, and PDFs.
  * @param filePath Absolute path to the file.
  * @param config Config instance for truncation settings.
@@ -561,6 +598,26 @@ export async function processSingleFileContent(
       .replace(/\\/g, '/');
 
     const displayName = path.basename(filePath);
+
+    // Check modality support for media files using the resolved config
+    // (same source of truth the converter uses at API-call time).
+    const modality = mediaModalityKey(fileType);
+    if (modality) {
+      const modalities: InputModalities =
+        config.getContentGeneratorConfig()?.modalities ?? {};
+      if (!modalities[modality]) {
+        const message = unsupportedModalityMessage(modality, displayName);
+        debugLogger.warn(
+          `Model '${config.getModel()}' does not support ${modality} input. ` +
+            `Skipping file: ${relativePathForDisplay}`,
+        );
+        return {
+          llmContent: message,
+          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+        };
+      }
+    }
+
     switch (fileType) {
       case 'binary': {
         return {

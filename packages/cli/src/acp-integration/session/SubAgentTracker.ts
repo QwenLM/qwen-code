@@ -5,18 +5,18 @@
  */
 
 import type {
-  SubAgentEventEmitter,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentApprovalRequestEvent,
-  SubAgentUsageEvent,
-  SubAgentStreamTextEvent,
+  AgentEventEmitter,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentUsageEvent,
+  AgentStreamTextEvent,
   ToolCallConfirmationDetails,
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
-  SubAgentEventType,
+  AgentEventType,
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -65,7 +65,7 @@ const basicPermissionOptions: readonly PermissionOptionConfig[] = [
 ] as const;
 
 /**
- * Tracks and emits events for sub-agent tool calls within TaskTool execution.
+ * Tracks and emits events for sub-agent tool calls within AgentTool execution.
  *
  * Uses the unified ToolCallEmitter for consistency with normal flow
  * and history replay. Also handles permission requests for tools that
@@ -106,12 +106,12 @@ export class SubAgentTracker {
   /**
    * Sets up event listeners for a sub-agent's tool events.
    *
-   * @param eventEmitter - The SubAgentEventEmitter from TaskTool
+   * @param eventEmitter - The AgentEventEmitter from AgentTool
    * @param abortSignal - Signal to abort tracking if parent is cancelled
    * @returns Array of cleanup functions to remove listeners
    */
   setup(
-    eventEmitter: SubAgentEventEmitter,
+    eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
     const onToolCall = this.createToolCallHandler(abortSignal);
@@ -120,19 +120,19 @@ export class SubAgentTracker {
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
     const onStreamText = this.createStreamTextHandler(abortSignal);
 
-    eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
-    eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
-    eventEmitter.on(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-    eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
-    eventEmitter.on(SubAgentEventType.STREAM_TEXT, onStreamText);
+    eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
+    eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+    eventEmitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+    eventEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+    eventEmitter.on(AgentEventType.STREAM_TEXT, onStreamText);
 
     return [
       () => {
-        eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
-        eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
-        eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-        eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
-        eventEmitter.off(SubAgentEventType.STREAM_TEXT, onStreamText);
+        eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
+        eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+        eventEmitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+        eventEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+        eventEmitter.off(AgentEventType.STREAM_TEXT, onStreamText);
         // Clean up any remaining states
         this.toolStates.clear();
       },
@@ -146,7 +146,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolCallEvent;
+      const event = args[0] as AgentToolCallEvent;
       if (abortSignal.aborted) return;
 
       // Look up tool and build invocation for metadata
@@ -187,7 +187,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolResultEvent;
+      const event = args[0] as AgentToolResultEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
@@ -215,7 +215,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => Promise<void> {
     return async (...args: unknown[]) => {
-      const event = args[0] as SubAgentApprovalRequestEvent;
+      const event = args[0] as AgentApprovalRequestEvent;
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
@@ -292,7 +292,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentUsageEvent;
+      const event = args[0] as AgentUsageEvent;
       if (abortSignal.aborted) return;
 
       this.messageEmitter.emitUsageMetadata(
@@ -312,7 +312,7 @@ export class SubAgentTracker {
     abortSignal: AbortSignal,
   ): (...args: unknown[]) => void {
     return (...args: unknown[]) => {
-      const event = args[0] as SubAgentStreamTextEvent;
+      const event = args[0] as AgentStreamTextEvent;
       if (abortSignal.aborted) return;
 
       // Emit streamed text as agent message or thought based on the flag
@@ -330,6 +330,8 @@ export class SubAgentTracker {
   private toPermissionOptions(
     confirmation: ToolCallConfirmationDetails,
   ): PermissionOption[] {
+    const hideAlwaysAllow =
+      'hideAlwaysAllow' in confirmation && confirmation.hideAlwaysAllow;
     switch (confirmation.type) {
       case 'edit':
         return [
@@ -342,34 +344,56 @@ export class SubAgentTracker {
         ];
       case 'exec':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: `Always Allow ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: `Always Allow in project: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: `Always Allow for user: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'mcp':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-            name: `Always Allow ${(confirmation as { serverName?: string }).serverName ?? 'server'}`,
-            kind: 'allow_always',
-          },
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-            name: `Always Allow ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: `Always Allow in project: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: `Always Allow for user: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'info':
         return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: 'Always Allow',
-            kind: 'allow_always',
-          },
+          ...(hideAlwaysAllow
+            ? []
+            : [
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+                  name: 'Always Allow in project',
+                  kind: 'allow_always' as const,
+                },
+                {
+                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+                  name: 'Always Allow for user',
+                  kind: 'allow_always' as const,
+                },
+              ]),
           ...basicPermissionOptions,
         ];
       case 'plan':

@@ -12,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { resolveAndValidatePath } from '../utils/paths.js';
 import { type Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   type FileFilteringOptions,
@@ -99,12 +100,32 @@ class GlobToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace, so that external glob
+   * searches require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (!this.params.path) {
+      return 'allow'; // Default workspace directory
+    }
+    const workspaceContext = this.config.getWorkspaceContext();
+    const resolvedPath = path.resolve(
+      this.config.getTargetDir(),
+      this.params.path,
+    );
+    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       // Default to target directory if no path is provided
       const searchDirAbs = resolveAndValidatePath(
         this.config,
         this.params.path,
+        { allowExternalPaths: true },
       );
       const searchLocationDescription = this.params.path
         ? `within ${searchDirAbs}`
@@ -279,7 +300,9 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
     // Only validate path if one is provided
     if (params.path) {
       try {
-        resolveAndValidatePath(this.config, params.path);
+        resolveAndValidatePath(this.config, params.path, {
+          allowExternalPaths: true,
+        });
       } catch (error) {
         return getErrorMessage(error);
       }

@@ -52,12 +52,10 @@ export class JsonOutputAdapter
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
-    const message = this.finalizeAssistantMessageInternal(
+    return this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
       null,
     );
-    this.updateLastAssistantMessage(message);
-    return message;
   }
 
   emitResult(options: ResultOptions): void {
