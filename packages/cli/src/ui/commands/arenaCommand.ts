@@ -187,7 +187,7 @@ function executeArenaCommand(
   let chatHistory;
   try {
     const fullHistory = config.getGeminiClient().getHistory();
-    chatHistory = stripStartupContext(fullHistory);
+    chatHistory = [...stripStartupContext(fullHistory)];
   } catch {
     debugLogger.debug('Could not retrieve chat history for arena agents');
   }
