@@ -35,7 +35,7 @@ export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
  * Exported for testing purposes.
  */
 export function findCompressSplitPoint(
-  contents: Content[],
+  contents: readonly Content[],
   fraction: number,
 ): number {
   if (fraction <= 0 || fraction >= 1) {

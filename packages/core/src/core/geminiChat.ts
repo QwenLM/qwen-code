@@ -455,7 +455,7 @@ export class GeminiChat {
 
   private async makeApiCallAndProcessStream(
     model: string,
-    requestContents: Content[],
+    requestContents: readonly Content[],
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
@@ -463,7 +463,7 @@ export class GeminiChat {
       this.config.getContentGenerator().generateContentStream(
         {
           model,
-          contents: requestContents,
+          contents: [...requestContents],
           config: { ...this.generationConfig, ...params.config },
         },
         prompt_id,
@@ -511,7 +511,7 @@ export class GeminiChat {
    * @return History contents alternating between user and model for the entire
    * chat session.
    */
-  getHistory(curated: boolean = false): Content[] {
+  getHistory(curated: boolean = false): readonly Content[] {
     const history = curated
       ? extractCuratedHistory(this.history)
       : this.history;
@@ -534,8 +534,8 @@ export class GeminiChat {
     this.history.push(content);
   }
 
-  setHistory(history: Content[]): void {
-    this.history = history;
+  setHistory(history: readonly Content[]): void {
+    this.history = [...history];
   }
 
   stripThoughtsFromHistory(): void {
