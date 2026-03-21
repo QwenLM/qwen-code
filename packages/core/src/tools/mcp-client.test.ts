@@ -10,18 +10,21 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   createTransport,
+  discoverTools,
   hasNetworkTransport,
   isEnabled,
   McpClient,
   populateMcpServerCommand,
 } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
+import { Kind } from './tools.js';
 
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
@@ -389,6 +392,51 @@ describe('mcp-client', () => {
       expect(isEnabled(namelessFuncDecl, serverName, mcpServerConfig)).toBe(
         false,
       );
+    });
+  });
+
+  describe('discoverTools', () => {
+    it('should use Kind.Read when readOnlyTools is true and listTools has no annotations', async () => {
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => ({
+          functionDeclarations: [{ name: 't1' }],
+        }),
+      } as unknown as GenAiLib.CallableTool);
+      const mockClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [{ name: 't1' }] }),
+      } as unknown as ClientLib.Client;
+
+      const tools = await discoverTools(
+        'srv',
+        { command: 'c', readOnlyTools: true } as MCPServerConfig,
+        mockClient,
+        {} as Config,
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0]!.kind).toBe(Kind.Read);
+    });
+
+    it('should keep Kind.Other when readOnlyTools is true but server sets readOnlyHint false', async () => {
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => ({
+          functionDeclarations: [{ name: 't1' }],
+        }),
+      } as unknown as GenAiLib.CallableTool);
+      const mockClient = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [{ name: 't1', annotations: { readOnlyHint: false } }],
+        }),
+      } as unknown as ClientLib.Client;
+
+      const tools = await discoverTools(
+        'srv',
+        { command: 'c', readOnlyTools: true } as MCPServerConfig,
+        mockClient,
+        {} as Config,
+      );
+
+      expect(tools[0]!.kind).toBe(Kind.Other);
     });
   });
 

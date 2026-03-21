@@ -117,6 +117,7 @@ export class SystemController extends BaseController {
           undefined, // authProviderType
           undefined, // targetAudience
           undefined, // targetServiceAccount
+          undefined, // readOnlyTools
           'sdk', // type
         );
       }
@@ -254,6 +255,7 @@ export class SystemController extends BaseController {
       authProvider,
       config.targetAudience,
       config.targetServiceAccount,
+      config.readOnlyTools,
     );
   }
 

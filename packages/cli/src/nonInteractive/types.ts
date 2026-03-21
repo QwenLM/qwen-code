@@ -352,6 +352,7 @@ export interface CLIMcpServerConfig {
     | 'service_account_impersonation';
   targetAudience?: string;
   targetServiceAccount?: string;
+  readOnlyTools?: boolean;
 }
 
 export interface CLIControlInitializeRequest {
