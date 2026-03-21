@@ -26,6 +26,7 @@ export const ToolNames = {
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
+  READ_MANY_FILES: 'read_many_files',
 } as const;
 
 /**
@@ -50,6 +51,7 @@ export const ToolDisplayNames = {
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
+  READ_MANY_FILES: 'ReadManyFiles',
 } as const;
 
 // Migration from old tool names to new tool names

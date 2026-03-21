@@ -67,6 +67,9 @@ export enum ToolErrorType {
   // WebSearch-specific Errors
   WEB_SEARCH_FAILED = 'web_search_failed',
 
+  // ReadManyFiles-specific Errors
+  READ_MANY_FILES_SEARCH_ERROR = 'read_many_files_search_error',
+
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',
 }
