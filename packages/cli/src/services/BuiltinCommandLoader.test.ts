@@ -237,6 +237,14 @@ describe('BuiltinCommandLoader', () => {
     expect(mcpCmd).toBeDefined();
   });
 
+  it('should include insight command in the built-in command list', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const insightCmd = commands.find((c) => c.name === 'insight');
+    expect(insightCmd).toBeDefined();
+    expect(insightCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
   it('should always include hooks command regardless of disableAllHooks', async () => {
     // When disableAllHooks is false
     const loader1 = new BuiltinCommandLoader(mockConfig);
