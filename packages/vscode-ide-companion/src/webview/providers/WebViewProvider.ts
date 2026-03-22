@@ -128,6 +128,21 @@ export class WebViewProvider {
       });
     });
 
+    this.agentManager.onSlashCommandNotification((event) => {
+      const chunk = event.message.endsWith('\n')
+        ? event.message
+        : `${event.message}\n`;
+      this.messageHandler.appendStreamContent(chunk);
+      this.sendMessageToWebView({
+        type: 'streamChunk',
+        data: { chunk },
+      });
+    });
+
+    this.agentManager.onInsightReady((event) => {
+      void this.offerOpenInsightReport(event.path);
+    });
+
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {
@@ -454,6 +469,17 @@ export class WebViewProvider {
         });
       },
     );
+  }
+
+  private async offerOpenInsightReport(path: string): Promise<void> {
+    const selection = await vscode.window.showInformationMessage(
+      'Insight report generated successfully.',
+      'Open Report',
+    );
+
+    if (selection === 'Open Report') {
+      await vscode.env.openExternal(vscode.Uri.file(path));
+    }
   }
 
   /**

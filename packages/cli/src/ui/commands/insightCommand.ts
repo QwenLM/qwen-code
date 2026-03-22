@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CommandContext, SlashCommand } from './types.js';
+import type {
+  CommandContext,
+  SlashCommand,
+  StreamMessagesActionReturn,
+} from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
@@ -15,6 +19,23 @@ import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
 import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
+
+export const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
+
+function formatAcpInsightProgress(
+  stage: string,
+  progress: number,
+  detail?: string,
+): string {
+  const trimmedStage = stage.trim();
+  const trimmedDetail = detail?.trim();
+
+  if (trimmedDetail) {
+    return `${trimmedStage} (${trimmedDetail})`;
+  }
+
+  return `${trimmedStage} (${Math.round(progress)}%)`;
+}
 
 export const insightCommand: SlashCommand = {
   name: 'insight',
@@ -35,6 +56,100 @@ export const insightCommand: SlashCommand = {
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
+
+      if (context.executionMode === 'acp') {
+        const pendingMessages: Array<{
+          messageType: 'info' | 'error';
+          content: string;
+        }> = [];
+        let isComplete = false;
+        let resume: (() => void) | null = null;
+
+        const pushMessage = (message: {
+          messageType: 'info' | 'error';
+          content: string;
+        }) => {
+          pendingMessages.push(message);
+          if (resume) {
+            const resolve = resume;
+            resume = null;
+            resolve();
+          }
+        };
+
+        const streamMessages = async function* (): AsyncGenerator<
+          { messageType: 'info' | 'error'; content: string },
+          void,
+          unknown
+        > {
+          while (!isComplete || pendingMessages.length > 0) {
+            if (pendingMessages.length === 0) {
+              await new Promise<void>((resolve) => {
+                resume = resolve;
+              });
+            }
+
+            while (pendingMessages.length > 0) {
+              const message = pendingMessages.shift();
+              if (message) {
+                yield message;
+              }
+            }
+          }
+        };
+
+        void (async () => {
+          try {
+            pushMessage({
+              messageType: 'info',
+              content: t('This may take a couple minutes. Sit tight!'),
+            });
+            pushMessage({
+              messageType: 'info',
+              content: t('Starting insight generation...'),
+            });
+
+            const outputPath = await insightGenerator.generateStaticInsight(
+              projectsDir,
+              (stage, progress, detail) => {
+                pushMessage({
+                  messageType: 'info',
+                  content: formatAcpInsightProgress(stage, progress, detail),
+                });
+              },
+            );
+
+            pushMessage({
+              messageType: 'info',
+              content: t('Insight report generated successfully!'),
+            });
+            pushMessage({
+              messageType: 'info',
+              content: `${INSIGHT_READY_MARKER}${outputPath}`,
+            });
+          } catch (error) {
+            pushMessage({
+              messageType: 'error',
+              content: t('Failed to generate insights: {{error}}', {
+                error: (error as Error).message,
+              }),
+            });
+            logger.error('Insight generation error:', error);
+          } finally {
+            isComplete = true;
+            if (resume) {
+              const resolve = resume;
+              resume = null;
+              resolve();
+            }
+          }
+        })();
+
+        return {
+          type: 'stream_messages',
+          messages: streamMessages(),
+        } satisfies StreamMessagesActionReturn;
+      }
 
       const updateProgress = (
         stage: string,
