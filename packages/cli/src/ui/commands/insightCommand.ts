@@ -14,11 +14,6 @@ import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
-import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
-import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
-import open from 'open';
-
-const logger = createDebugLogger('DataProcessor');
 
 export const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
 
@@ -49,10 +44,16 @@ export const insightCommand: SlashCommand = {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));
 
-      const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
+      const [{ Storage, createDebugLogger }, { StaticInsightGenerator }] =
+        await Promise.all([
+          import('@qwen-code/qwen-code-core'),
+          import('../../services/insight/generators/StaticInsightGenerator.js'),
+        ]);
+      const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
+      const logger = createDebugLogger('DataProcessor');
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
@@ -65,16 +66,21 @@ export const insightCommand: SlashCommand = {
         let isComplete = false;
         let resume: (() => void) | null = null;
 
+        const flushResume = () => {
+          const resolve = resume;
+          if (!resolve) {
+            return;
+          }
+          resume = null;
+          resolve();
+        };
+
         const pushMessage = (message: {
           messageType: 'info' | 'error';
           content: string;
         }) => {
           pendingMessages.push(message);
-          if (resume) {
-            const resolve = resume;
-            resume = null;
-            resolve();
-          }
+          flushResume();
         };
 
         const streamMessages = async function* (): AsyncGenerator<
@@ -137,11 +143,7 @@ export const insightCommand: SlashCommand = {
             logger.error('Insight generation error:', error);
           } finally {
             isComplete = true;
-            if (resume) {
-              const resolve = resume;
-              resume = null;
-              resolve();
-            }
+            flushResume();
           }
         })();
 
@@ -197,6 +199,7 @@ export const insightCommand: SlashCommand = {
 
       // Open the file in the default browser
       try {
+        const { default: open } = await import('open');
         await open(outputPath);
 
         context.ui.addItem(
@@ -226,6 +229,7 @@ export const insightCommand: SlashCommand = {
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));
+      return;
     } catch (error) {
       // Clear pending item on error
       context.ui.setPendingItem(null);
@@ -240,7 +244,10 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
+      const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
+      const logger = createDebugLogger('DataProcessor');
       logger.error('Insight generation error:', error);
+      return;
     }
   },
 };
