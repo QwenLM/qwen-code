@@ -6,12 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockProcessImageAttachments, mockShowErrorMessage } = vi.hoisted(
-  () => ({
-    mockProcessImageAttachments: vi.fn(),
-    mockShowErrorMessage: vi.fn(),
-  }),
-);
+const {
+  mockProcessImageAttachments,
+  mockShowErrorMessage,
+  mockShowInformationMessage,
+  mockExportSessionToFile,
+} = vi.hoisted(() => ({
+  mockProcessImageAttachments: vi.fn(),
+  mockShowErrorMessage: vi.fn(),
+  mockShowInformationMessage: vi.fn(),
+  mockExportSessionToFile: vi.fn(),
+}));
 const { mockExecuteCommand } = vi.hoisted(() => ({
   mockExecuteCommand: vi.fn(),
 }));
@@ -20,6 +25,7 @@ vi.mock('vscode', () => ({
   window: {
     showWarningMessage: vi.fn(),
     showErrorMessage: mockShowErrorMessage,
+    showInformationMessage: mockShowInformationMessage,
   },
   commands: {
     executeCommand: mockExecuteCommand,
@@ -38,6 +44,20 @@ vi.mock('../utils/imageHandler.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../../services/sessionExportService.js', () => ({
+  parseExportSlashCommand: (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed === '/export') {
+      return 'html';
+    }
+    if (trimmed === '/export md') {
+      return 'md';
+    }
+    return null;
+  },
+  exportSessionToFile: mockExportSessionToFile,
+}));
+
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 
 describe('SessionMessageHandler', () => {
@@ -48,6 +68,12 @@ describe('SessionMessageHandler', () => {
       displayText: '',
       savedImageCount: 0,
       promptImages: [],
+    });
+    mockShowInformationMessage.mockResolvedValue(undefined);
+    mockExportSessionToFile.mockResolvedValue({
+      cancelled: false,
+      filename: 'export.html',
+      uri: { fsPath: '/workspace/export.html' },
     });
   });
 
@@ -218,5 +244,90 @@ describe('SessionMessageHandler', () => {
       type: 'conversationCleared',
       data: {},
     });
+  });
+
+  it('intercepts /export and uses the VSCode export flow instead of sending a prompt', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export',
+      },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/workspace',
+      format: 'html',
+    });
+    expect(conversationStore.addMessage).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Session exported to HTML: export.html',
+      'Open File',
+    );
+  });
+
+  it('reports export failures back to the user', async () => {
+    mockExportSessionToFile.mockRejectedValue(new Error('disk full'));
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export md',
+      },
+    });
+
+    expect(mockShowErrorMessage).toHaveBeenCalledWith(
+      'Failed to export session: disk full',
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Failed to export session: disk full' },
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
   });
 });
