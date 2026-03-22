@@ -90,6 +90,35 @@ type OpenAIContentPart =
   | OpenAIContentPartVideoUrl
   | OpenAIContentPartFile;
 
+export function cleanToolSchema(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const clean = (obj: unknown, isRoot = false): unknown => {
+    if (typeof obj !== 'object' || obj === null) return obj;
+    if (Array.isArray(obj)) return obj.map((item) => clean(item));
+
+    const source = obj as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(source)) {
+      if (key.startsWith('$') || key === 'strict' || key === 'const') {
+        continue;
+      }
+      result[key] = clean(value);
+    }
+
+    if (isRoot) {
+      result['type'] = 'object';
+      if (!result['properties']) {
+        result['properties'] = {};
+      }
+    }
+
+    return result;
+  };
+
+  return clean(schema, true) as Record<string, unknown>;
+}
+
 /**
  * Converter class for transforming data between Gemini and OpenAI formats
  */
@@ -245,6 +274,7 @@ export class OpenAIContentConverter {
 
             if (parameters) {
               parameters = convertSchema(parameters, this.schemaCompliance);
+              parameters = cleanToolSchema(parameters);
             }
 
             openAITools.push({
@@ -441,6 +471,7 @@ export class OpenAIContentConverter {
     const reasoningParts: string[] = [];
     const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
     let toolCallIndex = 0;
+    const seenToolIds = new Map<string, Part>();
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -476,8 +507,23 @@ export class OpenAIContentConverter {
       }
 
       if (part.functionResponse && role === 'user') {
-        // Create tool message for the function response (with embedded media)
-        const toolMessage = this.createToolMessage(part.functionResponse);
+        const frId = part.functionResponse.id;
+        if (frId) {
+          seenToolIds.set(frId, part);
+        } else {
+          const toolMessage = this.createToolMessage(part.functionResponse);
+          if (toolMessage) {
+            messages.push(toolMessage);
+          }
+        }
+      }
+    }
+
+    if (role === 'user') {
+      for (const dedupedPart of seenToolIds.values()) {
+        const toolMessage = this.createToolMessage(
+          dedupedPart.functionResponse!,
+        );
         if (toolMessage) {
           messages.push(toolMessage);
         }

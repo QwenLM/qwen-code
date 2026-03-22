@@ -892,7 +892,7 @@ describe('Gemini Client (client.ts)', () => {
       ];
       mockGetHistory.mockReturnValue(history);
 
-      const originalTokenCount = 1000 * 0.7;
+      const originalTokenCount = 1000 * 0.9 + 1;
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
         originalTokenCount,
       );
@@ -925,7 +925,7 @@ describe('Gemini Client (client.ts)', () => {
       });
 
       // Mock the summary response from the chat
-      // newTokenCount = 700 - (1500 - 1000) + 50 = 700 - 500 + 50 = 250 <= 700 (success)
+      // newTokenCount = 901 - (1500 - 1000) + 50 = 901 - 500 + 50 = 451 <= 901 (success)
       mockGenerateContentFn.mockResolvedValue({
         candidates: [
           {

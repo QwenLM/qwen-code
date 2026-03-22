@@ -18,6 +18,7 @@ import { t } from '../i18n/index.js';
  */
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OPENAI_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -142,7 +143,10 @@ export function validateAuthMethod(
   const settings = loadSettings();
   loadEnvironment(settings.merged);
 
-  if (authMethod === AuthType.USE_OPENAI) {
+  if (
+    authMethod === AuthType.USE_OPENAI ||
+    authMethod === AuthType.USE_OPENAI_RESPONSES
+  ) {
     const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
       authMethod,
       settings.merged,

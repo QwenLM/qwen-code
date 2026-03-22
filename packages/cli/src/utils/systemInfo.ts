@@ -158,6 +158,7 @@ export async function getExtendedSystemInfo(
   // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
   const contentGeneratorConfig =
     baseInfo.selectedAuthType === AuthType.USE_OPENAI ||
+    baseInfo.selectedAuthType === AuthType.USE_OPENAI_RESPONSES ||
     baseInfo.selectedAuthType === AuthType.USE_ANTHROPIC
       ? context.services.config?.getContentGeneratorConfig()
       : undefined;

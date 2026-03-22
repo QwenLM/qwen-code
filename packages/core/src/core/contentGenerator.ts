@@ -50,10 +50,13 @@ export interface ContentGenerator {
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
 
   useSummarizedThinking(): boolean;
+
+  resetPipelineState?(): void;
 }
 
 export enum AuthType {
   USE_OPENAI = 'openai',
+  USE_OPENAI_RESPONSES = 'openai-responses',
   QWEN_OAUTH = 'qwen-oauth',
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
@@ -98,7 +101,10 @@ export type ContentGeneratorConfig = {
     | {
         effort?: 'low' | 'medium' | 'high';
         budget_tokens?: number;
+        summary?: 'auto' | 'concise' | 'detailed';
       };
+  verbosity?: 'low' | 'medium' | 'high';
+  serviceTier?: 'auto' | 'priority';
   proxy?: string | undefined;
   userAgent?: string;
   // Schema compliance mode for tool definitions
@@ -311,6 +317,14 @@ export async function createContentGenerator(
       './openaiContentGenerator/index.js'
     );
     baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+  } else if (authType === AuthType.USE_OPENAI_RESPONSES) {
+    const { createOpenAIResponsesContentGenerator } = await import(
+      './openaiResponsesContentGenerator/index.js'
+    );
+    baseGenerator = createOpenAIResponsesContentGenerator(
+      generatorConfig,
+      config,
+    );
   } else if (authType === AuthType.QWEN_OAUTH) {
     const { getQwenOAuthClient: getQwenOauthClient } = await import(
       '../qwen/qwenOAuth2.js'

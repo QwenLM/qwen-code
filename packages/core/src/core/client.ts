@@ -66,7 +66,7 @@ import {
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -651,33 +651,41 @@ export class GeminiClient {
       requestToSent,
       signal,
     );
-    for await (const event of resultStream) {
-      if (!this.config.getSkipLoopDetection()) {
-        if (this.loopDetector.addAndCheck(event)) {
-          yield { type: GeminiEventType.LoopDetected };
+    try {
+      for await (const event of resultStream) {
+        if (!this.config.getSkipLoopDetection()) {
+          if (this.loopDetector.addAndCheck(event)) {
+            yield { type: GeminiEventType.LoopDetected };
+            if (arenaAgentClient) {
+              await arenaAgentClient.reportError('Loop detected');
+            }
+            return turn;
+          }
+        }
+        // Update arena status on Finished events — stats are derived
+        // automatically from uiTelemetryService by the reporter.
+        if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+          await arenaAgentClient.updateStatus();
+        }
+
+        yield event;
+        if (event.type === GeminiEventType.Error) {
           if (arenaAgentClient) {
-            await arenaAgentClient.reportError('Loop detected');
+            const errorMsg =
+              event.value instanceof Error
+                ? event.value.message
+                : 'Unknown error';
+            await arenaAgentClient.reportError(errorMsg);
           }
           return turn;
         }
       }
-      // Update arena status on Finished events — stats are derived
-      // automatically from uiTelemetryService by the reporter.
-      if (arenaAgentClient && event.type === GeminiEventType.Finished) {
-        await arenaAgentClient.updateStatus();
-      }
-
-      yield event;
-      if (event.type === GeminiEventType.Error) {
-        if (arenaAgentClient) {
-          const errorMsg =
-            event.value instanceof Error
-              ? event.value.message
-              : 'Unknown error';
-          await arenaAgentClient.reportError(errorMsg);
-        }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        yield { type: GeminiEventType.UserCancelled };
         return turn;
       }
+      throw error;
     }
     // Fire Stop hook through MessageBus (only if hooks are enabled)
     // This must be done before any early returns to ensure hooks are always triggered
@@ -868,6 +876,7 @@ export class GeminiClient {
         });
 
         await this.startChat(newHistory);
+        this.config.getContentGenerator().resetPipelineState?.();
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }

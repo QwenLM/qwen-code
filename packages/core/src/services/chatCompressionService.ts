@@ -6,11 +6,13 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
+import { ResponsesCompactionClient } from './responsesCompactionClient.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
-import { getCompressionPrompt } from '../core/prompts.js';
+import { getCompressionPrompt, COMPACTION_SUMMARY_PREFIX } from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -21,6 +23,11 @@ import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
  * If the chat history exceeds this threshold, it will be compressed.
  */
 export const COMPRESSION_TOKEN_THRESHOLD = 0.7;
+export const RESPONSES_COMPRESSION_TOKEN_THRESHOLD = 0.9;
+
+export function isCompactionSummary(text: string): boolean {
+  return text.startsWith(COMPACTION_SUMMARY_PREFIX);
+}
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -86,9 +93,14 @@ export class ChatCompressionService {
     hasFailedCompressionAttempt: boolean,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const curatedHistory = chat.getHistory(true);
+    const authType = config.getContentGeneratorConfig()?.authType;
+    const defaultThreshold =
+      authType === AuthType.USE_OPENAI_RESPONSES
+        ? RESPONSES_COMPRESSION_TOKEN_THRESHOLD
+        : COMPRESSION_TOKEN_THRESHOLD;
     const threshold =
       config.getChatCompression()?.contextPercentageThreshold ??
-      COMPRESSION_TOKEN_THRESHOLD;
+      defaultThreshold;
 
     // Regardless of `force`, don't do anything if the history is empty.
     if (
@@ -136,6 +148,15 @@ export class ChatCompressionService {
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
+    }
+
+    if (authType === AuthType.USE_OPENAI_RESPONSES) {
+      return this.compactViaResponsesApi(
+        curatedHistory,
+        config,
+        model,
+        originalTokenCount,
+      );
     }
 
     const splitPoint = findCompressSplitPoint(
@@ -291,6 +312,100 @@ export class ChatCompressionService {
           originalTokenCount,
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      };
+    }
+  }
+
+  private async compactViaResponsesApi(
+    curatedHistory: Content[],
+    config: Config,
+    model: string,
+    originalTokenCount: number,
+  ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
+    const generatorConfig = config.getContentGeneratorConfig();
+    if (!generatorConfig) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+        },
+      };
+    }
+
+    try {
+      const client = new ResponsesCompactionClient(generatorConfig);
+      const { compactedHistory, inputTokens, outputTokens } =
+        await client.compact(curatedHistory);
+
+      if (compactedHistory.length === 0) {
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        };
+      }
+
+      const newTokenCount = Math.max(
+        0,
+        originalTokenCount - inputTokens + outputTokens,
+      );
+
+      if (newTokenCount > originalTokenCount) {
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+          },
+        };
+      }
+
+      logChatCompression(
+        config,
+        makeChatCompressionEvent({
+          tokens_before: originalTokenCount,
+          tokens_after: newTokenCount,
+          compression_input_token_count: inputTokens,
+          compression_output_token_count: outputTokens,
+        }),
+      );
+
+      uiTelemetryService.setLastPromptTokenCount(newTokenCount);
+
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(SessionStartSource.Compact, model ?? '');
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      }
+
+      return {
+        newHistory: compactedHistory,
+        info: {
+          originalTokenCount,
+          newTokenCount,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      };
+    } catch (error) {
+      config
+        .getDebugLogger()
+        .error(`Remote compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
         },
       };
     }

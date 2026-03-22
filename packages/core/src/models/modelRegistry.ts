@@ -49,6 +49,7 @@ export class ModelRegistry {
       case AuthType.QWEN_OAUTH:
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
       case AuthType.USE_OPENAI:
+      case AuthType.USE_OPENAI_RESPONSES:
         return DEFAULT_OPENAI_BASE_URL;
       default:
         return '';

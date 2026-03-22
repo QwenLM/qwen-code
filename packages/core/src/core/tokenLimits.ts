@@ -231,3 +231,14 @@ export function tokenLimit(
   // Return appropriate default based on token type
   return type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
 }
+
+export function tokenEstimationScaleFactor(model: string): number {
+  const m = normalize(model);
+  if (/claude/.test(m)) return 1.25;
+  if (/gpt|^o\d|codex/.test(m)) return 1.2;
+  return 1.0;
+}
+
+export function defaultMaxOutputTokens(model: string): TokenCount {
+  return tokenLimit(model, 'output');
+}

@@ -26,6 +26,7 @@
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
     "build:sea": "docker buildx build --platform linux/amd64 -f Dockerfile.sea -o type=local,dest=.bin/ .",
+    "relink": "npm run build && npm run bundle && npm link",
     "deploy": "npm run build && npm run build:sea && npm run deploy:remote",
     "deploy:remote": "scp .bin/qwen-code-linux-amd64 ${QWEN_DEPLOY_HOST:-curosr}:~/bin/qwen",
     "build:packages": "npm run build --workspaces",

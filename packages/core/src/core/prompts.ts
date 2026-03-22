@@ -352,6 +352,10 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
 /**
  * Provides the system prompt for the history compression process.
+ */
+export const COMPACTION_SUMMARY_PREFIX = `Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:`;
+
+/**
  * This prompt instructs the model to act as a specialized state manager,
  * think in a scratchpad, and produce a structured XML summary.
  */
