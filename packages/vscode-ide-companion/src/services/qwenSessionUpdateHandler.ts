@@ -111,6 +111,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,
@@ -134,6 +135,7 @@ export class QwenSessionUpdateHandler {
             title: (update.title as string) || undefined,
             status: (update.status as string) || undefined,
             rawInput: update.rawInput,
+            rawOutput: (update as { rawOutput?: unknown }).rawOutput,
             content: update.content as
               | Array<Record<string, unknown>>
               | undefined,

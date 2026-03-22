@@ -31,6 +31,11 @@ export {
 
 // Types
 export type {
+  AgentExecutionRawOutput,
+  AgentExecutionStatus,
+  AgentExecutionSummary,
+  AgentExecutionToolCall,
+  AgentToolCallStatus,
   ToolCallContent,
   ToolCallLocation,
   ToolCallStatus,
