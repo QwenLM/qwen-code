@@ -24,9 +24,10 @@ import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-
-const INSIGHT_PROGRESS_MARKER = '__QWEN_INSIGHT_PROGRESS__:';
-const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
+import {
+  INSIGHT_PROGRESS_MARKER,
+  INSIGHT_READY_MARKER,
+} from '@qwen-code/qwen-code-core/src/core/insightProtocol.js';
 
 type ParsedInsightSlashCommandMessage =
   | {

@@ -69,6 +69,11 @@ import {
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 
+const ACP_ALLOWED_COMMANDS = [
+  ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+  'insight',
+];
+
 // Import modular session components
 import type {
   ApprovalModeValue,
@@ -239,7 +244,7 @@ export class Session implements SessionContext {
             pendingSend,
             this.config,
             this.settings,
-            [...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE, 'insight'],
+            ACP_ALLOWED_COMMANDS,
           );
 
           parts = await this.#processSlashCommandResult(
@@ -376,7 +381,7 @@ export class Session implements SessionContext {
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
-        [...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE, 'insight'],
+        ACP_ALLOWED_COMMANDS,
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
