@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import {
+  ALLOWED_BUILTIN_COMMANDS_ACP,
+  handleSlashCommand,
+} from './nonInteractiveCliCommands.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind } from './ui/commands/types.js';
@@ -58,6 +61,12 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result.type).toBe('no_command');
+  });
+
+  it('should keep the ACP allowlist commands needed by VSCode companion', () => {
+    expect(ALLOWED_BUILTIN_COMMANDS_ACP).toEqual(
+      expect.arrayContaining(['bug', 'compress', 'summary', 'insight']),
+    );
   });
 
   it('should return no_command for unknown slash commands', async () => {
