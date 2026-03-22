@@ -15,6 +15,11 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import {
+  exportSessionToFile,
+  parseExportSlashCommand,
+  type SessionExportFormat,
+} from '../../services/sessionExportService.js';
 
 /**
  * Session message handler
@@ -268,6 +273,69 @@ export class SessionMessageHandler extends BaseMessageHandler {
     return isAuthenticationRequiredError(error);
   }
 
+  private async resolveSessionWorkingDir(sessionId: string): Promise<string> {
+    try {
+      const sessions = await this.agentManager.getSessionList();
+      const match = sessions.find(
+        (session) =>
+          session.sessionId === sessionId || session.id === sessionId,
+      );
+      if (typeof match?.cwd === 'string' && match.cwd.length > 0) {
+        return match.cwd;
+      }
+    } catch (error) {
+      console.warn(
+        '[SessionMessageHandler] Failed to resolve export session cwd:',
+        error,
+      );
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    return workspaceFolder?.uri.fsPath || process.cwd();
+  }
+
+  private async handleExportCommand(
+    format: SessionExportFormat,
+  ): Promise<void> {
+    const sessionId =
+      this.currentConversationId ?? this.agentManager.currentSessionId;
+    if (!sessionId) {
+      const errorMsg = 'No active session found to export.';
+      vscode.window.showErrorMessage(errorMsg);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    try {
+      const cwd = await this.resolveSessionWorkingDir(sessionId);
+      const result = await exportSessionToFile({ sessionId, cwd, format });
+      if (result.cancelled || !result.filename || !result.uri) {
+        return;
+      }
+
+      const formatLabel = format.toUpperCase();
+      const selection = await vscode.window.showInformationMessage(
+        `Session exported to ${formatLabel}: ${result.filename}`,
+        'Open File',
+      );
+
+      if (selection === 'Open File') {
+        await vscode.commands.executeCommand('vscode.open', result.uri);
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      console.error('[SessionMessageHandler] Failed to export session:', error);
+      vscode.window.showErrorMessage(`Failed to export session: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
+  }
+
   /**
    * Handle send message request
    */
@@ -296,6 +364,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
+
+    try {
+      const exportFormat = parseExportSlashCommand(trimmedText);
+      if (exportFormat) {
+        await this.handleExportCommand(exportFormat);
+        return;
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      vscode.window.showErrorMessage(errorMsg);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
       return;
     }
 
