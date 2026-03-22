@@ -14,6 +14,8 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  InsightReadyNotification,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
@@ -269,6 +271,16 @@ export class QwenAgentManager {
           err,
         );
       }
+    };
+
+    this.connection.onSlashCommandNotification = (
+      data: SlashCommandNotification,
+    ) => {
+      this.callbacks.onSlashCommandNotification?.(data);
+    };
+
+    this.connection.onInsightReady = (data: InsightReadyNotification) => {
+      this.callbacks.onInsightReady?.(data);
     };
 
     // Initialize callback to surface available modes and current mode to UI
@@ -1450,6 +1462,18 @@ export class QwenAgentManager {
    */
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  onSlashCommandNotification(
+    callback: (event: SlashCommandNotification) => void,
+  ): void {
+    this.callbacks.onSlashCommandNotification = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  onInsightReady(callback: (event: InsightReadyNotification) => void): void {
+    this.callbacks.onInsightReady = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

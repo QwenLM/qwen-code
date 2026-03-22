@@ -8,7 +8,11 @@ import type {
   AvailableCommand,
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
-import type { AskUserQuestionRequest } from './acpTypes.js';
+import type {
+  AskUserQuestionRequest,
+  InsightReadyNotification,
+  SlashCommandNotification,
+} from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -79,6 +83,8 @@ export interface QwenAgentCallbacks {
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
   onDisconnected?: (code: number | null, signal: string | null) => void;
+  onSlashCommandNotification?: (event: SlashCommandNotification) => void;
+  onInsightReady?: (event: InsightReadyNotification) => void;
 }
 
 export interface ToolCallUpdate {

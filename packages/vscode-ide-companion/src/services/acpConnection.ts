@@ -32,6 +32,8 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  InsightReadyNotification,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
@@ -65,6 +67,9 @@ export class AcpConnection {
     });
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
+  onSlashCommandNotification: (data: SlashCommandNotification) => void =
+    () => {};
+  onInsightReady: (data: InsightReadyNotification) => void = () => {};
   onEndTurn: (reason?: string) => void = () => {};
   /** Invoked when the child process exits (expected or unexpected). */
   onDisconnected: (code: number | null, signal: string | null) => void =
@@ -344,6 +349,12 @@ export class AcpConnection {
             this.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
+          } else if (method === '_qwencode/slash_command') {
+            this.onSlashCommandNotification(
+              params as unknown as SlashCommandNotification,
+            );
+          } else if (method === '_qwencode/insight_ready') {
+            this.onInsightReady(params as unknown as InsightReadyNotification);
           } else {
             console.warn(`[ACP] Unhandled extension notification: ${method}`);
           }

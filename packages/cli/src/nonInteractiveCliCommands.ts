@@ -49,6 +49,15 @@ export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
 ] as const;
 
 /**
+ * ACP integrations can support a broader built-in command set because they
+ * can stream progress and handle extension-specific notifications.
+ */
+export const ALLOWED_BUILTIN_COMMANDS_ACP = [
+  ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+  'insight',
+] as const;
+
+/**
  * Result of handling a slash command in non-interactive mode.
  *
  * Supported types:
