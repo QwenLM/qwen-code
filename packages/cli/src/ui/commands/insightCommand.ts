@@ -11,11 +11,13 @@ import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
-import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  INSIGHT_PROGRESS_MARKER,
+  INSIGHT_READY_MARKER,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import open from 'open';
-
-export const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
-export const INSIGHT_PROGRESS_MARKER = '__QWEN_INSIGHT_PROGRESS__:';
 
 interface AcpInsightProgressPayload {
   stage: string;
