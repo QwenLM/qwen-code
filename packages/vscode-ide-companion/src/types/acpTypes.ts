@@ -31,11 +31,6 @@ export interface SlashCommandNotification {
   message: string;
 }
 
-export interface InsightReadyNotification {
-  sessionId: string;
-  path: string;
-}
-
 export interface SessionUpdateMeta {
   usage?: Usage | null;
   durationMs?: number | null;

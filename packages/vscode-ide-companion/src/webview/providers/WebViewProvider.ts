@@ -26,6 +26,66 @@ import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 
+const INSIGHT_PROGRESS_MARKER = '__QWEN_INSIGHT_PROGRESS__:';
+const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
+
+type ParsedInsightSlashCommandMessage =
+  | {
+      type: 'progress';
+      stage: string;
+      progress: number;
+      detail?: string;
+    }
+  | {
+      type: 'ready';
+      path: string;
+    };
+
+function parseInsightSlashCommandMessage(event: {
+  command: string;
+  messageType: 'info' | 'error';
+  message: string;
+}): ParsedInsightSlashCommandMessage | null {
+  if (event.command !== '/insight' || event.messageType !== 'info') {
+    return null;
+  }
+
+  if (event.message.startsWith(INSIGHT_PROGRESS_MARKER)) {
+    try {
+      const parsed = JSON.parse(
+        event.message.slice(INSIGHT_PROGRESS_MARKER.length),
+      ) as {
+        stage?: unknown;
+        progress?: unknown;
+        detail?: unknown;
+      };
+
+      if (
+        typeof parsed.stage === 'string' &&
+        typeof parsed.progress === 'number'
+      ) {
+        return {
+          type: 'progress',
+          stage: parsed.stage,
+          progress: parsed.progress,
+          detail: typeof parsed.detail === 'string' ? parsed.detail : undefined,
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (event.message.startsWith(INSIGHT_READY_MARKER)) {
+    return {
+      type: 'ready',
+      path: event.message.slice(INSIGHT_READY_MARKER.length),
+    };
+  }
+
+  return null;
+}
+
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
@@ -135,6 +195,36 @@ export class WebViewProvider {
     });
 
     this.agentManager.onSlashCommandNotification((event) => {
+      if (event.command === '/insight' && event.messageType === 'error') {
+        this.sendMessageToWebView({
+          type: 'insightProgressCleared',
+          data: {},
+        });
+      }
+
+      const parsedInsightMessage = parseInsightSlashCommandMessage(event);
+      if (parsedInsightMessage?.type === 'progress') {
+        this.sendMessageToWebView({
+          type: 'insightProgress',
+          data: {
+            stage: parsedInsightMessage.stage,
+            progress: parsedInsightMessage.progress,
+            detail: parsedInsightMessage.detail,
+          },
+        });
+        return;
+      }
+
+      if (parsedInsightMessage?.type === 'ready') {
+        this.sendMessageToWebView({
+          type: 'insightReportReady',
+          data: {
+            path: parsedInsightMessage.path,
+          },
+        });
+        return;
+      }
+
       const chunk = event.message.endsWith('\n')
         ? event.message
         : `${event.message}\n`;
@@ -143,10 +233,6 @@ export class WebViewProvider {
         type: 'streamChunk',
         data: { chunk },
       });
-    });
-
-    this.agentManager.onInsightReady((event) => {
-      void this.offerOpenInsightReport(event.path);
     });
 
     // Surface available modes and current mode (from ACP initialize)
@@ -468,15 +554,23 @@ export class WebViewProvider {
     });
   }
 
-  private async offerOpenInsightReport(path: string): Promise<void> {
-    const selection = await vscode.window.showInformationMessage(
-      'Insight report generated successfully.',
-      'Open Report',
-    );
+  private async openInsightReport(path: string): Promise<void> {
+    await vscode.env.openExternal(vscode.Uri.file(path));
+  }
 
-    if (selection === 'Open Report') {
-      await vscode.env.openExternal(vscode.Uri.file(path));
+  private async handleOpenInsightReportMessage(message: {
+    type: string;
+    data?: unknown;
+  }): Promise<boolean> {
+    if (message.type !== 'openInsightReport') {
+      return false;
     }
+
+    const path = (message.data as { path?: unknown } | undefined)?.path;
+    if (typeof path === 'string' && path.length > 0) {
+      await this.openInsightReport(path);
+    }
+    return true;
   }
 
   /**
@@ -526,6 +620,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -685,6 +782,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, newPanel.webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1522,6 +1622,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, panel.webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         if (message.type === 'updatePanelTitle') {

@@ -76,12 +76,11 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
-  ALLOWED_BUILTIN_COMMANDS_ACP,
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
   handleSlashCommand,
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import { INSIGHT_READY_MARKER } from '../../ui/commands/insightCommand.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
@@ -329,13 +328,13 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // Handle slash command - uses default allowed commands (init, summary, compress)
+          // ACP supports the standard non-interactive built-ins plus /insight.
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
             this.config,
             this.settings,
-            [...ALLOWED_BUILTIN_COMMANDS_ACP],
+            [...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE, 'insight'],
           );
 
           parts = await this.#processSlashCommandResult(
@@ -971,7 +970,7 @@ export class Session implements SessionContext {
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
-        [...ALLOWED_BUILTIN_COMMANDS_ACP],
+        [...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE, 'insight'],
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -1721,23 +1720,9 @@ export class Session implements SessionContext {
           .filter((block) => block.type === 'text')
           .map((block) => (block.type === 'text' ? block.text : ''))
           .join(' ');
-        const commandName = command.trim().split(/\s+/, 1)[0];
 
         // Stream all messages to the client
         for await (const msg of result.messages) {
-          if (
-            commandName === '/insight' &&
-            msg.messageType === 'info' &&
-            msg.content.startsWith(INSIGHT_READY_MARKER)
-          ) {
-            const path = msg.content.slice(INSIGHT_READY_MARKER.length);
-            await this.client.extNotification('_qwencode/insight_ready', {
-              sessionId: this.sessionId,
-              path,
-            });
-            continue;
-          }
-
           await this.client.extNotification('_qwencode/slash_command', {
             sessionId: this.sessionId,
             command,
