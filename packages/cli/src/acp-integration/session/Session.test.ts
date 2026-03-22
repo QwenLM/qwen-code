@@ -18,18 +18,17 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
-import { INSIGHT_READY_MARKER } from '../../ui/commands/insightCommand.js';
 
-vi.mock('../../nonInteractiveCliCommands.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../../nonInteractiveCliCommands.js')>();
-
-  return {
-    ...actual,
-    getAvailableCommands: vi.fn(),
-    handleSlashCommand: vi.fn(),
-  };
-});
+vi.mock('../../nonInteractiveCliCommands.js', () => ({
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
+    'init',
+    'summary',
+    'compress',
+    'bug',
+  ],
+  getAvailableCommands: vi.fn(),
+  handleSlashCommand: vi.fn(),
+}));
 
 describe('Session', () => {
   let mockChat: GeminiChat;
@@ -41,7 +40,6 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
-  let handleSlashCommandSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
@@ -98,9 +96,6 @@ describe('Session', () => {
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
       .getAvailableCommands as unknown as ReturnType<typeof vi.fn>;
     getAvailableCommandsSpy.mockResolvedValue([]);
-    handleSlashCommandSpy = vi.mocked(nonInteractiveCliCommands)
-      .handleSlashCommand as unknown as ReturnType<typeof vi.fn>;
-    handleSlashCommandSpy.mockResolvedValue({ type: 'no_command' });
 
     session = new Session(
       'test-session-id',
@@ -180,7 +175,10 @@ describe('Session', () => {
       expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
         mockConfig,
         expect.any(AbortSignal),
-        expect.arrayContaining(['insight']),
+        [
+          ...nonInteractiveCliCommands.ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+          'insight',
+        ],
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -210,55 +208,6 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
-    it('allows /insight in ACP slash-command handling and emits the report-ready notification', async () => {
-      handleSlashCommandSpy.mockResolvedValueOnce({
-        type: 'stream_messages',
-        messages: (async function* () {
-          yield {
-            messageType: 'info' as const,
-            content: 'Scanning sessions...',
-          };
-          yield {
-            messageType: 'info' as const,
-            content: `${INSIGHT_READY_MARKER}/tmp/insight-report.html`,
-          };
-        })(),
-      });
-
-      const promptRequest: PromptRequest = {
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: '/insight' }],
-      };
-
-      await expect(session.prompt(promptRequest)).resolves.toEqual({
-        stopReason: 'end_turn',
-      });
-
-      expect(handleSlashCommandSpy).toHaveBeenCalledWith(
-        '/insight',
-        expect.any(AbortController),
-        mockConfig,
-        mockSettings,
-        expect.arrayContaining(['insight']),
-      );
-      expect(mockClient.extNotification).toHaveBeenCalledWith(
-        '_qwencode/slash_command',
-        {
-          sessionId: 'test-session-id',
-          command: '/insight',
-          messageType: 'info',
-          message: 'Scanning sessions...',
-        },
-      );
-      expect(mockClient.extNotification).toHaveBeenCalledWith(
-        '_qwencode/insight_ready',
-        {
-          sessionId: 'test-session-id',
-          path: '/tmp/insight-report.html',
-        },
-      );
-    });
-
     it('passes resolved paths to read_many_files tool', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'qwen-acp-session-'),

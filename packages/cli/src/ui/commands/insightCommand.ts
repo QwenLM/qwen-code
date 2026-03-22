@@ -4,33 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  CommandContext,
-  SlashCommand,
-  StreamMessagesActionReturn,
-} from './types.js';
+import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
+import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
+import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
+import open from 'open';
 
 export const INSIGHT_READY_MARKER = '__QWEN_INSIGHT_READY__:';
+export const INSIGHT_PROGRESS_MARKER = '__QWEN_INSIGHT_PROGRESS__:';
 
-function formatAcpInsightProgress(
-  stage: string,
-  progress: number,
-  detail?: string,
-): string {
-  const trimmedStage = stage.trim();
-  const trimmedDetail = detail?.trim();
-
-  if (trimmedDetail) {
-    return `${trimmedStage} (${trimmedDetail})`;
-  }
-
-  return `${trimmedStage} (${Math.round(progress)}%)`;
+interface AcpInsightProgressPayload {
+  stage: string;
+  progress: number;
+  detail?: string;
 }
+
+function encodeAcpInsightProgress(payload: AcpInsightProgressPayload): string {
+  return `${INSIGHT_PROGRESS_MARKER}${JSON.stringify(payload)}`;
+}
+
+const logger = createDebugLogger('DataProcessor');
 
 export const insightCommand: SlashCommand = {
   name: 'insight',
@@ -44,16 +41,10 @@ export const insightCommand: SlashCommand = {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));
 
+      const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
-      const [{ Storage, createDebugLogger }, { StaticInsightGenerator }] =
-        await Promise.all([
-          import('@qwen-code/qwen-code-core'),
-          import('../../services/insight/generators/StaticInsightGenerator.js'),
-        ]);
-      const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
-      const logger = createDebugLogger('DataProcessor');
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
@@ -112,7 +103,10 @@ export const insightCommand: SlashCommand = {
             });
             pushMessage({
               messageType: 'info',
-              content: t('Starting insight generation...'),
+              content: encodeAcpInsightProgress({
+                stage: t('Starting insight generation...'),
+                progress: 0,
+              }),
             });
 
             const outputPath = await insightGenerator.generateStaticInsight(
@@ -120,15 +114,15 @@ export const insightCommand: SlashCommand = {
               (stage, progress, detail) => {
                 pushMessage({
                   messageType: 'info',
-                  content: formatAcpInsightProgress(stage, progress, detail),
+                  content: encodeAcpInsightProgress({
+                    stage,
+                    progress,
+                    detail,
+                  }),
                 });
               },
             );
 
-            pushMessage({
-              messageType: 'info',
-              content: t('Insight report generated successfully!'),
-            });
             pushMessage({
               messageType: 'info',
               content: `${INSIGHT_READY_MARKER}${outputPath}`,
@@ -150,7 +144,7 @@ export const insightCommand: SlashCommand = {
         return {
           type: 'stream_messages',
           messages: streamMessages(),
-        } satisfies StreamMessagesActionReturn;
+        };
       }
 
       const updateProgress = (
@@ -199,7 +193,6 @@ export const insightCommand: SlashCommand = {
 
       // Open the file in the default browser
       try {
-        const { default: open } = await import('open');
         await open(outputPath);
 
         context.ui.addItem(
@@ -244,8 +237,6 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
-      const logger = createDebugLogger('DataProcessor');
       logger.error('Insight generation error:', error);
       return;
     }

@@ -14,7 +14,6 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
-  InsightReadyNotification,
   SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
@@ -276,10 +275,6 @@ export class QwenAgentManager {
       data: SlashCommandNotification,
     ) => {
       this.callbacks.onSlashCommandNotification?.(data);
-    };
-
-    this.connection.onInsightReady = (data: InsightReadyNotification) => {
-      this.callbacks.onInsightReady?.(data);
     };
 
     // Initialize callback to surface available modes and current mode to UI
@@ -1424,11 +1419,6 @@ export class QwenAgentManager {
     callback: (event: SlashCommandNotification) => void,
   ): void {
     this.callbacks.onSlashCommandNotification = callback;
-    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
-  }
-
-  onInsightReady(callback: (event: InsightReadyNotification) => void): void {
-    this.callbacks.onInsightReady = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

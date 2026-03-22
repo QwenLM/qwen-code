@@ -78,6 +78,8 @@ export type {
   AssistantMessageProps,
   AssistantMessageStatus,
 } from './components/messages/Assistant/AssistantMessage';
+export { InsightProgressCard } from './components/messages/InsightProgressCard';
+export type { InsightProgressCardProps } from './components/messages/InsightProgressCard';
 export {
   CollapsibleFileContent,
   parseContentWithFileReferences,

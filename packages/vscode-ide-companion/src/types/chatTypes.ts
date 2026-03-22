@@ -10,7 +10,6 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AskUserQuestionRequest,
-  InsightReadyNotification,
   SlashCommandNotification,
 } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
@@ -83,7 +82,6 @@ export interface QwenAgentCallbacks {
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
   onSlashCommandNotification?: (event: SlashCommandNotification) => void;
-  onInsightReady?: (event: InsightReadyNotification) => void;
 }
 
 export interface ToolCallUpdate {
