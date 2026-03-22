@@ -322,7 +322,9 @@ async function exportJsonlAction(
 export const exportCommand: SlashCommand = {
   name: 'export',
   get description() {
-    return t('Export current session message history to a file');
+    return t(
+      'Export current session to HTML by default. Other formats: md, json, jsonl.',
+    );
   },
   kind: CommandKind.BUILT_IN,
   subCommands: [
