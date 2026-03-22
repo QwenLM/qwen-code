@@ -207,6 +207,14 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd?.name).toBe('model');
   });
 
+  it('should include insight command in the built-in command list', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const insightCmd = commands.find((c) => c.name === 'insight');
+    expect(insightCmd).toBeDefined();
+    expect(insightCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
   it('should include hooks command when enableHooks is true', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     const commands = await loader.loadCommands(new AbortController().signal);
