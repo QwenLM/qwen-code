@@ -41,6 +41,7 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -308,7 +309,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
       if (hookSystem) {
         hookSystem
-          .fireSessionStartEvent(sessionStartSource, config.getModel() ?? '')
+          .fireSessionStartEvent(
+            sessionStartSource,
+            config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
+          )
           .then(() => {
             debugLogger.debug('SessionStart event completed successfully');
           })

@@ -59,6 +59,7 @@ describe('clearCommand', () => {
           }),
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
+          getApprovalMode: () => 'default',
         },
       },
       session: {
@@ -108,6 +109,7 @@ describe('clearCommand', () => {
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
       SessionStartSource.Clear,
       'test-model',
+      expect.any(String), // permissionMode
     );
 
     // SessionEnd should be called before SessionStart

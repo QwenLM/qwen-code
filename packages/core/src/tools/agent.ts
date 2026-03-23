@@ -525,6 +525,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             agentId,
             agentType,
             PermissionMode.Default,
+            signal,
           );
 
           // Inject additional context from hook output into subagent context
@@ -572,6 +573,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               subagent.getFinalText(),
               stopHookActive,
               PermissionMode.Default,
+              signal,
             );
 
             const typedStopOutput = stopHookOutput as
