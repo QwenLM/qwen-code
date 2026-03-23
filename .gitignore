@@ -83,3 +83,14 @@ integration-tests/terminal-capture/scenarios/screenshots/
 # storybook
 *storybook.log
 storybook-static
+
+# NetApp distribution — corp-specific, do not push upstream
+.bin/apex
+.bin/apex-*
+.bin/qwen-code-*
+.bin/ontap-*
+.bin/settings.json
+.qwen/settings.json
+.qwen/settings.json.orig
+Dockerfile.sea
+sea-config.json
