@@ -84,6 +84,7 @@ interface SlashCommandProcessorActions {
   openAgentsManagerDialog: () => void;
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
+  openHooksDialog: () => void;
 }
 
 /**
@@ -500,6 +501,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'mcp':
                       actions.openMcpDialog();
+                      return { type: 'handled' };
+                    case 'hooks':
+                      actions.openHooksDialog();
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
