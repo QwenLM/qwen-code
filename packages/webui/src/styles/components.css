@@ -441,6 +441,44 @@
   max-width: calc(100% - 28px);
 }
 
+/* Follow-up suggestion styling - different from normal placeholder */
+.composer-input[data-has-suggestion='true']:empty::before,
+.composer-input[data-has-suggestion='true'][data-empty='true']::before {
+  color: var(--app-accent-color, #3b82f6);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.composer-input[data-has-suggestion='true']:hover:empty::before,
+.composer-input[data-has-suggestion='true']:hover[data-empty='true']::before {
+  opacity: 0.9;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+/* Suggestion counter indicator */
+.composer-input[data-suggestion-count]:not([data-suggestion-count='1']):not(
+    [data-suggestion-count='0']
+  )::after {
+  content: ' (' attr(data-suggestion-index) '/' attr(data-suggestion-count) ')';
+  font-size: 0.85em;
+  opacity: 0.6;
+  font-style: normal;
+  color: var(--app-accent-color, #3b82f6);
+  pointer-events: none;
+}
+
+/* Adjust placeholder width when showing counter to prevent overflow */
+.composer-input[data-suggestion-count]:not(
+    [data-suggestion-count='0']
+  ):empty::before,
+.composer-input[data-suggestion-count]:not(
+    [data-suggestion-count='0']
+  )[data-empty='true']::before {
+  max-width: calc(100% - 60px); /* Reserve space for counter */
+}
+
 .composer-input:focus {
   outline: none;
 }

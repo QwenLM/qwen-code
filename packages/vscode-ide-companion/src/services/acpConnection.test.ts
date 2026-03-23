@@ -69,19 +69,9 @@ describe('AcpConnection readTextFile error mapping', () => {
   });
 
   it('passes structured ACP prompt blocks through without wrapping them as text', async () => {
-    const prompt = vi.fn().mockResolvedValue({});
+    const promptFn = vi.fn().mockResolvedValue({});
     const onEndTurn = vi.fn();
-    const conn = new AcpConnection() as unknown as {
-      sdkConnection: {
-        prompt: (params: {
-          sessionId: string;
-          prompt: ContentBlock[];
-        }) => Promise<unknown>;
-      };
-      sessionId: string | null;
-      onEndTurn: (reason?: string) => void;
-      sendPrompt: (prompt: string | ContentBlock[]) => Promise<unknown>;
-    };
+    const conn = new AcpConnection();
     const promptBlocks: ContentBlock[] = [
       { type: 'text', text: 'Inspect this image' },
       {
@@ -92,14 +82,22 @@ describe('AcpConnection readTextFile error mapping', () => {
       },
     ];
 
-    conn.sdkConnection = { prompt };
-    conn.sessionId = 'session-1';
+    // Mock ensureConnection to return a mock connection with the prompt function
+    vi.spyOn(
+      conn as unknown as { ensureConnection: () => unknown },
+      'ensureConnection',
+    ).mockReturnValue({
+      prompt: promptFn,
+    } as never);
+
+    // Set sessionId via the public property
+    (conn as unknown as { sessionId: string | null }).sessionId = 'session-1';
     conn.onEndTurn = onEndTurn;
     (conn as unknown as AcpConnectionInternal).child = createMockChild();
 
     await conn.sendPrompt(promptBlocks);
 
-    expect(prompt).toHaveBeenCalledWith({
+    expect(promptFn).toHaveBeenCalledWith({
       sessionId: 'session-1',
       prompt: promptBlocks,
     });
