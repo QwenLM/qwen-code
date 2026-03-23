@@ -65,6 +65,7 @@ import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { getSlashCommandArgumentCompletions } from '../nonInteractiveCliCommands.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -369,8 +370,35 @@ class QwenAgent implements Agent {
 
   async extMethod(
     method: string,
-    _params: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (method === '_qwencode/slash_command_completion') {
+      const parsed = z
+        .object({
+          sessionId: z.string().min(1),
+          query: z.string(),
+        })
+        .parse(params);
+
+      const session = this.sessions.get(parsed.sessionId);
+      if (!session) {
+        throw RequestError.invalidParams(
+          undefined,
+          `Session not found: ${parsed.sessionId}`,
+        );
+      }
+
+      const abortController = new AbortController();
+      const items = await getSlashCommandArgumentCompletions(
+        parsed.query,
+        session.getConfig(),
+        this.settings,
+        abortController.signal,
+      );
+
+      return { items };
+    }
+
     throw RequestError.methodNotFound(method);
   }
 

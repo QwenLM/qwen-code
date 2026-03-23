@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import {
+  getSlashCommandArgumentCompletions,
+  handleSlashCommand,
+} from './nonInteractiveCliCommands.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind } from './ui/commands/types.js';
@@ -176,6 +179,34 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('should execute /skills when using the default allowed list', async () => {
+    const mockSkillsCommand = {
+      name: 'skills',
+      description: 'List available skills',
+      kind: CommandKind.BUILT_IN,
+      action: vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'Available skills:\n- review',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockSkillsCommand]);
+
+    const result = await handleSlashCommand(
+      '/skills',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(mockSkillsCommand.action).toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Available skills:\n- review',
+    });
+  });
+
   it('should execute file commands regardless of allowed list', async () => {
     const mockFileCommand = {
       name: 'custom',
@@ -265,5 +296,121 @@ describe('handleSlashCommand', () => {
       expect(result.content).toBe('Command executed successfully.');
       expect(result.messageType).toBe('info');
     }
+  });
+});
+
+describe('getSlashCommandArgumentCompletions', () => {
+  let mockConfig: Config;
+  let mockSettings: LoadedSettings;
+  let abortController: AbortController;
+
+  beforeEach(() => {
+    mockCommandServiceCreate.mockResolvedValue({
+      getCommands: mockGetCommands,
+    });
+
+    mockConfig = {
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
+      getFolderTrustFeature: vi.fn().mockReturnValue(false),
+      getFolderTrust: vi.fn().mockReturnValue(false),
+      getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      storage: {},
+    } as unknown as Config;
+
+    mockSettings = {
+      system: { path: '', settings: {} },
+      systemDefaults: { path: '', settings: {} },
+      user: { path: '', settings: {} },
+      workspace: { path: '', settings: {} },
+    } as LoadedSettings;
+
+    abortController = new AbortController();
+  });
+
+  it('returns completion items for exact command matches', async () => {
+    const completion = vi
+      .fn()
+      .mockResolvedValue([{ value: 'review', description: 'Review code' }]);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'skills',
+        description: 'List available skills',
+        kind: CommandKind.BUILT_IN,
+        completion,
+      },
+    ]);
+
+    const result = await getSlashCommandArgumentCompletions(
+      '/skills',
+      mockConfig,
+      mockSettings,
+      abortController.signal,
+    );
+
+    expect(completion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocation: {
+          raw: '/skills',
+          name: 'skills',
+          args: '',
+        },
+      }),
+      '',
+    );
+    expect(result).toEqual([{ value: 'review', description: 'Review code' }]);
+  });
+
+  it('passes partial args to command completion', async () => {
+    const completion = vi
+      .fn()
+      .mockResolvedValue([{ value: 'review', description: 'Review code' }]);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'skills',
+        description: 'List available skills',
+        kind: CommandKind.BUILT_IN,
+        completion,
+      },
+    ]);
+
+    await getSlashCommandArgumentCompletions(
+      '/skills re',
+      mockConfig,
+      mockSettings,
+      abortController.signal,
+    );
+
+    expect(completion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocation: {
+          raw: '/skills re',
+          name: 'skills',
+          args: 're',
+        },
+      }),
+      're',
+    );
+  });
+
+  it('returns empty list when command has no argument completion context', async () => {
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'skills',
+        description: 'List available skills',
+        kind: CommandKind.BUILT_IN,
+        completion: vi.fn(),
+      },
+    ]);
+
+    const result = await getSlashCommandArgumentCompletions(
+      '/ski',
+      mockConfig,
+      mockSettings,
+      abortController.signal,
+    );
+
+    expect(result).toEqual([]);
   });
 });

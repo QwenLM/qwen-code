@@ -325,8 +325,14 @@ export function useCompletionTrigger(
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
-          // Only show if query doesn't contain spaces (still typing the reference)
-          if (!query.includes(' ') && !query.includes('\n')) {
+          // Slash commands may keep completing after the first space so users can
+          // get argument suggestions like `/skills review`.
+          const shouldOpenCompletion =
+            triggerChar === '@'
+              ? !query.includes(' ') && !query.includes('\n')
+              : !query.includes('\n');
+
+          if (shouldOpenCompletion) {
             // Get precise cursor position for menu
             const cursorPos = getCursorPosition();
             if (cursorPos) {

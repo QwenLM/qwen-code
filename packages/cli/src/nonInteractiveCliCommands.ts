@@ -18,6 +18,7 @@ import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import {
   CommandKind,
+  type CommandCompletionItem,
   type CommandContext,
   type SlashCommand,
   type SlashCommandActionReturn,
@@ -37,11 +38,13 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
  * - init: Initialize project configuration
  * - summary: Generate session summary
  * - compress: Compress conversation history
+ * - skills: List available skills or invoke a specific skill
  */
 export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'init',
   'summary',
   'compress',
+  'skills',
   'btw',
   'bug',
 ] as const;
@@ -82,6 +85,115 @@ export type NonInteractiveSlashCommandResult =
   | {
       type: 'no_command';
     };
+
+function createCommandContext(
+  raw: string,
+  name: string,
+  args: string,
+  executionMode: 'interactive' | 'non_interactive' | 'acp',
+  config: Config,
+  settings: LoadedSettings,
+): CommandContext {
+  const sessionStats: SessionStatsState = {
+    sessionId: config?.getSessionId(),
+    sessionStartTime: new Date(),
+    metrics: uiTelemetryService.getMetrics(),
+    lastPromptTokenCount: 0,
+    promptCount: 1,
+  };
+
+  const logger = new Logger(config?.getSessionId() || '', config?.storage);
+
+  return {
+    executionMode,
+    services: {
+      config,
+      settings,
+      git: undefined,
+      logger,
+    },
+    ui: createNonInteractiveUI(),
+    session: {
+      stats: sessionStats,
+      sessionShellAllowlist: new Set(),
+    },
+    invocation: {
+      raw,
+      name,
+      args,
+    },
+  };
+}
+
+function getExecutionMode(
+  config: Config,
+): 'interactive' | 'non_interactive' | 'acp' {
+  const isAcpMode = config.getExperimentalZedIntegration();
+  const isInteractive = config.isInteractive();
+
+  return isAcpMode ? 'acp' : isInteractive ? 'interactive' : 'non_interactive';
+}
+
+export const getSlashCommandArgumentCompletions = async (
+  rawQuery: string,
+  config: Config,
+  settings: LoadedSettings,
+  abortSignal: AbortSignal,
+  allowedBuiltinCommandNames: string[] = [
+    ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+  ],
+): Promise<CommandCompletionItem[]> => {
+  const trimmed = rawQuery.trim();
+  if (!trimmed.startsWith('/')) {
+    return [];
+  }
+
+  const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
+  const commands = await getAvailableCommands(
+    config,
+    abortSignal,
+    allowedBuiltinCommandNames,
+  );
+  const { commandToExecute, args, canonicalPath } = parseSlashCommand(
+    rawQuery,
+    filterCommandsForNonInteractive(commands, allowedBuiltinSet),
+  );
+
+  if (!commandToExecute?.completion) {
+    return [];
+  }
+
+  const canonicalCommand = `/${canonicalPath.join(' ')}`;
+  if (!canonicalCommand || canonicalCommand === '/') {
+    return [];
+  }
+
+  const normalizedQuery = trimmed.toLowerCase();
+  const normalizedCanonical = canonicalCommand.toLowerCase();
+  const isExactCommand = normalizedQuery === normalizedCanonical;
+  const isArgumentContext = normalizedQuery.startsWith(
+    `${normalizedCanonical} `,
+  );
+
+  if (!isExactCommand && !isArgumentContext) {
+    return [];
+  }
+
+  const argString = isExactCommand ? '' : args;
+  const context = createCommandContext(
+    isExactCommand ? canonicalCommand : trimmed,
+    commandToExecute.name,
+    argString,
+    getExecutionMode(config),
+    config,
+    settings,
+  );
+
+  const completions = await commandToExecute.completion(context, argString);
+  return (completions || []).map((item) =>
+    typeof item === 'string' ? { value: item } : item,
+  );
+};
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.
@@ -221,7 +333,8 @@ function filterCommandsForNonInteractive(
  * @param config The configuration object
  * @param settings The loaded settings
  * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
+ *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary,
+ *   compress, skills, btw, bug).
  *   Pass an empty array to only allow file commands.
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
@@ -239,15 +352,7 @@ export const handleSlashCommand = async (
   if (!trimmed.startsWith('/')) {
     return { type: 'no_command' };
   }
-
-  const isAcpMode = config.getExperimentalZedIntegration();
-  const isInteractive = config.isInteractive();
-
-  const executionMode = isAcpMode
-    ? 'acp'
-    : isInteractive
-      ? 'interactive'
-      : 'non_interactive';
+  const executionMode = getExecutionMode(config);
 
   const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
 
@@ -300,36 +405,14 @@ export const handleSlashCommand = async (
     return { type: 'no_command' };
   }
 
-  // Not used by custom commands but may be in the future.
-  const sessionStats: SessionStatsState = {
-    sessionId: config?.getSessionId(),
-    sessionStartTime: new Date(),
-    metrics: uiTelemetryService.getMetrics(),
-    lastPromptTokenCount: 0,
-    promptCount: 1,
-  };
-
-  const logger = new Logger(config?.getSessionId() || '', config?.storage);
-
-  const context: CommandContext = {
+  const context = createCommandContext(
+    trimmed,
+    commandToExecute.name,
+    args,
     executionMode,
-    services: {
-      config,
-      settings,
-      git: undefined,
-      logger,
-    },
-    ui: createNonInteractiveUI(),
-    session: {
-      stats: sessionStats,
-      sessionShellAllowlist: new Set(),
-    },
-    invocation: {
-      raw: trimmed,
-      name: commandToExecute.name,
-      args,
-    },
-  };
+    config,
+    settings,
+  );
 
   const result = await commandToExecute.action(context, args);
 
@@ -352,7 +435,8 @@ export const handleSlashCommand = async (
  * @param config The configuration object
  * @param abortSignal Signal to cancel the loading process
  * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
+ *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary,
+ *   compress, skills, btw, bug).
  *   Pass an empty array to only include file commands.
  * @returns A Promise that resolves to an array of SlashCommand objects
  */

@@ -161,4 +161,41 @@ describe('SessionMessageHandler', () => {
       },
     ]);
   });
+
+  it('returns slash command completion results to the webview', async () => {
+    const agentManager = {
+      getSlashCommandCompletions: vi
+        .fn()
+        .mockResolvedValue([{ value: 'review', description: 'Review code' }]),
+    };
+    const conversationStore = {};
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'requestSlashCommandCompletions',
+      data: {
+        query: '/skills',
+        requestId: 7,
+      },
+    });
+
+    expect(agentManager.getSlashCommandCompletions).toHaveBeenCalledWith(
+      '/skills',
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'slashCommandCompletions',
+      data: {
+        query: '/skills',
+        requestId: 7,
+        items: [{ value: 'review', description: 'Review code' }],
+      },
+    });
+  });
 });

@@ -28,6 +28,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
   canHandle(messageType: string): boolean {
     return [
       'sendMessage',
+      'requestSlashCommandCompletions',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -73,6 +74,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+        );
+        break;
+
+      case 'requestSlashCommandCompletions':
+        await this.handleRequestSlashCommandCompletions(
+          (data?.query as string) || '',
+          typeof data?.requestId === 'number' ? data.requestId : undefined,
         );
         break;
 
@@ -1011,6 +1019,37 @@ export class SessionMessageHandler extends BaseMessageHandler {
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to set model: ${errorMsg}` },
+      });
+    }
+  }
+
+  private async handleRequestSlashCommandCompletions(
+    query: string,
+    requestId?: number,
+  ): Promise<void> {
+    try {
+      const items = await this.agentManager.getSlashCommandCompletions(query);
+      this.sendToWebView({
+        type: 'slashCommandCompletions',
+        data: {
+          query,
+          requestId,
+          items,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        '[SessionMessageHandler] Failed to load slash command completions:',
+        error,
+      );
+      this.sendToWebView({
+        type: 'slashCommandCompletions',
+        data: {
+          query,
+          requestId,
+          items: [],
+          error: this.getErrorMessage(error),
+        },
       });
     }
   }

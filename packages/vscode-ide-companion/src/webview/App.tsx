@@ -99,6 +99,18 @@ export const App: React.FC = () => {
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
+  const slashCompletionRequestIdRef = useRef(0);
+  const pendingSlashCompletionRequestsRef = useRef(
+    new Map<
+      number,
+      {
+        resolve: (
+          items: Array<{ value: string; description?: string; label?: string }>,
+        ) => void;
+        timeoutId: ReturnType<typeof setTimeout>;
+      }
+    >(),
+  );
 
   const [editMode, setEditMode] = useState<ApprovalModeValue>(
     ApprovalMode.DEFAULT,
@@ -107,6 +119,68 @@ export const App: React.FC = () => {
   const [isComposing, setIsComposing] = useState(false);
   // When true, do NOT auto-attach the active editor file/selection to message context
   const [skipAutoActiveContext, setSkipAutoActiveContext] = useState(false);
+
+  useEffect(() => {
+    const pendingRequests = pendingSlashCompletionRequestsRef.current;
+    return () => {
+      for (const pending of pendingRequests.values()) {
+        clearTimeout(pending.timeoutId);
+        pending.resolve([]);
+      }
+      pendingRequests.clear();
+    };
+  }, []);
+
+  const handleSlashCommandCompletions = useCallback(
+    (payload: {
+      requestId?: number;
+      items: Array<{ value: string; description?: string; label?: string }>;
+    }) => {
+      const requestId = payload.requestId;
+      if (typeof requestId !== 'number') {
+        return;
+      }
+
+      const pending = pendingSlashCompletionRequestsRef.current.get(requestId);
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(pending.timeoutId);
+      pendingSlashCompletionRequestsRef.current.delete(requestId);
+      pending.resolve(payload.items);
+    },
+    [],
+  );
+
+  const requestSlashCommandCompletions = useCallback(
+    (
+      query: string,
+    ): Promise<
+      Array<{ value: string; description?: string; label?: string }>
+    > =>
+      new Promise((resolve) => {
+        const requestId = ++slashCompletionRequestIdRef.current;
+        const timeoutId = setTimeout(() => {
+          pendingSlashCompletionRequestsRef.current.delete(requestId);
+          resolve([]);
+        }, 5000);
+
+        pendingSlashCompletionRequestsRef.current.set(requestId, {
+          resolve,
+          timeoutId,
+        });
+
+        vscode.postMessage({
+          type: 'requestSlashCommandCompletions',
+          data: {
+            query: `/${query}`,
+            requestId,
+          },
+        });
+      }),
+    [vscode],
+  );
 
   // Completion system
   const getCompletionItems = React.useCallback(
@@ -151,6 +225,28 @@ export const App: React.FC = () => {
 
         return allItems;
       } else {
+        const normalizedQuery = query.trim();
+        const shouldRequestArgumentCompletions =
+          normalizedQuery.length > 0 &&
+          (normalizedQuery.includes(' ') ||
+            availableCommands.some(
+              (cmd) => cmd.name.toLowerCase() === normalizedQuery.toLowerCase(),
+            ));
+
+        if (shouldRequestArgumentCompletions) {
+          const argumentItems = await requestSlashCommandCompletions(query);
+          if (argumentItems.length > 0) {
+            return argumentItems.map((item) => ({
+              id: `slash-arg-${item.value}`,
+              label: item.label || item.value,
+              description: item.description,
+              type: 'command' as const,
+              group: 'Arguments',
+              value: item.value,
+            }));
+          }
+        }
+
         // Handle slash commands with grouping
         // Model group - special items without / prefix
         const modelGroupItems: CompletionItem[] = [
@@ -203,7 +299,12 @@ export const App: React.FC = () => {
         );
       }
     },
-    [fileContext, availableCommands, modelInfo?.name],
+    [
+      fileContext,
+      availableCommands,
+      modelInfo?.name,
+      requestSlashCommandCompletions,
+    ],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
@@ -366,6 +467,7 @@ export const App: React.FC = () => {
     setAvailableModels: (models) => {
       setAvailableModels(models);
     },
+    handleSlashCommandCompletions,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -538,6 +640,24 @@ export const App: React.FC = () => {
         return;
       }
 
+      const getCompletionPosition = (): { top: number; left: number } => {
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount > 0) {
+          try {
+            const range = selection.getRangeAt(0);
+            const rect = range.getBoundingClientRect();
+            if (rect.top > 0 && rect.left > 0) {
+              return { top: rect.top, left: rect.left };
+            }
+          } catch (error) {
+            console.warn('[App] Failed to read completion position:', error);
+          }
+        }
+
+        const inputRect = inputElement.getBoundingClientRect();
+        return { top: inputRect.top, left: inputRect.left };
+      };
+
       // Ignore info items (placeholders like "Searching files…")
       if (item.type === 'info') {
         completion.closeCompletion();
@@ -698,8 +818,13 @@ export const App: React.FC = () => {
       if (triggerPos >= 0) {
         const insertValue =
           typeof item.value === 'string' ? item.value : String(item.label);
+        let replacementStart = triggerPos + 1;
+        if (completion.triggerChar === '/' && completion.query.includes(' ')) {
+          const lastSpaceIndex = completion.query.lastIndexOf(' ');
+          replacementStart = triggerPos + lastSpaceIndex + 2;
+        }
         const newText =
-          text.substring(0, triggerPos + 1) + // keep the trigger symbol
+          text.substring(0, replacementStart) +
           insertValue +
           ' ' +
           text.substring(cursorPos);
@@ -718,6 +843,19 @@ export const App: React.FC = () => {
 
       // Close the completion menu
       completion.closeCompletion();
+
+      if (
+        fillOnly &&
+        item.type === 'command' &&
+        availableCommands.some((cmd) => cmd.name === item.id)
+      ) {
+        const commandName =
+          typeof item.value === 'string' ? item.value : String(item.label);
+        const position = getCompletionPosition();
+        void requestAnimationFrame(() => {
+          void completion.openCompletion('/', `${commandName} `, position);
+        });
+      }
     },
     [
       completion,

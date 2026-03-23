@@ -75,6 +75,58 @@ export class AcpConnection {
   }> = () => Promise.resolve({ optionId: 'cancel' });
   onInitialized: (init: unknown) => void = () => {};
 
+  private handleExtensionNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    if (method === 'authenticate/update') {
+      console.log(
+        '[ACP] >>> Processing authenticate_update:',
+        JSON.stringify(params).substring(0, 300),
+      );
+      this.onAuthenticateUpdate(
+        params as unknown as AuthenticateUpdateNotification,
+      );
+      return;
+    }
+
+    if (method === '_qwencode/slash_command') {
+      const message =
+        typeof params['message'] === 'string' ? params['message'] : '';
+      if (!message) {
+        return;
+      }
+
+      const sessionId =
+        typeof params['sessionId'] === 'string'
+          ? params['sessionId']
+          : this.sessionId;
+      if (!sessionId) {
+        return;
+      }
+
+      this.onSessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: message },
+          _meta: {
+            timestamp: Date.now(),
+            slashCommand:
+              typeof params['command'] === 'string' ? params['command'] : '',
+            slashCommandMessageType:
+              typeof params['messageType'] === 'string'
+                ? params['messageType']
+                : 'info',
+          },
+        },
+      } as unknown as SessionNotification);
+      return;
+    }
+
+    console.warn(`[ACP] Unhandled extension notification: ${method}`);
+  }
+
   async connect(
     cliEntryPath: string,
     workingDir: string = process.cwd(),
@@ -314,17 +366,7 @@ export class AcpConnection {
           method: string,
           params: Record<string, unknown>,
         ): Promise<void> => {
-          if (method === 'authenticate/update') {
-            console.log(
-              '[ACP] >>> Processing authenticate_update:',
-              JSON.stringify(params).substring(0, 300),
-            );
-            this.onAuthenticateUpdate(
-              params as unknown as AuthenticateUpdateNotification,
-            );
-          } else {
-            console.warn(`[ACP] Unhandled extension notification: ${method}`);
-          }
+          this.handleExtensionNotification(method, params);
         },
       }),
       stream,
@@ -551,6 +593,31 @@ export class AcpConnection {
     });
     console.log('[ACP] set_model response:', res);
     return res;
+  }
+
+  async getSlashCommandCompletions(
+    query: string,
+  ): Promise<Array<{ value: string; description?: string; label?: string }>> {
+    const conn = this.ensureConnection();
+    if (!this.sessionId) {
+      return [];
+    }
+
+    const response = await conn.extMethod(
+      '_qwencode/slash_command_completion',
+      {
+        sessionId: this.sessionId,
+        query,
+      },
+    );
+    const items = response['items'];
+    return Array.isArray(items)
+      ? (items as Array<{
+          value: string;
+          description?: string;
+          label?: string;
+        }>)
+      : [];
   }
 
   disconnect(): void {

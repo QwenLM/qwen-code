@@ -23,6 +23,11 @@ type AcpConnectionInternal = {
   lastExitSignal: string | null;
   mapReadTextFileError: (error: unknown, filePath: string) => unknown;
   ensureConnection: () => unknown;
+  handleExtensionNotification: (
+    method: string,
+    params: Record<string, unknown>,
+  ) => void;
+  onSessionUpdate: (data: unknown) => void;
 };
 
 function createConnection(overrides?: Partial<AcpConnectionInternal>) {
@@ -214,6 +219,76 @@ describe('AcpConnection onDisconnected callback', () => {
 
     acpConn.onDisconnected(1, null);
     expect(spy).toHaveBeenCalledWith(1, null);
+  });
+});
+
+describe('AcpConnection.getSlashCommandCompletions', () => {
+  it('calls ACP extMethod and returns completion items', async () => {
+    const extMethod = vi.fn().mockResolvedValue({
+      items: [{ value: 'review', description: 'Review code' }],
+    });
+    const conn = createConnection({
+      sdkConnection: { extMethod },
+      child: { killed: false, exitCode: null },
+      sessionId: 'session-1',
+    }) as unknown as AcpConnection;
+
+    const result = await conn.getSlashCommandCompletions('/skills');
+
+    expect(extMethod).toHaveBeenCalledWith(
+      '_qwencode/slash_command_completion',
+      {
+        sessionId: 'session-1',
+        query: '/skills',
+      },
+    );
+    expect(result).toEqual([{ value: 'review', description: 'Review code' }]);
+  });
+
+  it('returns empty list when there is no active session', async () => {
+    const extMethod = vi.fn();
+    const conn = createConnection({
+      sdkConnection: { extMethod },
+      child: { killed: false, exitCode: null },
+      sessionId: null,
+    }) as unknown as AcpConnection;
+
+    await expect(conn.getSlashCommandCompletions('/skills')).resolves.toEqual(
+      [],
+    );
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+});
+
+describe('AcpConnection extension notifications', () => {
+  it('routes slash command notifications into assistant message chunks', () => {
+    const onSessionUpdate = vi.fn();
+    const conn = createConnection({
+      child: { killed: false, exitCode: null },
+      sessionId: 'session-1',
+      onSessionUpdate,
+    });
+
+    conn.handleExtensionNotification('_qwencode/slash_command', {
+      sessionId: 'session-1',
+      command: '/skills',
+      messageType: 'info',
+      message: 'Available skills:\n- review',
+    });
+
+    expect(onSessionUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        update: expect.objectContaining({
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'Available skills:\n- review' },
+          _meta: expect.objectContaining({
+            slashCommand: '/skills',
+            slashCommandMessageType: 'info',
+          }),
+        }),
+      }),
+    );
   });
 });
 

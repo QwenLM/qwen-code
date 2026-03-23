@@ -394,6 +394,12 @@ export class QwenAgentManager {
     }
   }
 
+  async getSlashCommandCompletions(
+    query: string,
+  ): Promise<Array<{ value: string; description?: string; label?: string }>> {
+    return this.connection.getSlashCommandCompletions(query);
+  }
+
   /**
    * Validate if current session is still active
    * This is a lightweight check to verify session validity

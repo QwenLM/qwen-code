@@ -25,11 +25,21 @@ export const skillsCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext, args?: string) => {
+    const executionMode = context.executionMode ?? 'interactive';
+    const isNonInteractive = executionMode !== 'interactive';
     const rawArgs = args?.trim() ?? '';
     const [skillName = ''] = rawArgs.split(/\s+/);
 
     const skillManager = context.services.config?.getSkillManager();
     if (!skillManager) {
+      if (isNonInteractive) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Could not retrieve skill manager.'),
+        };
+      }
+
       context.ui.addItem(
         {
           type: MessageType.ERROR,
@@ -42,6 +52,14 @@ export const skillsCommand: SlashCommand = {
 
     const skills = await skillManager.listSkills();
     if (skills.length === 0) {
+      if (isNonInteractive) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t('No skills are currently available.'),
+        };
+      }
+
       context.ui.addItem(
         {
           type: MessageType.INFO,
@@ -52,10 +70,19 @@ export const skillsCommand: SlashCommand = {
       return;
     }
 
+    const sortedSkills = [...skills].sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+
     if (!skillName) {
-      const sortedSkills = [...skills].sort((left, right) =>
-        left.name.localeCompare(right.name),
-      );
+      if (isNonInteractive) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: formatSkillsList(sortedSkills),
+        };
+      }
+
       const skillsListItem: HistoryItemSkillsList = {
         type: MessageType.SKILLS_LIST,
         skills: sortedSkills.map((skill) => ({ name: skill.name })),
@@ -69,10 +96,19 @@ export const skillsCommand: SlashCommand = {
     );
 
     if (!hasSkill) {
+      const content = t('Unknown skill: {{name}}', { name: skillName });
+      if (isNonInteractive) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content,
+        };
+      }
+
       context.ui.addItem(
         {
           type: MessageType.ERROR,
-          text: t('Unknown skill: {{name}}', { name: skillName }),
+          text: content,
         },
         Date.now(),
       );
@@ -104,6 +140,12 @@ export const skillsCommand: SlashCommand = {
     }));
   },
 };
+
+function formatSkillsList(skills: SkillConfig[]): string {
+  return [t('Available skills:'), ...skills.map((skill) => `- ${skill.name}`)]
+    .join('\n')
+    .trim();
+}
 
 async function getSkillMatches(
   skills: SkillConfig[],

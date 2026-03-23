@@ -131,6 +131,11 @@ interface UseWebViewMessagesProps {
   setAvailableCommands?: (commands: AvailableCommand[]) => void;
   // Available models setter
   setAvailableModels?: (models: ModelInfo[]) => void;
+  // Slash command argument completion responses
+  handleSlashCommandCompletions?: (payload: {
+    requestId?: number;
+    items: Array<{ value: string; description?: string; label?: string }>;
+  }) => void;
 }
 
 /**
@@ -154,6 +159,7 @@ export const useWebViewMessages = ({
   setModelInfo,
   setAvailableCommands,
   setAvailableModels,
+  handleSlashCommandCompletions,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
@@ -190,6 +196,7 @@ export const useWebViewMessages = ({
     setModelInfo,
     setAvailableCommands,
     setAvailableModels,
+    handleSlashCommandCompletions,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -240,6 +247,7 @@ export const useWebViewMessages = ({
       setModelInfo,
       setAvailableCommands,
       setAvailableModels,
+      handleSlashCommandCompletions,
     };
   });
 
@@ -319,6 +327,25 @@ export const useWebViewMessages = ({
               _error,
             );
           }
+          break;
+        }
+
+        case 'slashCommandCompletions': {
+          const requestId =
+            typeof message.data?.requestId === 'number'
+              ? message.data.requestId
+              : undefined;
+          const items = Array.isArray(message.data?.items)
+            ? (message.data.items as Array<{
+                value: string;
+                description?: string;
+                label?: string;
+              }>)
+            : [];
+          handlers.handleSlashCommandCompletions?.({
+            requestId,
+            items,
+          });
           break;
         }
 
