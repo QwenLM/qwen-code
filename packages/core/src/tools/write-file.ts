@@ -43,6 +43,7 @@ import {
   fileExists as isFilefileExists,
 } from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -216,6 +217,28 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       }
     }
 
+    // Content-loss guard: detect potential data loss when overwriting existing files.
+    // If proposed content is significantly shorter than original, refuse the write
+    // and instruct the LLM to read the file first.
+    if (fileExists && originalContent.length >= 100 && !modified_by_user) {
+      const ratio = content.length / originalContent.length;
+      if (ratio < 0.5) {
+        const warningMsg =
+          `Warning: Proposed content (${content.length} chars) is significantly shorter than the existing file ` +
+          `(${originalContent.length} chars), which may indicate data loss. ` +
+          `Please use ${ReadFileTool.Name} to read the current file content before overwriting. ` +
+          `If you intend to replace the file with shorter content, read the file first to confirm your intent.`;
+        return {
+          llmContent: warningMsg,
+          returnDisplay: warningMsg,
+          error: {
+            message: warningMsg,
+            type: ToolErrorType.WRITE_CONTENT_LOSS_WARNING,
+          },
+        };
+      }
+    }
+
     if (!fileExists) {
       fs.mkdirSync(dirName, { recursive: true });
       const userEncoding = this.config.getDefaultFileEncoding();
@@ -366,7 +389,7 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem.
+      `Writes content to a specified file in the local filesystem. IMPORTANT: When overwriting an existing file, you MUST first read the file using ${ReadFileTool.Name} to understand its current content. Failure to do so may result in data loss. For targeted changes to existing files, prefer using the ${ToolNames.EDIT} tool instead.
 
       The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
