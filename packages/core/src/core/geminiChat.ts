@@ -87,6 +87,53 @@ const RATE_LIMIT_RETRY_OPTIONS = {
 };
 
 /**
+ * Creates a promise that resolves after the specified delay, but can be
+ * resolved early by calling the returned `skip` function.
+ *
+ * If an `AbortSignal` is provided and it fires before the delay completes,
+ * the promise rejects so the caller's `await` throws and normal error
+ * propagation takes over (e.g. the retry loop breaks and the generator exits).
+ */
+function delay(
+  delayMs: number,
+  signal?: AbortSignal,
+): {
+  promise: Promise<void>;
+  skip: () => void;
+} {
+  let resolveRef: () => void;
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveRef = resolve;
+
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
+    timeoutId = setTimeout(resolve, delayMs);
+
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timeoutId);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+
+  return {
+    promise,
+    skip: () => {
+      clearTimeout(timeoutId);
+      resolveRef();
+    },
+  };
+}
+
+/**
  * Returns true if the response is valid, false otherwise.
  *
  * The DashScope provider may return the last 2 chunks as:
@@ -354,6 +401,10 @@ export class GeminiChat {
                 `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
+              const { promise: delayPromise, skip } = delay(
+                delayMs,
+                params.config?.abortSignal,
+              );
               yield {
                 type: StreamEventType.RETRY,
                 retryInfo: {
@@ -361,11 +412,12 @@ export class GeminiChat {
                   attempt: rateLimitRetryCount,
                   maxRetries: maxRateLimitRetries,
                   delayMs,
+                  skipDelay: skip,
                 },
               };
               // Don't count rate-limit retries against the content retry limit
               attempt--;
-              await new Promise((res) => setTimeout(res, delayMs));
+              await delayPromise;
               continue;
             }
 
@@ -398,7 +450,7 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY };
               // Don't count transient retries against content retry limit.
               attempt--;
-              await new Promise((res) => setTimeout(res, delayMs));
+              await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
             // Transient budget exhausted — stop immediately.
@@ -419,13 +471,10 @@ export class GeminiChat {
                     model,
                   ),
                 );
-                await new Promise((res) =>
-                  setTimeout(
-                    res,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs *
-                      (attempt + 1),
-                  ),
-                );
+                await delay(
+                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
+                  params.config?.abortSignal,
+                ).promise;
                 continue;
               }
             }
