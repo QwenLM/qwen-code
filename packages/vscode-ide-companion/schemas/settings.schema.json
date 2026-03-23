@@ -867,7 +867,34 @@
     "experimental": {
       "description": "Setting to enable experimental features",
       "type": "object",
-      "properties": {}
+      "properties": {
+        "toolOutputMasking": {
+          "description": "Mask older bulky tool outputs to save context (full output kept on disk).",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enables tool output masking to save tokens.",
+              "type": "boolean",
+              "default": true
+            },
+            "toolProtectionThreshold": {
+              "description": "Token budget of the newest tool outputs to keep unmasked.",
+              "type": "number",
+              "default": 50000
+            },
+            "minPrunableTokensThreshold": {
+              "description": "Minimum prunable tokens required before a masking pass runs.",
+              "type": "number",
+              "default": 30000
+            },
+            "protectLatestTurn": {
+              "description": "When true, the most recent conversation turn is never masked.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
     },
     "$version": {
       "type": "number",

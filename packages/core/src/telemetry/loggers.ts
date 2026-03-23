@@ -27,6 +27,7 @@ import {
   EVENT_SLASH_COMMAND,
   EVENT_CONVERSATION_FINISHED,
   EVENT_CHAT_COMPRESSION,
+  EVENT_TOOL_OUTPUT_MASKING,
   EVENT_CONTENT_RETRY,
   EVENT_CONTENT_RETRY_FAILURE,
   EVENT_FILE_OPERATION,
@@ -86,6 +87,7 @@ import type {
   ContentRetryFailureEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
+  ToolOutputMaskingEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
@@ -626,6 +628,30 @@ export function logChatCompression(
     tokens_before: event.tokens_before,
     tokens_after: event.tokens_after,
   });
+}
+
+export function logToolOutputMasking(
+  config: Config,
+  event: ToolOutputMaskingEvent,
+): void {
+  QwenLogger.getInstance(config)?.logToolOutputMaskingEvent(event);
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_TOOL_OUTPUT_MASKING,
+    'event.timestamp': event['event.timestamp'],
+    tokens_before: event.tokens_before,
+    tokens_after: event.tokens_after,
+    masked_count: event.masked_count,
+    total_prunable_tokens: event.total_prunable_tokens,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Tool output masking: ${event.masked_count} outputs, saved ~${event.tokens_before - event.tokens_after} tokens`,
+    attributes,
+  };
+  logger.emit(logRecord);
 }
 
 export function logKittySequenceOverflow(

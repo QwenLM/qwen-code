@@ -339,6 +339,13 @@ describe('Gemini Client (client.ts)', () => {
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getToolOutputMaskingEnabled: vi.fn().mockReturnValue(false),
+      getToolOutputMaskingConfig: vi.fn().mockResolvedValue({
+        enabled: false,
+        toolProtectionThreshold: 50000,
+        minPrunableTokensThreshold: 30000,
+        protectLatestTurn: true,
+      }),
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),

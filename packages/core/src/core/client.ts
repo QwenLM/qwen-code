@@ -44,6 +44,7 @@ import {
   COMPRESSION_TOKEN_THRESHOLD,
 } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
+import { ToolOutputMaskingService } from '../services/toolOutputMaskingService.js';
 
 // Tools
 import { AgentTool } from '../tools/agent.js';
@@ -103,6 +104,7 @@ export class GeminiClient {
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolOutputMaskingService: ToolOutputMaskingService;
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
@@ -115,6 +117,7 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+    this.toolOutputMaskingService = new ToolOutputMaskingService();
   }
 
   async initialize() {
@@ -601,6 +604,8 @@ export class GeminiClient {
       }
     }
 
+    await this.tryMaskToolOutputs(this.getHistory());
+
     const turn = new Turn(this.getChat(), prompt_id);
 
     // append system reminders to the request
@@ -883,6 +888,19 @@ export class GeminiClient {
     }
 
     return info;
+  }
+
+  private async tryMaskToolOutputs(history: Content[]): Promise<void> {
+    if (!this.config.getToolOutputMaskingEnabled()) {
+      return;
+    }
+    const result = await this.toolOutputMaskingService.mask(
+      history,
+      this.config,
+    );
+    if (result.maskedCount > 0) {
+      this.getChat().setHistory(result.newHistory);
+    }
   }
 }
 

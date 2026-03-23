@@ -36,6 +36,7 @@ import type {
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
   ToolOutputTruncatedEvent,
+  ToolOutputMaskingEvent,
   ExtensionEnableEvent,
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
@@ -920,6 +921,20 @@ export class QwenLogger {
       properties: {
         tokens_before: event.tokens_before,
         tokens_after: event.tokens_after,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolOutputMaskingEvent(event: ToolOutputMaskingEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'tool_output_masking', {
+      properties: {
+        tokens_before: event.tokens_before,
+        tokens_after: event.tokens_after,
+        masked_count: event.masked_count,
+        total_prunable_tokens: event.total_prunable_tokens,
       },
     });
 

@@ -71,6 +71,11 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  DEFAULT_MIN_PRUNABLE_TOKENS_THRESHOLD,
+  DEFAULT_PROTECT_LATEST_TURN,
+  DEFAULT_TOOL_PROTECTION_THRESHOLD,
+} from '../services/toolOutputMaskingService.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import {
@@ -293,6 +298,13 @@ export interface SandboxConfig {
   image: string;
 }
 
+export interface ToolOutputMaskingConfig {
+  enabled: boolean;
+  toolProtectionThreshold: number;
+  minPrunableTokensThreshold: number;
+  protectLatestTurn: boolean;
+}
+
 /**
  * Settings shared across multi-agent collaboration features
  * (Arena, Team, Swarm).
@@ -406,6 +418,7 @@ export interface ConfigParameters {
   skipLoopDetection?: boolean;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
+  toolOutputMasking?: Partial<ToolOutputMaskingConfig>;
   eventEmitter?: EventEmitter;
   output?: OutputSettings;
   inputFormat?: InputFormat;
@@ -590,6 +603,7 @@ export class Config {
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
+  private readonly toolOutputMasking: ToolOutputMaskingConfig;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
@@ -715,6 +729,18 @@ export class Config {
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
+    this.toolOutputMasking = {
+      enabled: params.toolOutputMasking?.enabled ?? true,
+      toolProtectionThreshold:
+        params.toolOutputMasking?.toolProtectionThreshold ??
+        DEFAULT_TOOL_PROTECTION_THRESHOLD,
+      minPrunableTokensThreshold:
+        params.toolOutputMasking?.minPrunableTokensThreshold ??
+        DEFAULT_MIN_PRUNABLE_TOKENS_THRESHOLD,
+      protectLatestTurn:
+        params.toolOutputMasking?.protectLatestTurn ??
+        DEFAULT_PROTECT_LATEST_TURN,
+    };
     this.channel = params.channel;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
@@ -1996,6 +2022,14 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
+  }
+
+  getToolOutputMaskingEnabled(): boolean {
+    return this.toolOutputMasking.enabled;
+  }
+
+  async getToolOutputMaskingConfig(): Promise<ToolOutputMaskingConfig> {
+    return { ...this.toolOutputMasking };
   }
 
   getOutputFormat(): OutputFormat {
