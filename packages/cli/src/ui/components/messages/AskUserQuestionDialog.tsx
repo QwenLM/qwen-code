@@ -13,7 +13,7 @@ import {
   type ToolConfirmationPayload,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
+import { type Key, useKeypress } from '../../hooks/useKeypress.js';
 import { TextInput } from '../shared/TextInput.js';
 import { t } from '../../../i18n/index.js';
 
@@ -129,10 +129,15 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
   };
 
-  const handleCustomInputSubmit = () => {
+  const handleCustomInputSubmit = (key?: Key) => {
     const trimmedValue = currentCustomInputValue.trim();
 
     if (isMultiSelect) {
+      if (key?.ctrl || key?.meta || key?.shift) {
+        handleMultiSelectSubmit();
+        return;
+      }
+
       // Toggle custom input checked state
       if (!trimmedValue) return;
       setCustomInputChecked((prev) => ({
@@ -168,12 +173,34 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
   };
 
+  const helpText = isCustomInputSelected
+    ? isMultiSelect
+      ? t(
+          hasMultipleQuestions
+            ? '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel'
+            : '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel',
+        )
+      : t(
+          hasMultipleQuestions
+            ? 'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel'
+            : 'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel',
+        )
+    : hasMultipleQuestions
+      ? isMultiSelect
+        ? t(
+            '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel',
+          )
+        : t('↑/↓: Navigate | ←/→: Switch tabs | Enter: Select | Esc: Cancel')
+      : isMultiSelect
+        ? t('↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel')
+        : t('↑/↓: Navigate | Enter: Select | Esc: Cancel');
+
   // Handle navigation and selection
   useKeypress(
     (key) => {
       if (!isFocused) return;
 
-      // When custom input is focused, still allow up/down navigation, tab switch and escape
+      // When custom input is focused, still allow navigation and escape.
       if (isCustomInputSelected) {
         if (key.name === 'up') {
           setSelectedIndex(Math.max(0, selectedIndex - 1));
@@ -550,21 +577,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       {/* Help text */}
       <Box flexDirection="column" marginTop={1}>
         <Box>
-          <Text dimColor>
-            {hasMultipleQuestions
-              ? isMultiSelect
-                ? t(
-                    '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel',
-                  )
-                : t(
-                    '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select | Esc: Cancel',
-                  )
-              : isMultiSelect
-                ? t(
-                    '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel',
-                  )
-                : t('↑/↓: Navigate | Enter: Select | Esc: Cancel')}
-          </Text>
+          <Text dimColor>{helpText}</Text>
         </Box>
       </Box>
     </Box>
