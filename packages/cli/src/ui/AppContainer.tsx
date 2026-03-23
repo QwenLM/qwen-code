@@ -452,6 +452,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleAuthSelect,
     handleCodingPlanSubmit,
     openAuthDialog,
+    closeAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
 
@@ -1675,6 +1676,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      closeAuthDialog,
       handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
@@ -1708,6 +1710,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Model dialog
+      openModelDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1728,6 +1732,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      closeAuthDialog,
       handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
@@ -1759,6 +1764,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Model dialog
+      openModelDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
