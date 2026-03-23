@@ -712,6 +712,7 @@ describe('HookEventHandler', () => {
         expect.any(Object), // input object
         expect.any(Function), // onHookStart callback
         expect.any(Function), // onHookEnd callback
+        undefined, // signal
       );
     });
 

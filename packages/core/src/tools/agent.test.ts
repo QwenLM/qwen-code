@@ -617,6 +617,7 @@ describe('AgentTool', () => {
         expect.stringContaining('file-search-'),
         'file-search',
         PermissionMode.Default,
+        undefined,
       );
     });
 
@@ -798,6 +799,7 @@ describe('AgentTool', () => {
         'Task completed successfully',
         false,
         PermissionMode.Default,
+        undefined,
       );
     });
 
@@ -842,6 +844,7 @@ describe('AgentTool', () => {
         'Task completed successfully',
         true,
         PermissionMode.Default,
+        undefined,
       );
     });
 

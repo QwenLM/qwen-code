@@ -34,6 +34,7 @@ import {
 import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -2438,6 +2439,55 @@ Other open files:
           contents,
         },
         'test-session-id',
+      );
+    });
+
+    it('should prefer the current prompt id context for stateless requests', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('btw-prompt-id', async () => {
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'btw-prompt-id',
+      );
+    });
+
+    it('should prefer an explicit prompt id override over the current context', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('context-prompt-id', async () => {
+        await (
+          client.generateContent as unknown as (
+            ...args: unknown[]
+          ) => Promise<GenerateContentResponse>
+        )(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+          'override-prompt-id',
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'override-prompt-id',
       );
     });
 

@@ -64,13 +64,19 @@ export class HookEventHandler {
    */
   async fireUserPromptSubmitEvent(
     prompt: string,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
       prompt,
     };
 
-    return this.executeHooks(HookEventName.UserPromptSubmit, input);
+    return this.executeHooks(
+      HookEventName.UserPromptSubmit,
+      input,
+      undefined,
+      signal,
+    );
   }
 
   /**
@@ -80,6 +86,7 @@ export class HookEventHandler {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
       ...this.createBaseInput(HookEventName.Stop),
@@ -87,7 +94,7 @@ export class HookEventHandler {
       last_assistant_message: lastAssistantMessage,
     };
 
-    return this.executeHooks(HookEventName.Stop, input);
+    return this.executeHooks(HookEventName.Stop, input, undefined, signal);
   }
 
   /**
@@ -99,6 +106,7 @@ export class HookEventHandler {
     model: string,
     permissionMode?: PermissionMode,
     agentType?: AgentType,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: SessionStartInput = {
       ...this.createBaseInput(HookEventName.SessionStart),
@@ -109,9 +117,14 @@ export class HookEventHandler {
     };
 
     // Pass source as context for matcher filtering
-    return this.executeHooks(HookEventName.SessionStart, input, {
-      trigger: source,
-    });
+    return this.executeHooks(
+      HookEventName.SessionStart,
+      input,
+      {
+        trigger: source,
+      },
+      signal,
+    );
   }
 
   /**
@@ -120,6 +133,7 @@ export class HookEventHandler {
    */
   async fireSessionEndEvent(
     reason: SessionEndReason,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: SessionEndInput = {
       ...this.createBaseInput(HookEventName.SessionEnd),
@@ -127,9 +141,14 @@ export class HookEventHandler {
     };
 
     // Pass reason as context for matcher filtering
-    return this.executeHooks(HookEventName.SessionEnd, input, {
-      trigger: reason,
-    });
+    return this.executeHooks(
+      HookEventName.SessionEnd,
+      input,
+      {
+        trigger: reason,
+      },
+      signal,
+    );
   }
 
   /**
@@ -141,6 +160,7 @@ export class HookEventHandler {
     toolInput: Record<string, unknown>,
     toolUseId: string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PreToolUseInput = {
       ...this.createBaseInput(HookEventName.PreToolUse),
@@ -151,9 +171,14 @@ export class HookEventHandler {
     };
 
     // Pass tool name as context for matcher filtering
-    return this.executeHooks(HookEventName.PreToolUse, input, {
-      toolName,
-    });
+    return this.executeHooks(
+      HookEventName.PreToolUse,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
   }
 
   /**
@@ -166,6 +191,7 @@ export class HookEventHandler {
     toolResponse: Record<string, unknown>,
     toolUseId: string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
@@ -177,9 +203,14 @@ export class HookEventHandler {
     };
 
     // Pass tool name as context for matcher filtering
-    return this.executeHooks(HookEventName.PostToolUse, input, {
-      toolName,
-    });
+    return this.executeHooks(
+      HookEventName.PostToolUse,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
   }
 
   /**
@@ -193,6 +224,7 @@ export class HookEventHandler {
     errorMessage: string,
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
@@ -205,9 +237,14 @@ export class HookEventHandler {
     };
 
     // Pass tool name as context for matcher filtering
-    return this.executeHooks(HookEventName.PostToolUseFailure, input, {
-      toolName,
-    });
+    return this.executeHooks(
+      HookEventName.PostToolUseFailure,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
   }
 
   /**
@@ -217,6 +254,7 @@ export class HookEventHandler {
   async firePreCompactEvent(
     trigger: PreCompactTrigger,
     customInstructions: string = '',
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PreCompactInput = {
       ...this.createBaseInput(HookEventName.PreCompact),
@@ -225,9 +263,14 @@ export class HookEventHandler {
     };
 
     // Pass trigger as context for matcher filtering
-    return this.executeHooks(HookEventName.PreCompact, input, {
-      trigger,
-    });
+    return this.executeHooks(
+      HookEventName.PreCompact,
+      input,
+      {
+        trigger,
+      },
+      signal,
+    );
   }
 
   /**
@@ -237,6 +280,7 @@ export class HookEventHandler {
     message: string,
     notificationType: NotificationType,
     title?: string,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: NotificationInput = {
       ...this.createBaseInput(HookEventName.Notification),
@@ -246,9 +290,14 @@ export class HookEventHandler {
     };
 
     // Pass notification_type as context for matcher filtering
-    return this.executeHooks(HookEventName.Notification, input, {
-      notificationType,
-    });
+    return this.executeHooks(
+      HookEventName.Notification,
+      input,
+      {
+        notificationType,
+      },
+      signal,
+    );
   }
 
   /**
@@ -260,6 +309,7 @@ export class HookEventHandler {
     toolInput: Record<string, unknown>,
     permissionMode: PermissionMode,
     permissionSuggestions?: PermissionSuggestion[],
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PermissionRequestInput = {
       ...this.createBaseInput(HookEventName.PermissionRequest),
@@ -270,9 +320,14 @@ export class HookEventHandler {
     };
 
     // Pass tool name as context for matcher filtering
-    return this.executeHooks(HookEventName.PermissionRequest, input, {
-      toolName,
-    });
+    return this.executeHooks(
+      HookEventName.PermissionRequest,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
   }
 
   /**
@@ -283,6 +338,7 @@ export class HookEventHandler {
     agentId: string,
     agentType: AgentType | string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: SubagentStartInput = {
       ...this.createBaseInput(HookEventName.SubagentStart),
@@ -292,9 +348,14 @@ export class HookEventHandler {
     };
 
     // Pass agentType as context for matcher filtering
-    return this.executeHooks(HookEventName.SubagentStart, input, {
-      agentType: String(agentType),
-    });
+    return this.executeHooks(
+      HookEventName.SubagentStart,
+      input,
+      {
+        agentType: String(agentType),
+      },
+      signal,
+    );
   }
 
   /**
@@ -308,6 +369,7 @@ export class HookEventHandler {
     lastAssistantMessage: string,
     stopHookActive: boolean,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: SubagentStopInput = {
       ...this.createBaseInput(HookEventName.SubagentStop),
@@ -320,9 +382,14 @@ export class HookEventHandler {
     };
 
     // Pass agentType as context for matcher filtering
-    return this.executeHooks(HookEventName.SubagentStop, input, {
-      agentType: String(agentType),
-    });
+    return this.executeHooks(
+      HookEventName.SubagentStop,
+      input,
+      {
+        agentType: String(agentType),
+      },
+      signal,
+    );
   }
 
   /**
@@ -333,6 +400,7 @@ export class HookEventHandler {
     eventName: HookEventName,
     input: HookInput,
     context?: HookEventContext,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     try {
       // Create execution plan
@@ -363,6 +431,7 @@ export class HookEventHandler {
             input,
             onHookStart,
             onHookEnd,
+            signal,
           )
         : await this.hookRunner.executeHooksParallel(
             plan.hookConfigs,
@@ -370,6 +439,7 @@ export class HookEventHandler {
             input,
             onHookStart,
             onHookEnd,
+            signal,
           );
 
       // Aggregate results
