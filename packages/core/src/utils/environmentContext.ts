@@ -101,7 +101,9 @@ export async function getInitialChatHistory(
  * to a child agent that will generate its own startup context for its
  * own working directory.
  */
-export function stripStartupContext(history: Content[]): Content[] {
+export function stripStartupContext(
+  history: readonly Content[],
+): readonly Content[] {
   if (history.length < 2) return history;
 
   const secondEntry = history[1];
