@@ -72,7 +72,6 @@ describe('AcpConnection readTextFile error mapping', () => {
     const prompt = vi.fn().mockResolvedValue({});
     const onEndTurn = vi.fn();
     const conn = new AcpConnection() as unknown as {
-      child: { killed: boolean; exitCode: number | null } | null;
       sdkConnection: {
         prompt: (params: {
           sessionId: string;
@@ -93,7 +92,6 @@ describe('AcpConnection readTextFile error mapping', () => {
       },
     ];
 
-    conn.child = { killed: false, exitCode: null };
     conn.sdkConnection = { prompt };
     conn.sessionId = 'session-1';
     conn.onEndTurn = onEndTurn;
