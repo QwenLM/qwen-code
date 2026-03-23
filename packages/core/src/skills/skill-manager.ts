@@ -19,7 +19,7 @@ import type {
 } from './types.js';
 import { SkillError, SkillErrorCode } from './types.js';
 import type { Config } from '../config/config.js';
-import { validateConfig } from './skill-load.js';
+import { validateConfig, parseExtendsField } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
@@ -131,11 +131,29 @@ export class SkillManager {
       }
     }
 
-    // Sort by name for consistent ordering
-    skills.sort((a, b) => a.name.localeCompare(b.name));
+    // Resolve extends for all skills
+    const resolvedSkills: SkillConfig[] = [];
+    for (const skill of skills) {
+      if (skill.extends) {
+        try {
+          resolvedSkills.push(await this.resolveExtends(skill));
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to resolve extends for skill "${skill.name}": ${error instanceof Error ? error.message : error}. ` +
+              `The skill will be loaded without the base content.`,
+          );
+          resolvedSkills.push({ ...skill, extends: undefined });
+        }
+      } else {
+        resolvedSkills.push(skill);
+      }
+    }
 
-    debugLogger.info(`Listed ${skills.length} unique skills`);
-    return skills;
+    // Sort by name for consistent ordering
+    resolvedSkills.sort((a, b) => a.name.localeCompare(b.name));
+
+    debugLogger.info(`Listed ${resolvedSkills.length} unique skills`);
+    return resolvedSkills;
   }
 
   /**
@@ -155,47 +173,42 @@ export class SkillManager {
       `Loading skill: ${name}${level ? ` at level: ${level}` : ''}`,
     );
 
-    if (level) {
-      const skill = await this.findSkillByNameAtLevel(name, level);
-      if (skill) {
-        debugLogger.debug(`Found skill ${name} at ${level} level`);
-      } else {
-        debugLogger.debug(`Skill ${name} not found at ${level} level`);
-      }
-      return skill;
-    }
+    const skill = level
+      ? await this.findSkillByNameAtLevel(name, level)
+      : await this.findFirstSkillByName(name);
 
-    // Try project level first
-    const projectSkill = await this.findSkillByNameAtLevel(name, 'project');
-    if (projectSkill) {
-      debugLogger.debug(`Found skill ${name} at project level`);
-      return projectSkill;
-    }
-
-    // Try user level
-    const userSkill = await this.findSkillByNameAtLevel(name, 'user');
-    if (userSkill) {
-      debugLogger.debug(`Found skill ${name} at user level`);
-      return userSkill;
-    }
-
-    // Try extension level
-    const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
-    if (extensionSkill) {
-      debugLogger.debug(`Found skill ${name} at extension level`);
-      return extensionSkill;
-    }
-
-    // Try bundled level (lowest precedence)
-    const bundledSkill = await this.findSkillByNameAtLevel(name, 'bundled');
-    if (bundledSkill) {
-      debugLogger.debug(`Found skill ${name} at bundled level`);
+    if (skill) {
+      debugLogger.debug(`Found skill ${name} at ${skill.level} level`);
     } else {
       debugLogger.debug(
-        `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
+        level
+          ? `Skill ${name} not found at ${level} level`
+          : `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
       );
     }
-    return bundledSkill;
+
+    // Resolve extends if present
+    if (skill?.extends) {
+      return this.resolveExtends(skill);
+    }
+
+    return skill;
+  }
+
+  /**
+   * Finds a skill by name, searching levels in precedence order:
+   * project > user > extension > bundled.
+   */
+  private async findFirstSkillByName(
+    name: string,
+  ): Promise<SkillConfig | null> {
+    for (const level of ['project', 'user', 'extension', 'bundled'] as const) {
+      const skill = await this.findSkillByNameAtLevel(name, level);
+      if (skill) {
+        return skill;
+      }
+    }
+    return null;
   }
 
   /**
@@ -396,6 +409,8 @@ export class SkillManager {
         }
       }
 
+      const extendsLevel = parseExtendsField(frontmatter);
+
       const config: SkillConfig = {
         name,
         description,
@@ -403,6 +418,7 @@ export class SkillManager {
         level,
         filePath,
         body: body.trim(),
+        extends: extendsLevel,
       };
 
       // Validate the parsed configuration
@@ -601,6 +617,37 @@ export class SkillManager {
       );
       return [];
     }
+  }
+
+  /**
+   * Resolves a skill that extends another skill at a different level.
+   * Merges the base skill's body with the extending skill's body.
+   */
+  private async resolveExtends(skill: SkillConfig): Promise<SkillConfig> {
+    const extendsLevel = skill.extends!;
+
+    const baseSkill = await this.findSkillByNameAtLevel(
+      skill.name,
+      extendsLevel,
+    );
+    if (!baseSkill) {
+      throw new SkillError(
+        `Cannot extend: ${extendsLevel} skill "${skill.name}" not found`,
+        SkillErrorCode.NOT_FOUND,
+        skill.name,
+      );
+    }
+
+    debugLogger.debug(
+      `Resolved extends for skill ${skill.name}: merging with ${extendsLevel} level`,
+    );
+
+    return {
+      ...skill,
+      allowedTools: skill.allowedTools ?? baseSkill.allowedTools,
+      body: skill.body ? baseSkill.body + '\n\n' + skill.body : baseSkill.body,
+      extends: undefined,
+    };
   }
 
   /**
