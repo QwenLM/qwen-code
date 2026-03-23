@@ -197,6 +197,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const thinking = this.buildThinkingConfig(request);
     const outputConfig = this.buildOutputConfig();
 
+    if (thinking && sampling.max_tokens <= thinking.budget_tokens) {
+      sampling.max_tokens = thinking.budget_tokens + 8_000;
+    }
+
     return {
       model: this.contentGeneratorConfig.model,
       system,
