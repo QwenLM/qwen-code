@@ -32,6 +32,7 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
@@ -64,6 +65,8 @@ export class AcpConnection {
       optionId: this.resolvePermissionOptionId(data) || '',
     });
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
+    () => {};
+  onSlashCommandNotification: (data: SlashCommandNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
   /** Invoked when the child process exits (expected or unexpected). */
@@ -321,6 +324,10 @@ export class AcpConnection {
             );
             this.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
+            );
+          } else if (method === '_qwencode/slash_command') {
+            this.onSlashCommandNotification(
+              params as unknown as SlashCommandNotification,
             );
           } else {
             console.warn(`[ACP] Unhandled extension notification: ${method}`);

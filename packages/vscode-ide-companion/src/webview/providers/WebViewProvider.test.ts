@@ -12,6 +12,9 @@ const {
   mockGetPanel,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
+  mockShowInformationMessage,
+  mockOpenExternal,
+  slashCommandNotificationCallbackRef,
 } = vi.hoisted(() => ({
   mockCreateImagePathResolver: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
@@ -20,6 +23,18 @@ const {
   ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+  mockShowInformationMessage: vi.fn(),
+  mockOpenExternal: vi.fn(),
+  slashCommandNotificationCallbackRef: {
+    current: undefined as
+      | ((event: {
+          sessionId: string;
+          command: string;
+          messageType: 'info' | 'error';
+          message: string;
+        }) => void)
+      | undefined,
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -35,10 +50,14 @@ vi.mock('vscode', () => ({
     })),
     file: vi.fn((filePath: string) => ({ fsPath: filePath })),
   },
+  env: {
+    openExternal: mockOpenExternal,
+  },
   window: {
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
+    showInformationMessage: mockShowInformationMessage,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
@@ -62,6 +81,18 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onModelChanged = vi.fn();
     onAvailableCommands = vi.fn();
     onAvailableModels = vi.fn();
+    onSlashCommandNotification = vi.fn(
+      (
+        callback: (event: {
+          sessionId: string;
+          command: string;
+          messageType: 'info' | 'error';
+          message: string;
+        }) => void,
+      ) => {
+        slashCommandNotificationCallbackRef.current = callback;
+      },
+    );
     onEndTurn = vi.fn();
     onToolCall = vi.fn();
     onPlan = vi.fn();
@@ -132,6 +163,7 @@ describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetPanel.mockReturnValue(null);
+    slashCommandNotificationCallbackRef.current = undefined;
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
         path: entry,
@@ -220,6 +252,256 @@ describe('WebViewProvider.attachToView', () => {
         ],
         requestId: 7,
       },
+    });
+  });
+
+  it('streams slash-command notifications into the attached webview', async () => {
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          void handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/summary',
+      messageType: 'info',
+      message: 'Generating project summary...',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'streamChunk',
+      data: {
+        chunk: 'Generating project summary...\n',
+      },
+    });
+  });
+
+  it('does not special-case plain insight slash notifications in the provider', async () => {
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          void handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message: 'Starting insight generation...',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'streamChunk',
+      data: {
+        chunk: 'Starting insight generation...\n',
+      },
+    });
+  });
+
+  it('routes structured insight progress markers into the attached webview', async () => {
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          void handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message:
+        '__QWEN_INSIGHT_PROGRESS__:{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'insightProgress',
+      data: {
+        stage: 'Analyzing sessions',
+        progress: 42,
+        detail: '21/50',
+      },
+    });
+  });
+
+  it('exposes a persistent insight report entry from slash-command ready markers without auto-opening it', async () => {
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage: vi.fn(),
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          void handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message: '__QWEN_INSIGHT_READY__:/tmp/insight-report.html',
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(webview.postMessage).toHaveBeenCalledWith({
+      type: 'insightReportReady',
+      data: {
+        path: '/tmp/insight-report.html',
+      },
+    });
+    expect(mockShowInformationMessage).not.toHaveBeenCalled();
+    expect(mockOpenExternal).not.toHaveBeenCalled();
+  });
+
+  it('reopens the latest insight report when requested from the webview', async () => {
+    let messageHandler:
+      | ((message: { type: string; data?: unknown }) => Promise<void>)
+      | undefined;
+
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage: vi.fn(),
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(
+        (
+          handler: (message: { type: string; data?: unknown }) => Promise<void>,
+        ) => {
+          messageHandler = handler;
+          return { dispose: vi.fn() };
+        },
+      ),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    await messageHandler?.({
+      type: 'openInsightReport',
+      data: { path: '/tmp/insight-report.html' },
+    });
+
+    expect(mockOpenExternal).toHaveBeenCalledWith({
+      fsPath: '/tmp/insight-report.html',
     });
   });
 

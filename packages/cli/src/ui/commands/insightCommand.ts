@@ -11,8 +11,23 @@ import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
-import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  INSIGHT_PROGRESS_MARKER,
+  INSIGHT_READY_MARKER,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import open from 'open';
+
+interface AcpInsightProgressPayload {
+  stage: string;
+  progress: number;
+  detail?: string;
+}
+
+function encodeAcpInsightProgress(payload: AcpInsightProgressPayload): string {
+  return `${INSIGHT_PROGRESS_MARKER}${JSON.stringify(payload)}`;
+}
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -35,6 +50,104 @@ export const insightCommand: SlashCommand = {
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
+
+      if (context.executionMode === 'acp') {
+        const pendingMessages: Array<{
+          messageType: 'info' | 'error';
+          content: string;
+        }> = [];
+        let isComplete = false;
+        let resume: (() => void) | null = null;
+
+        const flushResume = () => {
+          const resolve = resume;
+          if (!resolve) {
+            return;
+          }
+          resume = null;
+          resolve();
+        };
+
+        const pushMessage = (message: {
+          messageType: 'info' | 'error';
+          content: string;
+        }) => {
+          pendingMessages.push(message);
+          flushResume();
+        };
+
+        const streamMessages = async function* (): AsyncGenerator<
+          { messageType: 'info' | 'error'; content: string },
+          void,
+          unknown
+        > {
+          while (!isComplete || pendingMessages.length > 0) {
+            if (pendingMessages.length === 0) {
+              await new Promise<void>((resolve) => {
+                resume = resolve;
+              });
+            }
+
+            while (pendingMessages.length > 0) {
+              const message = pendingMessages.shift();
+              if (message) {
+                yield message;
+              }
+            }
+          }
+        };
+
+        void (async () => {
+          try {
+            pushMessage({
+              messageType: 'info',
+              content: t('This may take a couple minutes. Sit tight!'),
+            });
+            pushMessage({
+              messageType: 'info',
+              content: encodeAcpInsightProgress({
+                stage: t('Starting insight generation...'),
+                progress: 0,
+              }),
+            });
+
+            const outputPath = await insightGenerator.generateStaticInsight(
+              projectsDir,
+              (stage, progress, detail) => {
+                pushMessage({
+                  messageType: 'info',
+                  content: encodeAcpInsightProgress({
+                    stage,
+                    progress,
+                    detail,
+                  }),
+                });
+              },
+            );
+
+            pushMessage({
+              messageType: 'info',
+              content: `${INSIGHT_READY_MARKER}${outputPath}`,
+            });
+          } catch (error) {
+            pushMessage({
+              messageType: 'error',
+              content: t('Failed to generate insights: {{error}}', {
+                error: (error as Error).message,
+              }),
+            });
+            logger.error('Insight generation error:', error);
+          } finally {
+            isComplete = true;
+            flushResume();
+          }
+        })();
+
+        return {
+          type: 'stream_messages',
+          messages: streamMessages(),
+        };
+      }
 
       const updateProgress = (
         stage: string,
@@ -111,6 +224,7 @@ export const insightCommand: SlashCommand = {
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));
+      return;
     } catch (error) {
       // Clear pending item on error
       context.ui.setPendingItem(null);
@@ -126,6 +240,7 @@ export const insightCommand: SlashCommand = {
       );
 
       logger.error('Insight generation error:', error);
+      return;
     }
   },
 };

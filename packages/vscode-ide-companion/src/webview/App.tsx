@@ -39,6 +39,7 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
   // Layout components imported directly from webui
@@ -94,6 +95,14 @@ export const App: React.FC = () => {
     AvailableCommand[]
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const [showModelSelector, setShowModelSelector] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
@@ -366,6 +375,8 @@ export const App: React.FC = () => {
     setAvailableModels: (models) => {
       setAvailableModels(models);
     },
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -749,6 +760,16 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
@@ -976,6 +997,32 @@ export const App: React.FC = () => {
           <>
             {/* Render all messages and tool calls */}
             {renderMessages()}
+
+            {insightProgress && (
+              <InsightProgressCard
+                stage={insightProgress.stage}
+                progress={insightProgress.progress}
+                detail={insightProgress.detail}
+              />
+            )}
+
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
 
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&

@@ -20,6 +20,12 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
+    'init',
+    'summary',
+    'compress',
+    'bug',
+  ],
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
@@ -169,6 +175,10 @@ describe('Session', () => {
       expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
         mockConfig,
         expect.any(AbortSignal),
+        [
+          ...nonInteractiveCliCommands.ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+          'insight',
+        ],
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
