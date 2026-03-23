@@ -183,6 +183,53 @@ export type ShellOutputEvent =
 interface ActivePty {
   ptyProcess: IPty;
   headlessTerminal: pkg.Terminal;
+  outputBuffer: string[];
+  startedAt: Date;
+  command: string;
+  cwd: string;
+  exited: boolean;
+  exitCode: number | null;
+  signal: number | null;
+}
+
+/** Information about an active shell session. */
+export interface ShellSessionInfo {
+  /** The process ID of the shell session. */
+  pid: number;
+  /** The command being executed. */
+  command: string;
+  /** The working directory where the command was started. */
+  cwd: string;
+  /** The timestamp when the session was started. */
+  startedAt: Date;
+  /** Whether the session has exited. */
+  exited: boolean;
+  /** The exit code if the session has exited. */
+  exitCode: number | null;
+  /** The signal that terminated the process, if any. */
+  signal: number | null;
+}
+
+/** Result of reading output from a shell session. */
+export interface ShellOutputResult {
+  /** The output text. */
+  output: string;
+  /** Whether there is more output available. */
+  hasMore: boolean;
+  /** Whether the session has exited. */
+  exited: boolean;
+}
+
+/** Result of checking process status. */
+export interface ProcessStatusResult {
+  /** Whether the process is still running. */
+  running: boolean;
+  /** The exit code if the process has exited. */
+  exitCode: number | null;
+  /** The signal that terminated the process, if any. */
+  signal: number | null;
+  /** The process ID. */
+  pid: number;
 }
 
 const getFullBufferText = (terminal: pkg.Terminal): string => {
@@ -582,7 +629,18 @@ export class ShellExecutionService {
         });
         headlessTerminal.scrollToTop();
 
-        this.activePtys.set(ptyProcess.pid, { ptyProcess, headlessTerminal });
+        const activePty: ActivePty = {
+          ptyProcess,
+          headlessTerminal,
+          outputBuffer: [],
+          startedAt: new Date(),
+          command: commandToExecute,
+          cwd,
+          exited: false,
+          exitCode: null,
+          signal: null,
+        };
+        this.activePtys.set(ptyProcess.pid, activePty);
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
@@ -772,7 +830,13 @@ export class ShellExecutionService {
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
-            this.activePtys.delete(ptyProcess.pid);
+            // Update the activePty state instead of deleting immediately
+            const activePtyEntry = this.activePtys.get(ptyProcess.pid);
+            if (activePtyEntry) {
+              activePtyEntry.exited = true;
+              activePtyEntry.exitCode = exitCode;
+              activePtyEntry.signal = signal ?? null;
+            }
 
             const finalize = async () => {
               render(true);
@@ -903,8 +967,22 @@ export class ShellExecutionService {
     }
 
     const activePty = this.activePtys.get(pid);
-    if (activePty) {
-      activePty.ptyProcess.write(input);
+    if (activePty && !activePty.exited) {
+      try {
+        activePty.ptyProcess.write(input);
+      } catch (e) {
+        // Ignore errors if the pty has already exited, which can happen
+        // due to a race condition between the exit event and this call.
+        if (
+          e instanceof Error &&
+          'code' in e &&
+          (e.code === 'ESRCH' || e.code === 'EBADF')
+        ) {
+          // ignore
+        } else {
+          throw e;
+        }
+      }
     }
   }
 
@@ -931,14 +1009,18 @@ export class ShellExecutionService {
     }
 
     const activePty = this.activePtys.get(pid);
-    if (activePty) {
+    if (activePty && !activePty.exited) {
       try {
         activePty.ptyProcess.resize(cols, rows);
         activePty.headlessTerminal.resize(cols, rows);
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        if (
+          e instanceof Error &&
+          'code' in e &&
+          (e.code === 'ESRCH' || e.code === 'EBADF')
+        ) {
           // ignore
         } else {
           throw e;
@@ -959,7 +1041,7 @@ export class ShellExecutionService {
     }
 
     const activePty = this.activePtys.get(pid);
-    if (activePty) {
+    if (activePty && !activePty.exited) {
       try {
         activePty.headlessTerminal.scrollLines(lines);
         if (activePty.headlessTerminal.buffer.active.viewportY < 0) {
@@ -968,12 +1050,162 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        if (
+          e instanceof Error &&
+          'code' in e &&
+          (e.code === 'ESRCH' || e.code === 'EBADF')
+        ) {
           // ignore
         } else {
           throw e;
         }
       }
     }
+  }
+
+  /**
+   * Gets information about all active shell sessions.
+   *
+   * @returns An array of ShellSessionInfo objects for all active sessions.
+   */
+  static getActiveSessions(): ShellSessionInfo[] {
+    const sessions: ShellSessionInfo[] = [];
+    for (const [pid, activePty] of this.activePtys) {
+      sessions.push({
+        pid,
+        command: activePty.command,
+        cwd: activePty.cwd,
+        startedAt: activePty.startedAt,
+        exited: activePty.exited,
+        exitCode: activePty.exitCode,
+        signal: activePty.signal,
+      });
+    }
+    return sessions;
+  }
+
+  /**
+   * Gets information about a specific shell session.
+   *
+   * @param pid The process ID of the session.
+   * @returns The session info, or undefined if not found.
+   */
+  static getSessionInfo(pid: number): ShellSessionInfo | undefined {
+    const activePty = this.activePtys.get(pid);
+    if (!activePty) {
+      return undefined;
+    }
+    return {
+      pid,
+      command: activePty.command,
+      cwd: activePty.cwd,
+      startedAt: activePty.startedAt,
+      exited: activePty.exited,
+      exitCode: activePty.exitCode,
+      signal: activePty.signal,
+    };
+  }
+
+  /**
+   * Reads output from a shell session.
+   *
+   * @param pid The process ID of the session.
+   * @returns The output result, or undefined if the session doesn't exist.
+   */
+  static readOutput(pid: number): ShellOutputResult | undefined {
+    const activePty = this.activePtys.get(pid);
+    if (!activePty) {
+      return undefined;
+    }
+
+    const output = getFullBufferText(activePty.headlessTerminal);
+    return {
+      output,
+      hasMore: false, // For now, we return all available output
+      exited: activePty.exited,
+    };
+  }
+
+  /**
+   * Gets the process status for a shell session.
+   *
+   * @param pid The process ID of the session.
+   * @returns The process status, or undefined if the session doesn't exist.
+   */
+  static getProcessStatus(pid: number): ProcessStatusResult | undefined {
+    const activePty = this.activePtys.get(pid);
+    if (!activePty) {
+      return undefined;
+    }
+
+    return {
+      running: !activePty.exited,
+      exitCode: activePty.exitCode,
+      signal: activePty.signal,
+      pid,
+    };
+  }
+
+  /**
+   * Kills a shell session.
+   *
+   * @param pid The process ID of the session to kill.
+   * @param signal The signal to send (default: SIGTERM).
+   * @returns True if the kill signal was sent, false if the session doesn't exist or has already exited.
+   */
+  static killSession(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    const activePty = this.activePtys.get(pid);
+    if (!activePty || activePty.exited) {
+      return false;
+    }
+
+    try {
+      if (os.platform() === 'win32') {
+        activePty.ptyProcess.kill();
+      } else {
+        // On Unix, kill the process group to terminate all child processes
+        try {
+          process.kill(-pid, signal);
+        } catch {
+          // Fallback to killing just the PTY process
+          activePty.ptyProcess.kill();
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Removes a completed session from the active sessions map.
+   * This should only be called after a session has exited.
+   *
+   * @param pid The process ID of the session to remove.
+   * @returns True if the session was removed, false if it didn't exist or hasn't exited.
+   */
+  static removeSession(pid: number): boolean {
+    const activePty = this.activePtys.get(pid);
+    if (!activePty || !activePty.exited) {
+      return false;
+    }
+    this.activePtys.delete(pid);
+    return true;
+  }
+
+  /**
+   * Cleans up all completed sessions.
+   *
+   * @returns The number of sessions removed.
+   */
+  static cleanupCompletedSessions(): number {
+    let removed = 0;
+    for (const [pid, activePty] of this.activePtys) {
+      if (activePty.exited) {
+        this.activePtys.delete(pid);
+        removed++;
+      }
+    }
+    return removed;
   }
 }
