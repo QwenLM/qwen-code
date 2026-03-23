@@ -294,4 +294,47 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.validate(schema, params)).toBeNull();
     });
   });
+
+  describe('non-string to string coercion', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        old_string: { type: 'string' },
+        content: { type: 'string' },
+        count: { type: 'integer' },
+      },
+      required: ['old_string', 'content'],
+    };
+
+    it('should coerce number values to strings', () => {
+      const params = { old_string: 123, content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('123');
+    });
+
+    it('should coerce boolean values to strings', () => {
+      const params = { old_string: true, content: false };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('true');
+      expect(params.content).toBe('false');
+    });
+
+    it('should not coerce values that are already strings', () => {
+      const params = { old_string: 'original', content: 'text' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('original');
+    });
+
+    it('should not coerce non-string schema fields', () => {
+      const params = { old_string: 'text', content: 'hello', count: 42 };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.count).toBe(42);
+    });
+
+    it('should coerce float to string', () => {
+      const params = { old_string: 3.14, content: 'hello' };
+      expect(SchemaValidator.validate(schema, params)).toBeNull();
+      expect(params.old_string).toBe('3.14');
+    });
+  });
 });
