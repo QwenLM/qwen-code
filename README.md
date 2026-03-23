@@ -449,6 +449,10 @@ Looking for a graphical interface?
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) A cross-platform desktop/web/mobile UI for Qwen Code
 
+### Community Libraries
+
+- [**AgentSmith**](https://github.com/guerro47/agentsmith) Agent orchestration library for Qwen-Agent and Qwen-Code. Manage multiple AI agents working together with support for sequential, parallel, collaborative, and hierarchical execution strategies.
+
 ## Troubleshooting
 
 If you encounter issues, check the [troubleshooting guide](https://qwenlm.github.io/qwen-code-docs/en/users/support/troubleshooting/).
