@@ -106,6 +106,7 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   contentLength?: number;
+  status?: 'success' | 'error' | 'cancelled';
 }
 
 export interface ServerToolCallConfirmationDetails {

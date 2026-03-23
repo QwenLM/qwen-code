@@ -618,7 +618,14 @@ export function buildApiHistoryFromConversation(
     for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
       const record = messages[i];
       if (record.type === 'system') continue;
-      if (record.message) {
+
+      // For tool_result records, reconstruct Content from toolCallResult
+      if (record.type === 'tool_result') {
+        const toolContent = buildContentFromToolResult(record);
+        if (toolContent) {
+          baseHistory.push(toolContent);
+        }
+      } else if (record.message) {
         baseHistory.push(structuredClone(record.message as Content));
       }
     }
@@ -632,10 +639,18 @@ export function buildApiHistoryFromConversation(
   }
 
   // Fallback: return linear messages as Content[]
-  const result = messages
-    .map((record) => record.message)
-    .filter((message): message is Content => message !== undefined)
-    .map((message) => structuredClone(message));
+  const result: Content[] = [];
+  for (const record of messages) {
+    // For tool_result records, reconstruct Content from toolCallResult
+    if (record.type === 'tool_result') {
+      const toolContent = buildContentFromToolResult(record);
+      if (toolContent) {
+        result.push(toolContent);
+      }
+    } else if (record.message) {
+      result.push(structuredClone(record.message as Content));
+    }
+  }
 
   if (stripThoughtsFromHistory) {
     return result
@@ -643,6 +658,45 @@ export function buildApiHistoryFromConversation(
       .filter((content): content is Content => content !== null);
   }
   return result;
+}
+
+/**
+ * Builds a Content object from a tool_result record's toolCallResult.
+ * Creates a Gemini-format functionResponse part that the converter will
+ * transform into proper OpenAI tool message format.
+ */
+function buildContentFromToolResult(record: ChatRecord): Content | null {
+  const toolCallResult = record.toolCallResult;
+  if (!toolCallResult || !toolCallResult.callId) {
+    return null;
+  }
+
+  // Extract output text from resultDisplay or error
+  let output = '';
+  if (toolCallResult.resultDisplay) {
+    if (typeof toolCallResult.resultDisplay === 'string') {
+      output = toolCallResult.resultDisplay;
+    } else if (typeof toolCallResult.resultDisplay === 'object') {
+      // For task_execution type, extract relevant text
+      output = JSON.stringify(toolCallResult.resultDisplay);
+    }
+  }
+  if (toolCallResult.error && !output) {
+    output = toolCallResult.error.message || String(toolCallResult.error);
+  }
+
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id: toolCallResult.callId,
+          name: 'tool', // Tool name may not be available; converter handles this
+          response: { output },
+        },
+      },
+    ],
+  };
 }
 
 /**

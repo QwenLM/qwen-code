@@ -225,7 +225,7 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordToolResult', () => {
-    it('should record tool result with Parts', () => {
+    it('should record tool result WITHOUT message field (reconstructed at API time)', () => {
       // First record a user and assistant message to set up the chain
       chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordAssistantTurn({
@@ -250,11 +250,11 @@ describe('ChatRecordingService', () => {
         .calls[2][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
-      // The service wraps parts in a Content object using createUserContent
-      expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
+      // Tool results no longer store message field - reconstructed from toolCallResult at API time
+      expect(record.message).toBeUndefined();
     });
 
-    it('should record tool result with toolCallResult metadata', () => {
+    it('should record tool result with toolCallResult metadata (no message field)', () => {
       const toolResultParts: Part[] = [
         {
           functionResponse: {
@@ -278,8 +278,8 @@ describe('ChatRecordingService', () => {
         .calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
-      // The service wraps parts in a Content object using createUserContent
-      expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
+      // No message field - tool responses are reconstructed from toolCallResult at API time
+      expect(record.message).toBeUndefined();
       expect(record.toolCallResult).toBeDefined();
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
