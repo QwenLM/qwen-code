@@ -14,6 +14,8 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { ErrorHandler, RequestContext } from './errorHandler.js';
+import { tokenLimit } from '../tokenLimits.js';
+import { trimMessagesForContextBudget } from './contextBudgetTrim.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -337,6 +339,15 @@ export class ContentGenerationPipeline {
         request.config.tools,
       );
     }
+
+    const contextLimit =
+      this.contentGeneratorConfig.contextWindowSize ??
+      tokenLimit(effectiveModel, 'input');
+    baseRequest.messages = trimMessagesForContextBudget(
+      baseRequest.messages,
+      baseRequest.tools,
+      contextLimit,
+    );
 
     // Let provider enhance the request (e.g., add metadata, cache control)
     return this.config.provider.buildRequest(baseRequest, userPromptId);
