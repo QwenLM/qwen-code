@@ -47,6 +47,12 @@ export interface SkillConfig {
   body: string;
 
   /**
+   * If set, this skill extends the bundled skill with the same name.
+   * The body of the extending skill is appended to the bundled skill's body.
+   */
+  extends?: 'bundled';
+
+  /**
    * For extension-level skills: the name of the providing extension
    */
   extensionName?: string;
