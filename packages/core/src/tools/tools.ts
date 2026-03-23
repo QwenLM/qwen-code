@@ -215,6 +215,10 @@ export abstract class DeclarativeTool<
     };
   }
 
+  get isReadOnly(): boolean {
+    return (READ_ONLY_KINDS as readonly Kind[]).includes(this.kind);
+  }
+
   /**
    * Validates the raw tool parameters.
    * Subclasses should override this to add custom validation logic
@@ -734,6 +738,13 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Delete,
   Kind.Move,
   Kind.Execute,
+] as const;
+
+/** Safe to run concurrently with other read-only tools (contiguous batches only). */
+export const READ_ONLY_KINDS: Kind[] = [
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
 ] as const;
 
 export interface ToolLocation {

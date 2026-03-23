@@ -22,6 +22,7 @@ import {
 
 interface MockToolOptions {
   name: string;
+  kind?: Kind;
   displayName?: string;
   description?: string;
   canUpdateOutput?: boolean;
@@ -97,7 +98,7 @@ export class MockTool extends BaseDeclarativeTool<
       options.name,
       options.displayName ?? options.name,
       options.description ?? options.name,
-      Kind.Other,
+      options.kind ?? Kind.Other,
       options.params,
       options.isOutputMarkdown ?? false,
       options.canUpdateOutput ?? false,
