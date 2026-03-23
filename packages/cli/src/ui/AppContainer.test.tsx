@@ -434,6 +434,41 @@ describe('AppContainer State Management', () => {
         );
       }).not.toThrow();
     });
+
+    it('submits /btw immediately instead of queueing while responding', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw quick side question');
+
+      expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
   });
 
   describe('Settings Integration', () => {
