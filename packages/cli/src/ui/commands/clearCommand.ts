@@ -13,6 +13,7 @@ import {
   SessionStartSource,
   ToolNames,
   SkillTool,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
@@ -72,6 +73,7 @@ export const clearCommand: SlashCommand = {
           ?.fireSessionStartEvent(
             SessionStartSource.Clear,
             config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
           );
       } catch (err) {
         config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);

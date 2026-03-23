@@ -9,6 +9,7 @@ import {
   SessionService,
   type Config,
   SessionStartSource,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -78,6 +79,7 @@ export function useResumeCommand(
           ?.fireSessionStartEvent(
             SessionStartSource.Resume,
             config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
           );
       } catch (err) {
         config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);

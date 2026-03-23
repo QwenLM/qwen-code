@@ -810,19 +810,33 @@ export class Config {
               return;
             }
 
+            // Check if request was aborted
+            if (request.signal?.aborted) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook execution cancelled (aborted)'),
+              } as HookExecutionResponse);
+              return;
+            }
+
             // Execute the appropriate hook based on eventName
             let result;
             const input = request.input || {};
+            const signal = request.signal;
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
+                  signal,
                 );
                 break;
               case 'Stop':
                 result = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
+                  signal,
                 );
                 break;
               case 'PreToolUse': {
@@ -832,6 +846,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               }
@@ -842,6 +857,7 @@ export class Config {
                   (input['tool_response'] as Record<string, unknown>) || {},
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -852,6 +868,7 @@ export class Config {
                   (input['error'] as string) || '',
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
                 );
                 break;
               case 'Notification':
@@ -860,6 +877,7 @@ export class Config {
                   (input['notification_type'] as NotificationType) ||
                     'permission_prompt',
                   (input['title'] as string) || undefined,
+                  signal,
                 );
                 break;
               case 'PermissionRequest':
@@ -871,6 +889,7 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
                 );
                 break;
               case 'SubagentStart':
@@ -879,6 +898,7 @@ export class Config {
                   (input['agent_type'] as string) || '',
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               case 'SubagentStop':
@@ -890,6 +910,7 @@ export class Config {
                   (input['stop_hook_active'] as boolean) || false,
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               default:

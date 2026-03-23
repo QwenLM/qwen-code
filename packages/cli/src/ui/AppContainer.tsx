@@ -44,6 +44,7 @@ import {
   getGenerator,
   extractSuggestionContext,
   type FollowupSuggestion,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -74,6 +75,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
+import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -310,7 +312,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
       if (hookSystem) {
         hookSystem
-          .fireSessionStartEvent(sessionStartSource, config.getModel() ?? '')
+          .fireSessionStartEvent(
+            sessionStartSource,
+            config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
+          )
           .then(() => {
             debugLogger.debug('SessionStart event completed successfully');
           })
@@ -602,6 +608,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleSlashCommand,
     slashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
+    btwItem,
+    setBtwItem,
+    cancelBtw,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -756,9 +765,16 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
+      if (
+        streamingState === StreamingState.Responding &&
+        isBtwCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
       addMessage(submittedValue);
     },
-    [addMessage, agentViewState],
+    [addMessage, agentViewState, streamingState, submitQuery],
   );
 
   const handleArenaModelsSelected = useCallback(
@@ -1045,6 +1061,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const dialogsVisibleRef = useRef(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1331,7 +1348,13 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Escape key handling
+        // Dismiss or cancel btw side-question on Escape,
+        // but only when btw is actually visible (not hidden behind a dialog).
+        if (btwItem && !dialogsVisibleRef.current) {
+          cancelBtw();
+          return;
+        }
+
         // Skip if shell is focused (to allow shell's own escape handling)
         if (embeddedShellFocused) {
           return;
@@ -1371,6 +1394,20 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
+      }
+
+      // Dismiss completed btw side-question on Space or Enter,
+      // but only when btw is visible and the input buffer is empty.
+      if (
+        btwItem &&
+        !btwItem.btw.isPending &&
+        !dialogsVisibleRef.current &&
+        buffer.text.length === 0
+      ) {
+        if (key.name === 'return' || key.sequence === ' ') {
+          setBtwItem(null);
+          return;
+        }
       }
 
       let enteringConstrainHeightMode = false;
@@ -1427,6 +1464,9 @@ export const AppContainer = (props: AppContainerProps) => {
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
     ],
@@ -1500,6 +1540,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isExtensionsManagerDialogOpen;
+  dialogsVisibleRef.current = dialogsVisible;
 
   const {
     isFeedbackDialogOpen,
@@ -1590,6 +1631,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,
@@ -1688,6 +1732,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,

@@ -440,6 +440,16 @@ describe('getCommandRoots', () => {
     const result = getCommandRoots('ls\n\ngrep foo');
     expect(result).toEqual(['ls', 'grep']);
   });
+
+  it('should not treat file descriptor redirection as a command separator', () => {
+    const result = getCommandRoots('npm run build 2>&1 | head -100');
+    expect(result).toEqual(['npm', 'head']);
+  });
+
+  it('should not treat >| redirection as a pipeline separator', () => {
+    const result = getCommandRoots('echo hello >| out.txt');
+    expect(result).toEqual(['echo']);
+  });
 });
 
 describe('stripShellWrapper', () => {
