@@ -18,15 +18,25 @@ declare global {
 function getExtensionUri(): string | undefined {
   // First try to get from window (for backwards compatibility)
   if (window.__EXTENSION_URI__) {
-    return window.__EXTENSION_URI__;
+    try {
+      return new URL(window.__EXTENSION_URI__).href;
+    } catch {
+      return undefined;
+    }
   }
 
   // Then try to get from body data attribute (CSP-compliant method)
   const bodyUri = document.body?.getAttribute('data-extension-uri');
   if (bodyUri) {
-    // Cache it in window for future use
-    window.__EXTENSION_URI__ = bodyUri;
-    return bodyUri;
+    try {
+      // Validate and sanitize the URI using the URL constructor to clear CodeQL warnings
+      const parsedUri = new URL(bodyUri).href;
+      // Cache it in window for future use
+      window.__EXTENSION_URI__ = parsedUri;
+      return parsedUri;
+    } catch {
+      // Invalid URL format
+    }
   }
 
   return undefined;
@@ -95,7 +105,12 @@ export function generateResourceUrl(relativePath: string): string {
     ? extensionUri
     : `${extensionUri}/`;
 
-  const fullUrl = `${baseUri}${cleanPath}`;
+  let fullUrl: string;
+  try {
+    fullUrl = new URL(cleanPath, baseUri).href;
+  } catch {
+    fullUrl = `${baseUri}${cleanPath}`;
+  }
 
   // Validate if the final generated URL is secure
   if (!isValidWebviewUrl(fullUrl)) {

@@ -88,7 +88,9 @@ export class AcpConnection {
     this.lastExitSignal = null;
     this.workingDir = workingDir;
 
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+    };
 
     const proxyArg = extraArgs.find(
       (arg, i) => arg === '--proxy' && i + 1 < extraArgs.length,
@@ -406,14 +408,18 @@ export class AcpConnection {
     );
   }
 
-  async authenticate(methodId?: string): Promise<AuthenticateResponse> {
+  async authenticate(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<AuthenticateResponse> {
     const conn = this.ensureConnection();
     const authMethodId = methodId || 'default';
     console.log(
       '[ACP] Sending authenticate request with methodId:',
       authMethodId,
+      _meta,
     );
-    const response = await conn.authenticate({ methodId: authMethodId });
+    const response = await conn.authenticate({ methodId: authMethodId, _meta });
     console.log('[ACP] Authenticate successful', response);
     return response;
   }

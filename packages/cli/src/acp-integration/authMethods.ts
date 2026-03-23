@@ -10,22 +10,32 @@ import type { AuthMethod } from '@agentclientprotocol/sdk';
 export function buildAuthMethods(): AuthMethod[] {
   return [
     {
-      id: AuthType.USE_OPENAI,
-      name: 'Use OpenAI API key',
-      description: 'Requires setting the `OPENAI_API_KEY` environment variable',
-      _meta: {
-        type: 'terminal',
-        args: ['--auth-type=openai'],
-      },
-    },
-    {
       id: AuthType.QWEN_OAUTH,
       name: 'Qwen OAuth',
       description:
-        'OAuth authentication for Qwen models with free daily requests',
+        'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
       _meta: {
         type: 'terminal',
         args: ['--auth-type=qwen-oauth'],
+      },
+    },
+    {
+      id: 'coding-plan',
+      name: 'Alibaba Cloud Coding Plan',
+      description:
+        'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
+      _meta: {
+        type: 'terminal',
+        args: ['--auth-type=coding-plan'],
+      },
+    },
+    {
+      id: AuthType.USE_OPENAI,
+      name: 'API Key',
+      description: 'Bring your own API key',
+      _meta: {
+        type: 'terminal',
+        args: ['--auth-type=openai'],
       },
     },
   ];

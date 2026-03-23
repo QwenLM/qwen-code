@@ -86,9 +86,11 @@ export class WebViewProvider {
     );
 
     // Set login handler for /login command - direct force re-login
-    this.messageHandler.setLoginHandler(async () => {
-      await this.forceReLogin();
-    });
+    this.messageHandler.setLoginHandler(
+      async (methodId?: string, _meta?: Record<string, unknown>) => {
+        await this.forceReLogin(methodId, _meta);
+      },
+    );
 
     // Setup file watchers for cache invalidation
     const fileWatcherDisposable = this.messageHandler.setupFileWatchers();
@@ -863,7 +865,10 @@ export class WebViewProvider {
           );
           this.sendMessageToWebView({
             type: 'authState',
-            data: { authenticated: false },
+            data: {
+              authenticated: false,
+              authMethods: connectResult.authMethods,
+            },
           });
           // Initialize empty conversation to allow browsing history
           await this.initializeEmptyConversation();
@@ -873,7 +878,10 @@ export class WebViewProvider {
         if (connectResult.requiresAuth) {
           this.sendMessageToWebView({
             type: 'authState',
-            data: { authenticated: false },
+            data: {
+              authenticated: false,
+              authMethods: connectResult.authMethods,
+            },
           });
         }
 
@@ -917,8 +925,11 @@ export class WebViewProvider {
    * Force re-login by clearing auth cache and reconnecting
    * Called when user explicitly uses /login command
    */
-  async forceReLogin(): Promise<void> {
-    console.log('[WebViewProvider] Force re-login requested');
+  async forceReLogin(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
+    console.log('[WebViewProvider] Force re-login requested', methodId);
 
     return vscode.window.withProgress(
       {
@@ -947,17 +958,62 @@ export class WebViewProvider {
             message: 'Connecting to CLI and starting sign-in...',
           });
 
-          // Reinitialize connection (will trigger fresh authentication)
-          await this.doInitializeAgentConnection({ autoAuthenticate: true });
-          console.log(
-            '[WebViewProvider] Force re-login completed successfully',
-          );
+          // Reinitialize connection with explicit authentication disabled
+          await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
-          // Send success notification to WebView
-          this.sendMessageToWebView({
-            type: 'loginSuccess',
-            data: { message: 'Successfully logged in!' },
-          });
+          if (methodId && methodId !== 'default') {
+            // If we are about to re-authenticate with a specific method, ensure
+            // the webview stays on the Onboarding page.  The preceding
+            // doInitializeAgentConnection may have sent `agentConnected` (when
+            // cached credentials are still valid), which would prematurely
+            // transition to the chat view.  Override that here.
+            this.sendMessageToWebView({
+              type: 'authState',
+              data: {
+                authenticated: false,
+                authMethods: this.agentManager.availableAuthMethods,
+              },
+            });
+
+            progress.report({
+              message: 'Authenticating...',
+            });
+
+            await this.agentManager.authenticate(methodId, _meta);
+
+            await this.agentManager.createNewSession(
+              this.agentManager.currentWorkingDir,
+            );
+
+            console.log(
+              '[WebViewProvider] Force re-login completed successfully',
+            );
+
+            // Send success notification to WebView
+            this.sendMessageToWebView({
+              type: 'loginSuccess',
+              data: { message: 'Successfully logged in!' },
+            });
+          } else {
+            console.log(
+              '[WebViewProvider] Force re-login clear session and wait for prompt selection',
+            );
+            // Clear any lingering error message on the frontend since user intentionally triggered /login
+            this.sendMessageToWebView({
+              type: 'loginError',
+              data: { message: '' },
+            });
+            // Force the unauthenticated view and provide available auth methods from backend initialization
+            this.sendMessageToWebView({
+              type: 'authState',
+              data: {
+                authenticated: false,
+                authMethods: this.agentManager.availableAuthMethods,
+              },
+            });
+            // Wipe the chat view so that App.tsx 'hasContent' correctly defaults back to false, thereby rendering the Onboarding tab
+            await this.initializeEmptyConversation();
+          }
         } catch (_error) {
           const errorMsg = getErrorMessage(_error);
           console.error('[WebViewProvider] Force re-login failed:', _error);

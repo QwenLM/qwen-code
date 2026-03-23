@@ -87,6 +87,10 @@ export const App: React.FC = () => {
   } | null>(null);
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [loginErrorMessage, setLoginErrorMessage] = useState<string>('');
+  const [authMethods, setAuthMethods] = useState<
+    Array<Record<string, unknown>>
+  >([]);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
@@ -355,7 +359,16 @@ export const App: React.FC = () => {
     inputFieldRef,
     setInputText,
     setEditMode,
-    setIsAuthenticated,
+    setIsAuthenticated: (auth, methods) => {
+      setIsAuthenticated(auth);
+      if (methods) {
+        setAuthMethods(methods);
+      }
+      if (auth) {
+        setLoginErrorMessage('');
+      } // Reset error on successful auth
+    },
+    setLoginErrorMessage: (msg) => setLoginErrorMessage(msg),
     setUsageStats: (stats) => setUsageStats(stats ?? null),
     setModelInfo: (info) => {
       setModelInfo(info);
@@ -955,13 +968,19 @@ export const App: React.FC = () => {
 
       <div
         ref={messagesContainerRef}
-        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        className={`chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 ${hasContent ? 'pb-[140px]' : 'pb-5'} flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]`}
       >
         {!hasContent && !isLoading ? (
           isAuthenticated === false ? (
             <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
+              authMethods={authMethods}
+              errorMessage={loginErrorMessage}
+              onLogin={(methodId, _meta) => {
+                setLoginErrorMessage(''); // Clear previous error upon new login attempt
+                vscode.postMessage({
+                  type: 'login',
+                  data: { methodId, _meta },
+                });
                 messageHandling.setWaitingForResponse(
                   'Logging in to Qwen Code...',
                 );
