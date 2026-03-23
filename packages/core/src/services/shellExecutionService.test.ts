@@ -413,6 +413,67 @@ describe('ShellExecutionService', () => {
       expect(mockHeadlessTerminal.resize).toHaveBeenCalledWith(100, 40);
     });
 
+    it('should ignore expected PTY read EIO errors on process exit', async () => {
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        const eioError = Object.assign(new Error('read EIO'), { code: 'EIO' });
+        pty.emit('error', eioError);
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('should throw unexpected PTY errors from error event', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'ls -l',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+      );
+      await new Promise((resolve) => process.nextTick(resolve));
+
+      const unexpectedError = Object.assign(new Error('unexpected pty error'), {
+        code: 'EPIPE',
+      });
+      expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
+        'unexpected pty error',
+      );
+
+      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      await handle.result;
+    });
+
+    it('should ignore ioctl EBADF message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('ioctl(2) failed, EBADF');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
+    it('should ignore exited-pty message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('Cannot resize a pty that has already exited');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
     it('should scroll the headless terminal', async () => {
       await simulateExecution('ls -l', (pty) => {
         pty.onData.mock.calls[0][0]('file1.txt\n');
