@@ -1,3 +1,15 @@
+## Visual Evidence (Screenshots / Video)
+
+<!--
+A screenshot or short video showing the change in action helps reviewers pick this up faster.
+
+- For UI changes: Add a screenshot or GIF showing the before/after
+- For CLI changes: Add a terminal screenshot or screen recording
+- For API changes: Add a curl example or API response snippet
+
+If there's nothing visual to show (e.g., refactor, internal change, docs-only), please note that here: **N/A - [reason]**
+-->
+
 ## TLDR
 
 <!-- Add a brief description of what this pull request changes and why and any important things for reviewers to look at -->
