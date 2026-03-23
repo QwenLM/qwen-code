@@ -87,46 +87,27 @@ jobs:
 
       - name: 'Get the version'
         id: 'version'
-        working-directory: 'packages/vscode-ide-companion'
         run: |
-          # Get the base version from package.json regardless of scenario
-          BASE_VERSION=$(node -p "require('./package.json').version")
+          VERSION_ARGS=()
+          if [[ "${IS_PREVIEW}" == "true" ]]; then
+            VERSION_ARGS+=(--type=preview)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--preview_version_override=${MANUAL_VERSION}")
+            fi
+          else
+            VERSION_ARGS+=(--type=stable)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--stable_version_override=${MANUAL_VERSION}")
+            fi
+          fi
+
+          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
+          echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
 
           if [[ "${IS_PREVIEW}" == "true" ]]; then
-            # Generate preview version. If a manual version is provided and already
-            # contains -preview.<id>, use it as-is (no timestamp). Otherwise, append
-            # a timestamp for uniqueness.
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              MANUAL_CLEAN="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
-              if [[ "${MANUAL_CLEAN}" == *"-preview."* ]]; then
-                PREVIEW_VERSION="${MANUAL_CLEAN}"
-              else
-                PREVIEW_BASE="${MANUAL_CLEAN%%-*}" # Strip any prerelease/build
-                TIMESTAMP=$(date +%Y%m%d%H%M%S)
-                PREVIEW_VERSION="${PREVIEW_BASE}-preview.${TIMESTAMP}"
-              fi
-            else
-              TIMESTAMP=$(date +%Y%m%d%H%M%S)
-              PREVIEW_VERSION="${BASE_VERSION}-preview.${TIMESTAMP}"
-            fi
-
-            RELEASE_TAG="${PREVIEW_VERSION}"
-
-            echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "RELEASE_VERSION=${PREVIEW_VERSION}" >> "$GITHUB_OUTPUT"
             echo "VSCODE_TAG=preview" >> "$GITHUB_OUTPUT"
           else
-            # Use specified version or get from package.json
-            if [[ -n "${MANUAL_VERSION}" ]]; then
-              RELEASE_VERSION="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
-              RELEASE_TAG="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
-            else
-              RELEASE_VERSION="${BASE_VERSION}"
-              RELEASE_TAG="${BASE_VERSION}"
-            fi
-
-            echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
             echo "VSCODE_TAG=latest" >> "$GITHUB_OUTPUT"
           fi
         env:
