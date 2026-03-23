@@ -321,10 +321,16 @@ export class WebViewProvider {
               optionId === 'cancel' ||
               optionId.toLowerCase().includes('reject');
 
+            // For switch_mode (exit_plan_mode), cancel means "reject
+            // the plan and stay in plan mode" — the agent keeps running.
+            const isSwitchMode =
+              (request.toolCall as { kind?: string } | undefined)?.kind ===
+              'switch_mode';
+
             // Always close open qwen-diff editors after any permission decision
             void vscode.commands.executeCommand('qwen.diff.closeAll');
 
-            if (isCancel) {
+            if (isCancel && !isSwitchMode) {
               // Fire and forget — cancel generation and update UI
               void (async () => {
                 try {
