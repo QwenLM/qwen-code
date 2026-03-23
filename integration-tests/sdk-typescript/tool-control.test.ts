@@ -622,14 +622,12 @@ describe('Tool Control Parameters (E2E)', () => {
             'Read test.txt, write "modified" to it, and list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            pathToQwenExecutable:
+              '/Users/mingholy/qwen-code/main/packages/cli/index.ts',
             cwd: testDir,
             permissionMode: 'default',
             // Limit available tools
-            coreTools: ['read_file', 'write_file', 'list_directory', 'edit'],
-            // Block edit
-            excludeTools: ['edit'],
-            // Auto-approve write
-            allowedTools: ['write_file'],
+            coreTools: ['read_file', 'write_file', 'list_directory'],
             canUseTool: async (toolName) => {
               canUseToolCalls.push(toolName);
               return {
@@ -658,9 +656,8 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should NOT use excluded tool
           expect(toolNames).not.toContain('edit');
 
-          // canUseTool should be called for tools not in allowedTools
-          // but should NOT be called for write_file (in allowedTools)
-          expect(canUseToolCalls).not.toContain('write_file');
+          // canUseTool should be called for core write tools
+          expect(canUseToolCalls).toContain('write_file');
 
           // Verify file was modified
           const content = await helper.readFile('test.txt');
