@@ -722,6 +722,14 @@ export class GeminiClient {
 
       const stopOutput = hookOutput as StopHookOutput | undefined;
 
+      // This should happen regardless of the hook's decision
+      if (stopOutput?.systemMessage) {
+        yield {
+          type: GeminiEventType.HookSystemMessage,
+          value: stopOutput.systemMessage,
+        };
+      }
+
       // For Stop hooks, blocking/stop execution should force continuation
       if (
         stopOutput?.isBlockingDecision() ||
@@ -730,14 +738,6 @@ export class GeminiClient {
         // Check if aborted before continuing
         if (signal.aborted) {
           return turn;
-        }
-
-        // Emit system message if provided (e.g., "🔄 Ralph iteration 5")
-        if (stopOutput.systemMessage) {
-          yield {
-            type: GeminiEventType.HookSystemMessage,
-            value: stopOutput.systemMessage,
-          };
         }
 
         const continueReason = stopOutput.getEffectiveReason();
