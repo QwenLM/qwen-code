@@ -110,6 +110,8 @@ export class ChatCompressionService {
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
+      // Model-aware window (resolved at auth init), not a flat default — keeps
+      // compression threshold aligned with Claude 200K, Gemini 1M, etc.
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
