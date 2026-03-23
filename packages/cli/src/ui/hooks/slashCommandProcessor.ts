@@ -23,6 +23,7 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
   Message,
   HistoryItemWithoutId,
+  HistoryItemBtw,
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
@@ -36,6 +37,7 @@ import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
+import { isBtwCommand } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -63,6 +65,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'reset',
   'new',
   'resume',
+  'btw',
 ]);
 
 interface SlashCommandProcessorActions {
@@ -139,10 +142,20 @@ export const useSlashCommandProcessor = (
     null,
   );
 
+  const [btwItem, setBtwItem] = useState<HistoryItemBtw | null>(null);
+  const btwAbortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelBtw = useCallback(() => {
+    btwAbortControllerRef.current?.abort();
+    btwAbortControllerRef.current = null;
+    setBtwItem(null);
+  }, []);
+
   // AbortController for cancelling async slash commands via ESC
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const cancelSlashCommand = useCallback(() => {
+    cancelBtw();
     if (!abortControllerRef.current) {
       return;
     }
@@ -156,7 +169,7 @@ export const useSlashCommandProcessor = (
     );
     setPendingItem(null);
     setIsProcessing(false);
-  }, [addItem, setIsProcessing]);
+  }, [addItem, setIsProcessing, cancelBtw]);
 
   useKeypress(
     (key) => {
@@ -251,6 +264,10 @@ export const useSlashCommandProcessor = (
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
+        btwItem,
+        setBtwItem,
+        cancelBtw,
+        btwAbortControllerRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -279,6 +296,9 @@ export const useSlashCommandProcessor = (
       actions,
       pendingItem,
       setPendingItem,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       toggleVimEnabled,
       sessionShellAllowlist,
       setGeminiMdFileCount,
@@ -366,10 +386,12 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
-      addItemWithRecording(
-        { type: MessageType.USER, text: trimmed },
-        userMessageTimestamp,
-      );
+      if (!isBtwCommand(trimmed)) {
+        addItemWithRecording(
+          { type: MessageType.USER, text: trimmed },
+          userMessageTimestamp,
+        );
+      }
 
       let hasError = false;
       const {
@@ -727,6 +749,9 @@ export const useSlashCommandProcessor = (
     handleSlashCommand,
     slashCommands: commands,
     pendingHistoryItems,
+    btwItem,
+    setBtwItem,
+    cancelBtw,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

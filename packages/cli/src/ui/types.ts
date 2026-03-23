@@ -350,6 +350,17 @@ export type HistoryItemInsightProgress = HistoryItemBase & {
   progress: InsightProgressProps;
 };
 
+export interface BtwProps {
+  question: string;
+  answer: string;
+  isPending: boolean;
+}
+
+export type HistoryItemBtw = HistoryItemBase & {
+  type: 'btw';
+  btw: BtwProps;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -383,7 +394,8 @@ export type HistoryItemWithoutId =
   | HistoryItemContextUsage
   | HistoryItemArenaAgentComplete
   | HistoryItemArenaSessionComplete
-  | HistoryItemInsightProgress;
+  | HistoryItemInsightProgress
+  | HistoryItemBtw;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -411,6 +423,7 @@ export enum MessageType {
   ARENA_AGENT_COMPLETE = 'arena_agent_complete',
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
+  BTW = 'btw',
 }
 
 export interface InsightProgressProps {
