@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import type { HookEventDisplayInfo } from './types.js';
+import { t } from '../../../i18n/index.js';
 
 interface HooksListStepProps {
   hooks: HookEventDisplayInfo[];
@@ -41,7 +42,7 @@ export function HooksListStep({
   if (hooks.length === 0) {
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text color={theme.text.secondary}>No hook events found.</Text>
+        <Text color={theme.text.secondary}>{t('No hook events found.')}</Text>
       </Box>
     );
   }
@@ -52,21 +53,26 @@ export function HooksListStep({
     0,
   );
 
+  // Get the correct plural/singular form
+  const hooksConfiguredText =
+    totalConfigured === 1
+      ? t('{{count}} hook configured', { count: String(totalConfigured) })
+      : t('{{count}} hooks configured', { count: String(totalConfigured) });
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
         <Text bold color={theme.text.primary}>
-          Hooks
+          {t('Hooks')}
         </Text>
-        <Text color={theme.text.secondary}>
-          {` · ${totalConfigured} hook${totalConfigured !== 1 ? 's' : ''} configured`}
-        </Text>
+        <Text color={theme.text.secondary}>{` · ${hooksConfiguredText}`}</Text>
       </Box>
 
       <Box marginBottom={1}>
         <Text color={theme.text.secondary}>
-          This menu is read-only. To add or modify hooks, edit settings.json
-          directly or ask Qwen Code.
+          {t(
+            'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+          )}
         </Text>
       </Box>
 
@@ -101,7 +107,7 @@ export function HooksListStep({
 
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
-          Enter to select · Esc to cancel
+          {t('Enter to select · Esc to cancel')}
         </Text>
       </Box>
     </Box>

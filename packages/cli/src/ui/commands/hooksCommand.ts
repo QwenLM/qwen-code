@@ -20,13 +20,13 @@ import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
 function formatHookSource(source: string): string {
   switch (source) {
     case 'project':
-      return 'Project';
+      return t('Project');
     case 'user':
-      return 'User';
+      return t('User');
     case 'system':
-      return 'System';
+      return t('System');
     case 'extensions':
-      return 'Extension';
+      return t('Extension');
     default:
       return source;
   }
@@ -36,7 +36,7 @@ function formatHookSource(source: string): string {
  * Format hook status for display
  */
 function formatHookStatus(enabled: boolean): string {
-  return enabled ? '✓ Enabled' : '✗ Disabled';
+  return enabled ? t('✓ Enabled') : t('✗ Disabled');
 }
 
 const listCommand: SlashCommand = {

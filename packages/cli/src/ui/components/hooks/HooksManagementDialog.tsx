@@ -25,9 +25,10 @@ import { HooksListStep } from './HooksListStep.js';
 import { HookDetailStep } from './HookDetailStep.js';
 import {
   DISPLAY_HOOK_EVENTS,
-  SOURCE_DISPLAY_MAP,
+  getTranslatedSourceDisplayMap,
   createEmptyHookEventInfo,
 } from './constants.js';
+import { t } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('HOOKS_DIALOG');
 
@@ -44,6 +45,7 @@ export function HooksManagementDialog({
   const [selectedHookIndex, setSelectedHookIndex] = useState<number>(-1);
   const [hooks, setHooks] = useState<HookEventDisplayInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Load hooks data
   const fetchHooksData = useCallback((): HookEventDisplayInfo[] => {
@@ -54,6 +56,9 @@ export function HooksManagementDialog({
     const workspaceSettings = settings.forScope(
       SettingScope.Workspace,
     ).settings;
+
+    // Get translated source display map
+    const sourceDisplayMap = getTranslatedSourceDisplayMap();
 
     const result: HookEventDisplayInfo[] = [];
 
@@ -70,7 +75,7 @@ export function HooksManagementDialog({
             hookInfo.configs.push({
               config: hookConfig,
               source: HooksConfigSource.User,
-              sourceDisplay: SOURCE_DISPLAY_MAP[HooksConfigSource.User],
+              sourceDisplay: sourceDisplayMap[HooksConfigSource.User],
               enabled: true,
             });
           }
@@ -87,7 +92,7 @@ export function HooksManagementDialog({
             hookInfo.configs.push({
               config: hookConfig,
               source: HooksConfigSource.Project,
-              sourceDisplay: SOURCE_DISPLAY_MAP[HooksConfigSource.Project],
+              sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
               enabled: true,
             });
           }
@@ -103,7 +108,7 @@ export function HooksManagementDialog({
               hookInfo.configs.push({
                 config: hookConfig,
                 source: HooksConfigSource.Extensions,
-                sourceDisplay: SOURCE_DISPLAY_MAP[HooksConfigSource.Extensions],
+                sourceDisplay: sourceDisplayMap[HooksConfigSource.Extensions],
                 enabled: true,
               });
             }
@@ -120,11 +125,15 @@ export function HooksManagementDialog({
   // Load hooks data on initial render
   useEffect(() => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const hooksData = fetchHooksData();
       setHooks(hooksData);
     } catch (error) {
       debugLogger.error('Error loading hooks:', error);
+      setLoadError(
+        error instanceof Error ? error.message : 'Failed to load hooks',
+      );
     } finally {
       setIsLoading(false);
     }
@@ -180,7 +189,21 @@ export function HooksManagementDialog({
     if (isLoading) {
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text color={theme.text.secondary}>Loading hooks...</Text>
+          <Text color={theme.text.secondary}>{t('Loading hooks...')}</Text>
+        </Box>
+      );
+    }
+
+    if (loadError) {
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text color={theme.status.error}>{t('Error loading hooks:')}</Text>
+          <Text color={theme.text.secondary}>{loadError}</Text>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Press Escape to close')}
+            </Text>
+          </Box>
         </Box>
       );
     }
@@ -203,7 +226,7 @@ export function HooksManagementDialog({
         }
         return (
           <Box flexDirection="column" paddingX={1}>
-            <Text color={theme.text.secondary}>No hook selected</Text>
+            <Text color={theme.text.secondary}>{t('No hook selected')}</Text>
           </Box>
         );
 

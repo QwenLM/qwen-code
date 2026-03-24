@@ -594,6 +594,112 @@ export default {
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
   'Enable a disabled hook': 'Einen deaktivierten Hook aktivieren',
   'Disable an active hook': 'Einen aktiven Hook deaktivieren',
+  // Hooks - Dialog
+  Hooks: 'Hooks',
+  'Loading hooks...': 'Hooks werden geladen...',
+  'Error loading hooks:': 'Fehler beim Laden der Hooks:',
+  'Press Escape to close': 'Escape zum Schließen drücken',
+  'No hook selected': 'Kein Hook ausgewählt',
+  // Hooks - List Step
+  'No hook events found.': 'Keine Hook-Ereignisse gefunden.',
+  '{{count}} hook configured': '{{count}} Hook konfiguriert',
+  '{{count}} hooks configured': '{{count}} Hooks konfiguriert',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
+  // Hooks - Detail Step
+  'Exit codes:': 'Exit-Codes:',
+  'Configured hooks:': 'Konfigurierte Hooks:',
+  'No hooks configured for this event.':
+    'Für dieses Ereignis sind keine Hooks konfiguriert.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'Um Hooks hinzuzufügen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Source
+  Project: 'Projekt',
+  User: 'Benutzer',
+  System: 'System',
+  Extension: 'Erweiterung',
+  'Local Settings': 'Lokale Einstellungen',
+  'User Settings': 'Benutzereinstellungen',
+  'System Settings': 'Systemeinstellungen',
+  Extensions: 'Erweiterungen',
+  // Hooks - Status
+  '✓ Enabled': '✓ Aktiviert',
+  '✗ Disabled': '✗ Deaktiviert',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Vor der Tool-Ausführung',
+  'After tool execution': 'Nach der Tool-Ausführung',
+  'After tool execution fails': 'Wenn die Tool-Ausführung fehlschlägt',
+  'When notifications are sent': 'Wenn Benachrichtigungen gesendet werden',
+  'When the user submits a prompt': 'Wenn der Benutzer einen Prompt absendet',
+  'When a new session is started': 'Wenn eine neue Sitzung gestartet wird',
+  'Right before Qwen Code concludes its response':
+    'Direkt bevor Qwen Code seine Antwort abschließt',
+  'When a subagent (Agent tool call) is started':
+    'Wenn ein Subagent (Agent-Tool-Aufruf) gestartet wird',
+  'Right before a subagent concludes its response':
+    'Direkt bevor ein Subagent seine Antwort abschließt',
+  'Before conversation compaction': 'Vor der Gesprächskomprimierung',
+  'When a session is ending': 'Wenn eine Sitzung endet',
+  'When a permission dialog is displayed':
+    'Wenn ein Berechtigungsdialog angezeigt wird',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Die Eingabe an den Befehl ist JSON der Tool-Aufruf-Argumente.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Die Eingabe an den Befehl ist JSON mit den Feldern "inputs" (Tool-Aufruf-Argumente) und "response" (Tool-Aufruf-Antwort).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
+  'Input to command is JSON with original user prompt text.':
+    'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with session start source.':
+    'Die Eingabe an den Befehl ist JSON mit der Sitzungsstart-Quelle.',
+  'Input to command is JSON with session end reason.':
+    'Die Eingabe an den Befehl ist JSON mit dem Sitzungsende-Grund.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Die Eingabe an den Befehl ist JSON mit agent_id und agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Die Eingabe an den Befehl ist JSON mit agent_id, agent_type und agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Die Eingabe an den Befehl ist JSON mit Komprimierungsdetails.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input und tool_use_id. Ausgabe ist JSON mit hookSpecificOutput, das die Entscheidung zum Zulassen oder Ablehnen enthält.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr nicht angezeigt',
+  'show stderr to model and continue conversation':
+    'stderr dem Modell anzeigen und Konversation fortsetzen',
+  'show stderr to user only': 'stderr nur dem Benutzer anzeigen',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout im Transkriptmodus angezeigt (ctrl+o)',
+  'show stderr to model immediately': 'stderr sofort dem Modell anzeigen',
+  'show stderr to user only but continue with tool call':
+    'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
+  'block processing, erase original prompt, and show stderr to user only':
+    'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
+  'stdout shown to model': 'stdout dem Modell anzeigen',
+  'show stderr to user only (blocking errors ignored)':
+    'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',
+  'command completes successfully': 'Befehl erfolgreich abgeschlossen',
+  'stdout shown to subagent': 'stdout dem Subagenten anzeigen',
+  'show stderr to subagent and continue having it run':
+    'stderr dem Subagenten anzeigen und ihn weiterlaufen lassen',
+  'stdout appended as custom compact instructions':
+    'stdout als benutzerdefinierte Komprimierungsanweisungen angehängt',
+  'block compaction': 'Komprimierung blockieren',
+  'show stderr to user only but continue with compaction':
+    'stderr nur dem Benutzer anzeigen, aber mit Komprimierung fortfahren',
+  'use hook decision if provided':
+    'Hook-Entscheidung verwenden, falls bereitgestellt',
+  // Hooks - Messages
+  'Config not loaded.': 'Konfiguration nicht geladen.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hooks sind nicht aktiviert. Aktivieren Sie Hooks in den Einstellungen, um diese Funktion zu nutzen.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'Keine Hooks konfiguriert. Fügen Sie Hooks in Ihrer settings.json-Datei hinzu.',
+  'Configured Hooks ({{count}} total)':
+    'Konfigurierte Hooks ({{count}} insgesamt)',
 
   // ============================================================================
   // Commands - Session Export
@@ -708,7 +814,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',
   'Apply To': 'Anwenden auf',
-  'User Settings': 'Benutzereinstellungen',
   'Workspace Settings': 'Arbeitsbereich-Einstellungen',
 
   // ============================================================================
@@ -763,7 +868,6 @@ export default {
   'List configured MCP servers and tools':
     'Konfigurierte MCP-Server und Werkzeuge auflisten',
   'Restarts MCP servers.': 'MCP-Server neu starten.',
-  'Config not loaded.': 'Konfiguration nicht geladen.',
   'Could not retrieve tool registry.':
     'Werkzeugregister konnte nicht abgerufen werden.',
   'No MCP servers configured with OAuth authentication.':
@@ -972,7 +1076,6 @@ export default {
   'No server selected': 'Kein Server ausgewählt',
   '(disabled)': '(deaktiviert)',
   'Error:': 'Fehler:',
-  Extension: 'Erweiterung',
   tool: 'Werkzeug',
   tools: 'Werkzeuge',
   connected: 'verbunden',
