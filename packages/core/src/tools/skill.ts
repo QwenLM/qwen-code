@@ -21,6 +21,15 @@ export interface SkillParams {
 }
 
 /**
+ * Builds the LLM-facing content string when a skill body is injected.
+ * Shared between SkillToolInvocation (runtime) and /context (estimation)
+ * so that token estimates stay in sync with actual usage.
+ */
+export function buildSkillLlmContent(baseDir: string, body: string): string {
+  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+}
+
+/**
  * Skill tool that enables the model to access skill definitions.
  * The tool dynamically loads available skills and includes them in its description
  * for the model to choose from.
@@ -30,6 +39,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
+  private loadedSkillNames: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -84,7 +94,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient && geminiClient.isInitialized()) {
+      if (geminiClient) {
         await geminiClient.setTools();
       }
     }
@@ -176,11 +186,33 @@ ${skillDescriptions}
   }
 
   protected createInvocation(params: SkillParams) {
-    return new SkillToolInvocation(this.config, this.skillManager, params);
+    return new SkillToolInvocation(
+      this.config,
+      this.skillManager,
+      params,
+      (name: string) => this.loadedSkillNames.add(name),
+    );
   }
 
   getAvailableSkillNames(): string[] {
     return this.availableSkills.map((skill) => skill.name);
+  }
+
+  /**
+   * Returns the set of skill names that have been successfully loaded
+   * (invoked) during the current session. Used by /context to attribute
+   * loaded skill body tokens separately from the tool-definition cost.
+   */
+  getLoadedSkillNames(): ReadonlySet<string> {
+    return this.loadedSkillNames;
+  }
+
+  /**
+   * Clears the loaded-skills tracking. Should be called when the session
+   * is reset (e.g. /clear) so that stale body-token data is not shown.
+   */
+  clearLoadedSkills(): void {
+    this.loadedSkillNames.clear();
   }
 }
 
@@ -189,6 +221,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
+    private readonly onSkillLoaded: (name: string) => void,
   ) {
     super(params);
   }
@@ -240,11 +273,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.config,
         new SkillLaunchEvent(this.params.skill, true),
       );
+      this.onSkillLoaded(this.params.skill);
 
       const baseDir = path.dirname(skill.filePath);
-
-      // Build markdown content for LLM (show base dir, then body)
-      const llmContent = `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${skill.body}\n`;
+      const llmContent = buildSkillLlmContent(baseDir, skill.body);
 
       return {
         llmContent: [{ text: llmContent }],

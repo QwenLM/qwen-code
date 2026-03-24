@@ -72,11 +72,13 @@ export function resolvePathFromEnv(envVar?: string): {
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
  * @param userMemory - User memory to append
- * @returns Processed custom system instruction with user memory appended
+ * @param appendInstruction - Extra instructions to append after user memory
+ * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
+  appendInstruction?: string,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -100,17 +102,20 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
-      : '';
+  const memorySuffix = buildSystemPromptSuffix(userMemory);
 
-  return `${instructionText}${memorySuffix}`;
+  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+}
+
+function buildSystemPromptSuffix(text?: string): string {
+  const trimmed = text?.trim();
+  return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
 
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
+  appendInstruction?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -261,7 +266,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Task Management:** Use the '${ToolNames.TODO_WRITE}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
-- **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.TASK}' tool in order to reduce context usage. You should proactively use the '${ToolNames.TASK}' tool with specialized agents when the task at hand matches the agent's description.
+- **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.AGENT}' tool in order to reduce context usage. You should proactively use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${ToolNames.MEMORY}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
 
@@ -338,10 +343,11 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
   const memorySuffix =
     userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
+      ? buildSystemPromptSuffix(userMemory)
       : '';
+  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
 
-  return `${basePrompt}${memorySuffix}`;
+  return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
 /**
@@ -826,7 +832,7 @@ function getToolCallExamples(model?: string): string {
  * ```
  */
 export function getSubagentSystemReminder(agentTypes: string[]): string {
-  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.TASK} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
+  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.AGENT} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
 }
 
 /**
@@ -857,6 +863,16 @@ Plan mode is active. The user indicated that they do not want you to execute yet
 1. Answer the user's query comprehensively
 2. When you're done researching, present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan. Use ${ToolNames.ASK_USER_QUESTION} if you need to clarify approaches.
 </system-reminder>`;
+}
+
+/**
+ * Generates a system reminder about an active Arena session.
+ *
+ * @param configFilePath - Absolute path to the arena session's `config.json`
+ * @returns A formatted system reminder string wrapped in XML tags
+ */
+export function getArenaSystemReminder(configFilePath: string): string {
+  return `<system-reminder>An Arena session is active. For details, read: ${configFilePath}. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
 }
 
 // ============================================================================

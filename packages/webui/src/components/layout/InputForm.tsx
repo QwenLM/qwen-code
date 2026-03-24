@@ -64,7 +64,7 @@ export interface InputFormProps {
   /** Current input text */
   inputText: string;
   /** Ref for the input field */
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   /** Whether AI is currently generating */
   isStreaming: boolean;
   /** Whether waiting for response */
@@ -111,12 +111,20 @@ export interface InputFormProps {
   completionIsOpen: boolean;
   /** Completion items */
   completionItems?: CompletionItem[];
-  /** Completion select callback */
+  /** Completion select callback (Enter / click) */
   onCompletionSelect?: (item: CompletionItem) => void;
+  /** Completion fill callback (Tab — fill without executing). Falls back to onCompletionSelect. */
+  onCompletionFill?: (item: CompletionItem) => void;
   /** Completion close callback */
   onCompletionClose?: () => void;
+  /** Optional paste handler for the contentEditable input */
+  onPaste?: (e: React.ClipboardEvent) => void;
+  /** Optional content rendered between the input and actions */
+  extraContent?: ReactNode;
   /** Placeholder text */
   placeholder?: string;
+  /** Whether the current draft is eligible to submit */
+  canSubmit?: boolean;
 }
 
 /**
@@ -170,10 +178,16 @@ export const InputForm: FC<InputFormProps> = ({
   completionIsOpen,
   completionItems,
   onCompletionSelect,
+  onCompletionFill,
   onCompletionClose,
+  onPaste,
+  extraContent,
   placeholder = 'Ask Qwen Code …',
+  canSubmit,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
+  const hasDraftContent =
+    canSubmit ?? inputText.replace(/\u200B/g, '').trim().length > 0;
   const completionItemsResolved = completionItems ?? [];
   const completionActive =
     completionIsOpen &&
@@ -242,6 +256,7 @@ export const InputForm: FC<InputFormProps> = ({
               <CompletionMenu
                 items={completionItemsResolved}
                 onSelect={onCompletionSelect}
+                onFill={onCompletionFill}
                 onClose={onCompletionClose}
                 title={undefined}
               />
@@ -271,9 +286,14 @@ export const InputForm: FC<InputFormProps> = ({
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}
               onKeyDown={handleKeyDown}
+              onPaste={onPaste}
               suppressContentEditableWarning
             />
           </div>
+
+          {extraContent ? (
+            <div className="relative z-[1]">{extraContent}</div>
+          ) : null}
 
           <div className="composer-actions">
             {/* Edit mode button */}
@@ -353,7 +373,7 @@ export const InputForm: FC<InputFormProps> = ({
               <button
                 type="submit"
                 className="btn-send-compact [&>svg]:w-5 [&>svg]:h-5"
-                disabled={composerDisabled || !inputText.trim()}
+                disabled={composerDisabled || !hasDraftContent}
                 aria-label="Send message"
               >
                 <ArrowUpIcon />

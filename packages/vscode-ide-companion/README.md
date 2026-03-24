@@ -63,7 +63,7 @@ We welcome contributions! See our [Contributing Guide](https://github.com/QwenLM
 
 ## Terms of Service and Privacy Notice
 
-By installing this extension, you agree to the [Terms of Service](https://github.com/QwenLM/qwen-code/blob/main/docs/tos-privacy.md).
+By installing this extension, you agree to the [Terms of Service](https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/).
 
 ## License
 

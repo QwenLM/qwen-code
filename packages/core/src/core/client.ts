@@ -23,6 +23,7 @@ const debugLogger = createDebugLogger('CLIENT');
 import type { ContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
+  getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
@@ -45,7 +46,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { TaskTool } from '../tools/task.js';
+import { AgentTool } from '../tools/agent.js';
 
 // Telemetry
 import {
@@ -67,6 +68,7 @@ import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
 // Hook types and utilities
@@ -127,9 +129,9 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      this.chat = await this.startChat(resumedHistory);
+      await this.startChat(resumedHistory);
     } else {
-      this.chat = await this.startChat();
+      await this.startChat();
     }
   }
 
@@ -172,7 +174,11 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
-  async setTools(): Promise<void> {
+  setTools(): void {
+    if (!this.isInitialized()) {
+      return;
+    }
+
     const toolRegistry = this.config.getToolRegistry();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
@@ -180,7 +186,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
-    this.chat = await this.startChat();
+    await this.startChat();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -198,30 +204,48 @@ export class GeminiClient {
     });
   }
 
+  private getMainSessionSystemInstruction(): string {
+    const userMemory = this.config.getUserMemory();
+    const overrideSystemPrompt = this.config.getSystemPrompt();
+    const appendSystemPrompt = this.config.getAppendSystemPrompt();
+
+    if (overrideSystemPrompt) {
+      return getCustomSystemPrompt(
+        overrideSystemPrompt,
+        userMemory,
+        appendSystemPrompt,
+      );
+    }
+
+    return getCoreSystemPrompt(
+      userMemory,
+      this.config.getModel(),
+      appendSystemPrompt,
+    );
+  }
+
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     this.hasFailedCompressionAttempt = false;
 
-    const toolRegistry = this.config.getToolRegistry();
-    const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
-
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      const userMemory = this.config.getUserMemory();
-      const model = this.config.getModel();
-      const systemInstruction = getCoreSystemPrompt(userMemory, model);
+      const systemInstruction = this.getMainSessionSystemInstruction();
 
-      return new GeminiChat(
+      this.chat = new GeminiChat(
         this.config,
         {
           systemInstruction,
-          tools,
         },
         history,
         this.config.getChatRecordingService(),
+        uiTelemetryService,
       );
+
+      this.setTools();
+
+      return this.chat;
     } catch (error) {
       await reportError(
         error,
@@ -511,7 +535,7 @@ export class GeminiClient {
       return new Turn(this.getChat(), prompt_id);
     }
 
-    const compressed = await this.tryCompressChat(prompt_id, false);
+    const compressed = await this.tryCompressChat(prompt_id, false, signal);
 
     if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
       yield { type: GeminiEventType.ChatCompressed, value: compressed };
@@ -564,6 +588,19 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
+    // Check for arena control signal before starting a new turn
+    const arenaAgentClient = this.config.getArenaAgentClient();
+    if (arenaAgentClient) {
+      const controlSignal = await arenaAgentClient.checkControlSignal();
+      if (controlSignal) {
+        debugLogger.info(
+          `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
+        );
+        await arenaAgentClient.reportCancelled();
+        return new Turn(this.getChat(), prompt_id);
+      }
+    }
+
     const turn = new Turn(this.getChat(), prompt_id);
 
     // append system reminders to the request
@@ -572,12 +609,14 @@ export class GeminiClient {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
-      const hasTaskTool = this.config.getToolRegistry().getTool(TaskTool.Name);
+      const hasAgentTool = this.config
+        .getToolRegistry()
+        .getTool(AgentTool.Name);
       const subagents = (await this.config.getSubagentManager().listSubagents())
         .filter((subagent) => subagent.level !== 'builtin')
         .map((subagent) => subagent.name);
 
-      if (hasTaskTool && subagents.length > 0) {
+      if (hasAgentTool && subagents.length > 0) {
         systemReminders.push(getSubagentSystemReminder(subagents));
       }
 
@@ -586,6 +625,18 @@ export class GeminiClient {
         systemReminders.push(
           getPlanModeSystemReminder(this.config.getSdkMode()),
         );
+      }
+
+      // add arena system reminder if an arena session is active
+      const arenaManager = this.config.getArenaManager();
+      if (arenaManager) {
+        try {
+          const sessionDir = arenaManager.getArenaSessionDir();
+          const configPath = `${sessionDir}/config.json`;
+          systemReminders.push(getArenaSystemReminder(configPath));
+        } catch {
+          // Arena config not yet initialized — skip
+        }
       }
 
       requestToSent = [...systemReminders, ...requestToSent];
@@ -600,17 +651,39 @@ export class GeminiClient {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
           yield { type: GeminiEventType.LoopDetected };
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportError('Loop detected');
+          }
           return turn;
         }
       }
+      // Update arena status on Finished events — stats are derived
+      // automatically from uiTelemetryService by the reporter.
+      if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+        await arenaAgentClient.updateStatus();
+      }
+
       yield event;
       if (event.type === GeminiEventType.Error) {
+        if (arenaAgentClient) {
+          const errorMsg =
+            event.value instanceof Error
+              ? event.value.message
+              : 'Unknown error';
+          await arenaAgentClient.reportError(errorMsg);
+        }
         return turn;
       }
     }
     // Fire Stop hook through MessageBus (only if hooks are enabled)
     // This must be done before any early returns to ensure hooks are always triggered
-    if (hooksEnabled && messageBus && !turn.pendingToolCalls.length) {
+    if (
+      hooksEnabled &&
+      messageBus &&
+      !turn.pendingToolCalls.length &&
+      signal &&
+      !signal.aborted
+    ) {
       // Get response text from the chat history
       const history = this.getHistory();
       const lastModelMessage = history
@@ -633,26 +706,38 @@ export class GeminiClient {
             stop_hook_active: true,
             last_assistant_message: responseText,
           },
+          signal,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
       );
+
+      // Check if aborted after hook execution
+      if (signal.aborted) {
+        return turn;
+      }
+
       const hookOutput = response.output
         ? createHookOutput('Stop', response.output)
         : undefined;
 
       const stopOutput = hookOutput as StopHookOutput | undefined;
 
+      // This should happen regardless of the hook's decision
+      if (stopOutput?.systemMessage) {
+        yield {
+          type: GeminiEventType.HookSystemMessage,
+          value: stopOutput.systemMessage,
+        };
+      }
+
       // For Stop hooks, blocking/stop execution should force continuation
       if (
         stopOutput?.isBlockingDecision() ||
         stopOutput?.shouldStopExecution()
       ) {
-        // Emit system message if provided (e.g., "🔄 Ralph iteration 5")
-        if (stopOutput.systemMessage) {
-          yield {
-            type: GeminiEventType.HookSystemMessage,
-            value: stopOutput.systemMessage,
-          };
+        // Check if aborted before continuing
+        if (signal.aborted) {
+          return turn;
         }
 
         const continueReason = stopOutput.getEffectiveReason();
@@ -669,6 +754,10 @@ export class GeminiClient {
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
+        // Report completed before returning — agent has no more work to do
+        if (arenaAgentClient) {
+          await arenaAgentClient.reportCompleted();
+        }
         return turn;
       }
 
@@ -697,7 +786,15 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
+      } else if (arenaAgentClient) {
+        // No continuation needed — agent completed its task
+        await arenaAgentClient.reportCompleted();
       }
+    }
+
+    // Report cancelled to arena when user cancelled mid-stream
+    if (signal?.aborted && arenaAgentClient) {
+      await arenaAgentClient.reportCancelled();
     }
 
     return turn;
@@ -708,14 +805,17 @@ export class GeminiClient {
     generationConfig: GenerateContentConfig,
     abortSignal: AbortSignal,
     model: string,
+    promptIdOverride?: string,
   ): Promise<GenerateContentResponse> {
     let currentAttemptModel: string = model;
+    const promptId =
+      promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
     try {
       const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
         ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
-        : getCoreSystemPrompt(userMemory, this.config.getModel());
+        : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {
         abortSignal,
@@ -732,7 +832,7 @@ export class GeminiClient {
             config: requestConfig,
             contents,
           },
-          this.lastPromptId!,
+          promptId,
         );
       };
       const result = await retryWithBackoff(apiCall, {
@@ -762,6 +862,7 @@ export class GeminiClient {
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
+    signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
     const compressionService = new ChatCompressionService();
 
@@ -772,6 +873,7 @@ export class GeminiClient {
       this.config.getModel(),
       this.config,
       this.hasFailedCompressionAttempt,
+      signal,
     );
 
     // Handle compression result
@@ -784,7 +886,7 @@ export class GeminiClient {
           compressedHistory: newHistory,
         });
 
-        this.chat = await this.startChat(newHistory);
+        await this.startChat(newHistory);
         uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }

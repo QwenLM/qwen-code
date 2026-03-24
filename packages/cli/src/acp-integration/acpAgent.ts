@@ -58,12 +58,13 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
 import { SettingScope } from '../config/settings.js';
+import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
-import type { ApprovalModeValue } from './session/types.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
+import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -87,7 +88,33 @@ export async function runAcpAgent(
     stream,
   );
 
+  // Handle SIGTERM/SIGINT for graceful shutdown.
+  // Without this, signal handlers registered elsewhere in the CLI
+  // (e.g., stdin raw mode restoration) override the default exit behavior,
+  // causing the ACP process to ignore termination signals.
+  let shuttingDown = false;
+  const shutdownHandler = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    debugLogger.debug('[ACP] Shutdown signal received, closing streams');
+    try {
+      process.stdin.destroy();
+    } catch {
+      // stdin may already be closed
+    }
+    try {
+      process.stdout.destroy();
+    } catch {
+      // stdout may already be closed
+    }
+  };
+  process.on('SIGTERM', shutdownHandler);
+  process.on('SIGINT', shutdownHandler);
+
   await connection.closed;
+
+  process.off('SIGTERM', shutdownHandler);
+  process.off('SIGINT', shutdownHandler);
 }
 
 function toStdioServer(server: McpServer): McpServerStdio | undefined {
@@ -188,8 +215,14 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const sessionService = new SessionService(params.cwd);
-    const exists = await sessionService.sessionExists(params.sessionId);
+    const exists = await runWithAcpRuntimeOutputDir(
+      this.settings,
+      params.cwd,
+      async () => {
+        const sessionService = new SessionService(params.cwd);
+        return sessionService.sessionExists(params.sessionId);
+      },
+    );
     if (!exists) {
       throw RequestError.invalidParams(
         undefined,
@@ -230,10 +263,12 @@ class QwenAgent implements Agent {
     params: ListSessionsRequest,
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
-    const sessionService = new SessionService(cwd);
     const numericCursor = params.cursor ? Number(params.cursor) : undefined;
-    const result = await sessionService.listSessions({
-      cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+    const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
+      const sessionService = new SessionService(cwd);
+      return sessionService.listSessions({
+        cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+      });
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({

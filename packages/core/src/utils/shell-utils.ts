@@ -126,6 +126,16 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let i = 0;
 
+  const previousNonWhitespaceChar = (index: number): string | undefined => {
+    for (let j = index - 1; j >= 0; j--) {
+      const ch = command[j];
+      if (ch && !/\s/.test(ch)) {
+        return ch;
+      }
+    }
+    return undefined;
+  };
+
   while (i < command.length) {
     const char = command[i];
     const nextChar = command[i + 1];
@@ -145,14 +155,30 @@ export function splitCommands(command: string): string[] {
     if (!inSingleQuotes && !inDoubleQuotes) {
       if (
         (char === '&' && nextChar === '&') ||
-        (char === '|' && nextChar === '|')
+        (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
         commands.push(currentCommand.trim());
         currentCommand = '';
         i++; // Skip the next character
-      } else if (char === ';' || char === '&' || char === '|') {
+      } else if (char === ';') {
         commands.push(currentCommand.trim());
         currentCommand = '';
+      } else if (char === '&') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>' || prevChar === '<') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
+      } else if (char === '|') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
         commands.push(currentCommand.trim());
@@ -971,6 +997,52 @@ export function isCommandNeedsPermission(command: string): {
   return {
     requiresPermission: true,
     reason: 'Command requires permission to execute.',
+  };
+}
+
+/**
+ * Checks user arguments for potentially dangerous shell characters.
+ * This is used to validate arguments before they are substituted into
+ * shell command templates (e.g., $ARGUMENTS placeholder).
+ *
+ * Note: This does NOT remove outer quotes - it validates the raw input.
+ * Use escapeShellArg() for safe shell argument escaping.
+ *
+ * @param args - The raw user arguments string
+ * @returns Object with isSafe flag and list of dangerous patterns found
+ */
+export function checkArgumentSafety(args: string): {
+  isSafe: boolean;
+  dangerousPatterns: string[];
+} {
+  const dangerousPatterns: string[] = [];
+
+  // Command substitution patterns
+  if (args.includes('$(')) dangerousPatterns.push('$() command substitution');
+  if (args.includes('`'))
+    dangerousPatterns.push('backtick command substitution');
+  if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
+  if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
+
+  // Command separators (outside of quotes)
+  if (args.includes(';')) dangerousPatterns.push('; command separator');
+  if (args.includes('|')) dangerousPatterns.push('| pipe');
+  if (args.includes('&&')) dangerousPatterns.push('&& AND operator');
+  if (args.includes('||')) dangerousPatterns.push('|| OR operator');
+
+  // Background execution (space + &, with optional surrounding)
+  if (args.includes(' &') || args.includes('& '))
+    dangerousPatterns.push('& background operator');
+
+  // Input/Output redirection
+  if (args.includes('>') || args.includes('<')) {
+    if (/>\s|\d>/.test(args)) dangerousPatterns.push('> output redirection');
+    if (/<\s|\d</.test(args)) dangerousPatterns.push('< input redirection');
+  }
+
+  return {
+    isSafe: dangerousPatterns.length === 0,
+    dangerousPatterns,
   };
 }
 

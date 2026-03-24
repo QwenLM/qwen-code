@@ -9,7 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -126,12 +126,12 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const dirPath = path.resolve(this.params.path);
     const workspaceContext = this.config.getWorkspaceContext();
-    const userSkillsBase = this.config.storage.getUserSkillsDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const userExtensionsDir = Storage.getUserExtensionsDir();
 
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
-      isSubpath(userSkillsBase, dirPath) ||
+      isSubpaths(userSkillsDirs, dirPath) ||
       isSubpath(userExtensionsDir, dirPath)
     ) {
       return 'allow';

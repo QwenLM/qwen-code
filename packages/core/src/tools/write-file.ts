@@ -25,7 +25,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { FileEncoding } from '../services/fileSystemService.js';
+import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -218,7 +218,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
     if (!fileExists) {
       fs.mkdirSync(dirName, { recursive: true });
-      useBOM = this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
+      const userEncoding = this.config.getDefaultFileEncoding();
+      if (userEncoding === FileEncoding.UTF8_BOM) {
+        // User explicitly configured UTF-8 BOM for all new files
+        useBOM = true;
+      } else if (userEncoding === undefined) {
+        // No explicit setting: auto-detect based on platform/extension.
+        // e.g. .ps1 on Windows with a non-UTF-8 code page needs BOM so
+        // PowerShell 5.1 reads the file as UTF-8 instead of the system ANSI page
+        useBOM = needsUtf8Bom(file_path);
+      }
+      // else: user explicitly set 'utf-8' (no BOM) — respect it
       detectedEncoding = undefined;
     }
 

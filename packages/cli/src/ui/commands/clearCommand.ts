@@ -7,7 +7,14 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+import {
+  uiTelemetryService,
+  SessionEndReason,
+  SessionStartSource,
+  ToolNames,
+  SkillTool,
+  type PermissionMode,
+} from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -20,10 +27,28 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     if (config) {
+      // Fire SessionEnd event before clearing (current session ends)
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionEndEvent(SessionEndReason.Clear);
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
+      }
+
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
+
+      // Clear loaded-skills tracking so /context doesn't show stale data
+      const skillTool = config
+        .getToolRegistry()
+        ?.getAllTools()
+        .find((tool) => tool.name === ToolNames.SKILL);
+      if (skillTool instanceof SkillTool) {
+        skillTool.clearLoadedSkills();
+      }
 
       if (newSessionId && context.session.startNewSession) {
         context.session.startNewSession(newSessionId);
@@ -39,6 +64,19 @@ export const clearCommand: SlashCommand = {
         await geminiClient.resetChat();
       } else {
         context.ui.setDebugMessage(t('Starting a new session and clearing.'));
+      }
+
+      // Fire SessionStart event after clearing (new session starts)
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(
+            SessionStartSource.Clear,
+            config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
+          );
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       }
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));

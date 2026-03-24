@@ -15,14 +15,10 @@ import type {
   ToolInvocation,
   ToolResult,
   ToolConfirmationPayload,
-
-  ToolConfirmationOutcome} from './tools.js';
-import type { PermissionDecision } from '../permissions/types.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind
+  ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
@@ -115,7 +111,11 @@ ${textContent}
 
       const result = await geminiClient.generateContent(
         [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {},
+        {
+          systemInstruction:
+            'Extract and summarize the requested information from the provided web content. ' +
+            'Be concise and accurate. Respond only with the requested information.',
+        },
         signal,
         this.config.getModel() || DEFAULT_QWEN_MODEL,
       );

@@ -13,6 +13,7 @@ import {
 import type {
   Client,
   Agent,
+  ContentBlock,
   SessionNotification,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -52,6 +53,8 @@ export class AcpConnection {
   private sessionId: string | null = null;
   private workingDir: string = process.cwd();
   private fileHandler = new AcpFileHandler();
+  private lastExitCode: number | null = null;
+  private lastExitSignal: string | null = null;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -63,6 +66,9 @@ export class AcpConnection {
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
+  /** Invoked when the child process exits (expected or unexpected). */
+  onDisconnected: (code: number | null, signal: string | null) => void =
+    () => {};
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
     optionId: string;
     answers?: Record<string, string>;
@@ -78,6 +84,8 @@ export class AcpConnection {
       this.disconnect();
     }
 
+    this.lastExitCode = null;
+    this.lastExitSignal = null;
     this.workingDir = workingDir;
 
     const env = { ...process.env };
@@ -145,6 +153,14 @@ export class AcpConnection {
       console.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
+      this.lastExitCode = code;
+      this.lastExitSignal = signal;
+      if (this.child) {
+        this.sdkConnection = null;
+        this.sessionId = null;
+        this.child = null;
+        this.onDisconnected(code, signal);
+      }
     });
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -154,7 +170,11 @@ export class AcpConnection {
     }
 
     if (!this.child || this.child.killed) {
-      throw new Error(`Qwen ACP process failed to start`);
+      const code = this.lastExitCode ?? this.child?.exitCode ?? null;
+      const signal = this.lastExitSignal;
+      throw new Error(
+        `Qwen ACP process failed to start (exit code: ${code}, signal: ${signal})`,
+      );
     }
 
     // Convert Node.js child process streams to Web Streams for SDK
@@ -166,22 +186,20 @@ export class AcpConnection {
     const stream = ndJsonStream(stdin, stdout);
 
     // Build the SDK Client implementation that bridges to our callbacks.
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
     this.sdkConnection = new ClientSideConnection(
       (_agent: Agent): Client => ({
-        sessionUpdate(params: SessionNotification): Promise<void> {
+        sessionUpdate: (params: SessionNotification): Promise<void> => {
           console.log(
             '[ACP] >>> Processing session_update:',
             JSON.stringify(params).substring(0, 300),
           );
-          self.onSessionUpdate(params as unknown as SessionNotification);
+          this.onSessionUpdate(params as unknown as SessionNotification);
           return Promise.resolve();
         },
 
-        async requestPermission(
+        requestPermission: async (
           params: RequestPermissionRequest,
-        ): Promise<RequestPermissionResponse> {
+        ): Promise<RequestPermissionResponse> => {
           const permissionData = params as unknown as RequestPermissionRequest;
           try {
             // Check if this is an ask_user_question request by inspecting rawInput
@@ -197,7 +215,7 @@ export class AcpConnection {
               const metadata =
                 rawInput?.metadata as AskUserQuestionRequest['metadata'];
 
-              const response = await self.onAskUserQuestion({
+              const response = await this.onAskUserQuestion({
                 sessionId: permissionData.sessionId,
                 questions,
                 metadata,
@@ -230,7 +248,7 @@ export class AcpConnection {
             }
 
             // Handle regular permission request
-            const response = await self.onPermissionRequest(permissionData);
+            const response = await this.onPermissionRequest(permissionData);
             const optionId = response?.optionId;
             console.log('[ACP] Permission request:', optionId);
             let outcome: 'selected' | 'cancelled';
@@ -247,7 +265,7 @@ export class AcpConnection {
             if (outcome === 'cancelled') {
               return { outcome: { outcome: 'cancelled' } };
             }
-            const selectedOptionId = self.resolvePermissionOptionId(
+            const selectedOptionId = this.resolvePermissionOptionId(
               permissionData,
               optionId,
             );
@@ -265,11 +283,11 @@ export class AcpConnection {
           }
         },
 
-        async readTextFile(
+        readTextFile: async (
           params: ReadTextFileRequest,
-        ): Promise<ReadTextFileResponse> {
+        ): Promise<ReadTextFileResponse> => {
           try {
-            const result = await self.fileHandler.handleReadTextFile({
+            const result = await this.fileHandler.handleReadTextFile({
               path: params.path,
               sessionId: params.sessionId,
               line: params.line ?? null,
@@ -277,14 +295,14 @@ export class AcpConnection {
             });
             return { content: result.content };
           } catch (error) {
-            throw self.mapReadTextFileError(error, params.path);
+            throw this.mapReadTextFileError(error, params.path);
           }
         },
 
-        async writeTextFile(
+        writeTextFile: async (
           params: WriteTextFileRequest,
-        ): Promise<WriteTextFileResponse> {
-          await self.fileHandler.handleWriteTextFile({
+        ): Promise<WriteTextFileResponse> => {
+          await this.fileHandler.handleWriteTextFile({
             path: params.path,
             content: params.content,
             sessionId: params.sessionId,
@@ -292,16 +310,16 @@ export class AcpConnection {
           return {};
         },
 
-        async extNotification(
+        extNotification: async (
           method: string,
           params: Record<string, unknown>,
-        ): Promise<void> {
+        ): Promise<void> => {
           if (method === 'authenticate/update') {
             console.log(
               '[ACP] >>> Processing authenticate_update:',
               JSON.stringify(params).substring(0, 300),
             );
-            self.onAuthenticateUpdate(
+            this.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
           } else {
@@ -334,7 +352,9 @@ export class AcpConnection {
   }
 
   private ensureConnection(): ClientSideConnection {
-    if (!this.sdkConnection) {
+    // sdkConnection is cleared asynchronously by the exit handler;
+    // isConnected (via exitCode) catches the race window before the exit event fires.
+    if (!this.sdkConnection || !this.isConnected) {
       throw new Error('Not connected to ACP agent');
     }
     return this.sdkConnection;
@@ -410,14 +430,16 @@ export class AcpConnection {
     return response;
   }
 
-  async sendPrompt(prompt: string): Promise<PromptResponse> {
+  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
     }
+    const promptBlocks =
+      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
     const response: PromptResponse = await conn.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text: prompt }],
+      prompt: promptBlocks,
     });
     // Emit end-of-turn from stopReason
     if (response.stopReason) {
@@ -541,7 +563,9 @@ export class AcpConnection {
   }
 
   get isConnected(): boolean {
-    return this.child !== null && !this.child.killed;
+    return (
+      this.child !== null && !this.child.killed && this.child.exitCode === null
+    );
   }
 
   get hasActiveSession(): boolean {

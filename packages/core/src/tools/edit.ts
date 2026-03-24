@@ -21,7 +21,7 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { FileEncoding } from '../services/fileSystemService.js';
+import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -392,8 +392,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
       if (editData.isNewFile) {
-        const useBOM =
-          this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
+        const userEncoding = this.config.getDefaultFileEncoding();
+        let useBOM = false;
+        if (userEncoding === FileEncoding.UTF8_BOM) {
+          useBOM = true;
+        } else if (userEncoding === undefined) {
+          // No explicit setting: auto-detect (e.g. .ps1 on non-UTF-8 Windows)
+          useBOM = needsUtf8Bom(this.params.file_path);
+        }
         await this.config.getFileSystemService().writeTextFile({
           path: this.params.file_path,
           content: editData.newContent,

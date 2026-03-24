@@ -43,7 +43,7 @@ describe('LSTool', () => {
       }),
       getTruncateToolOutputLines: () => 1000,
       storage: {
-        getUserSkillsDir: () => userSkillsBase,
+        getUserSkillsDirs: () => [userSkillsBase],
       },
     } as unknown as Config;
 

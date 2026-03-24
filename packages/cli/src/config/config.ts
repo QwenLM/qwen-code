@@ -10,7 +10,6 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  FileEncoding,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
@@ -36,6 +35,7 @@ import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import type { Settings, LoadedSettings } from './settings.js';
 import { SettingScope } from './settings.js';
+import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -53,16 +53,16 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 
 // UUID v4 regex pattern for validation
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SESSION_ID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
 
 /**
- * Validates if a string is a valid UUID format
- * @param value - The string to validate
- * @returns True if the string is a valid UUID, false otherwise
+ * Validates if a string is a valid session ID format.
+ * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
+ * (used by Arena to give each agent a deterministic session ID).
  */
-function isValidUUID(value: string): boolean {
-  return UUID_REGEX.test(value);
+function isValidSessionId(value: string): boolean {
+  return SESSION_ID_REGEX.test(value);
 }
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -112,6 +112,8 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
+  systemPrompt: string | undefined;
+  appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -290,6 +292,16 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description:
             'Execute the provided prompt and continue in interactive mode',
+        })
+        .option('system-prompt', {
+          type: 'string',
+          description:
+            'Override the main session system prompt for this run. Can be combined with --append-system-prompt.',
+        })
+        .option('append-system-prompt', {
+          type: 'string',
+          description:
+            'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
         })
         .option('sandbox', {
           alias: 's',
@@ -559,10 +571,13 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
           }
-          if (argv['sessionId'] && !isValidUUID(argv['sessionId'] as string)) {
+          if (
+            argv['sessionId'] &&
+            !isValidSessionId(argv['sessionId'] as string)
+          ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          if (argv['resume'] && !isValidUUID(argv['resume'] as string)) {
+          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
             return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           return true;
@@ -572,6 +587,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
+    // Register Auth subcommands
+    .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand);
 
@@ -690,6 +707,11 @@ export async function loadCliConfig(
   loadedSettings?: LoadedSettings,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
+
+  // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
+  // is auto-detected inside getRuntimeBaseDir() at each call site).
+  // Pass cwd so that relative paths like ".qwen" resolve per-project.
+  Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
 
   const ideMode = settings.ide?.enabled ?? false;
 
@@ -1007,6 +1029,8 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
+    systemPrompt: argv.systemPrompt,
+    appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
@@ -1108,11 +1132,22 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
-    defaultFileEncoding:
-      settings.general?.defaultFileEncoding ?? FileEncoding.UTF8,
+    defaultFileEncoding: settings.general?.defaultFileEncoding,
     lsp: {
       enabled: lspEnabled,
     },
+    agents: settings.agents
+      ? {
+          displayMode: settings.agents.displayMode,
+          arena: settings.agents.arena
+            ? {
+                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
+                preserveArtifacts:
+                  settings.agents.arena.preserveArtifacts ?? false,
+              }
+            : undefined,
+        }
+      : undefined,
   });
 
   if (lspEnabled) {

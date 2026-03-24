@@ -18,6 +18,7 @@ import {
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
+  stripStartupContext,
 } from './environmentContext.js';
 import type { Config } from '../config/config.js';
 import { getFolderStructure } from './getFolderStructure.js';
@@ -221,5 +222,78 @@ describe('getInitialChatHistory', () => {
     const history = await getInitialChatHistory(mockConfig as Config);
 
     expect(history).toEqual([]);
+  });
+});
+
+describe('stripStartupContext', () => {
+  it('should strip the env context + model ack from the start of history', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'This is the Qwen Code...' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      },
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Hi there' }] },
+    ];
+
+    const result = stripStartupContext(history);
+    expect(result).toEqual([
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Hi there' }] },
+    ]);
+  });
+
+  it('should return history unchanged when no startup context is present', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Hi there' }] },
+    ];
+
+    const result = stripStartupContext(history);
+    expect(result).toEqual(history);
+  });
+
+  it('should return empty array when history is only the startup context', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'This is the Qwen Code...' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      },
+    ];
+
+    const result = stripStartupContext(history);
+    expect(result).toEqual([]);
+  });
+
+  it('should return history unchanged when it has fewer than 2 entries', () => {
+    expect(stripStartupContext([])).toEqual([]);
+    expect(
+      stripStartupContext([{ role: 'user', parts: [{ text: 'Hello' }] }]),
+    ).toEqual([{ role: 'user', parts: [{ text: 'Hello' }] }]);
+  });
+
+  it('should round-trip with getInitialChatHistory', async () => {
+    const mockConfig = {
+      getSkipStartupContext: vi.fn().mockReturnValue(false),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue(['/test/dir']),
+      }),
+      getFileService: vi.fn(),
+    };
+
+    const conversation: Content[] = [
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Hi' }] },
+    ];
+
+    const withStartup = await getInitialChatHistory(
+      mockConfig as unknown as Config,
+      conversation,
+    );
+    const stripped = stripStartupContext(withStartup);
+
+    expect(stripped).toEqual(conversation);
   });
 });

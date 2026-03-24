@@ -35,6 +35,7 @@ import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
@@ -162,13 +163,15 @@ export async function startInteractiveUI(
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
-              <AppContainer
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                version={version}
-                initializationResult={initializationResult}
-              />
+              <AgentViewProvider config={config}>
+                <AppContainer
+                  config={config}
+                  settings={settings}
+                  startupWarnings={startupWarnings}
+                  version={version}
+                  initializationResult={initializationResult}
+                />
+              </AgentViewProvider>
             </VimModeProvider>
           </SessionStatsProvider>
         </KeypressProvider>
@@ -323,8 +326,15 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker
+  // Handle --resume without a session ID by showing the session picker.
+  // Set the runtime output dir early so the picker can find sessions stored
+  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
+  // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available

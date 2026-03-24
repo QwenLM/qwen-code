@@ -9,7 +9,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ToolResult,
   ToolResultDisplay,
-  TaskResultDisplay,
+  AgentResultDisplay,
 } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import type {
@@ -18,42 +18,45 @@ import type {
 } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import { ContextState } from '../agents/runtime/agent-headless.js';
 import {
-  type SubagentConfig,
-  SubagentTerminateMode,
-} from '../subagents/types.js';
-import { ContextState } from '../subagents/subagent.js';
-import {
-  SubAgentEventEmitter,
-  SubAgentEventType,
-} from '../subagents/subagent-events.js';
+  AgentEventEmitter,
+  AgentEventType,
+} from '../agents/runtime/agent-events.js';
 import type {
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentFinishEvent,
-  SubAgentErrorEvent,
-  SubAgentApprovalRequestEvent,
-} from '../subagents/subagent-events.js';
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentFinishEvent,
+  AgentErrorEvent,
+  AgentApprovalRequestEvent,
+} from '../agents/runtime/agent-events.js';
+import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { PermissionMode } from '../hooks/types.js';
+import type { StopHookOutput } from '../hooks/types.js';
 
-export interface TaskParams {
+export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type: string;
 }
 
-const debugLogger = createDebugLogger('TASK');
+const debugLogger = createDebugLogger('AGENT');
 
 /**
- * Task tool that enables primary agents to delegate tasks to specialized subagents.
- * The tool dynamically loads available subagents and includes them in its description
+ * Agent tool that enables primary agents to delegate tasks to specialized agents.
+ * The tool dynamically loads available agents and includes them in its description
  * for the model to choose from.
  */
-export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
-  static readonly Name: string = ToolNames.TASK;
+export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
+  static readonly Name: string = ToolNames.AGENT;
 
   private subagentManager: SubagentManager;
-  private availableSubagents: SubagentConfig[] = [];
+  private availableSubagents: SubagentConfig[] =
+    BuiltinAgentRegistry.getBuiltinAgents();
+  private readonly removeChangeListener: () => void;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -79,9 +82,9 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     };
 
     super(
-      TaskTool.Name,
-      ToolDisplayNames.TASK,
-      'Delegate tasks to specialized subagents. Loading available subagents...', // Initial description
+      AgentTool.Name,
+      ToolDisplayNames.AGENT,
+      'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
       Kind.Other,
       initialSchema,
       true, // isOutputMarkdown
@@ -89,12 +92,16 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     );
 
     this.subagentManager = config.getSubagentManager();
-    this.subagentManager.addChangeListener(() => {
+    this.removeChangeListener = this.subagentManager.addChangeListener(() => {
       void this.refreshSubagents();
     });
 
     // Initialize the tool asynchronously
     this.refreshSubagents();
+  }
+
+  dispose(): void {
+    this.removeChangeListener();
   }
 
   /**
@@ -106,13 +113,13 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
       this.availableSubagents = await this.subagentManager.listSubagents();
       this.updateDescriptionAndSchema();
     } catch (error) {
-      debugLogger.warn('Failed to load subagents for Task tool:', error);
-      this.availableSubagents = [];
+      debugLogger.warn('Failed to load agents for Agent tool:', error);
+      this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient && geminiClient.isInitialized()) {
+      if (geminiClient) {
         await geminiClient.setTools();
       }
     }
@@ -132,37 +139,40 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         .join('\n');
     }
 
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
+    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
+The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
 When NOT to use the Agent tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
+- If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
 
+
 Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+- Always include a short description (3-5 words) summarizing what the agent will do
+- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
+- The agent's outputs should generally be trusted
+- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
+- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 
 Example usage:
+
 <example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a signficant piece of code
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
+"test-runner": use this agent after you are done writing code to run tests
+"greeting-responder": use this agent to respond to user greetings with a friendly joke
+</example_agent_descriptions>
 
 <example>
 user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the Write tool to write a function that checks if a number is prime
 assistant: I'm going to use the Write tool to write the following code:
 <code>
 function isPrime(n) {
@@ -174,10 +184,9 @@ function isPrime(n) {
 }
 </code>
 <commentary>
-Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
 </commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the with the code-reviewer agent 
+assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
 </example>
 
 <example>
@@ -185,13 +194,12 @@ user: "Hello"
 <commentary>
 Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
 </commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-responder agent"
 </example>
 `;
 
     // Update description using object property assignment since it's readonly
-    (this as { description: string }).description =
-      baseDescription + subagentDescriptions;
+    (this as { description: string }).description = baseDescription;
 
     // Generate dynamic schema with enum of available subagent names
     const subagentNames = this.availableSubagents.map((s) => s.name);
@@ -213,7 +221,7 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
     }
   }
 
-  override validateToolParams(params: TaskParams): string | null {
+  override validateToolParams(params: AgentParams): string | null {
     // Validate required fields
     if (
       !params.description ||
@@ -239,9 +247,10 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
       return 'Parameter "subagent_type" must be a non-empty string.';
     }
 
-    // Validate that the subagent exists
+    // Validate that the subagent exists (case-insensitive)
+    const lowerType = params.subagent_type.toLowerCase();
     const subagentExists = this.availableSubagents.some(
-      (subagent) => subagent.name === params.subagent_type,
+      (subagent) => subagent.name.toLowerCase() === lowerType,
     );
 
     if (!subagentExists) {
@@ -252,8 +261,8 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
     return null;
   }
 
-  protected createInvocation(params: TaskParams) {
-    return new TaskToolInvocation(this.config, this.subagentManager, params);
+  protected createInvocation(params: AgentParams) {
+    return new AgentToolInvocation(this.config, this.subagentManager, params);
   }
 
   getAvailableSubagentNames(): string[] {
@@ -261,29 +270,24 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
   }
 }
 
-class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
-  private readonly _eventEmitter: SubAgentEventEmitter;
-  private currentDisplay: TaskResultDisplay | null = null;
-  private currentToolCalls: TaskResultDisplay['toolCalls'] = [];
+class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
+  readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
+  private currentDisplay: AgentResultDisplay | null = null;
+  private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
-    params: TaskParams,
+    params: AgentParams,
   ) {
     super(params);
-    this._eventEmitter = new SubAgentEventEmitter();
-  }
-
-  get eventEmitter(): SubAgentEventEmitter {
-    return this._eventEmitter;
   }
 
   /**
    * Updates the current display state and calls updateOutput if provided
    */
   private updateDisplay(
-    updates: Partial<TaskResultDisplay>,
+    updates: Partial<AgentResultDisplay>,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
     if (!this.currentDisplay) return;
@@ -304,12 +308,12 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
   private setupEventListeners(
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
-    this.eventEmitter.on(SubAgentEventType.START, () => {
+    this.eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
     });
 
-    this.eventEmitter.on(SubAgentEventType.TOOL_CALL, (...args: unknown[]) => {
-      const event = args[0] as SubAgentToolCallEvent;
+    this.eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
+      const event = args[0] as AgentToolCallEvent;
       const newToolCall = {
         callId: event.callId,
         name: event.name,
@@ -327,33 +331,30 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       );
     });
 
-    this.eventEmitter.on(
-      SubAgentEventType.TOOL_RESULT,
-      (...args: unknown[]) => {
-        const event = args[0] as SubAgentToolResultEvent;
-        const toolCallIndex = this.currentToolCalls!.findIndex(
-          (call) => call.callId === event.callId,
+    this.eventEmitter.on(AgentEventType.TOOL_RESULT, (...args: unknown[]) => {
+      const event = args[0] as AgentToolResultEvent;
+      const toolCallIndex = this.currentToolCalls!.findIndex(
+        (call) => call.callId === event.callId,
+      );
+      if (toolCallIndex >= 0) {
+        this.currentToolCalls![toolCallIndex] = {
+          ...this.currentToolCalls![toolCallIndex],
+          status: event.success ? 'success' : 'failed',
+          error: event.error,
+          responseParts: event.responseParts,
+        };
+
+        this.updateDisplay(
+          {
+            toolCalls: [...this.currentToolCalls!],
+          },
+          updateOutput,
         );
-        if (toolCallIndex >= 0) {
-          this.currentToolCalls![toolCallIndex] = {
-            ...this.currentToolCalls![toolCallIndex],
-            status: event.success ? 'success' : 'failed',
-            error: event.error,
-            responseParts: event.responseParts,
-          };
+      }
+    });
 
-          this.updateDisplay(
-            {
-              toolCalls: [...this.currentToolCalls!],
-            },
-            updateOutput,
-          );
-        }
-      },
-    );
-
-    this.eventEmitter.on(SubAgentEventType.FINISH, (...args: unknown[]) => {
-      const event = args[0] as SubAgentFinishEvent;
+    this.eventEmitter.on(AgentEventType.FINISH, (...args: unknown[]) => {
+      const event = args[0] as AgentFinishEvent;
       this.updateDisplay(
         {
           status: event.terminateReason === 'GOAL' ? 'completed' : 'failed',
@@ -363,8 +364,8 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       );
     });
 
-    this.eventEmitter.on(SubAgentEventType.ERROR, (...args: unknown[]) => {
-      const event = args[0] as SubAgentErrorEvent;
+    this.eventEmitter.on(AgentEventType.ERROR, (...args: unknown[]) => {
+      const event = args[0] as AgentErrorEvent;
       this.updateDisplay(
         {
           status: 'failed',
@@ -376,9 +377,9 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
 
     // Indicate when a tool call is waiting for approval
     this.eventEmitter.on(
-      SubAgentEventType.TOOL_WAITING_APPROVAL,
+      AgentEventType.TOOL_WAITING_APPROVAL,
       (...args: unknown[]) => {
-        const event = args[0] as SubAgentApprovalRequestEvent;
+        const event = args[0] as AgentApprovalRequestEvent;
         const idx = this.currentToolCalls!.findIndex(
           (c) => c.callId === event.callId,
         );
@@ -457,7 +458,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `${this.params.subagent_type} subagent: "${this.params.description}"`;
+    return this.params.description;
   }
 
   async execute(
@@ -503,7 +504,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       if (updateOutput) {
         updateOutput(this.currentDisplay);
       }
-      const subagentScope = await this.subagentManager.createSubagentScope(
+      const subagent = await this.subagentManager.createAgentHeadless(
         subagentConfig,
         this.config,
         { eventEmitter: this.eventEmitter },
@@ -513,20 +514,111 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
       const contextState = new ContextState();
       contextState.set('task_prompt', this.params.prompt);
 
+      // Fire SubagentStart hook before execution
+      const hookSystem = this.config.getHookSystem();
+      const agentId = `${subagentConfig.name}-${Date.now()}`;
+      const agentType = this.params.subagent_type;
+
+      if (hookSystem) {
+        try {
+          const startHookOutput = await hookSystem.fireSubagentStartEvent(
+            agentId,
+            agentType,
+            PermissionMode.Default,
+            signal,
+          );
+
+          // Inject additional context from hook output into subagent context
+          const additionalContext = startHookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            contextState.set('hook_context', additionalContext);
+          }
+        } catch (hookError) {
+          debugLogger.warn(
+            `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
+          );
+        }
+      }
+
       // Execute the subagent (blocking)
-      await subagentScope.runNonInteractive(contextState, signal);
+      await subagent.execute(contextState, signal);
+
+      // Fire SubagentStop hook after execution and handle block decisions
+      if (hookSystem && !signal?.aborted) {
+        const transcriptPath = this.config.getTranscriptPath();
+        let stopHookActive = false;
+
+        // Loop to handle "block" decisions (prevent subagent from stopping)
+        let continueExecution = true;
+        let iterationCount = 0;
+        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
+
+        while (continueExecution) {
+          iterationCount++;
+
+          // Safety check to prevent infinite loops
+          if (iterationCount >= maxIterations) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+            );
+            continueExecution = false;
+            break;
+          }
+
+          try {
+            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+              agentId,
+              agentType,
+              transcriptPath,
+              subagent.getFinalText(),
+              stopHookActive,
+              PermissionMode.Default,
+              signal,
+            );
+
+            const typedStopOutput = stopHookOutput as
+              | StopHookOutput
+              | undefined;
+
+            if (
+              typedStopOutput?.isBlockingDecision() ||
+              typedStopOutput?.shouldStopExecution()
+            ) {
+              // Feed the reason back to the subagent and continue execution
+              const continueReason = typedStopOutput.getEffectiveReason();
+              stopHookActive = true;
+
+              const continueContext = new ContextState();
+              continueContext.set('task_prompt', continueReason);
+              await subagent.execute(continueContext, signal);
+
+              if (signal?.aborted) {
+                continueExecution = false;
+              }
+              // Loop continues to re-check SubagentStop hook
+            } else {
+              continueExecution = false;
+            }
+          } catch (hookError) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+            );
+            continueExecution = false;
+          }
+        }
+      }
 
       // Get the results
-      const finalText = subagentScope.getFinalText();
-      const terminateMode = subagentScope.getTerminateMode();
-      const success = terminateMode === SubagentTerminateMode.GOAL;
-      const executionSummary = subagentScope.getExecutionSummary();
+      const finalText = subagent.getFinalText();
+      const terminateMode = subagent.getTerminateMode();
+      const success = terminateMode === AgentTerminateMode.GOAL;
+      const executionSummary = subagent.getExecutionSummary();
 
       if (signal?.aborted) {
         this.updateDisplay(
           {
             status: 'cancelled',
-            terminateReason: 'Task was cancelled by user',
+            terminateReason: 'Agent was cancelled by user',
             executionSummary,
           },
           updateOutput,
@@ -550,9 +642,9 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      debugLogger.error(`[TaskTool] Error running subagent: ${errorMessage}`);
+      debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
 
-      const errorDisplay: TaskResultDisplay = {
+      const errorDisplay: AgentResultDisplay = {
         ...this.currentDisplay!,
         status: 'failed',
         terminateReason: `Failed to run subagent: ${errorMessage}`,

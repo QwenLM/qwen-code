@@ -9,7 +9,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
 
@@ -483,7 +483,7 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export interface TaskResultDisplay {
+export interface AgentResultDisplay {
   type: 'task_execution';
   subagentName: string;
   subagentColor?: string;
@@ -492,7 +492,7 @@ export interface TaskResultDisplay {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   terminateReason?: string;
   result?: string;
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -534,7 +534,7 @@ export type ToolResultDisplay =
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
-  | TaskResultDisplay
+  | AgentResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
 

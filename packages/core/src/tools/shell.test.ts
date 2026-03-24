@@ -56,7 +56,7 @@ describe('ShellTool', () => {
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
         getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
@@ -947,6 +947,24 @@ describe('ShellTool', () => {
       expect(details.permissionRules).toContainEqual(
         expect.stringContaining('npm'),
       );
+    });
+
+    it('should not surface file descriptor redirects as standalone commands in confirmation details', async () => {
+      const params = {
+        command: 'npm run build 2>&1 | head -100',
+        is_background: false,
+      };
+      const invocation = shellTool.build(params);
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).toBe('npm');
+      expect(details.permissionRules).toEqual(['Bash(npm run *)']);
     });
 
     it('should throw an error if validation fails', () => {

@@ -39,6 +39,9 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  SessionEndReason,
+  SessionStartSource,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -52,6 +55,7 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -68,6 +72,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
+import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -96,6 +101,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { useAgentViewState } from './contexts/AgentViewContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -293,7 +299,46 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         historyManager.loadHistory(historyItems);
       }
+
+      // Fire SessionStart event after config is initialized
+      const sessionStartSource = resumedSessionData
+        ? SessionStartSource.Resume
+        : SessionStartSource.Startup;
+
+      const hookSystem = config.getHookSystem();
+
+      if (hookSystem) {
+        hookSystem
+          .fireSessionStartEvent(
+            sessionStartSource,
+            config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
+          )
+          .then(() => {
+            debugLogger.debug('SessionStart event completed successfully');
+          })
+          .catch((err) => {
+            debugLogger.warn(`SessionStart hook failed: ${err}`);
+          });
+      } else {
+        debugLogger.debug(
+          'SessionStart: HookSystem not available, skipping event',
+        );
+      }
     })();
+
+    // Register SessionEnd cleanup for process exit
+    registerCleanup(async () => {
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionEndEvent(SessionEndReason.PromptInputExit);
+        debugLogger.debug('SessionEnd event completed successfully!!!');
+      } catch (err) {
+        debugLogger.error(`SessionEnd hook failed: ${err}`);
+      }
+    });
+
     registerCleanup(async () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
@@ -474,6 +519,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isModelDialogOpen, openModelDialog, closeModelDialog } =
     useModelCommand();
+  const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
+    useArenaCommand();
 
   const {
     isResumeDialogOpen,
@@ -514,6 +561,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openModelDialog,
       openTrustDialog,
+      openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
@@ -538,6 +586,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
+      openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
       openTrustDialog,
@@ -556,6 +605,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleSlashCommand,
     slashCommands,
     pendingHistoryItems: pendingSlashCommandHistoryItems,
+    btwItem,
+    setBtwItem,
+    cancelBtw,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -675,12 +727,15 @@ export const AppContainer = (props: AppContainerProps) => {
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
-  // Auto-accept indicator
+  const agentViewState = useAgentViewState();
+
+  // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
     shouldBlockTab: () => hasSuggestionsVisible,
+    disabled: agentViewState.activeView !== 'main',
   });
 
   const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
@@ -693,9 +748,33 @@ export const AppContainer = (props: AppContainerProps) => {
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {
+      // Route to active in-process agent if viewing a sub-agent tab.
+      if (agentViewState.activeView !== 'main') {
+        const agent = agentViewState.agents.get(agentViewState.activeView);
+        if (agent) {
+          agent.interactiveAgent.enqueueMessage(submittedValue.trim());
+          return;
+        }
+      }
+      if (
+        streamingState === StreamingState.Responding &&
+        isBtwCommand(submittedValue)
+      ) {
+        void submitQuery(submittedValue);
+        return;
+      }
       addMessage(submittedValue);
     },
-    [addMessage],
+    [addMessage, agentViewState, streamingState, submitQuery],
+  );
+
+  const handleArenaModelsSelected = useCallback(
+    (models: string[]) => {
+      const value = models.join(',');
+      buffer.setText(`/arena start --models ${value} `);
+      closeArenaDialog();
+    },
+    [buffer, closeArenaDialog],
   );
 
   // Welcome back functionality (must be after handleFinalSubmit)
@@ -771,10 +850,17 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [buffer, terminalWidth, terminalHeight]);
 
-  // Compute available terminal height based on controls measurement
+  // agentViewState is declared earlier (before handleFinalSubmit) so it
+  // is available for input routing. Referenced here for layout computation.
+
+  // Compute available terminal height based on controls measurement.
+  // When in-process agents are present the AgentTabBar renders an extra
+  // row at the top of the layout; subtract it so downstream consumers
+  // (shell, transcript, etc.) don't overestimate available space.
+  const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2,
+    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
   );
 
   config.setShellExecutionConfig({
@@ -877,6 +963,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const dialogsVisibleRef = useRef(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1028,16 +1115,23 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
-  const { elapsedTime, currentLoadingPhrase } = useLoadingIndicator(
-    streamingState,
-    settings.merged.ui?.customWittyPhrases,
-  );
+  const currentCandidatesTokens = Object.values(
+    sessionStats.metrics?.models ?? {},
+  ).reduce((acc, model) => acc + (model.tokens?.candidates ?? 0), 0);
+
+  const { elapsedTime, currentLoadingPhrase, taskStartTokens } =
+    useLoadingIndicator(
+      streamingState,
+      settings.merged.ui?.customWittyPhrases,
+      currentCandidatesTokens,
+    );
 
   useAttentionNotifications({
     isFocused,
     streamingState,
     elapsedTime,
     settings,
+    config,
   });
 
   // Dialog close functionality
@@ -1053,6 +1147,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    activeArenaDialog,
+    closeArenaDialog,
     isFolderTrustDialogOpen,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
@@ -1154,7 +1250,13 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Escape key handling
+        // Dismiss or cancel btw side-question on Escape,
+        // but only when btw is actually visible (not hidden behind a dialog).
+        if (btwItem && !dialogsVisibleRef.current) {
+          cancelBtw();
+          return;
+        }
+
         // Skip if shell is focused (to allow shell's own escape handling)
         if (embeddedShellFocused) {
           return;
@@ -1194,6 +1296,20 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
+      }
+
+      // Dismiss completed btw side-question on Space or Enter,
+      // but only when btw is visible and the input buffer is empty.
+      if (
+        btwItem &&
+        !btwItem.btw.isPending &&
+        !dialogsVisibleRef.current &&
+        buffer.text.length === 0
+      ) {
+        if (key.name === 'return' || key.sequence === ' ') {
+          setBtwItem(null);
+          return;
+        }
       }
 
       let enteringConstrainHeightMode = false;
@@ -1250,6 +1366,9 @@ export const AppContainer = (props: AppContainerProps) => {
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
     ],
@@ -1311,6 +1430,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSettingsDialogOpen ||
     isModelDialogOpen ||
     isTrustDialogOpen ||
+    activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
     isAuthenticating ||
@@ -1322,6 +1442,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isExtensionsManagerDialogOpen;
+  dialogsVisibleRef.current = dialogsVisible;
 
   const {
     isFeedbackDialogOpen,
@@ -1362,6 +1483,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isSettingsDialogOpen,
       isModelDialogOpen,
       isTrustDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1411,6 +1533,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,
@@ -1438,6 +1563,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     }),
     [
       isThemeDialogOpen,
@@ -1456,6 +1583,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isSettingsDialogOpen,
       isModelDialogOpen,
       isTrustDialogOpen,
+      activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
@@ -1504,6 +1632,9 @@ export const AppContainer = (props: AppContainerProps) => {
       staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
       nightly,
       branchName,
       sessionStats,
@@ -1533,6 +1664,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Per-task token tracking
+      taskStartTokens,
     ],
   );
 
@@ -1552,6 +1685,9 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
       dismissCodingPlanUpdate,
       closeTrustDialog,
       closePermissionsDialog,
@@ -1602,6 +1738,9 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openArenaDialog,
+      closeArenaDialog,
+      handleArenaModelsSelected,
       dismissCodingPlanUpdate,
       closeTrustDialog,
       closePermissionsDialog,

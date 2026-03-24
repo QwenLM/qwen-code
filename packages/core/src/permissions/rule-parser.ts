@@ -99,10 +99,15 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   WebSearch: 'web_search',
   WebSearchTool: 'web_search',
 
-  // Task tool
-  task: 'task',
-  Task: 'task',
-  TaskTool: 'task',
+  // Agent (subagent) tool
+  agent: 'agent',
+  Agent: 'agent',
+  AgentTool: 'agent',
+
+  // Legacy aliases for the agent tool (renamed from "task")
+  task: 'agent',
+  Task: 'agent',
+  TaskTool: 'agent',
 
   // Skill tool
   skill: 'skill',
@@ -121,10 +126,6 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
 
   // Legacy edit tool name
   replace: 'edit',
-
-  // Agent (subagent) rules — "Agent" is a user-friendly alias for the Task tool.
-  // "Agent(Explore)" is parsed with toolName = "task" and specifier = "Explore"
-  Agent: 'task',
 };
 
 /**
@@ -301,7 +302,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   web_fetch: 'WebFetch',
   web_search: 'WebSearch',
   // Agent / Skill
-  task: 'Task',
+  agent: 'Agent',
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
@@ -725,9 +726,11 @@ function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
-  // Wildcard: "mcp__server__*" matches all tools from that server
-  if (pattern.endsWith('__*')) {
-    const prefix = pattern.slice(0, -1); // "mcp__server__"
+  // Wildcard: patterns ending with "*" match by prefix.
+  // e.g. "mcp__server__*" matches all tools from that server,
+  //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
+  if (pattern.endsWith('*')) {
+    const prefix = pattern.slice(0, -1); // strip trailing "*"
     return toolName.startsWith(prefix);
   }
 

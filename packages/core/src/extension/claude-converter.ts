@@ -16,6 +16,7 @@ import type {
   ExtensionInstallMetadata,
   MCPServerConfig,
 } from '../config/config.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
@@ -25,6 +26,7 @@ import {
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { substituteHookVariables } from './variables.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -40,7 +42,7 @@ export interface ClaudePluginConfig {
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
-  hooks?: string;
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
@@ -312,12 +314,21 @@ export function convertClaudeToQwenConfig(
     }
   }
 
-  // Warn about unsupported fields
+  // Parse hooks
+  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
   if (claudeConfig.hooks) {
-    debugLogger.warn(
-      `[Claude Converter] Hooks are not yet supported in ${claudeConfig.name}`,
-    );
+    if (typeof claudeConfig.hooks === 'string') {
+      // If it's a string, it's a file path, we handle it later in the conversion process
+      // hooks will be loaded from file path in the convertClaudePluginPackage function
+    } else {
+      // Assume it's already in the correct format
+      hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
+    }
+  } else {
+    hooks = undefined;
   }
+
+  // Warn about unsupported fields
   if (claudeConfig.outputStyles) {
     debugLogger.warn(
       `[Claude Converter] Output styles are not yet supported in ${claudeConfig.name}`,
@@ -329,6 +340,7 @@ export function convertClaudeToQwenConfig(
     version: claudeConfig.version,
     mcpServers,
     lspServers: claudeConfig.lspServers,
+    hooks, // Assign the properly typed hooks variable
   };
 }
 
@@ -461,7 +473,42 @@ export async function convertClaudePluginPackage(
       // Otherwise, keep the existing folder from pluginSource (default behavior)
     }
 
-    // Step 9.1: Convert collected agent files from Claude format to Qwen format
+    // Step 7: Handle hooks from file paths if needed
+    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+      const hooksPath = path.isAbsolute(mergedConfig.hooks)
+        ? mergedConfig.hooks
+        : path.join(pluginSource, mergedConfig.hooks);
+
+      if (fs.existsSync(hooksPath)) {
+        try {
+          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
+          const parsedHooks = JSON.parse(hooksContent);
+
+          // Check if the file has a top-level "hooks" property (like Claude plugins use)
+          // or if the entire file content is the hooks object
+          let hooksData;
+          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+            hooksData = parsedHooks.hooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          } else {
+            // Assume the entire file content is the hooks object
+            hooksData = parsedHooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          }
+
+          // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
+    // Step 9: Convert collected agent files from Claude format to Qwen format
     const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
 

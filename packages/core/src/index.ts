@@ -89,7 +89,7 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/shell.js';
 export * from './tools/skill.js';
-export * from './tools/task.js';
+export * from './tools/agent.js';
 export * from './tools/todoWrite.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
@@ -105,6 +105,7 @@ export * from './services/chatRecordingService.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
+export * from './services/gitWorktreeService.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 
@@ -180,13 +181,14 @@ export {
 } from './telemetry/types.js';
 
 // ============================================================================
-// Extensions, Skills & Subagents
+// Extensions, Skills, Subagents & Agents
 // ============================================================================
 
 export * from './extension/index.js';
 export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
 export * from './subagents/index.js';
+export * from './agents/index.js';
 
 // ============================================================================
 // Utilities
@@ -196,6 +198,7 @@ export * from './utils/browser.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
+export * from './utils/environmentContext.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
@@ -217,6 +220,7 @@ export * from './utils/promptIdContext.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
+export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
 export * from './utils/schemaValidator.js';
@@ -252,3 +256,9 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry } from './hooks/index.js';
+
+// Export hook triggers for notification hooks
+export {
+  fireNotificationHook,
+  type NotificationHookResult,
+} from './core/toolHookTriggers.js';

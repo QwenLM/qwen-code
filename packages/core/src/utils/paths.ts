@@ -241,6 +241,10 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
   );
 }
 
+export function isSubpaths(parentPath: string[], childPath: string): boolean {
+  return parentPath.some((p) => isSubpath(p, childPath));
+}
+
 /**
  * Resolves a path with tilde (~) expansion and relative path resolution.
  * Handles tilde expansion for home directory and resolves relative paths

@@ -7,8 +7,8 @@
 import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import type {
-  TaskResultDisplay,
-  SubagentStatsSummary,
+  AgentResultDisplay,
+  AgentStatsSummary,
   Config,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
@@ -20,7 +20,7 @@ import { ToolConfirmationMessage } from '../../messages/ToolConfirmationMessage.
 export type DisplayMode = 'compact' | 'default' | 'verbose';
 
 export interface AgentExecutionDisplayProps {
-  data: TaskResultDisplay;
+  data: AgentResultDisplay;
   availableHeight?: number;
   childWidth: number;
   config: Config;
@@ -28,7 +28,7 @@ export interface AgentExecutionDisplayProps {
 
 const getStatusColor = (
   status:
-    | TaskResultDisplay['status']
+    | AgentResultDisplay['status']
     | 'executing'
     | 'success'
     | 'awaiting_approval',
@@ -50,7 +50,7 @@ const getStatusColor = (
   }
 };
 
-const getStatusText = (status: TaskResultDisplay['status']) => {
+const getStatusText = (status: AgentResultDisplay['status']) => {
   switch (status) {
     case 'running':
       return 'Running';
@@ -301,7 +301,7 @@ const TaskPromptSection: React.FC<{
  * Status dot component with similar height as text
  */
 const StatusDot: React.FC<{
-  status: TaskResultDisplay['status'];
+  status: AgentResultDisplay['status'];
 }> = ({ status }) => (
   <Box marginLeft={1} marginRight={1}>
     <Text color={getStatusColor(status)}>●</Text>
@@ -312,7 +312,7 @@ const StatusDot: React.FC<{
  * Status indicator component
  */
 const StatusIndicator: React.FC<{
-  status: TaskResultDisplay['status'];
+  status: AgentResultDisplay['status'];
 }> = ({ status }) => {
   const color = getStatusColor(status);
   const text = getStatusText(status);
@@ -323,7 +323,7 @@ const StatusIndicator: React.FC<{
  * Tool calls list - format consistent with ToolInfo in ToolMessage.tsx
  */
 const ToolCallsList: React.FC<{
-  toolCalls: TaskResultDisplay['toolCalls'];
+  toolCalls: AgentResultDisplay['toolCalls'];
   displayMode: DisplayMode;
 }> = ({ toolCalls, displayMode }) => {
   const calls = toolCalls || [];
@@ -435,7 +435,7 @@ const ToolCallItem: React.FC<{
  * Execution summary details component
  */
 const ExecutionSummaryDetails: React.FC<{
-  data: TaskResultDisplay;
+  data: AgentResultDisplay;
   displayMode: DisplayMode;
 }> = ({ data, displayMode: _displayMode }) => {
   const stats = data.executionSummary;
@@ -467,7 +467,7 @@ const ExecutionSummaryDetails: React.FC<{
  * Tool usage statistics component
  */
 const ToolUsageStats: React.FC<{
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 }> = ({ executionSummary }) => {
   if (!executionSummary) {
     return (
@@ -505,7 +505,7 @@ const ToolUsageStats: React.FC<{
  * Results section for completed executions - matches the clean layout from the image
  */
 const ResultsSection: React.FC<{
-  data: TaskResultDisplay;
+  data: AgentResultDisplay;
   displayMode: DisplayMode;
 }> = ({ data, displayMode }) => (
   <Box flexDirection="column" gap={1}>

@@ -7,6 +7,7 @@
 import { createContext, useContext } from 'react';
 import type {
   HistoryItem,
+  HistoryItemBtw,
   ThoughtSummary,
   ShellConfirmationRequest,
   ConfirmationRequest,
@@ -33,6 +34,7 @@ import type { UpdateObject } from '../utils/updateCheck.js';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
+import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -53,6 +55,7 @@ export interface UIState {
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isTrustDialogOpen: boolean;
+  activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
@@ -102,6 +105,9 @@ export interface UIState {
   staticExtraHeight: number;
   dialogsVisible: boolean;
   pendingHistoryItems: HistoryItemWithoutId[];
+  btwItem: HistoryItemBtw | null;
+  setBtwItem: (item: HistoryItemBtw | null) => void;
+  cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
   sessionStats: SessionStatsState;
@@ -132,6 +138,8 @@ export interface UIState {
   isMcpDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
+  // Per-task token tracking
+  taskStartTokens: number;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

@@ -5,7 +5,12 @@
  */
 
 import { useState, useCallback } from 'react';
-import { SessionService, type Config } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  type Config,
+  SessionStartSource,
+  type PermissionMode,
+} from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 
@@ -66,6 +71,19 @@ export function useResumeCommand(
       // Update session history core.
       config.startNewSession(sessionId, sessionData);
       await config.getGeminiClient()?.initialize?.();
+
+      // Fire SessionStart event after resuming session
+      try {
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(
+            SessionStartSource.Resume,
+            config.getModel() ?? '',
+            String(config.getApprovalMode()) as PermissionMode,
+          );
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      }
 
       // Refresh terminal UI.
       remount?.();

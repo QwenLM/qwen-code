@@ -12,6 +12,7 @@ import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { Footer } from '../components/Footer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
+import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
@@ -24,12 +25,17 @@ export const ScreenReaderAppLayout: React.FC = () => {
       <Box flexGrow={1} overflow="hidden">
         <MainContent />
       </Box>
+
       {uiState.dialogsVisible ? (
         <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
           <DialogManager
             terminalWidth={uiState.terminalWidth}
             addItem={uiState.historyManager.addItem}
           />
+        </Box>
+      ) : uiState.btwItem ? (
+        <Box marginX={2} width={uiState.terminalWidth - 4}>
+          <BtwMessage btw={uiState.btwItem.btw} />
         </Box>
       ) : (
         <Composer />
