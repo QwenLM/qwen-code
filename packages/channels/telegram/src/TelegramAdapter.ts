@@ -1,9 +1,11 @@
 import { Telegraf } from 'telegraf';
+import {
+  telegramFormat,
+  splitHtmlForTelegram,
+} from 'telegram-markdown-formatter';
 import { ChannelBase } from '@qwen-code/channel-base';
 import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
 import type { AcpBridge } from '@qwen-code/channel-base';
-
-const TELEGRAM_MSG_LIMIT = 4096;
 
 export class TelegramChannel extends ChannelBase {
   private bot: Telegraf;
@@ -40,46 +42,31 @@ export class TelegramChannel extends ChannelBase {
       }
     });
 
-    console.log(`[Telegram:${this.name}] Launching bot (polling)...`);
     this.bot.launch({ dropPendingUpdates: true }).catch((err) => {
       console.error(`[Telegram:${this.name}] Bot launch error:`, err);
     });
-    console.log(`[Telegram:${this.name}] Bot started (polling)`);
 
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
     process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    // Split long messages at Telegram's 4096 char limit
-    const chunks = splitMessage(text, TELEGRAM_MSG_LIMIT);
+    const html = telegramFormat(text);
+    const chunks = splitHtmlForTelegram(html);
     for (const chunk of chunks) {
-      await this.bot.telegram.sendMessage(chatId, chunk);
+      try {
+        await this.bot.telegram.sendMessage(chatId, chunk, {
+          parse_mode: 'HTML',
+        });
+      } catch {
+        // Fallback to plain text if HTML parsing fails
+        await this.bot.telegram.sendMessage(chatId, text);
+        return;
+      }
     }
   }
 
   disconnect(): void {
     this.bot.stop();
   }
-}
-
-function splitMessage(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= limit) {
-      chunks.push(remaining);
-      break;
-    }
-    // Try to split at last newline within limit
-    let splitAt = remaining.lastIndexOf('\n', limit);
-    if (splitAt <= 0) {
-      splitAt = limit;
-    }
-    chunks.push(remaining.substring(0, splitAt));
-    remaining = remaining.substring(splitAt).replace(/^\n/, '');
-  }
-  return chunks;
 }

@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
-    "telegraf": "^4.16.0"
+    "telegraf": "^4.16.0",
+    "telegram-markdown-formatter": "^0.1.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
