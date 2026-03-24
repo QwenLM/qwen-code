@@ -10,6 +10,7 @@
 
 import type {
   SuggestionContext,
+  SuggestionProvider,
   SuggestionResult,
   SuggestionRule,
   FollowupSuggestion,
@@ -172,10 +173,13 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
   },
 ];
 
+/** Maximum number of suggestions returned */
+const MAX_SUGGESTIONS = 5;
+
 /**
  * Rule-based suggestion provider
  */
-export class RuleBasedProvider {
+export class RuleBasedProvider implements SuggestionProvider {
   private rules: SuggestionRule[];
 
   constructor(rules: SuggestionRule[] = DEFAULT_SUGGESTION_RULES) {
@@ -186,7 +190,9 @@ export class RuleBasedProvider {
   }
 
   /**
-   * Get suggestions based on the context
+   * Get suggestions based on the context.
+   * Collects suggestions from all matching rules, deduplicates by text,
+   * and returns up to MAX_SUGGESTIONS results sorted by priority.
    */
   getSuggestions(context: SuggestionContext): SuggestionResult {
     // Don't show suggestions if there was an error or cancellation
@@ -199,16 +205,26 @@ export class RuleBasedProvider {
       return { suggestions: [], shouldShow: false };
     }
 
-    // Check each rule in priority order
+    // Collect suggestions from all matching rules
+    const seen = new Set<string>();
+    const all: FollowupSuggestion[] = [];
+
     for (const rule of this.rules) {
       if (this.matchesRule(rule, context)) {
-        const suggestions = this.convertToFollowupSuggestions(rule.suggestions);
-        // Only show if there are actual suggestions
-        return { suggestions, shouldShow: suggestions.length > 0 };
+        for (const s of this.convertToFollowupSuggestions(rule.suggestions)) {
+          if (!seen.has(s.text)) {
+            seen.add(s.text);
+            all.push(s);
+          }
+        }
       }
     }
 
-    return { suggestions: [], shouldShow: false };
+    // Sort by priority descending and limit
+    all.sort((a, b) => b.priority - a.priority);
+    const suggestions = all.slice(0, MAX_SUGGESTIONS);
+
+    return { suggestions, shouldShow: suggestions.length > 0 };
   }
 
   /**
@@ -218,42 +234,42 @@ export class RuleBasedProvider {
     suggestionRule: SuggestionRule,
     context: SuggestionContext,
   ): boolean {
-    // Check custom condition first
+    const pattern = suggestionRule.pattern;
+
+    // Check pattern first (cheap string/regex match) before condition (may be expensive)
+    let patternMatches = false;
+
+    if (suggestionRule.matchMessage) {
+      // Match pattern against message content only
+      if (pattern instanceof RegExp) {
+        patternMatches = pattern.test(context.lastMessage);
+      } else if (typeof pattern === 'string') {
+        patternMatches = context.lastMessage
+          .toLowerCase()
+          .includes(pattern.toLowerCase());
+      }
+    } else if (pattern instanceof RegExp) {
+      patternMatches = context.toolCalls.some((call) =>
+        pattern.test(call.name),
+      );
+    } else if (typeof pattern === 'string') {
+      const lowerPattern = pattern.toLowerCase();
+      patternMatches =
+        context.toolCalls.some((call) =>
+          call.name.toLowerCase().includes(lowerPattern),
+        ) || context.lastMessage.toLowerCase().includes(lowerPattern);
+    }
+
+    if (!patternMatches) {
+      return false;
+    }
+
+    // Pattern matched — now check custom condition (potentially expensive)
     if (suggestionRule.condition && !suggestionRule.condition(context)) {
       return false;
     }
 
-    const pattern = suggestionRule.pattern;
-
-    // If matchMessage is true, check pattern against message content only
-    if (suggestionRule.matchMessage) {
-      if (pattern instanceof RegExp) {
-        return pattern.test(context.lastMessage);
-      }
-      if (typeof pattern === 'string') {
-        return context.lastMessage
-          .toLowerCase()
-          .includes(pattern.toLowerCase());
-      }
-      return false;
-    }
-
-    // Check pattern against tool calls
-    if (pattern instanceof RegExp) {
-      return context.toolCalls.some((call) => pattern.test(call.name));
-    }
-
-    // Check pattern as string (matches both tool calls and message)
-    if (typeof pattern === 'string') {
-      const lowerPattern = pattern.toLowerCase();
-      return (
-        context.toolCalls.some((call) =>
-          call.name.toLowerCase().includes(lowerPattern),
-        ) || context.lastMessage.toLowerCase().includes(lowerPattern)
-      );
-    }
-
-    return false;
+    return true;
   }
 
   /**

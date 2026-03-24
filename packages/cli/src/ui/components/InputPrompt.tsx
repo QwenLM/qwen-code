@@ -1114,7 +1114,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     if (followupSuggestions) {
       followup.setSuggestions(followupSuggestions);
     }
-  }, [followupSuggestions, followup]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
+  }, [followupSuggestions]);
 
   const showAutoAcceptStyling =
     !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;

@@ -11,25 +11,26 @@
  * suggestion generation and pass the results to this hook.
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import type { FollowupSuggestion } from '@qwen-code/qwen-code-core';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  INITIAL_FOLLOWUP_STATE,
+  followupReducers,
+} from '@qwen-code/qwen-code-core';
+import type {
+  FollowupSuggestion,
+  FollowupState,
+} from '@qwen-code/qwen-code-core';
 
 // Re-export types from core for convenience
-export type { FollowupSuggestion } from '@qwen-code/qwen-code-core';
+export type {
+  FollowupSuggestion,
+  FollowupState,
+} from '@qwen-code/qwen-code-core';
 
-/**
- * State for follow-up suggestions
- */
-export interface FollowupState {
-  /** Current suggestion text (for placeholder) */
-  suggestion: string | null;
-  /** All available suggestions */
-  suggestions: FollowupSuggestion[];
-  /** Whether to show suggestion in input */
-  isVisible: boolean;
-  /** Index of current suggestion (for cycling) */
-  currentIndex: number;
-}
+/** Delay before showing suggestion after response completes */
+const SUGGESTION_DELAY_MS = 300;
+/** Debounce lock duration to prevent rapid-fire accepts */
+const ACCEPT_DEBOUNCE_MS = 100;
 
 /**
  * Options for the hook
@@ -93,56 +94,29 @@ export function useFollowupSuggestions(
 ): UseFollowupSuggestionsReturn {
   const { enabled = true, onAccept } = options;
 
-  const [state, setState] = useState<FollowupState>({
-    suggestion: null,
-    suggestions: [],
-    isVisible: false,
-    currentIndex: 0,
-  });
+  const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const acceptingRef = useRef(false); // Prevent rapid-fire Tab accepts
+  const acceptingRef = useRef(false);
   const acceptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /**
-   * Set suggestions directly (called by parent component after generating)
-   */
   const setSuggestions = useCallback(
     (suggestions: FollowupSuggestion[]) => {
       if (!enabled) {
         return;
       }
 
-      // Clear any existing timeout
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
 
-      // Small delay to show suggestion after response completes
       timeoutRef.current = setTimeout(() => {
-        if (suggestions.length > 0) {
-          setState({
-            suggestion: suggestions[0].text,
-            suggestions,
-            isVisible: true,
-            currentIndex: 0,
-          });
-        } else {
-          setState({
-            suggestion: null,
-            suggestions: [],
-            isVisible: false,
-            currentIndex: 0,
-          });
-        }
-      }, 300);
+        setState(followupReducers.setSuggestions(suggestions));
+      }, SUGGESTION_DELAY_MS);
     },
     [enabled],
   );
 
-  /**
-   * Get placeholder text (shows suggestion when available)
-   */
   const getPlaceholder = useCallback(
     (defaultPlaceholder: string) => {
       if (state.isVisible && state.suggestion) {
@@ -153,101 +127,46 @@ export function useFollowupSuggestions(
     [state.isVisible, state.suggestion],
   );
 
-  /**
-   * Accept the current suggestion
-   */
   const accept = useCallback(() => {
-    // Prevent duplicate accepts (rapid Tab presses)
     if (acceptingRef.current) {
       return;
     }
 
     setState((prev) => {
-      if (
-        prev.suggestions.length === 0 ||
-        prev.currentIndex >= prev.suggestions.length
-      ) {
+      const text = followupReducers.getAcceptText(prev);
+      if (text === null) {
         return prev;
       }
 
-      const suggestion = prev.suggestions[prev.currentIndex].text;
-      onAccept?.(suggestion);
+      // Schedule side effects outside the updater via microtask
+      queueMicrotask(() => {
+        onAccept?.(text);
 
-      // Set accepting lock
-      acceptingRef.current = true;
+        acceptingRef.current = true;
+        if (acceptTimeoutRef.current) {
+          clearTimeout(acceptTimeoutRef.current);
+        }
+        acceptTimeoutRef.current = setTimeout(() => {
+          acceptingRef.current = false;
+        }, ACCEPT_DEBOUNCE_MS);
+      });
 
-      // Clear lock after a short delay
-      if (acceptTimeoutRef.current) {
-        clearTimeout(acceptTimeoutRef.current);
-      }
-      acceptTimeoutRef.current = setTimeout(() => {
-        acceptingRef.current = false;
-      }, 100);
-
-      // Clear after accepting
-      return {
-        suggestion: null,
-        suggestions: [],
-        isVisible: false,
-        currentIndex: 0,
-      };
+      return followupReducers.clear();
     });
-  }, [onAccept]); // Only depends on onAccept callback
+  }, [onAccept]);
 
-  /**
-   * Dismiss the current suggestion
-   */
   const dismiss = useCallback(() => {
-    setState({
-      suggestion: null,
-      suggestions: [],
-      isVisible: false,
-      currentIndex: 0,
-    });
+    setState(followupReducers.clear());
   }, []);
 
-  /**
-   * Cycle to next suggestion
-   */
   const next = useCallback(() => {
-    setState((prev) => {
-      if (prev.suggestions.length === 0) {
-        return prev;
-      }
+    setState((prev) => followupReducers.next(prev) ?? prev);
+  }, []);
 
-      const nextIndex = (prev.currentIndex + 1) % prev.suggestions.length;
-      return {
-        ...prev,
-        currentIndex: nextIndex,
-        suggestion: prev.suggestions[nextIndex].text,
-      };
-    });
-  }, []); // No dependencies - uses functional update
-
-  /**
-   * Cycle to previous suggestion
-   */
   const previous = useCallback(() => {
-    setState((prev) => {
-      if (prev.suggestions.length === 0) {
-        return prev;
-      }
+    setState((prev) => followupReducers.previous(prev) ?? prev);
+  }, []);
 
-      const prevIndex =
-        prev.currentIndex === 0
-          ? prev.suggestions.length - 1
-          : prev.currentIndex - 1;
-      return {
-        ...prev,
-        currentIndex: prevIndex,
-        suggestion: prev.suggestions[prevIndex].text,
-      };
-    });
-  }, []); // No dependencies - uses functional update
-
-  /**
-   * Clear all suggestions and reset state
-   */
   const clear = useCallback(() => {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
@@ -257,13 +176,7 @@ export function useFollowupSuggestions(
       clearTimeout(acceptTimeoutRef.current);
       acceptTimeoutRef.current = null;
     }
-
-    setState({
-      suggestion: null,
-      suggestions: [],
-      isVisible: false,
-      currentIndex: 0,
-    });
+    setState(followupReducers.clear());
   }, []);
 
   // Clean up timeouts on unmount
@@ -281,27 +194,14 @@ export function useFollowupSuggestions(
     [],
   );
 
-  // Stable reference to return value to prevent unnecessary re-renders
-  return useMemo(
-    () => ({
-      state,
-      getPlaceholder,
-      setSuggestions,
-      accept,
-      dismiss,
-      next,
-      previous,
-      clear,
-    }),
-    [
-      state,
-      getPlaceholder,
-      setSuggestions,
-      accept,
-      dismiss,
-      next,
-      previous,
-      clear,
-    ],
-  );
+  return {
+    state,
+    getPlaceholder,
+    setSuggestions,
+    accept,
+    dismiss,
+    next,
+    previous,
+    clear,
+  };
 }

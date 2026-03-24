@@ -9,5 +9,6 @@
  */
 
 export * from './types.js';
+export * from './followupState.js';
 export * from './suggestionGenerator.js';
 export * from './ruleBasedProvider.js';

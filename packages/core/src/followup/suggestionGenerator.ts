@@ -136,6 +136,13 @@ export function getGenerator(): FollowupSuggestionsGenerator {
 }
 
 /**
+ * Reset the singleton (useful for testing)
+ */
+export function resetGenerator(): void {
+  defaultGenerator = null;
+}
+
+/**
  * Convenience function to generate suggestions
  */
 export function generateFollowupSuggestions(

@@ -8,22 +8,23 @@
  * React hook for managing follow-up suggestions in the CLI (Ink/React).
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import type { FollowupSuggestion } from '@qwen-code/qwen-code-core';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  INITIAL_FOLLOWUP_STATE,
+  followupReducers,
+} from '@qwen-code/qwen-code-core';
+import type {
+  FollowupSuggestion,
+  FollowupState,
+} from '@qwen-code/qwen-code-core';
 
-/**
- * State for follow-up suggestions in CLI
- */
-export interface FollowupState {
-  /** Current suggestion text (for ghost text) */
-  suggestion: string | null;
-  /** All available suggestions */
-  suggestions: FollowupSuggestion[];
-  /** Whether to show suggestion */
-  isVisible: boolean;
-  /** Index of current suggestion (for cycling) */
-  currentIndex: number;
-}
+// Re-export for consumers that import from here
+export type { FollowupState } from '@qwen-code/qwen-code-core';
+
+/** Delay before showing suggestion after response completes */
+const SUGGESTION_DELAY_MS = 300;
+/** Debounce lock duration to prevent rapid-fire accepts */
+const ACCEPT_DEBOUNCE_MS = 100;
 
 /**
  * Options for the hook
@@ -78,148 +79,70 @@ export function useFollowupSuggestionsCLI(
 ): UseFollowupSuggestionsReturn {
   const { enabled = true, onAccept } = options;
 
-  const [state, setState] = useState<FollowupState>({
-    suggestion: null,
-    suggestions: [],
-    isVisible: false,
-    currentIndex: 0,
-  });
+  const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const acceptingRef = useRef(false); // Prevent rapid-fire accepts
+  const acceptingRef = useRef(false);
   const acceptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /**
-   * Set suggestions directly (called by parent component after generating)
-   */
   const setSuggestions = useCallback(
     (suggestions: FollowupSuggestion[]) => {
       if (!enabled) {
         return;
       }
 
-      // Clear any existing timeout
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
 
-      // Small delay to show suggestion after response completes
       timeoutRef.current = setTimeout(() => {
-        if (suggestions.length > 0) {
-          setState({
-            suggestion: suggestions[0].text,
-            suggestions,
-            isVisible: true,
-            currentIndex: 0,
-          });
-        } else {
-          setState({
-            suggestion: null,
-            suggestions: [],
-            isVisible: false,
-            currentIndex: 0,
-          });
-        }
-      }, 300);
+        setState(followupReducers.setSuggestions(suggestions));
+      }, SUGGESTION_DELAY_MS);
     },
     [enabled],
   );
 
-  /**
-   * Accept the current suggestion
-   */
   const accept = useCallback(() => {
-    // Prevent duplicate accepts (rapid Tab presses)
     if (acceptingRef.current) {
       return;
     }
 
+    // Read current state to extract suggestion text before clearing
     setState((prev) => {
-      if (
-        prev.suggestions.length === 0 ||
-        prev.currentIndex >= prev.suggestions.length
-      ) {
+      const text = followupReducers.getAcceptText(prev);
+      if (text === null) {
         return prev;
       }
 
-      const suggestion = prev.suggestions[prev.currentIndex].text;
-      onAccept?.(suggestion);
+      // Schedule side effects outside the updater via microtask
+      queueMicrotask(() => {
+        onAccept?.(text);
 
-      // Set accepting lock
-      acceptingRef.current = true;
+        acceptingRef.current = true;
+        if (acceptTimeoutRef.current) {
+          clearTimeout(acceptTimeoutRef.current);
+        }
+        acceptTimeoutRef.current = setTimeout(() => {
+          acceptingRef.current = false;
+        }, ACCEPT_DEBOUNCE_MS);
+      });
 
-      // Clear lock after a short delay
-      if (acceptTimeoutRef.current) {
-        clearTimeout(acceptTimeoutRef.current);
-      }
-      acceptTimeoutRef.current = setTimeout(() => {
-        acceptingRef.current = false;
-      }, 100);
-
-      // Clear after accepting
-      return {
-        suggestion: null,
-        suggestions: [],
-        isVisible: false,
-        currentIndex: 0,
-      };
+      return followupReducers.clear();
     });
   }, [onAccept]);
 
-  /**
-   * Dismiss the current suggestion
-   */
   const dismiss = useCallback(() => {
-    setState({
-      suggestion: null,
-      suggestions: [],
-      isVisible: false,
-      currentIndex: 0,
-    });
+    setState(followupReducers.clear());
   }, []);
 
-  /**
-   * Cycle to next suggestion
-   */
   const next = useCallback(() => {
-    setState((prev) => {
-      if (prev.suggestions.length === 0) {
-        return prev;
-      }
-
-      const nextIndex = (prev.currentIndex + 1) % prev.suggestions.length;
-      return {
-        ...prev,
-        currentIndex: nextIndex,
-        suggestion: prev.suggestions[nextIndex].text,
-      };
-    });
+    setState((prev) => followupReducers.next(prev) ?? prev);
   }, []);
 
-  /**
-   * Cycle to previous suggestion
-   */
   const previous = useCallback(() => {
-    setState((prev) => {
-      if (prev.suggestions.length === 0) {
-        return prev;
-      }
-
-      const prevIndex =
-        prev.currentIndex === 0
-          ? prev.suggestions.length - 1
-          : prev.currentIndex - 1;
-      return {
-        ...prev,
-        currentIndex: prevIndex,
-        suggestion: prev.suggestions[prevIndex].text,
-      };
-    });
+    setState((prev) => followupReducers.previous(prev) ?? prev);
   }, []);
 
-  /**
-   * Clear all suggestions and reset state
-   */
   const clear = useCallback(() => {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
@@ -229,13 +152,7 @@ export function useFollowupSuggestionsCLI(
       clearTimeout(acceptTimeoutRef.current);
       acceptTimeoutRef.current = null;
     }
-
-    setState({
-      suggestion: null,
-      suggestions: [],
-      isVisible: false,
-      currentIndex: 0,
-    });
+    setState(followupReducers.clear());
   }, []);
 
   // Clean up timeouts on unmount
@@ -253,17 +170,13 @@ export function useFollowupSuggestionsCLI(
     [],
   );
 
-  // Stable reference to return value to prevent unnecessary re-renders
-  return useMemo(
-    () => ({
-      state,
-      setSuggestions,
-      accept,
-      dismiss,
-      next,
-      previous,
-      clear,
-    }),
-    [state, setSuggestions, accept, dismiss, next, previous, clear],
-  );
+  return {
+    state,
+    setSuggestions,
+    accept,
+    dismiss,
+    next,
+    previous,
+    clear,
+  };
 }

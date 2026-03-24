@@ -1025,7 +1025,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     prevStreamingStateRef.current = streamingState;
-  }, [streamingState, historyManager.history]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
+  }, [streamingState]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
