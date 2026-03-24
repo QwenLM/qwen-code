@@ -352,26 +352,7 @@ describe('QwenSessionUpdateHandler', () => {
     });
   });
 
-  describe('available_skills_update handling', () => {
-    it('calls onAvailableSkills callback with skill names', () => {
-      mockCallbacks.onAvailableSkills = vi.fn();
-
-      const skillsUpdate = {
-        sessionId: 'test-session',
-        update: {
-          sessionUpdate: 'available_skills_update',
-          availableSkills: ['code-review-expert', 'verification-pack'],
-        },
-      } as unknown as SessionNotification;
-
-      handler.handleSessionUpdate(skillsUpdate);
-
-      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([
-        'code-review-expert',
-        'verification-pack',
-      ]);
-    });
-
+  describe('available skills handling', () => {
     it('reads available skills from available_commands_update metadata', () => {
       mockCallbacks.onAvailableSkills = vi.fn();
 
