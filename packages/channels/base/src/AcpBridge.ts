@@ -81,23 +81,25 @@ export class AcpBridge extends EventEmitter {
     this.connection = new ClientSideConnection(
       (): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
-          const update = (params as unknown as Record<string, unknown>)
-            .update as Record<string, unknown> | undefined;
+          const update = (params as unknown as Record<string, unknown>)[
+            'update'
+          ] as Record<string, unknown> | undefined;
           console.log(
             '[AcpBridge] sessionUpdate:',
-            update?.sessionUpdate,
-            update?.content
-              ? JSON.stringify(update.content).substring(0, 200)
+            update?.['sessionUpdate'],
+            update?.['content']
+              ? JSON.stringify(update['content']).substring(0, 200)
               : '',
           );
 
           // Capture available commands from ACP
           if (
-            update?.sessionUpdate === 'available_commands_update' &&
-            Array.isArray(update.availableCommands)
+            update?.['sessionUpdate'] === 'available_commands_update' &&
+            Array.isArray(update['availableCommands'])
           ) {
-            this._availableCommands =
-              update.availableCommands as AvailableCommand[];
+            this._availableCommands = update[
+              'availableCommands'
+            ] as AvailableCommand[];
           }
 
           this.emit('sessionUpdate', params);
@@ -113,10 +115,13 @@ export class AcpBridge extends EventEmitter {
             options.find((o) => o.optionId === 'proceed_once')?.optionId ||
             options[0]?.optionId ||
             'proceed_once';
+          const toolCall = params.toolCall as
+            | { name?: string; [key: string]: unknown }
+            | undefined;
           console.log(
             '[AcpBridge] Permission request auto-approved:',
             optionId,
-            params.toolCall?.name,
+            toolCall?.['name'],
           );
           return { outcome: { outcome: 'selected', optionId } };
         },
@@ -150,12 +155,12 @@ export class AcpBridge extends EventEmitter {
     const chunks: string[] = [];
     const onUpdate = (params: SessionNotification) => {
       if (params.sessionId !== sessionId) return;
-      const update = (params as unknown as Record<string, unknown>).update as
-        | Record<string, unknown>
-        | undefined;
+      const update = (params as unknown as Record<string, unknown>)[
+        'update'
+      ] as Record<string, unknown> | undefined;
       if (!update) return;
-      if (update.sessionUpdate !== 'agent_message_chunk') return;
-      const content = update.content as
+      if (update['sessionUpdate'] !== 'agent_message_chunk') return;
+      const content = update['content'] as
         | { type?: string; text?: string }
         | undefined;
       if (content?.type === 'text' && content.text) {
