@@ -4,8 +4,11 @@ import {
   splitHtmlForTelegram,
 } from 'telegram-markdown-formatter';
 import { ChannelBase } from '@qwen-code/channel-base';
-import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
-import type { AcpBridge } from '@qwen-code/channel-base';
+import type {
+  ChannelConfig,
+  Envelope,
+  AcpBridge,
+} from '@qwen-code/channel-base';
 
 // Commands handled locally by the Telegram adapter (not forwarded to ACP)
 const LOCAL_COMMANDS = new Set(['start', 'help', 'reset']);
@@ -81,18 +84,13 @@ export class TelegramChannel extends ChannelBase {
         text,
       };
 
-      try {
-        await this.handleInbound(envelope);
-      } catch (err) {
+      // Don't await — Telegraf has a 90s handler timeout that would kill long prompts
+      this.handleInbound(envelope).catch((err) => {
         console.error(`[Telegram:${this.name}] Error handling message:`, err);
-        try {
-          await ctx.reply(
-            'Sorry, something went wrong processing your message.',
-          );
-        } catch {
-          // ignore send failure
-        }
-      }
+        ctx
+          .reply('Sorry, something went wrong processing your message.')
+          .catch(() => {});
+      });
     });
 
     this.bot.launch({ dropPendingUpdates: true }).catch((err) => {
@@ -101,6 +99,24 @@ export class TelegramChannel extends ChannelBase {
 
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
     process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
+  }
+
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    // Send "Working..." immediately for instant feedback
+    const workingMsg = await this.bot.telegram
+      .sendMessage(envelope.chatId, 'Working...')
+      .catch(() => null);
+
+    try {
+      await super.handleInbound(envelope);
+    } finally {
+      // Always delete "Working..." — even on error/timeout
+      if (workingMsg) {
+        this.bot.telegram
+          .deleteMessage(envelope.chatId, workingMsg.message_id)
+          .catch(() => {});
+      }
+    }
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -122,4 +138,5 @@ export class TelegramChannel extends ChannelBase {
   disconnect(): void {
     this.bot.stop();
   }
+
 }

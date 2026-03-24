@@ -24,6 +24,15 @@ export interface AvailableCommand {
   description: string;
 }
 
+export interface ToolCallEvent {
+  sessionId: string;
+  toolCallId: string;
+  kind: string;
+  title: string;
+  status: string;
+  rawInput?: Record<string, unknown>;
+}
+
 export class AcpBridge extends EventEmitter {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
@@ -81,48 +90,19 @@ export class AcpBridge extends EventEmitter {
     this.connection = new ClientSideConnection(
       (): Client => ({
         sessionUpdate: (params: SessionNotification): Promise<void> => {
-          const update = (params as unknown as Record<string, unknown>)[
-            'update'
-          ] as Record<string, unknown> | undefined;
-          console.log(
-            '[AcpBridge] sessionUpdate:',
-            update?.['sessionUpdate'],
-            update?.['content']
-              ? JSON.stringify(update['content']).substring(0, 200)
-              : '',
-          );
-
-          // Capture available commands from ACP
-          if (
-            update?.['sessionUpdate'] === 'available_commands_update' &&
-            Array.isArray(update['availableCommands'])
-          ) {
-            this._availableCommands = update[
-              'availableCommands'
-            ] as AvailableCommand[];
-          }
-
-          this.emit('sessionUpdate', params);
+          this.handleSessionUpdate(params);
           return Promise.resolve();
         },
 
         requestPermission: async (
           params: RequestPermissionRequest,
         ): Promise<RequestPermissionResponse> => {
-          // Phase 1: auto-approve everything so plain text works
+          // Auto-approve for now; Phase 5 will add interactive approval
           const options = Array.isArray(params.options) ? params.options : [];
           const optionId =
             options.find((o) => o.optionId === 'proceed_once')?.optionId ||
             options[0]?.optionId ||
             'proceed_once';
-          const toolCall = params.toolCall as
-            | { name?: string; [key: string]: unknown }
-            | undefined;
-          console.log(
-            '[AcpBridge] Permission request auto-approved:',
-            optionId,
-            toolCall?.['name'],
-          );
           return { outcome: { outcome: 'selected', optionId } };
         },
 
@@ -135,59 +115,33 @@ export class AcpBridge extends EventEmitter {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
     });
-
-    console.log('[AcpBridge] Connected and initialized');
   }
 
   async newSession(cwd: string): Promise<string> {
     const conn = this.ensureConnection();
     const response = await conn.newSession({ cwd, mcpServers: [] });
-    const sessionId = response.sessionId;
-    console.log('[AcpBridge] New session:', sessionId);
-    return sessionId;
+    return response.sessionId;
   }
 
   async prompt(sessionId: string, text: string): Promise<string> {
     const conn = this.ensureConnection();
 
-    // Collect text from sessionUpdate events during this prompt
-    // SessionNotification shape: { sessionId, update: { sessionUpdate, content: { type, text } } }
     const chunks: string[] = [];
-    const onUpdate = (params: SessionNotification) => {
-      if (params.sessionId !== sessionId) return;
-      const update = (params as unknown as Record<string, unknown>)[
-        'update'
-      ] as Record<string, unknown> | undefined;
-      if (!update) return;
-      if (update['sessionUpdate'] !== 'agent_message_chunk') return;
-      const content = update['content'] as
-        | { type?: string; text?: string }
-        | undefined;
-      if (content?.type === 'text' && content.text) {
-        chunks.push(content.text);
-      }
+    const onChunk = (sid: string, chunk: string) => {
+      if (sid === sessionId) chunks.push(chunk);
     };
-    this.on('sessionUpdate', onUpdate);
+    this.on('textChunk', onChunk);
 
     try {
-      console.log('[AcpBridge] Sending prompt...');
-      const result = await conn.prompt({
+      await conn.prompt({
         sessionId,
         prompt: [{ type: 'text', text }],
       });
-      console.log(
-        '[AcpBridge] Prompt resolved, stopReason:',
-        result?.stopReason,
-      );
     } finally {
-      this.off('sessionUpdate', onUpdate);
+      this.off('textChunk', onChunk);
     }
 
-    const response = chunks.join('');
-    console.log(
-      `[AcpBridge] Collected ${chunks.length} chunks, ${response.length} chars`,
-    );
-    return response;
+    return chunks.join('');
   }
 
   stop(): void {
@@ -202,6 +156,50 @@ export class AcpBridge extends EventEmitter {
     return (
       this.child !== null && !this.child.killed && this.child.exitCode === null
     );
+  }
+
+  private handleSessionUpdate(params: SessionNotification): void {
+    const { sessionId } = params;
+    const update = (params as unknown as Record<string, unknown>)['update'] as
+      | Record<string, unknown>
+      | undefined;
+    if (!update) return;
+
+    const type = update['sessionUpdate'] as string;
+
+    switch (type) {
+      case 'agent_message_chunk': {
+        const content = update['content'] as
+          | { type?: string; text?: string }
+          | undefined;
+        if (content?.type === 'text' && content.text) {
+          this.emit('textChunk', sessionId, content.text);
+        }
+        break;
+      }
+      case 'tool_call': {
+        const event: ToolCallEvent = {
+          sessionId,
+          toolCallId: update['toolCallId'] as string,
+          kind: (update['kind'] as string) || '',
+          title: (update['title'] as string) || '',
+          status: (update['status'] as string) || 'pending',
+          rawInput: update['rawInput'] as Record<string, unknown> | undefined,
+        };
+        this.emit('toolCall', event);
+        break;
+      }
+      case 'available_commands_update': {
+        if (Array.isArray(update['availableCommands'])) {
+          this._availableCommands = update[
+            'availableCommands'
+          ] as AvailableCommand[];
+        }
+        break;
+      }
+    }
+
+    this.emit('sessionUpdate', params);
   }
 
   private ensureConnection(): ClientSideConnection {

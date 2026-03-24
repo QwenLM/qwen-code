@@ -1,7 +1,7 @@
 import type { ChannelConfig, Envelope } from './types.js';
 import { SenderGate } from './SenderGate.js';
 import { SessionRouter } from './SessionRouter.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 export abstract class ChannelBase {
   protected config: ChannelConfig;
@@ -17,17 +17,23 @@ export abstract class ChannelBase {
     this.bridge = bridge;
     this.gate = new SenderGate(config.senderPolicy, config.allowedUsers);
     this.router = new SessionRouter(bridge, config.cwd, config.sessionScope);
+
+    bridge.on('toolCall', (event: ToolCallEvent) => {
+      const target = this.router.getTarget(event.sessionId);
+      if (target) {
+        this.onToolCall(target.chatId, event);
+      }
+    });
   }
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  onToolCall(_chatId: string, _event: ToolCallEvent): void {}
+
   async handleInbound(envelope: Envelope): Promise<void> {
     if (!this.gate.check(envelope.senderId)) {
-      console.log(
-        `[Channel:${this.name}] Sender ${envelope.senderId} denied by gate`,
-      );
       return;
     }
 
@@ -45,21 +51,10 @@ export abstract class ChannelBase {
       this.instructedSessions.add(sessionId);
     }
 
-    console.log(
-      `[Channel:${this.name}] Prompting session ${sessionId}: "${envelope.text.substring(0, 80)}"`,
-    );
-
-    console.log(`[Channel:${this.name}] Waiting for prompt response...`);
     const response = await this.bridge.prompt(sessionId, promptText);
-    console.log(
-      `[Channel:${this.name}] Got response (${response.length} chars): "${response.substring(0, 100)}"`,
-    );
 
     if (response) {
       await this.sendMessage(envelope.chatId, response);
-      console.log(
-        `[Channel:${this.name}] Message sent to chat ${envelope.chatId}`,
-      );
     }
   }
 }
