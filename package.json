@@ -6,7 +6,9 @@
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/channels/base",
+    "packages/channels/telegram"
   ],
   "repository": {
     "type": "git",

@@ -189,6 +189,18 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  // Channels configuration (Telegram, Discord, etc.)
+  channels: {
+    type: 'object',
+    label: 'Channels',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, Record<string, unknown>>,
+    description: 'Configuration for messaging channels.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   // Model providers configuration grouped by authType
   modelProviders: {
     type: 'object',
