@@ -9,13 +9,14 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
+  private instructedSessions: Set<string> = new Set();
 
   constructor(name: string, config: ChannelConfig, bridge: AcpBridge) {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
     this.gate = new SenderGate(config.senderPolicy, config.allowedUsers);
-    this.router = new SessionRouter(bridge, config.cwd);
+    this.router = new SessionRouter(bridge, config.cwd, config.sessionScope);
   }
 
   abstract connect(): Promise<void>;
@@ -37,12 +38,19 @@ export abstract class ChannelBase {
       envelope.threadId,
     );
 
+    // Prepend channel instructions on first message of a session
+    let promptText = envelope.text;
+    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
+      promptText = `${this.config.instructions}\n\n${envelope.text}`;
+      this.instructedSessions.add(sessionId);
+    }
+
     console.log(
       `[Channel:${this.name}] Prompting session ${sessionId}: "${envelope.text.substring(0, 80)}"`,
     );
 
     console.log(`[Channel:${this.name}] Waiting for prompt response...`);
-    const response = await this.bridge.prompt(sessionId, envelope.text);
+    const response = await this.bridge.prompt(sessionId, promptText);
     console.log(
       `[Channel:${this.name}] Got response (${response.length} chars): "${response.substring(0, 100)}"`,
     );

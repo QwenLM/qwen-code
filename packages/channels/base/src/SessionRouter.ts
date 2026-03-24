@@ -1,4 +1,4 @@
-import type { SessionTarget } from './types.js';
+import type { SessionScope, SessionTarget } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
 
 export class SessionRouter {
@@ -7,10 +7,29 @@ export class SessionRouter {
 
   private bridge: AcpBridge;
   private cwd: string;
+  private scope: SessionScope;
 
-  constructor(bridge: AcpBridge, cwd: string) {
+  constructor(bridge: AcpBridge, cwd: string, scope: SessionScope = 'user') {
     this.bridge = bridge;
     this.cwd = cwd;
+    this.scope = scope;
+  }
+
+  private routingKey(
+    channelName: string,
+    senderId: string,
+    chatId: string,
+    threadId?: string,
+  ): string {
+    switch (this.scope) {
+      case 'thread':
+        return `${channelName}:${threadId || chatId}`;
+      case 'single':
+        return `${channelName}:__single__`;
+      case 'user':
+      default:
+        return `${channelName}:${senderId}`;
+    }
   }
 
   async resolve(
@@ -19,7 +38,7 @@ export class SessionRouter {
     chatId: string,
     threadId?: string,
   ): Promise<string> {
-    const key = `${channelName}:${senderId}`;
+    const key = this.routingKey(channelName, senderId, chatId, threadId);
     const existing = this.toSession.get(key);
     if (existing) {
       return existing;

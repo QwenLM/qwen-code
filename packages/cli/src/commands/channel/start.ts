@@ -54,9 +54,42 @@ export const startCommand: CommandModule<object, { name: string }> = {
     }
 
     const rawConfig = channels[name] as Record<string, unknown>;
+
+    // Validate required fields
+    if (!rawConfig['type']) {
+      writeStderrLine(
+        `Error: Channel "${name}" is missing required field "type".`,
+      );
+      process.exit(1);
+    }
+    if (!rawConfig['token']) {
+      writeStderrLine(
+        `Error: Channel "${name}" is missing required field "token".`,
+      );
+      process.exit(1);
+    }
+
+    const channelType = rawConfig['type'] as string;
+    if (channelType !== 'telegram') {
+      writeStderrLine(
+        `Error: Channel type "${channelType}" is not yet supported. Only "telegram" is available.`,
+      );
+      process.exit(1);
+    }
+
+    let token: string;
+    try {
+      token = resolveEnvVars(rawConfig['token'] as string);
+    } catch (err) {
+      writeStderrLine(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+
     const config: ChannelConfig = {
-      type: rawConfig['type'] as ChannelConfig['type'],
-      token: resolveEnvVars(rawConfig['token'] as string),
+      type: channelType as ChannelConfig['type'],
+      token,
       senderPolicy:
         (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
         'allowlist',
@@ -67,13 +100,6 @@ export const startCommand: CommandModule<object, { name: string }> = {
       approvalMode: rawConfig['approvalMode'] as string | undefined,
       instructions: rawConfig['instructions'] as string | undefined,
     };
-
-    if (config.type !== 'telegram') {
-      writeStderrLine(
-        `Error: Channel type "${config.type}" is not yet supported. Only "telegram" is available.`,
-      );
-      process.exit(1);
-    }
 
     const cliEntryPath = findCliEntryPath();
     writeStdoutLine(`[Channel] CLI entry: ${cliEntryPath}`);
