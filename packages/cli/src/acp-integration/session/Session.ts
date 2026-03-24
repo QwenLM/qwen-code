@@ -997,33 +997,33 @@ export class Session implements SessionContext {
         }),
       );
 
+      let availableSkills: string[] | undefined;
+      try {
+        const skillManager = this.config.getSkillManager();
+        if (skillManager) {
+          const skills = await skillManager.listSkills();
+          availableSkills = skills.map((skill) => skill.name);
+        }
+      } catch (error) {
+        debugLogger.error('Error loading available skills:', error);
+      }
+
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
+        ...(availableSkills
+          ? {
+              _meta: {
+                availableSkills,
+              },
+            }
+          : {}),
       };
 
       await this.sendUpdate(update);
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
-    }
-
-    // Send available skills list for secondary picker in IDE clients
-    try {
-      const skillManager = this.config.getSkillManager();
-      if (skillManager) {
-        const skills = await skillManager.listSkills();
-        const availableSkills = skills.map((s) => ({
-          name: s.name,
-          description: s.description,
-        }));
-        await this.sendUpdate({
-          sessionUpdate: 'available_skills_update',
-          availableSkills,
-        } as unknown as SessionUpdate);
-      }
-    } catch (error) {
-      debugLogger.error('Error sending available skills update:', error);
     }
   }
 

@@ -246,6 +246,43 @@ describe('Session', () => {
       });
     });
 
+    it('attaches available skills to available_commands_update metadata', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'init',
+          description: 'Initialize project context',
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi
+          .fn()
+          .mockResolvedValue([
+            { name: 'code-review-expert' },
+            { name: 'verification-pack' },
+          ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize project context',
+              input: null,
+            },
+          ],
+          _meta: {
+            availableSkills: ['code-review-expert', 'verification-pack'],
+          },
+        },
+      });
+    });
+
     it('swallows errors and does not throw', async () => {
       getAvailableCommandsSpy.mockRejectedValueOnce(
         new Error('Command discovery failed'),

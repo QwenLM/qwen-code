@@ -131,9 +131,7 @@ interface UseWebViewMessagesProps {
   // Available commands setter
   setAvailableCommands?: (commands: AvailableCommand[]) => void;
   // Available skills setter
-  setAvailableSkills?: (
-    skills: Array<{ name: string; description: string }>,
-  ) => void;
+  setAvailableSkills?: (skills: string[]) => void;
   // Available models setter
   setAvailableModels?: (models: ModelInfo[]) => void;
   // Account info setter (triggers dialog)
@@ -406,9 +404,7 @@ export const useWebViewMessages = ({
 
         case 'availableSkills': {
           try {
-            const skills = message.data?.skills as
-              | Array<{ name: string; description: string }>
-              | undefined;
+            const skills = message.data?.skills as string[] | undefined;
             if (skills) {
               handlers.setAvailableSkills?.(skills);
             }
