@@ -206,6 +206,10 @@ export class LoopManager {
       this.state.iteration >= this.state.config.maxIterations
     ) {
       this.state.isActive = false;
+      if (this.state.timerId) {
+        clearTimeout(this.state.timerId);
+        this.state.timerId = null;
+      }
       // Keep state accessible briefly so caller can read final iteration count
       return;
     }

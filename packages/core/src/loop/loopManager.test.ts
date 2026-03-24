@@ -136,6 +136,12 @@ describe('LoopManager', () => {
     expect(manager.getState()?.waitingForResponse).toBe(true);
   });
 
+  it('ignores onIterationComplete when no loop is active', () => {
+    // Should not throw
+    expect(() => manager.onIterationComplete(true)).not.toThrow();
+    expect(() => manager.onIterationComplete(false)).not.toThrow();
+  });
+
   it('ignores onIterationComplete when not waiting for response', () => {
     manager.start({
       prompt: 'check',
