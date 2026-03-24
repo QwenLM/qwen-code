@@ -7,6 +7,9 @@ import { ChannelBase } from '@qwen-code/channel-base';
 import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
 import type { AcpBridge } from '@qwen-code/channel-base';
 
+// Commands handled locally by the Telegram adapter (not forwarded to ACP)
+const LOCAL_COMMANDS = new Set(['start', 'help', 'reset']);
+
 export class TelegramChannel extends ChannelBase {
   private bot: Telegraf;
 
@@ -16,8 +19,58 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
+    // Register local-only commands
+    this.bot.command('start', async (ctx) => {
+      await ctx.reply(
+        `Hi ${ctx.from.first_name}! I'm a Qwen Code agent.\n\nSend any message to chat, or use slash commands like /compress, /summary.\n\nType /help for more info.`,
+      );
+    });
+
+    this.bot.command('help', async (ctx) => {
+      const lines = [
+        'Local commands:',
+        '/start — Welcome message',
+        '/help — Show this help',
+        '/reset — Reset your session (start fresh)',
+      ];
+
+      const agentCommands = this.bridge.availableCommands;
+      if (agentCommands.length > 0) {
+        lines.push('', 'Agent commands (forwarded to Qwen Code):');
+        for (const cmd of agentCommands) {
+          lines.push(`/${cmd.name} — ${cmd.description}`);
+        }
+      }
+
+      lines.push('', 'Send any text to chat with the agent.');
+      await ctx.reply(lines.join('\n'));
+    });
+
+    this.bot.command('reset', async (ctx) => {
+      const senderId = String(ctx.from.id);
+      const removed = this.router.removeSession(this.name, senderId);
+      if (removed) {
+        await ctx.reply(
+          'Session reset. Your next message will start a fresh conversation.',
+        );
+      } else {
+        await ctx.reply('No active session to reset.');
+      }
+    });
+
+    // All other messages (including non-local slash commands) go through handleInbound
     this.bot.on('text', async (ctx) => {
       const msg = ctx.message;
+      const text = msg.text;
+
+      // Skip if it's a local command (already handled above)
+      if (text.startsWith('/')) {
+        const command = text.slice(1).split(/[\s@]/)[0]?.toLowerCase();
+        if (command && LOCAL_COMMANDS.has(command)) {
+          return;
+        }
+      }
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId: String(msg.from.id),
@@ -25,7 +78,7 @@ export class TelegramChannel extends ChannelBase {
           msg.from.first_name +
           (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
         chatId: String(msg.chat.id),
-        text: msg.text,
+        text,
       };
 
       try {

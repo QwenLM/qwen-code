@@ -19,14 +19,24 @@ export interface AcpBridgeOptions {
   cwd: string;
 }
 
+export interface AvailableCommand {
+  name: string;
+  description: string;
+}
+
 export class AcpBridge extends EventEmitter {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
+  private _availableCommands: AvailableCommand[] = [];
 
   constructor(options: AcpBridgeOptions) {
     super();
     this.options = options;
+  }
+
+  get availableCommands(): AvailableCommand[] {
+    return this._availableCommands;
   }
 
   async start(): Promise<void> {
@@ -80,6 +90,16 @@ export class AcpBridge extends EventEmitter {
               ? JSON.stringify(update.content).substring(0, 200)
               : '',
           );
+
+          // Capture available commands from ACP
+          if (
+            update?.sessionUpdate === 'available_commands_update' &&
+            Array.isArray(update.availableCommands)
+          ) {
+            this._availableCommands =
+              update.availableCommands as AvailableCommand[];
+          }
+
           this.emit('sessionUpdate', params);
           return Promise.resolve();
         },

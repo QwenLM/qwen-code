@@ -34,4 +34,17 @@ export class SessionRouter {
   getTarget(sessionId: string): SessionTarget | undefined {
     return this.toTarget.get(sessionId);
   }
+
+  hasSession(channelName: string, senderId: string): boolean {
+    return this.toSession.has(`${channelName}:${senderId}`);
+  }
+
+  removeSession(channelName: string, senderId: string): boolean {
+    const key = `${channelName}:${senderId}`;
+    const sessionId = this.toSession.get(key);
+    if (!sessionId) return false;
+    this.toSession.delete(key);
+    this.toTarget.delete(sessionId);
+    return true;
+  }
 }
