@@ -41,6 +41,8 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
+  getLoopManager,
+  formatInterval,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -928,6 +930,89 @@ export const AppContainer = (props: AppContainerProps) => {
     welcomeBackChoice,
     geminiClient,
   ]);
+
+  // Loop command integration — refs to avoid stale closures in the callback
+  const addMessageRef = useRef(addMessage);
+  addMessageRef.current = addMessage;
+  const historyManagerRef = useRef(historyManager);
+  historyManagerRef.current = historyManager;
+
+  useEffect(() => {
+    const loopManager = getLoopManager();
+    loopManager.setIterationCallback((prompt: string, iteration: number) => {
+      const state = loopManager.getState();
+      const interval = formatInterval(state?.config.intervalMs ?? 0);
+      const maxInfo = state?.config.maxIterations
+        ? `/${state.config.maxIterations}`
+        : '';
+      historyManagerRef.current.addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            '-- Loop iteration {{iteration}}{{maxInfo}} (every {{interval}}) --',
+            {
+              iteration: String(iteration),
+              maxInfo,
+              interval,
+            },
+          ),
+        },
+        Date.now(),
+      );
+      addMessageRef.current(prompt);
+    });
+    return () => {
+      const lm = getLoopManager();
+      lm.stop();
+      lm.setIterationCallback(() => {});
+    };
+  }, []);
+
+  // Notify loop manager when streaming completes
+  useEffect(() => {
+    const loopManager = getLoopManager();
+    if (!loopManager.isActive() || streamingState !== StreamingState.Idle) {
+      return;
+    }
+
+    // Only process if the loop is waiting for a response (not a user-initiated prompt)
+    if (!loopManager.isWaitingForResponse()) {
+      return;
+    }
+
+    // Check if the last response had errors
+    const history = historyManager.history;
+    const lastItem = history[history.length - 1];
+    const hadError =
+      lastItem && 'type' in lastItem && lastItem.type === MessageType.ERROR;
+    loopManager.onIterationComplete(!hadError);
+
+    // If loop finished or paused, notify user
+    const updatedState = loopManager.getState();
+    if (updatedState && !updatedState.isActive) {
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Loop completed after {{count}} iteration(s).', {
+            count: String(updatedState.iteration),
+          }),
+        },
+        Date.now(),
+      );
+    } else if (updatedState && updatedState.isPaused) {
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Loop paused after {{failures}} consecutive failures. Use /loop stop to cancel.',
+            { failures: String(updatedState.consecutiveFailures) },
+          ),
+        },
+        Date.now(),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
+  }, [streamingState]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
