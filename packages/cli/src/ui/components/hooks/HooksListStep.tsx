@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
@@ -23,6 +24,13 @@ export function HooksListStep({
   onCancel,
 }: HooksListStepProps): React.JSX.Element {
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const { columns: terminalWidth } = useTerminalSize();
+
+  // Calculate responsive width for hook name column (min 20, max 35)
+  const hookNameWidth = Math.min(
+    35,
+    Math.max(20, Math.floor(terminalWidth * 0.25)),
+  );
 
   useKeypress(
     (key) => {
@@ -89,7 +97,7 @@ export function HooksListStep({
                 {isSelected ? '❯' : ' '}
               </Text>
             </Box>
-            <Box width={30}>
+            <Box width={hookNameWidth}>
               <Text
                 color={isSelected ? theme.text.accent : theme.text.primary}
                 bold={isSelected}

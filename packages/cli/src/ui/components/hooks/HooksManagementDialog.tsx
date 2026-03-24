@@ -7,7 +7,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
@@ -124,19 +123,29 @@ export function HooksManagementDialog({
 
   // Load hooks data on initial render
   useEffect(() => {
+    let cancelled = false;
     setIsLoading(true);
     setLoadError(null);
     try {
       const hooksData = fetchHooksData();
-      setHooks(hooksData);
+      if (!cancelled) {
+        setHooks(hooksData);
+      }
     } catch (error) {
-      debugLogger.error('Error loading hooks:', error);
-      setLoadError(
-        error instanceof Error ? error.message : 'Failed to load hooks',
-      );
+      if (!cancelled) {
+        debugLogger.error('Error loading hooks:', error);
+        setLoadError(
+          error instanceof Error ? error.message : 'Failed to load hooks',
+        );
+      }
     } finally {
-      setIsLoading(false);
+      if (!cancelled) {
+        setIsLoading(false);
+      }
     }
+    return () => {
+      cancelled = true;
+    };
   }, [fetchHooksData]);
 
   // Current step
@@ -157,16 +166,6 @@ export function HooksManagementDialog({
       return prev.slice(0, -1);
     });
   }, [onClose]);
-
-  // Handle escape key globally
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        handleNavigateBack();
-      }
-    },
-    { isActive: getCurrentStep() === HOOKS_MANAGEMENT_STEPS.HOOKS_LIST },
-  );
 
   // Select hook
   const handleSelectHook = useCallback((index: number) => {
