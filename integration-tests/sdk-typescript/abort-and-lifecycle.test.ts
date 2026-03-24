@@ -347,7 +347,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           session_id: sessionId,
           message: {
             role: 'user',
-            content: 'Write "updated" to test.txt.',
+            content:
+              'Write "updated" to test.txt. Stop if any exception occurs.',
           },
           parent_tool_use_id: null,
         };

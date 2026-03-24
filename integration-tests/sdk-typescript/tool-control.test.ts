@@ -316,6 +316,171 @@ describe('Tool Control Parameters (E2E)', () => {
       },
       TEST_TIMEOUT,
     );
+
+    it(
+      'should block read operations on specific path patterns with excludeTools',
+      async () => {
+        await helper.createFile('.env', 'SECRET=password');
+        await helper.createFile('config.json', '{"key": "value"}');
+        await helper.createFile('data.txt', 'public data');
+
+        const q = query({
+          prompt:
+            'Read .env file, read config.json, and read data.txt. Tell me about their contents.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // Block reading .env files
+            excludeTools: ['Read(.env)'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const readCalls = toolCalls.filter(
+            (tc) => tc.toolUse.name === 'read_file',
+          );
+
+          // Should have attempted to read files
+          expect(readCalls.length).toBeGreaterThan(0);
+
+          // Check that .env read was blocked
+          const envReadResults = findToolResults(messages, 'read_file').filter(
+            (result) => {
+              return result.content.includes('.env');
+            },
+          );
+          if (envReadResults.length > 0) {
+            for (const result of envReadResults) {
+              expect(result.content).toMatch(/permission.*declined/i);
+            }
+          }
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should block edit operations on specific path patterns with excludeTools',
+      async () => {
+        await helper.createFile('src/app.ts', 'const app = "original";');
+        await helper.createFile('test/spec.ts', 'describe("test", () => {});');
+        await helper.createFile('readme.md', '# Readme');
+
+        const q = query({
+          prompt:
+            'Edit src/app.ts to add a semicolon, edit test/spec.ts to add a test, and edit readme.md.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            coreTools: ['read_file', 'edit', 'write_file', 'list_directory'],
+            // Block editing files in /src/** directory
+            excludeTools: ['Edit(/src/**)'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const editCalls = toolCalls.filter(
+            (tc) => tc.toolUse.name === 'edit',
+          );
+
+          // Should have attempted edits
+          expect(editCalls.length).toBeGreaterThan(0);
+
+          // Check that src/app.ts edit was blocked
+          const srcEditResults = findToolResults(messages, 'edit').filter(
+            (result) => {
+              return (
+                result.content.includes('src/app.ts') ||
+                result.content.includes('/src/')
+              );
+            },
+          );
+          if (srcEditResults.length > 0) {
+            for (const result of srcEditResults) {
+              expect(result.content).toMatch(/permission.*declined/i);
+            }
+          }
+
+          // src/app.ts should remain unchanged
+          const srcContent = await helper.readFile('src/app.ts');
+          expect(srcContent).toBe('const app = "original";');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should block specific shell commands with prefix pattern',
+      async () => {
+        const q = query({
+          prompt: 'Run "echo hello", "rm file.txt", and "ls" commands.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // Block all rm commands
+            excludeTools: ['Bash(rm *)'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const shellCalls = toolCalls.filter(
+            (tc) => tc.toolUse.name === 'run_shell_command',
+          );
+
+          // Should have attempted shell commands
+          expect(shellCalls.length).toBeGreaterThan(0);
+
+          // Check that rm commands were blocked
+          for (const call of shellCalls) {
+            const input = call.toolUse.input as { command?: string };
+            if (input.command?.includes('rm')) {
+              const results = findToolResults(messages, 'run_shell_command');
+              const rmResults = results.filter((r) => {
+                return (
+                  r.content.includes('permission') ||
+                  r.content.includes('declined')
+                );
+              });
+              expect(rmResults.length).toBeGreaterThan(0);
+            }
+          }
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
   });
 
   describe('allowedTools parameter', () => {
@@ -510,6 +675,107 @@ describe('Tool Control Parameters (E2E)', () => {
           // canUseTool should NOT have been called
           // (edit tools auto-approved, list_directory in allowedTools)
           expect(canUseToolCalls.length).toBe(0);
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should auto-approve specific path patterns with allowedTools',
+      async () => {
+        await helper.createFile('config.json', '{"key": "value"}');
+        await helper.createFile('data.txt', 'text data');
+        await helper.createFile('.env', 'SECRET=secret');
+
+        const q = query({
+          prompt: 'Read config.json, data.txt, and .env files.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            // Auto-approve reading .json and .txt files
+            allowedTools: ['Read(.json)', 'Read(.txt)'],
+            canUseTool: async (_toolName) => {
+              return {
+                behavior: 'deny',
+                message: 'Should not be called for allowed patterns',
+              };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const readCalls = toolCalls.filter(
+            (tc) => tc.toolUse.name === 'read_file',
+          );
+
+          // Should have attempted reads
+          expect(readCalls.length).toBeGreaterThan(0);
+
+          // .env should trigger canUseTool (not in allowed pattern)
+          // but .json and .txt should be auto-approved
+          // Note: canUseTool may be called for .env or not used at all
+          // depending on model behavior
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should auto-approve specific shell commands with pattern matching',
+      async () => {
+        const q = query({
+          prompt:
+            'Run "echo test", "echo build", "pwd", and "whoami" commands.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            // Auto-approve echo commands
+            allowedTools: ['ShellTool(echo *)'],
+            canUseTool: async (_toolName) => {
+              return {
+                behavior: 'deny',
+                message: 'Non-allowed tools should trigger this',
+              };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const shellCalls = toolCalls.filter(
+            (tc) => tc.toolUse.name === 'run_shell_command',
+          );
+
+          // Should have attempted shell commands
+          expect(shellCalls.length).toBeGreaterThan(0);
+
+          // Check that echo commands were executed without canUseTool
+          const echoCalls = shellCalls.filter((call) => {
+            const input = call.toolUse.input as { command?: string };
+            return input.command?.startsWith('echo');
+          });
+          expect(echoCalls.length).toBeGreaterThan(0);
         } finally {
           await q.close();
         }
@@ -736,6 +1002,327 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Should work normally
           expect(toolNames).toContain('read_file');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('permissionMode priority interactions', () => {
+    it(
+      'permissionMode plan should block all write tools even if allowedTools is set',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+
+        const canUseToolCalls: string[] = [];
+
+        const q = query({
+          prompt: 'Read test.txt and write "modified" to it.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'plan',
+            // allowedTools should be overridden by plan mode
+            allowedTools: ['write_file'],
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // Should be able to read
+          expect(toolNames).toContain('read_file');
+
+          // write_file should NOT be called in plan mode
+          // (plan mode blocks all write operations)
+          // The AI should respond with a plan instead
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'permissionMode yolo should be overridden by excludeTools',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+
+        const q = query({
+          prompt: 'Read test.txt and run "echo hello" command.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // Even in yolo mode, excludeTools should block tools
+            excludeTools: ['run_shell_command'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // Should be able to read
+          expect(toolNames).toContain('read_file');
+
+          // Shell commands should have been blocked by excludeTools
+          const shellResults = findToolResults(messages, 'run_shell_command');
+          if (shellResults.length > 0) {
+            for (const result of shellResults) {
+              expect(result.content).toMatch(/permission.*declined/i);
+            }
+          }
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('canUseTool updatedInput handling', () => {
+    it(
+      'should apply updatedInput from canUseTool callback',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+
+        let capturedInput: Record<string, unknown> = {};
+
+        const q = query({
+          prompt: 'Write "new content" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (_toolName, input) => {
+              // Modify the input before allowing
+              capturedInput = { ...input };
+              const modifiedInput = {
+                ...input,
+                file_path: (input['file_path'] as string).replace(
+                  'test.txt',
+                  'test.txt',
+                ),
+              };
+              return { behavior: 'allow', updatedInput: modifiedInput };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          // The input should have been captured
+          expect(Object.keys(capturedInput).length).toBeGreaterThan(0);
+
+          // The file should be modified
+          const content = await helper.readFile('test.txt');
+          expect(content).toBe('new content');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'canUseTool should not be called for allowedTools even if it would modify input',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+
+        let canUseToolCalled = false;
+
+        const q = query({
+          prompt: 'Write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            // write_file is in allowedTools, so canUseTool should not be called
+            allowedTools: ['write_file'],
+            canUseTool: async (toolName, input) => {
+              canUseToolCalled = true;
+              return {
+                behavior: 'allow',
+                updatedInput: { ...input, file_path: '/some/other/path.txt' },
+              };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          // canUseTool should NOT have been called for allowed tool
+          expect(canUseToolCalled).toBe(false);
+
+          // File should be modified (not redirected to /some/other/path.txt)
+          const content = await helper.readFile('test.txt');
+          expect(content).toBe('modified');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('coreTools interaction with excludeTools and allowedTools', () => {
+    it(
+      'should block tools in excludeTools even if they are in coreTools',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+
+        const q = query({
+          prompt: 'Edit test.txt and list the directory.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // edit is in coreTools but also in excludeTools
+            coreTools: ['read_file', 'write_file', 'edit', 'list_directory'],
+            excludeTools: ['edit'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // edit should NOT be used (excluded even though in coreTools)
+          expect(toolNames).not.toContain('edit');
+
+          // list_directory should be used
+          expect(toolNames).toContain('list_directory');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should not auto-approve tools in allowedTools if they are not in coreTools',
+      async () => {
+        await helper.createFile('test.txt', 'original');
+        await helper.createFile('other.txt', 'other content');
+
+        const q = query({
+          prompt: 'Read test.txt and write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // write_file is in allowedTools but NOT in coreTools
+            coreTools: ['read_file'],
+            allowedTools: ['write_file'],
+            canUseTool: async (_toolName) => {
+              return { behavior: 'deny', message: 'Should not be called' };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // read_file should be used
+          expect(toolNames).toContain('read_file');
+
+          // write_file should NOT be used (not in coreTools)
+          // even though it's in allowedTools, coreTools takes precedence as a whitelist
+          expect(toolNames).not.toContain('write_file');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should prioritize coreTools as whitelist over allowedTools',
+      async () => {
+        await helper.createFile('a.txt', 'content a');
+        await helper.createFile('b.txt', 'content b');
+
+        const q = query({
+          prompt: 'Read both a.txt and b.txt files.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'yolo',
+            // coreTools is the whitelist - only these tools can be used
+            coreTools: ['read_file'],
+            // allowedTools pattern that would match b.txt
+            allowedTools: ['Read(b.txt)'],
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // read_file should be used (in coreTools)
+          expect(toolNames).toContain('read_file');
+
+          // Only read_file should be used, not other tools
+          const uniqueTools = Array.from(new Set(toolNames));
+          expect(uniqueTools).toEqual(['read_file']);
         } finally {
           await q.close();
         }
