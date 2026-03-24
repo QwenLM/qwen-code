@@ -24,6 +24,11 @@ vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
 }));
 
+// Mock useTerminalSize
+vi.mock('../../hooks/useTerminalSize.js', () => ({
+  useTerminalSize: vi.fn(() => ({ columns: 100, rows: 24 })),
+}));
+
 // Mock semantic-colors
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
@@ -137,6 +142,7 @@ describe('HookDetailStep', () => {
 
     const output = lastFrame();
     expect(output).toContain('Configured hooks');
+    expect(output).toContain('[command]');
     expect(output).toContain('hook-command-0');
     expect(output).toContain('hook-command-1');
   });

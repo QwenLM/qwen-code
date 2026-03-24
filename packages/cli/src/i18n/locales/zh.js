@@ -651,6 +651,15 @@ export default {
   'No hooks configured for this event.': '此事件未配置 Hook。',
   'To add hooks, edit settings.json directly or ask Qwen.':
     '要添加 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Enter to select · Esc to go back': 'Enter 选择 · Esc 返回',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook 详情',
+  'Event:': '事件：',
+  'Extension:': '扩展：',
+  'Desc:': '描述：',
+  'No hook config selected': '未选择 Hook 配置',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
   // Hooks - Source
   Project: '项目',
   User: '用户',

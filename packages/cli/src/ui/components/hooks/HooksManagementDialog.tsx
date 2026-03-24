@@ -22,6 +22,7 @@ import type {
 import { HOOKS_MANAGEMENT_STEPS } from './types.js';
 import { HooksListStep } from './HooksListStep.js';
 import { HookDetailStep } from './HookDetailStep.js';
+import { HookConfigDetailStep } from './HookConfigDetailStep.js';
 import {
   DISPLAY_HOOK_EVENTS,
   getTranslatedSourceDisplayMap,
@@ -42,6 +43,7 @@ export function HooksManagementDialog({
     HOOKS_MANAGEMENT_STEPS.HOOKS_LIST,
   ]);
   const [selectedHookIndex, setSelectedHookIndex] = useState<number>(-1);
+  const [selectedConfigIndex, setSelectedConfigIndex] = useState<number>(-1);
   const [hooks, setHooks] = useState<HookEventDisplayInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -107,7 +109,8 @@ export function HooksManagementDialog({
               hookInfo.configs.push({
                 config: hookConfig,
                 source: HooksConfigSource.Extensions,
-                sourceDisplay: sourceDisplayMap[HooksConfigSource.Extensions],
+                sourceDisplay: extension.name,
+                sourcePath: extension.path,
                 enabled: true,
               });
             }
@@ -167,19 +170,41 @@ export function HooksManagementDialog({
     });
   }, [onClose]);
 
-  // Select hook
+  // Select hook event
   const handleSelectHook = useCallback((index: number) => {
     setSelectedHookIndex(index);
+    setSelectedConfigIndex(-1);
     setNavigationStack((prev) => [...prev, HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL]);
   }, []);
 
-  // Selected hook
+  // Select hook config
+  const handleSelectConfig = useCallback((index: number) => {
+    setSelectedConfigIndex(index);
+    setNavigationStack((prev) => [
+      ...prev,
+      HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL,
+    ]);
+  }, []);
+
+  // Selected hook event
   const selectedHook = useMemo(() => {
     if (selectedHookIndex >= 0 && selectedHookIndex < hooks.length) {
       return hooks[selectedHookIndex];
     }
     return null;
   }, [hooks, selectedHookIndex]);
+
+  // Selected hook config
+  const selectedConfig = useMemo(() => {
+    if (
+      selectedHook &&
+      selectedConfigIndex >= 0 &&
+      selectedConfigIndex < selectedHook.configs.length
+    ) {
+      return selectedHook.configs[selectedConfigIndex];
+    }
+    return null;
+  }, [selectedHook, selectedConfigIndex]);
 
   // Render based on current step
   const renderContent = () => {
@@ -220,12 +245,34 @@ export function HooksManagementDialog({
       case HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL:
         if (selectedHook) {
           return (
-            <HookDetailStep hook={selectedHook} onBack={handleNavigateBack} />
+            <HookDetailStep
+              hook={selectedHook}
+              onBack={handleNavigateBack}
+              onSelectConfig={handleSelectConfig}
+            />
           );
         }
         return (
           <Box flexDirection="column" paddingX={1}>
             <Text color={theme.text.secondary}>{t('No hook selected')}</Text>
+          </Box>
+        );
+
+      case HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL:
+        if (selectedHook && selectedConfig) {
+          return (
+            <HookConfigDetailStep
+              hookEvent={selectedHook}
+              hookConfig={selectedConfig}
+              onBack={handleNavigateBack}
+            />
+          );
+        }
+        return (
+          <Box flexDirection="column" paddingX={1}>
+            <Text color={theme.text.secondary}>
+              {t('No hook config selected')}
+            </Text>
           </Box>
         );
 

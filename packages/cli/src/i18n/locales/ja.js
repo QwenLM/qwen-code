@@ -400,6 +400,15 @@ export default {
     'このイベントにはフックが設定されていません。',
   'To add hooks, edit settings.json directly or ask Qwen.':
     'フックを追加するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  'Enter to select · Esc to go back': 'Enter で選択 · Esc で戻る',
+  // Hooks - Config Detail Step
+  'Hook details': 'フック詳細',
+  'Event:': 'イベント：',
+  'Extension:': '拡張機能：',
+  'Desc:': '説明：',
+  'No hook config selected': 'フック設定が選択されていません',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'このフックを変更または削除するには、settings.json を直接編集するか、Qwen に尋ねてください。',
   // Hooks - Source
   Project: 'プロジェクト',
   User: 'ユーザー',

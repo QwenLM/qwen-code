@@ -36,6 +36,7 @@ export interface HookConfigDisplayInfo {
   config: HookConfig;
   source: HooksConfigSource;
   sourceDisplay: string;
+  sourcePath?: string;
   enabled: boolean;
 }
 
@@ -45,6 +46,7 @@ export interface HookConfigDisplayInfo {
 export const HOOKS_MANAGEMENT_STEPS = {
   HOOKS_LIST: 'hooks_list',
   HOOK_DETAIL: 'hook_detail',
+  HOOK_CONFIG_DETAIL: 'hook_config_detail',
 } as const;
 
 export type HooksManagementStep =

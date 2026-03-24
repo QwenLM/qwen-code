@@ -8,24 +8,33 @@ import { useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookEventDisplayInfo } from './types.js';
+import { HooksConfigSource } from '@qwen-code/qwen-code-core';
 import { getTranslatedSourceDisplayMap } from './constants.js';
 import { t } from '../../../i18n/index.js';
 
 interface HookDetailStepProps {
   hook: HookEventDisplayInfo;
   onBack: () => void;
+  onSelectConfig?: (index: number) => void;
 }
 
 export function HookDetailStep({
   hook,
   onBack,
+  onSelectConfig,
 }: HookDetailStepProps): React.JSX.Element {
   const hasConfigs = hook.configs.length > 0;
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const { columns: terminalWidth } = useTerminalSize();
 
   // Get translated source display map
   const sourceDisplayMap = getTranslatedSourceDisplayMap();
+
+  // Calculate column widths (command: 70%, source: 30%)
+  const commandWidth = Math.floor(terminalWidth * 0.65);
+  const sourceWidth = Math.floor(terminalWidth * 0.3);
 
   // Handle keyboard navigation
   useKeypress(
@@ -39,11 +48,25 @@ export function HookDetailStep({
           setSelectedIndex((prev) =>
             Math.min(hook.configs.length - 1, prev + 1),
           );
+        } else if (key.name === 'return' && onSelectConfig) {
+          onSelectConfig(selectedIndex);
         }
       }
     },
     { isActive: true },
   );
+
+  // Get source display for config list
+  const getConfigSourceDisplay = (config: {
+    source: HooksConfigSource;
+    sourceDisplay: string;
+  }): string => {
+    if (config.source === HooksConfigSource.Extensions) {
+      // For extensions, sourceDisplay is the extension name
+      return `${sourceDisplayMap[HooksConfigSource.Extensions]} (${config.sourceDisplay})`;
+    }
+    return sourceDisplayMap[config.source] || config.source;
+  };
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -87,31 +110,49 @@ export function HookDetailStep({
           </Text>
           {hook.configs.map((config, index) => {
             const isSelected = index === selectedIndex;
-            const sourceDisplay =
-              sourceDisplayMap[config.source] || config.source;
+            const sourceDisplay = getConfigSourceDisplay(config);
+            const command =
+              config.config.type === 'command' ? config.config.command : '';
+            const hookType = config.config.type;
 
             return (
               <Box key={index}>
-                <Box minWidth={2}>
+                {/* Left column: selector + command */}
+                <Box width={commandWidth}>
+                  <Box minWidth={2}>
+                    <Text
+                      color={
+                        isSelected ? theme.text.accent : theme.text.primary
+                      }
+                    >
+                      {isSelected ? '❯' : ' '}
+                    </Text>
+                  </Box>
                   <Text
                     color={isSelected ? theme.text.accent : theme.text.primary}
+                    bold={isSelected}
+                    wrap="wrap"
                   >
-                    {isSelected ? '❯' : ' '}
+                    {`${index + 1}. [${hookType}] ${command}`}
                   </Text>
                 </Box>
-                <Text
-                  color={isSelected ? theme.text.accent : theme.text.primary}
-                  bold={isSelected}
-                >
-                  {`${index + 1}. ${config.config.command}`}
-                </Text>
-                <Text color={theme.text.secondary}> · </Text>
-                <Text color={theme.text.secondary}>{sourceDisplay}</Text>
+                {/* Right column: source */}
+                <Box width={sourceWidth}>
+                  <Text color={theme.text.secondary} wrap="wrap">
+                    {sourceDisplay}
+                  </Text>
+                </Box>
               </Box>
             );
           })}
           <Box marginTop={1}>
-            <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
+            {onSelectConfig ? (
+              <Text color={theme.text.secondary}>
+                {t('Enter to select · Esc to go back')}
+              </Text>
+            ) : (
+              <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
+            )}
           </Box>
         </>
       ) : (

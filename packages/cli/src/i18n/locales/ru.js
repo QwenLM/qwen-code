@@ -625,6 +625,15 @@ export default {
     'Для этого события нет настроенных хуков.',
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Чтобы добавить хуки, отредактируйте settings.json напрямую или спросите Qwen.',
+  'Enter to select · Esc to go back': 'Enter для выбора · Esc для возврата',
+  // Hooks - Config Detail Step
+  'Hook details': 'Детали хука',
+  'Event:': 'Событие:',
+  'Extension:': 'Расширение:',
+  'Desc:': 'Описание:',
+  'No hook config selected': 'Конфигурация хука не выбрана',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'Чтобы изменить или удалить этот хук, отредактируйте settings.json напрямую или спросите Qwen.',
   // Hooks - Source
   Project: 'Проект',
   User: 'Пользователь',

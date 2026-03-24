@@ -620,6 +620,15 @@ export default {
     'Nenhum hook configurado para este evento.',
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Para adicionar hooks, edite settings.json diretamente ou pergunte ao Qwen.',
+  'Enter to select · Esc to go back': 'Enter para selecionar · Esc para voltar',
+  // Hooks - Config Detail Step
+  'Hook details': 'Detalhes do Hook',
+  'Event:': 'Evento:',
+  'Extension:': 'Extensão:',
+  'Desc:': 'Descrição:',
+  'No hook config selected': 'Nenhuma configuração de hook selecionada',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'Para modificar ou remover este hook, edite settings.json diretamente ou pergunte ao Qwen.',
   // Hooks - Source
   Project: 'Projeto',
   User: 'Usuário',
