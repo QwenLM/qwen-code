@@ -15,7 +15,7 @@ This guide covers setting up a Qwen Code channel on Telegram.
 
 ## Finding Your User ID
 
-To use `senderPolicy: "allowlist"`, you need your Telegram user ID (a numeric ID, not your username).
+To use `senderPolicy: "allowlist"` or `"pairing"`, you need your Telegram user ID (a numeric ID, not your username).
 
 The easiest way to find it:
 
@@ -62,7 +62,7 @@ Then open your bot in Telegram and send a message. You should see "Working..." a
 
 - **Keep instructions concise-focused** — Telegram has a 4096-character message limit. Adding instructions like "keep responses short" helps the agent stay within bounds.
 - **Use `sessionScope: "user"`** — This gives each user their own conversation. Use `/reset` to start fresh.
-- **Restrict access** — Use `senderPolicy: "allowlist"` with your user ID to prevent unauthorized access. The bot silently ignores messages from users not on the list.
+- **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of users, or `"pairing"` to let new users request access with a code you approve via CLI. See [DM Pairing](./overview#dm-pairing) for details.
 
 ## Message Formatting
 
@@ -73,7 +73,7 @@ The agent's markdown responses are automatically converted to Telegram-compatibl
 ### Bot doesn't respond
 
 - Check that the bot token is correct and the environment variable is set
-- Verify your user ID is in `allowedUsers` if using `senderPolicy: "allowlist"`
+- Verify your user ID is in `allowedUsers` if using `senderPolicy: "allowlist"`, or that you've been approved if using `"pairing"`
 - Check the terminal output for errors
 
 ### "Sorry, something went wrong processing your message"

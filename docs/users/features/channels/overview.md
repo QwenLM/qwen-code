@@ -41,23 +41,23 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option         | Required | Description                                                                  |
-| -------------- | -------- | ---------------------------------------------------------------------------- |
-| `type`         | Yes      | Channel type: `telegram` (more coming soon)                                  |
-| `token`        | Yes      | Bot token. Supports `$ENV_VAR` syntax to read from environment variables     |
-| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`         |
-| `allowedUsers` | No       | List of user IDs allowed to use the bot (when `senderPolicy` is `allowlist`) |
-| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`             |
-| `cwd`          | No       | Working directory for the agent. Defaults to the current directory           |
-| `instructions` | No       | Custom instructions prepended to the first message of each session           |
+| Option         | Required | Description                                                                          |
+| -------------- | -------- | ------------------------------------------------------------------------------------ |
+| `type`         | Yes      | Channel type: `telegram` (more coming soon)                                          |
+| `token`        | Yes      | Bot token. Supports `$ENV_VAR` syntax to read from environment variables             |
+| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                 |
+| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies) |
+| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                     |
+| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                   |
+| `instructions` | No       | Custom instructions prepended to the first message of each session                   |
 
 ### Sender Policy
 
 Controls who can interact with the bot:
 
 - **`allowlist`** (default) — Only users listed in `allowedUsers` can send messages. Others are silently ignored.
+- **`pairing`** — Unknown senders receive a pairing code. The bot operator approves them via CLI, and they're added to a persistent allowlist. Users in `allowedUsers` skip pairing entirely. See [DM Pairing](#dm-pairing) below.
 - **`open`** — Anyone can send messages. Use with caution.
-- **`pairing`** — (Coming soon) New users go through a pairing flow before they can chat.
 
 ### Session Scope
 
@@ -78,6 +78,39 @@ Bot tokens should not be stored directly in `settings.json`. Instead, use enviro
 ```
 
 Set the actual token in your shell environment or in a `.env` file that gets loaded before running the channel.
+
+## DM Pairing
+
+When `senderPolicy` is set to `"pairing"`, unknown senders go through an approval flow:
+
+1. An unknown user sends a message to the bot
+2. The bot replies with an 8-character pairing code (e.g., `VEQDDWXJ`)
+3. The user shares the code with you (the bot operator)
+4. You approve them via CLI:
+
+```bash
+qwen channel pairing approve my-channel VEQDDWXJ
+```
+
+Once approved, the user's ID is saved to `~/.qwen/channels/<name>-allowlist.json` and all future messages go through normally.
+
+### Pairing CLI Commands
+
+```bash
+# List pending pairing requests
+qwen channel pairing list my-channel
+
+# Approve a request by code
+qwen channel pairing approve my-channel <CODE>
+```
+
+### Pairing Rules
+
+- Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
+- Codes expire after 1 hour
+- Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
+- Users listed in `allowedUsers` in `settings.json` always skip pairing
+- Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
 
 ## Slash Commands
 
