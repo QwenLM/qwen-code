@@ -87,7 +87,7 @@ export class AcpConnection {
     this.lastExitSignal = null;
     this.workingDir = workingDir;
 
-    const env = { ...process.env };
+    const env = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
 
     const proxyArg = extraArgs.find(
       (arg, i) => arg === '--proxy' && i + 1 < extraArgs.length,
