@@ -76,6 +76,8 @@ export class WebViewProvider {
         this.pendingAskUserQuestionResolve = null;
         this.pendingAskUserQuestionRequest = null;
       }
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
     this.messageHandler = new MessageHandler(
@@ -597,6 +599,8 @@ export class WebViewProvider {
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
       this.attachedWebview = null;
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
 
