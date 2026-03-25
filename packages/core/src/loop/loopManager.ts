@@ -159,6 +159,12 @@ export class LoopManager {
       );
     }
 
+    if (!this.onIteration) {
+      throw new Error(
+        'Cannot start loop: no iteration callback registered. Call setIterationCallback() first.',
+      );
+    }
+
     this.stop();
 
     this.state = {
@@ -241,7 +247,8 @@ export class LoopManager {
         clearTimeout(this.state.timerId);
         this.state.timerId = null;
       }
-      // Keep state accessible briefly so caller can read final iteration count
+      // Keep state accessible (but inactive) so callers can read final stats
+      // until the loop is explicitly stopped or restarted.
       return;
     }
 

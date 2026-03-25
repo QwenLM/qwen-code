@@ -275,6 +275,35 @@ describe('LoopManager', () => {
     expect(iterationCallback).toHaveBeenLastCalledWith('second', 1);
   });
 
+  it('throws when starting without iteration callback', () => {
+    const mgr = new LoopManager();
+    expect(() =>
+      mgr.start({ prompt: 'test', intervalMs: 60_000, maxIterations: 0 }),
+    ).toThrow('no iteration callback');
+  });
+
+  it('throws for invalid intervalMs', () => {
+    expect(() =>
+      manager.start({ prompt: 'test', intervalMs: 0, maxIterations: 0 }),
+    ).toThrow('intervalMs');
+    expect(() =>
+      manager.start({ prompt: 'test', intervalMs: Infinity, maxIterations: 0 }),
+    ).toThrow('intervalMs');
+  });
+
+  it('throws for invalid maxIterations', () => {
+    expect(() =>
+      manager.start({ prompt: 'test', intervalMs: 60_000, maxIterations: -1 }),
+    ).toThrow('maxIterations');
+    expect(() =>
+      manager.start({
+        prompt: 'test',
+        intervalMs: 60_000,
+        maxIterations: 1.5,
+      }),
+    ).toThrow('maxIterations');
+  });
+
   it('does not fire callback after stop', () => {
     manager.start({
       prompt: 'check',
