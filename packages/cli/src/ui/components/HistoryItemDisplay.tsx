@@ -230,6 +230,16 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} />
       )}
+      {itemForDisplay.type === 'user_prompt_submit_blocked' && (
+        <ErrorMessage
+          text={`UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${itemForDisplay.originalPrompt}`}
+        />
+      )}
+      {itemForDisplay.type === 'stop_hook_loop' && (
+        <InfoMessage
+          text={`Ran ${itemForDisplay.iterationCount} stop hooks\n  ⎿  Stop hook reason: ${itemForDisplay.reasons[itemForDisplay.reasons.length - 1]}`}
+        />
+      )}
     </Box>
   );
 };

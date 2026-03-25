@@ -972,6 +972,48 @@ export const useGeminiStream = (
     });
   }, [handleLoopDetectionConfirmation]);
 
+  const handleUserPromptSubmitBlockedEvent = useCallback(
+    (
+      value: { reason: string; originalPrompt: string },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'user_prompt_submit_blocked',
+          reason: value.reason,
+          originalPrompt: value.originalPrompt,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
+  const handleStopHookLoopEvent = useCallback(
+    (
+      value: { iterationCount: number; reasons: string[] },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: value.iterationCount,
+          reasons: value.reasons,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
   const processGeminiStreamEvents = useCallback(
     async (
       stream: AsyncIterable<GeminiEvent>,
@@ -1061,6 +1103,15 @@ export const useGeminiStream = (
               userMessageTimestamp,
             );
             break;
+          case ServerGeminiEventType.UserPromptSubmitBlocked:
+            handleUserPromptSubmitBlockedEvent(
+              event.value,
+              userMessageTimestamp,
+            );
+            break;
+          case ServerGeminiEventType.StopHookLoop:
+            handleStopHookLoopEvent(event.value, userMessageTimestamp);
+            break;
           default: {
             // enforces exhaustive switch-case
             const unreachable: never = event;
@@ -1089,6 +1140,8 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
+      handleUserPromptSubmitBlockedEvent,
+      handleStopHookLoopEvent,
     ],
   );
 
