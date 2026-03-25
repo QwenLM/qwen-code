@@ -1,6 +1,6 @@
 # Channels
 
-Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
+Channels let you interact with a Qwen Code agent from messaging platforms like Telegram or WeChat, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ Each channel runs as a long-lived process that bridges a messaging platform to a
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see the channel-specific guide, e.g., [Telegram](./telegram))
+1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start <name>`
 
@@ -45,17 +45,18 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option         | Required | Description                                                                                        |
-| -------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `type`         | Yes      | Channel type: `telegram` (more coming soon)                                                        |
-| `token`        | Yes      | Bot token. Supports `$ENV_VAR` syntax to read from environment variables                           |
-| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                               |
-| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)               |
-| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                   |
-| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                                 |
-| `instructions` | No       | Custom instructions prepended to the first message of each session                                 |
-| `groupPolicy`  | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)   |
-| `groups`       | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats) |
+| Option         | Required | Description                                                                                                                              |
+| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`         | Yes      | Channel type: `telegram` or `weixin`                                                                                                     |
+| `token`        | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat                                          |
+| `model`        | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input |
+| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                     |
+| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                     |
+| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                         |
+| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                                                                       |
+| `instructions` | No       | Custom instructions prepended to the first message of each session                                                                       |
+| `groupPolicy`  | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                         |
+| `groups`       | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                       |
 
 ### Sender Policy
 
@@ -177,6 +178,42 @@ curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | python3
 ```
 
 Look for `message.chat.id` in the response — group IDs are negative numbers (e.g., `-5170296765`).
+
+## Media Support
+
+Channels support sending images and files to the agent, not just text.
+
+### Images
+
+Send a photo to the bot and the agent will see it — useful for sharing screenshots, error messages, or diagrams. The image is sent directly to the model as a vision input.
+
+To use image support, configure a multimodal model for the channel:
+
+```json
+{
+  "channels": {
+    "my-channel": {
+      "type": "telegram",
+      "model": "qwen3.5-plus",
+      ...
+    }
+  }
+}
+```
+
+### Files
+
+Send a document (PDF, code file, text file, etc.) to the bot. The file is downloaded and saved to a temporary directory, and the agent is told the file path so it can read the contents using its file-reading tools.
+
+Files work with any model — no multimodal support required.
+
+### Platform differences
+
+| Feature  | Telegram                                     | WeChat                           |
+| -------- | -------------------------------------------- | -------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption |
+| Captions | Photo/file captions included as message text | Not applicable                   |
 
 ## Slash Commands
 

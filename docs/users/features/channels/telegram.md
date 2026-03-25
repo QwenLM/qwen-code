@@ -73,6 +73,14 @@ To use the bot in Telegram groups:
 
 By default, the bot requires an @mention or a reply to respond in groups. Set `"requireMention": false` for a specific group to make it respond to all messages (useful for dedicated task groups). See [Group Chats](./overview#group-chats) for full details.
 
+## Images and Files
+
+You can send photos and documents to the bot, not just text.
+
+**Photos:** Send a photo and the agent will analyze it using its vision capabilities. This requires a multimodal model — add `"model": "qwen3.5-plus"` (or another vision-capable model) to your channel config. Photo captions are passed as the message text.
+
+**Documents:** Send a PDF, code file, or any document. The bot downloads it and saves it locally so the agent can read it with its file tools. This works with any model. Telegram's file size limit is 20MB.
+
 ## Tips
 
 - **Keep instructions concise-focused** — Telegram has a 4096-character message limit. Adding instructions like "keep responses short" helps the agent stay within bounds.
