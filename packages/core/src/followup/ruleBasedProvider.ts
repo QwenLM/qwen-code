@@ -103,9 +103,11 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
     matchMessage: true, // Match against message content, not tool names
     condition: (context) => {
       const hasToolCalls = context.toolCalls.length > 0;
+      const lastMessageLower = context.lastMessage.toLowerCase();
       const messageHasKeywords =
-        context.lastMessage.toLowerCase().includes('fix') ||
-        context.lastMessage.toLowerCase().includes('bug');
+        lastMessageLower.includes('fix') ||
+        lastMessageLower.includes('bug') ||
+        lastMessageLower.includes('error');
       return hasToolCalls && messageHasKeywords;
     },
   },
@@ -120,9 +122,11 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
     matchMessage: true, // Match against message content, not tool names
     condition: (context) => {
       const hasToolCalls = context.toolCalls.length > 0;
+      const lastMessageLower = context.lastMessage.toLowerCase();
       const messageHasKeywords =
-        context.lastMessage.toLowerCase().includes('refactor') ||
-        context.lastMessage.toLowerCase().includes('reorganize');
+        lastMessageLower.includes('refactor') ||
+        lastMessageLower.includes('reorganize') ||
+        lastMessageLower.includes('clean up');
       return hasToolCalls && messageHasKeywords;
     },
   },

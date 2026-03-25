@@ -256,13 +256,9 @@ export const InputForm: FC<InputFormProps> = ({
       !inputText &&
       !completionActive
     ) {
-      const inputEl = inputFieldRef.current;
-      // Only cycle if input is truly empty (no visible text)
-      if (inputEl && !inputEl.textContent) {
-        e.preventDefault();
-        onNextFollowup?.();
-        return;
-      }
+      e.preventDefault();
+      onNextFollowup?.();
+      return;
     }
     // Left arrow to cycle to previous suggestion (when input is empty)
     if (
@@ -271,13 +267,9 @@ export const InputForm: FC<InputFormProps> = ({
       !inputText &&
       !completionActive
     ) {
-      const inputEl = inputFieldRef.current;
-      // Only cycle if input is truly empty (no visible text)
-      if (inputEl && !inputEl.textContent) {
-        e.preventDefault();
-        onPreviousFollowup?.();
-        return;
-      }
+      e.preventDefault();
+      onPreviousFollowup?.();
+      return;
     }
     // If composing (Chinese IME input), don't process Enter key
     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
