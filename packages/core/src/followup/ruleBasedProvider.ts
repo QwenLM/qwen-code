@@ -259,10 +259,9 @@ export class RuleBasedProvider implements SuggestionProvider {
       });
     } else if (typeof pattern === 'string') {
       const lowerPattern = pattern.toLowerCase();
-      patternMatches =
-        context.toolCalls.some((call) =>
-          call.name.toLowerCase().includes(lowerPattern),
-        ) || context.lastMessage.toLowerCase().includes(lowerPattern);
+      patternMatches = context.toolCalls.some((call) =>
+        call.name.toLowerCase().includes(lowerPattern),
+      );
     }
 
     if (!patternMatches) {

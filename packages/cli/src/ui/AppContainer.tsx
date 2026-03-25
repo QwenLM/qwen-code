@@ -956,23 +956,22 @@ export const AppContainer = (props: AppContainerProps) => {
       // Get the last gemini message from history
       const history = historyManager.history;
 
-      // Collect only the most recent contiguous block of tool_group items
-      // to avoid suggesting based on older turns' tool activity
+      // Collect tool_group items from the most recent turn (after the last
+      // user message) to avoid suggesting based on older turns' tool activity
+      const lastUserIndex = history.findLastIndex(
+        (item) => item.type === 'user',
+      );
+      const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0;
       const recentToolGroupItems: typeof history = [];
-      for (let i = history.length - 1; i >= 0; i -= 1) {
-        const item = history[i];
-        if (item.type === 'tool_group') {
-          recentToolGroupItems.push(item);
-        } else if (recentToolGroupItems.length > 0) {
-          break;
+      for (let i = startIndex; i < history.length; i += 1) {
+        if (history[i].type === 'tool_group') {
+          recentToolGroupItems.push(history[i]);
         }
       }
-      recentToolGroupItems.reverse();
 
-      // Generate suggestions even if pendingToolCalls is empty - use history instead
+      // Flatten to individual tool calls, then cap at 10
       const toolCalls = recentToolGroupItems
-        .slice(-10) // Get last 10 tool calls within the most recent turn
-        .map((item) => {
+        .flatMap((item) => {
           const toolGroup = item as {
             tools?: Array<{ name: string; status: ToolCallStatus }>;
           };
@@ -990,7 +989,7 @@ export const AppContainer = (props: AppContainerProps) => {
           }
           return [];
         })
-        .flat();
+        .slice(-10);
 
       // Only proceed if we have tool calls
       if (toolCalls.length > 0) {
