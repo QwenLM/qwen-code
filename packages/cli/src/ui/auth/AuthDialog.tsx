@@ -210,7 +210,9 @@ export function AuthDialog(): React.JSX.Element {
       key: 'CUSTOM_API_KEY',
       title: t('Custom API Key'),
       label: t('Custom API Key'),
-      description: t('For other OpenAI-compatible providers'),
+      description: t(
+        'For other OpenAI / Anthropic / Gemini-compatible providers',
+      ),
       value: 'CUSTOM_API_KEY' as ApiKeyOption,
     },
   ];
@@ -218,7 +220,7 @@ export function AuthDialog(): React.JSX.Element {
   // Map an AuthType to the corresponding main menu option.
   // QWEN_OAUTH maps directly; USE_OPENAI maps to:
   // - CODING_PLAN when current config matches coding plan
-  // - API_KEY for other OpenAI-compatible configs
+  // - API_KEY for other OpenAI / Anthropic / Gemini-compatible configs
   const contentGenConfig = config.getContentGeneratorConfig();
   const isCurrentlyCodingPlan =
     isCodingPlanConfig(
