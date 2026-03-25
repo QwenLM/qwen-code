@@ -1,6 +1,6 @@
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
-export type ChannelType = 'telegram' | 'discord' | 'webhook';
+export type ChannelType = 'telegram' | 'weixin' | 'discord' | 'webhook';
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 
 export interface GroupConfig {

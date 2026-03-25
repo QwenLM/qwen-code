@@ -95,6 +95,14 @@ export class TelegramChannel extends ChannelBase {
       // Check if this is a reply to one of the bot's messages
       const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
 
+      // Strip @botname from message text so the agent only sees the actual prompt
+      let cleanText = text;
+      if (isMentioned && this.botUsername) {
+        cleanText = text
+          .replace(new RegExp(`@${this.botUsername}`, 'gi'), '')
+          .trim();
+      }
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId: String(msg.from.id),
@@ -102,7 +110,7 @@ export class TelegramChannel extends ChannelBase {
           msg.from.first_name +
           (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
         chatId: String(msg.chat.id),
-        text,
+        text: cleanText,
         isGroup,
         isMentioned,
         isReplyToBot,

@@ -4,6 +4,7 @@ import {
   pairingListCommand,
   pairingApproveCommand,
 } from './channel/pairing.js';
+import { configureWeixinCommand } from './channel/configure.js';
 
 const pairingCommand: CommandModule = {
   command: 'pairing',
@@ -24,6 +25,7 @@ export const channelCommand: CommandModule = {
     yargs
       .command(startCommand)
       .command(pairingCommand)
+      .command(configureWeixinCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},

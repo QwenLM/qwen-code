@@ -42,6 +42,7 @@
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
+    "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",

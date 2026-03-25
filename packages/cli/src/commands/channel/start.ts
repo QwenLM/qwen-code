@@ -4,6 +4,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge } from '@qwen-code/channel-base';
 import type { ChannelConfig } from '@qwen-code/channel-base';
 import { TelegramChannel } from '@qwen-code/channel-telegram';
+import { WeixinChannel } from '@qwen-code/channel-weixin';
 import * as path from 'node:path';
 
 function resolveEnvVars(value: string): string {
@@ -62,29 +63,33 @@ export const startCommand: CommandModule<object, { name: string }> = {
       );
       process.exit(1);
     }
-    if (!rawConfig['token']) {
-      writeStderrLine(
-        `Error: Channel "${name}" is missing required field "token".`,
-      );
-      process.exit(1);
-    }
 
     const channelType = rawConfig['type'] as string;
-    if (channelType !== 'telegram') {
+    const supportedTypes = ['telegram', 'weixin'];
+    if (!supportedTypes.includes(channelType)) {
       writeStderrLine(
-        `Error: Channel type "${channelType}" is not yet supported. Only "telegram" is available.`,
+        `Error: Channel type "${channelType}" is not supported. Available: ${supportedTypes.join(', ')}`,
       );
       process.exit(1);
     }
 
-    let token: string;
-    try {
-      token = resolveEnvVars(rawConfig['token'] as string);
-    } catch (err) {
-      writeStderrLine(
-        `Error: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      process.exit(1);
+    // Token is required for telegram, not for weixin (uses account.json)
+    let token = '';
+    if (channelType !== 'weixin') {
+      if (!rawConfig['token']) {
+        writeStderrLine(
+          `Error: Channel "${name}" is missing required field "token".`,
+        );
+        process.exit(1);
+      }
+      try {
+        token = resolveEnvVars(rawConfig['token'] as string);
+      } catch (err) {
+        writeStderrLine(
+          `Error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      }
     }
 
     const config: ChannelConfig = {
@@ -105,6 +110,12 @@ export const startCommand: CommandModule<object, { name: string }> = {
       groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
     };
 
+    // Pass through weixin-specific config
+    const extendedConfig = {
+      ...config,
+      baseUrl: rawConfig['baseUrl'] as string | undefined,
+    };
+
     const cliEntryPath = findCliEntryPath();
     writeStdoutLine(`[Channel] CLI entry: ${cliEntryPath}`);
     writeStdoutLine(`[Channel] Starting "${name}" (type=${config.type})...`);
@@ -112,7 +123,12 @@ export const startCommand: CommandModule<object, { name: string }> = {
     const bridge = new AcpBridge({ cliEntryPath, cwd: config.cwd });
     await bridge.start();
 
-    const channel = new TelegramChannel(name, config, bridge);
+    let channel: TelegramChannel | WeixinChannel;
+    if (channelType === 'weixin') {
+      channel = new WeixinChannel(name, extendedConfig, bridge);
+    } else {
+      channel = new TelegramChannel(name, config, bridge);
+    }
     await channel.connect();
 
     writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
