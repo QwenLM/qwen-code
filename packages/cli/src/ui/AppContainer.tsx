@@ -1002,13 +1002,19 @@ export const AppContainer = (props: AppContainerProps) => {
               } => f !== null,
             );
 
+          // Derive error/cancellation flags from actual tool call statuses
+          const hasError = toolCalls.some((call) => call.status === 'error');
+          const wasCancelled = toolCalls.some(
+            (call) => call.status === 'cancelled',
+          );
+
           // Generate suggestions
           const context = extractSuggestionContext({
             lastMessage: (lastGeminiItem.text || '').slice(0, 1000),
             toolCalls,
             modifiedFiles,
-            hasError: false,
-            wasCancelled: false,
+            hasError,
+            wasCancelled,
           });
 
           const result = getGenerator().generate(context);

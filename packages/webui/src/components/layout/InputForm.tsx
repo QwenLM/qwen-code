@@ -129,7 +129,7 @@ export interface InputFormProps {
   /** Follow-up suggestion state */
   followupState?: FollowupState;
   /** Callback to accept follow-up suggestion */
-  onAcceptFollowup?: (suggestion: string) => void;
+  onAcceptFollowup?: () => void;
   /** Callback to dismiss follow-up suggestion */
   onDismissFollowup?: () => void;
   /** Callback to cycle to next follow-up suggestion */
@@ -246,7 +246,7 @@ export const InputForm: FC<InputFormProps> = ({
     if (e.key === 'Tab' && hasFollowup && !inputText && !completionActive) {
       e.preventDefault();
       e.stopPropagation();
-      onAcceptFollowup?.(followupSuggestion!);
+      onAcceptFollowup?.();
       return;
     }
     // Right arrow to cycle to next suggestion (when input is empty)

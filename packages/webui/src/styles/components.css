@@ -457,10 +457,13 @@
   text-underline-offset: 2px;
 }
 
-/* Suggestion counter indicator */
-.composer-input[data-suggestion-count]:not([data-suggestion-count='1']):not(
-    [data-suggestion-count='0']
-  )::after {
+/* Suggestion counter indicator — only when suggestion is active and input is empty */
+.composer-input[data-has-suggestion='true'][data-suggestion-count]:not(
+    [data-suggestion-count='1']
+  ):not([data-suggestion-count='0']):empty::after,
+.composer-input[data-has-suggestion='true'][data-suggestion-count]:not(
+    [data-suggestion-count='1']
+  ):not([data-suggestion-count='0'])[data-empty='true']::after {
   content: ' (' attr(data-suggestion-index) '/' attr(data-suggestion-count) ')';
   font-size: 0.85em;
   opacity: 0.6;

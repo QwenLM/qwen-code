@@ -211,7 +211,10 @@ export class RuleBasedProvider implements SuggestionProvider {
 
     for (const rule of this.rules) {
       if (this.matchesRule(rule, context)) {
-        for (const s of this.convertToFollowupSuggestions(rule.suggestions)) {
+        for (const s of this.convertToFollowupSuggestions(
+          rule.suggestions,
+          rule.priority ?? 0,
+        )) {
           if (!seen.has(s.text)) {
             seen.add(s.text);
             all.push(s);
@@ -242,6 +245,7 @@ export class RuleBasedProvider implements SuggestionProvider {
     if (suggestionRule.matchMessage) {
       // Match pattern against message content only
       if (pattern instanceof RegExp) {
+        pattern.lastIndex = 0; // Reset for g/y flag safety
         patternMatches = pattern.test(context.lastMessage);
       } else if (typeof pattern === 'string') {
         patternMatches = context.lastMessage
@@ -249,9 +253,10 @@ export class RuleBasedProvider implements SuggestionProvider {
           .includes(pattern.toLowerCase());
       }
     } else if (pattern instanceof RegExp) {
-      patternMatches = context.toolCalls.some((call) =>
-        pattern.test(call.name),
-      );
+      patternMatches = context.toolCalls.some((call) => {
+        pattern.lastIndex = 0; // Reset for g/y flag safety
+        return pattern.test(call.name);
+      });
     } else if (typeof pattern === 'string') {
       const lowerPattern = pattern.toLowerCase();
       patternMatches =
@@ -277,15 +282,18 @@ export class RuleBasedProvider implements SuggestionProvider {
    */
   private convertToFollowupSuggestions(
     suggestions: Array<string | { text: string; description?: string }>,
+    rulePriority: number,
   ): FollowupSuggestion[] {
     return suggestions.map((s, index) => {
+      // Combine rule priority with index offset so higher-priority rules dominate
+      const priority = rulePriority * 100 + (100 - index * 10);
       if (typeof s === 'string') {
-        return { text: s, priority: 100 - index * 10 };
+        return { text: s, priority };
       }
       return {
         text: s.text,
         description: s.description,
-        priority: 100 - index * 10,
+        priority,
       };
     });
   }

@@ -25,7 +25,7 @@ export interface FollowupSuggestion {
  * Tool call information for context analysis
  */
 export interface ToolCallInfo {
-  /** Tool name (e.g., 'EditToolCall', 'WriteToolCall', 'ShellToolCall') */
+  /** Tool display name (e.g., 'Edit', 'WriteFile', 'Shell') */
   name: string;
   /** Tool input data */
   input: Record<string, unknown>;

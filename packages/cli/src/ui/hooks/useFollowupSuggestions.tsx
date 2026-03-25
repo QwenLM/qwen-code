@@ -8,7 +8,7 @@
  * React hook for managing follow-up suggestions in the CLI (Ink/React).
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   INITIAL_FOLLOWUP_STATE,
   followupReducers,
@@ -81,6 +81,9 @@ export function useFollowupSuggestionsCLI(
 
   const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
 
+  const onAcceptRef = useRef(onAccept);
+  onAcceptRef.current = onAccept;
+
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acceptingRef = useRef(false);
   const acceptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -93,6 +96,13 @@ export function useFollowupSuggestionsCLI(
 
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+
+      // Empty array clears immediately; non-empty is delayed for UX
+      if (suggestions.length === 0) {
+        setState(followupReducers.clear());
+        return;
       }
 
       timeoutRef.current = setTimeout(() => {
@@ -107,18 +117,21 @@ export function useFollowupSuggestionsCLI(
       return;
     }
 
-    // Read current state to extract suggestion text before clearing
+    // Lock synchronously to prevent multiple rapid calls in the same tick
+    acceptingRef.current = true;
+
     setState((prev) => {
       const text = followupReducers.getAcceptText(prev);
       if (text === null) {
+        // Nothing to accept — release lock
+        acceptingRef.current = false;
         return prev;
       }
 
       // Schedule side effects outside the updater via microtask
       queueMicrotask(() => {
-        onAccept?.(text);
+        onAcceptRef.current?.(text);
 
-        acceptingRef.current = true;
         if (acceptTimeoutRef.current) {
           clearTimeout(acceptTimeoutRef.current);
         }
@@ -129,7 +142,7 @@ export function useFollowupSuggestionsCLI(
 
       return followupReducers.clear();
     });
-  }, [onAccept]);
+  }, []);
 
   const dismiss = useCallback(() => {
     setState(followupReducers.clear());
@@ -170,13 +183,16 @@ export function useFollowupSuggestionsCLI(
     [],
   );
 
-  return {
-    state,
-    setSuggestions,
-    accept,
-    dismiss,
-    next,
-    previous,
-    clear,
-  };
+  return useMemo(
+    () => ({
+      state,
+      setSuggestions,
+      accept,
+      dismiss,
+      next,
+      previous,
+      clear,
+    }),
+    [state, setSuggestions, accept, dismiss, next, previous, clear],
+  );
 }

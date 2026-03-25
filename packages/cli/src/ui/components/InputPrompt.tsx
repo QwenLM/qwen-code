@@ -718,10 +718,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Handle Tab for follow-up suggestions (when buffer is empty and no completion)
+      // Handle Tab for follow-up suggestions (when buffer is empty and no completion active)
       if (
         keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
         buffer.text.length === 0 &&
+        !completion.showSuggestions &&
         followup.state.isVisible &&
         followup.state.suggestion
       ) {
