@@ -969,9 +969,8 @@ export const AppContainer = (props: AppContainerProps) => {
     loopManager.setIterationCallback((prompt: string, iteration: number) => {
       const state = loopManager.getState();
       const interval = formatInterval(state?.config.intervalMs ?? 0);
-      const maxInfo = state?.config.maxIterations
-        ? `/${state.config.maxIterations}`
-        : '';
+      const maxIterations = state?.config.maxIterations;
+      const maxInfo = maxIterations ? `/${maxIterations}` : '';
       historyManagerRef.current.addItem(
         {
           type: MessageType.INFO,
@@ -994,7 +993,7 @@ export const AppContainer = (props: AppContainerProps) => {
     return () => {
       const lm = getLoopManager();
       lm.stop();
-      lm.setIterationCallback(() => {});
+      lm.setIterationCallback(null);
     };
   }, []);
 

@@ -127,7 +127,7 @@ export class LoopManager {
    * Register the callback that will be invoked for each loop iteration.
    * This should be called once during initialization (e.g., in AppContainer).
    */
-  setIterationCallback(callback: LoopIterationCallback): void {
+  setIterationCallback(callback: LoopIterationCallback | null): void {
     this.onIteration = callback;
   }
 
