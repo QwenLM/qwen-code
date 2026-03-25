@@ -8,7 +8,9 @@ import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
 import type { AcpBridge } from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
+import type { ImageCdnRef } from './monitor.js';
 import { sendText } from './send.js';
+import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping } from './api.js';
 import { TypingStatus } from './types.js';
 
@@ -56,7 +58,7 @@ export class WeixinChannel extends ChannelBase {
           isReplyToBot: false,
         };
 
-        this.handleInbound(envelope).catch((err) => {
+        this.handleInboundWithImage(envelope, msg.image).catch((err) => {
           const errMsg =
             err instanceof Error ? err.message : JSON.stringify(err, null, 2);
           process.stderr.write(
@@ -76,17 +78,36 @@ export class WeixinChannel extends ChannelBase {
     );
   }
 
-  override async handleInbound(envelope: Envelope): Promise<void> {
+  private async handleInboundWithImage(
+    envelope: Envelope,
+    image?: ImageCdnRef,
+  ): Promise<void> {
     // Check group gate before showing typing
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       return;
     }
 
-    // Show typing indicator while agent processes
+    // Show typing indicator immediately — before image download
     await this.setTyping(envelope.chatId, true);
 
     try {
+      // Download image from CDN (after typing has started)
+      if (image) {
+        try {
+          const imageData = await downloadAndDecrypt(
+            image.encryptQueryParam,
+            image.aesKey,
+          );
+          envelope.imageBase64 = imageData.toString('base64');
+          envelope.imageMimeType = detectImageMime(imageData);
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
+          );
+        }
+      }
+
       await super.handleInbound(envelope);
     } finally {
       await this.setTyping(envelope.chatId, false);
@@ -138,4 +159,23 @@ export class WeixinChannel extends ChannelBase {
       // Typing is best-effort — don't fail the message flow
     }
   }
+}
+
+/** Detect image MIME type from magic bytes. */
+function detectImageMime(data: Buffer): string {
+  if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e) {
+    return 'image/png';
+  }
+  if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
+    return 'image/gif';
+  }
+  if (
+    data[0] === 0x52 &&
+    data[1] === 0x49 &&
+    data[2] === 0x46 &&
+    data[3] === 0x46
+  ) {
+    return 'image/webp';
+  }
+  return 'image/jpeg';
 }

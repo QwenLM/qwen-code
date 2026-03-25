@@ -74,7 +74,10 @@ export abstract class ChannelBase {
       this.instructedSessions.add(sessionId);
     }
 
-    const response = await this.bridge.prompt(sessionId, promptText);
+    const response = await this.bridge.prompt(sessionId, promptText, {
+      imageBase64: envelope.imageBase64,
+      imageMimeType: envelope.imageMimeType,
+    });
 
     if (response) {
       await this.sendMessage(envelope.chatId, response);

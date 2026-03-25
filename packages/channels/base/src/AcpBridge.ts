@@ -17,6 +17,7 @@ import type {
 export interface AcpBridgeOptions {
   cliEntryPath: string;
   cwd: string;
+  model?: string;
 }
 
 export interface AvailableCommand {
@@ -51,7 +52,12 @@ export class AcpBridge extends EventEmitter {
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
 
-    this.child = spawn(process.execPath, [cliEntryPath, '--acp'], {
+    const args = [cliEntryPath, '--acp'];
+    if (this.options.model) {
+      args.push('--model', this.options.model);
+    }
+
+    this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
@@ -123,7 +129,11 @@ export class AcpBridge extends EventEmitter {
     return response.sessionId;
   }
 
-  async prompt(sessionId: string, text: string): Promise<string> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    options?: { imageBase64?: string; imageMimeType?: string },
+  ): Promise<string> {
     const conn = this.ensureConnection();
 
     const chunks: string[] = [];
@@ -132,10 +142,20 @@ export class AcpBridge extends EventEmitter {
     };
     this.on('textChunk', onChunk);
 
+    const prompt: Array<Record<string, unknown>> = [];
+    if (options?.imageBase64 && options.imageMimeType) {
+      prompt.push({
+        type: 'image',
+        data: options.imageBase64,
+        mimeType: options.imageMimeType,
+      });
+    }
+    prompt.push({ type: 'text', text });
+
     try {
       await conn.prompt({
         sessionId,
-        prompt: [{ type: 'text', text }],
+        prompt: prompt as Array<{ type: 'text'; text: string }>,
       });
     } finally {
       this.off('textChunk', onChunk);

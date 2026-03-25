@@ -104,6 +104,7 @@ export const startCommand: CommandModule<object, { name: string }> = {
       cwd: (rawConfig['cwd'] as string) || process.cwd(),
       approvalMode: rawConfig['approvalMode'] as string | undefined,
       instructions: rawConfig['instructions'] as string | undefined,
+      model: rawConfig['model'] as string | undefined,
       groupPolicy:
         (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) ||
         'disabled',
@@ -120,7 +121,11 @@ export const startCommand: CommandModule<object, { name: string }> = {
     writeStdoutLine(`[Channel] CLI entry: ${cliEntryPath}`);
     writeStdoutLine(`[Channel] Starting "${name}" (type=${config.type})...`);
 
-    const bridge = new AcpBridge({ cliEntryPath, cwd: config.cwd });
+    const bridge = new AcpBridge({
+      cliEntryPath,
+      cwd: config.cwd,
+      model: config.model,
+    });
     await bridge.start();
 
     let channel: TelegramChannel | WeixinChannel;

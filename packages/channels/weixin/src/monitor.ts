@@ -31,10 +31,17 @@ function saveCursor(cursor: string): void {
   writeFileSync(cursorPath(), cursor, 'utf-8');
 }
 
+export interface ImageCdnRef {
+  encryptQueryParam: string;
+  aesKey: string;
+}
+
 export interface ParsedMessage {
   fromUserId: string;
   messageId: string;
   text: string;
+  /** CDN reference for deferred image download. */
+  image?: ImageCdnRef;
 }
 
 export type OnMessageCallback = (msg: ParsedMessage) => Promise<void>;
@@ -131,22 +138,33 @@ async function processMessage(
     contextTokens.set(fromUserId, msg.context_token);
   }
 
-  // Extract text content
+  // Extract text and image CDN reference
   let textContent = '';
+  let image: ImageCdnRef | undefined;
+
   if (msg.item_list) {
     for (const item of msg.item_list) {
       if (item.type === MessageItemType.TEXT && item.text_item?.text) {
         textContent += (textContent ? '\n' : '') + item.text_item.text;
+      } else if (item.type === MessageItemType.IMAGE && item.image_item) {
+        const media = item.image_item.media;
+        if (media?.encrypt_query_param && media.aes_key) {
+          image = {
+            encryptQueryParam: media.encrypt_query_param,
+            aesKey: media.aes_key,
+          };
+        }
       }
-      // MVP: skip media items, text only
     }
   }
 
-  if (!textContent) return;
+  // Need either text or image to proceed
+  if (!textContent && !image) return;
 
   await onMessage({
     fromUserId,
     messageId: String(msg.message_id || ''),
-    text: textContent,
+    text: textContent || '(image)',
+    image,
   });
 }

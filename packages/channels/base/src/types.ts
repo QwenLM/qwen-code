@@ -16,6 +16,7 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 }
@@ -30,6 +31,10 @@ export interface Envelope {
   isGroup: boolean;
   isMentioned: boolean;
   isReplyToBot: boolean;
+  /** Base64-encoded image data (e.g. from WeChat CDN download). */
+  imageBase64?: string;
+  /** MIME type for the image (e.g. "image/jpeg", "image/png"). */
+  imageMimeType?: string;
 }
 
 export interface SessionTarget {
