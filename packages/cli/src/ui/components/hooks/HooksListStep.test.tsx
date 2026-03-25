@@ -33,11 +33,6 @@ vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 120, rows: 24 })),
 }));
 
-// Mock useKeypress
-vi.mock('../../hooks/useKeypress.js', () => ({
-  useKeypress: vi.fn(),
-}));
-
 // Mock semantic-colors
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
@@ -54,9 +49,6 @@ vi.mock('../../semantic-colors.js', () => ({
 }));
 
 describe('HooksListStep', () => {
-  const mockOnSelect = vi.fn();
-  const mockOnCancel = vi.fn();
-
   const createMockHookInfo = (
     event: HookEventName,
     configCount = 0,
@@ -84,11 +76,7 @@ describe('HooksListStep', () => {
 
   it('should render empty state when no hooks', () => {
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={[]}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={[]} selectedIndex={0} />,
     );
 
     expect(lastFrame()).toContain('No hook events found');
@@ -101,11 +89,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -121,11 +105,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -140,11 +120,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -157,11 +133,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -174,11 +146,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -192,11 +160,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -211,11 +175,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -228,11 +188,7 @@ describe('HooksListStep', () => {
     ];
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -245,11 +201,7 @@ describe('HooksListStep', () => {
       .map((_, i) => createMockHookInfo(`${i}` as HookEventName));
 
     const { lastFrame } = render(
-      <HooksListStep
-        hooks={hooks}
-        onSelect={mockOnSelect}
-        onCancel={mockOnCancel}
-      />,
+      <HooksListStep hooks={hooks} selectedIndex={0} />,
     );
 
     const output = lastFrame();

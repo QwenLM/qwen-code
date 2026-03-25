@@ -8,11 +8,13 @@ import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import {
   HooksConfigSource,
   type HookDefinition,
+  type HookConfig,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -32,6 +34,71 @@ import { t } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('HOOKS_DIALOG');
 
+/**
+ * Type guard to check if a value is a valid HookConfig
+ */
+function isValidHookConfig(config: unknown): config is HookConfig {
+  return (
+    typeof config === 'object' &&
+    config !== null &&
+    'type' in config &&
+    'command' in config &&
+    typeof (config as HookConfig).command === 'string'
+  );
+}
+
+/**
+ * Type guard to check if a value is a valid HookDefinition
+ */
+function isValidHookDefinition(def: unknown): def is HookDefinition {
+  if (typeof def !== 'object' || def === null) {
+    return false;
+  }
+  const obj = def as Record<string, unknown>;
+  // hooks array is required
+  if (!('hooks' in obj) || !Array.isArray(obj['hooks'])) {
+    return false;
+  }
+  // Validate each hook config in the array
+  for (const hook of obj['hooks']) {
+    if (!isValidHookConfig(hook)) {
+      return false;
+    }
+  }
+  // matcher is optional but must be a string if present
+  if ('matcher' in obj && typeof obj['matcher'] !== 'string') {
+    return false;
+  }
+  // sequential is optional but must be a boolean if present
+  if ('sequential' in obj && typeof obj['sequential'] !== 'boolean') {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Type guard to check if a value is a valid hooks record
+ */
+function isValidHooksRecord(
+  hooks: unknown,
+): hooks is Record<string, HookDefinition[]> {
+  if (typeof hooks !== 'object' || hooks === null) {
+    return false;
+  }
+  const record = hooks as Record<string, unknown>;
+  for (const value of Object.values(record)) {
+    if (!Array.isArray(value)) {
+      return false;
+    }
+    for (const def of value) {
+      if (!isValidHookDefinition(def)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function HooksManagementDialog({
   onClose,
 }: HooksManagementDialogProps): React.JSX.Element {
@@ -44,9 +111,93 @@ export function HooksManagementDialog({
   ]);
   const [selectedHookIndex, setSelectedHookIndex] = useState<number>(-1);
   const [selectedConfigIndex, setSelectedConfigIndex] = useState<number>(-1);
+  // Track selected index within each step for keyboard navigation
+  const [listSelectedIndex, setListSelectedIndex] = useState<number>(0);
+  const [detailSelectedIndex, setDetailSelectedIndex] = useState<number>(0);
   const [hooks, setHooks] = useState<HookEventDisplayInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Current step
+  const currentStep =
+    navigationStack[navigationStack.length - 1] ||
+    HOOKS_MANAGEMENT_STEPS.HOOKS_LIST;
+
+  // Selected hook event
+  const selectedHook = useMemo(() => {
+    if (selectedHookIndex >= 0 && selectedHookIndex < hooks.length) {
+      return hooks[selectedHookIndex];
+    }
+    return null;
+  }, [hooks, selectedHookIndex]);
+
+  // Centralized keyboard handler
+  useKeypress(
+    (key) => {
+      if (isLoading || loadError) {
+        // Allow Escape to close even during loading/error states
+        if (key.name === 'escape') {
+          onClose();
+        }
+        return;
+      }
+
+      switch (currentStep) {
+        case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
+          if (key.name === 'up') {
+            setListSelectedIndex((prev) => Math.max(0, prev - 1));
+          } else if (key.name === 'down') {
+            setListSelectedIndex((prev) =>
+              Math.min(hooks.length - 1, prev + 1),
+            );
+          } else if (key.name === 'return') {
+            if (hooks.length > 0 && listSelectedIndex >= 0) {
+              setSelectedHookIndex(listSelectedIndex);
+              setSelectedConfigIndex(-1);
+              setDetailSelectedIndex(0);
+              setNavigationStack((prev) => [
+                ...prev,
+                HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL,
+              ]);
+            }
+          } else if (key.name === 'escape') {
+            onClose();
+          }
+          break;
+
+        case HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL:
+          if (key.name === 'escape') {
+            handleNavigateBack();
+          } else if (selectedHook && selectedHook.configs.length > 0) {
+            if (key.name === 'up') {
+              setDetailSelectedIndex((prev) => Math.max(0, prev - 1));
+            } else if (key.name === 'down') {
+              setDetailSelectedIndex((prev) =>
+                Math.min(selectedHook.configs.length - 1, prev + 1),
+              );
+            } else if (key.name === 'return') {
+              setSelectedConfigIndex(detailSelectedIndex);
+              setNavigationStack((prev) => [
+                ...prev,
+                HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL,
+              ]);
+            }
+          }
+          break;
+
+        case HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL:
+          if (key.name === 'escape') {
+            handleNavigateBack();
+          }
+          break;
+
+        default:
+          // No action for unknown steps
+          break;
+      }
+    },
+    { isActive: true },
+  );
 
   // Load hooks data
   const fetchHooksData = useCallback((): HookEventDisplayInfo[] => {
@@ -66,12 +217,11 @@ export function HooksManagementDialog({
     for (const eventName of DISPLAY_HOOK_EVENTS) {
       const hookInfo = createEmptyHookEventInfo(eventName);
 
-      // Get hooks from user settings
-      const userHooks = (userSettings as Record<string, unknown>)?.['hooks'] as
-        | Record<string, HookDefinition[]>
-        | undefined;
-      if (userHooks?.[eventName]) {
-        for (const def of userHooks[eventName]) {
+      // Get hooks from user settings (with type validation)
+      const userSettingsRecord = userSettings as Record<string, unknown>;
+      const userHooksRaw = userSettingsRecord?.['hooks'];
+      if (isValidHooksRecord(userHooksRaw) && userHooksRaw[eventName]) {
+        for (const def of userHooksRaw[eventName]) {
           for (const hookConfig of def.hooks) {
             hookInfo.configs.push({
               config: hookConfig,
@@ -83,12 +233,17 @@ export function HooksManagementDialog({
         }
       }
 
-      // Get hooks from workspace settings
-      const workspaceHooks = (workspaceSettings as Record<string, unknown>)?.[
-        'hooks'
-      ] as Record<string, HookDefinition[]> | undefined;
-      if (workspaceHooks?.[eventName]) {
-        for (const def of workspaceHooks[eventName]) {
+      // Get hooks from workspace settings (with type validation)
+      const workspaceSettingsRecord = workspaceSettings as Record<
+        string,
+        unknown
+      >;
+      const workspaceHooksRaw = workspaceSettingsRecord?.['hooks'];
+      if (
+        isValidHooksRecord(workspaceHooksRaw) &&
+        workspaceHooksRaw[eventName]
+      ) {
+        for (const def of workspaceHooksRaw[eventName]) {
           for (const hookConfig of def.hooks) {
             hookInfo.configs.push({
               config: hookConfig,
@@ -100,19 +255,24 @@ export function HooksManagementDialog({
         }
       }
 
-      // Get hooks from extensions
+      // Get hooks from extensions (with type validation)
       const extensions = config.getExtensions() || [];
       for (const extension of extensions) {
         if (extension.isActive && extension.hooks?.[eventName]) {
-          for (const def of extension.hooks[eventName]!) {
-            for (const hookConfig of def.hooks) {
-              hookInfo.configs.push({
-                config: hookConfig,
-                source: HooksConfigSource.Extensions,
-                sourceDisplay: extension.name,
-                sourcePath: extension.path,
-                enabled: true,
-              });
+          const extensionHooks = extension.hooks[eventName];
+          if (Array.isArray(extensionHooks)) {
+            for (const def of extensionHooks) {
+              if (isValidHookDefinition(def)) {
+                for (const hookConfig of def.hooks) {
+                  hookInfo.configs.push({
+                    config: hookConfig,
+                    source: HooksConfigSource.Extensions,
+                    sourceDisplay: extension.name,
+                    sourcePath: extension.path,
+                    enabled: true,
+                  });
+                }
+              }
             }
           }
         }
@@ -151,15 +311,7 @@ export function HooksManagementDialog({
     };
   }, [fetchHooksData]);
 
-  // Current step
-  const getCurrentStep = useCallback(
-    () =>
-      navigationStack[navigationStack.length - 1] ||
-      HOOKS_MANAGEMENT_STEPS.HOOKS_LIST,
-    [navigationStack],
-  );
-
-  // Navigation handlers
+  // Navigation handler for going back
   const handleNavigateBack = useCallback(() => {
     setNavigationStack((prev) => {
       if (prev.length <= 1) {
@@ -169,30 +321,6 @@ export function HooksManagementDialog({
       return prev.slice(0, -1);
     });
   }, [onClose]);
-
-  // Select hook event
-  const handleSelectHook = useCallback((index: number) => {
-    setSelectedHookIndex(index);
-    setSelectedConfigIndex(-1);
-    setNavigationStack((prev) => [...prev, HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL]);
-  }, []);
-
-  // Select hook config
-  const handleSelectConfig = useCallback((index: number) => {
-    setSelectedConfigIndex(index);
-    setNavigationStack((prev) => [
-      ...prev,
-      HOOKS_MANAGEMENT_STEPS.HOOK_CONFIG_DETAIL,
-    ]);
-  }, []);
-
-  // Selected hook event
-  const selectedHook = useMemo(() => {
-    if (selectedHookIndex >= 0 && selectedHookIndex < hooks.length) {
-      return hooks[selectedHookIndex];
-    }
-    return null;
-  }, [hooks, selectedHookIndex]);
 
   // Selected hook config
   const selectedConfig = useMemo(() => {
@@ -208,8 +336,6 @@ export function HooksManagementDialog({
 
   // Render based on current step
   const renderContent = () => {
-    const currentStep = getCurrentStep();
-
     if (isLoading) {
       return (
         <Box flexDirection="column" paddingX={1}>
@@ -235,11 +361,7 @@ export function HooksManagementDialog({
     switch (currentStep) {
       case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
         return (
-          <HooksListStep
-            hooks={hooks}
-            onSelect={handleSelectHook}
-            onCancel={onClose}
-          />
+          <HooksListStep hooks={hooks} selectedIndex={listSelectedIndex} />
         );
 
       case HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL:
@@ -247,8 +369,7 @@ export function HooksManagementDialog({
           return (
             <HookDetailStep
               hook={selectedHook}
-              onBack={handleNavigateBack}
-              onSelectConfig={handleSelectConfig}
+              selectedIndex={detailSelectedIndex}
             />
           );
         }
@@ -264,7 +385,6 @@ export function HooksManagementDialog({
             <HookConfigDetailStep
               hookEvent={selectedHook}
               hookConfig={selectedConfig}
-              onBack={handleNavigateBack}
             />
           );
         }

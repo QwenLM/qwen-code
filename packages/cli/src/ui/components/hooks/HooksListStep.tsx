@@ -4,47 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
 interface HooksListStepProps {
   hooks: HookEventDisplayInfo[];
-  onSelect: (index: number) => void;
-  onCancel: () => void;
+  selectedIndex: number;
 }
 
 export function HooksListStep({
   hooks,
-  onSelect,
-  onCancel,
+  selectedIndex,
 }: HooksListStepProps): React.JSX.Element {
-  const [selectedIndex, setSelectedIndex] = useState(0);
   const { columns: terminalWidth } = useTerminalSize();
 
   // Calculate responsive width for hook name column (min 20, max 35)
   const hookNameWidth = Math.min(
     35,
     Math.max(20, Math.floor(terminalWidth * 0.25)),
-  );
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'up') {
-        setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key.name === 'down') {
-        setSelectedIndex((prev) => Math.min(hooks.length - 1, prev + 1));
-      } else if (key.name === 'return') {
-        onSelect(selectedIndex);
-      } else if (key.name === 'escape') {
-        onCancel();
-      }
-    },
-    { isActive: true },
   );
 
   if (hooks.length === 0) {

@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { HooksConfigSource } from '@qwen-code/qwen-code-core';
@@ -16,17 +14,14 @@ import { t } from '../../../i18n/index.js';
 
 interface HookDetailStepProps {
   hook: HookEventDisplayInfo;
-  onBack: () => void;
-  onSelectConfig?: (index: number) => void;
+  selectedIndex: number;
 }
 
 export function HookDetailStep({
   hook,
-  onBack,
-  onSelectConfig,
+  selectedIndex,
 }: HookDetailStepProps): React.JSX.Element {
   const hasConfigs = hook.configs.length > 0;
-  const [selectedIndex, setSelectedIndex] = useState(0);
   const { columns: terminalWidth } = useTerminalSize();
 
   // Get translated source display map
@@ -35,26 +30,6 @@ export function HookDetailStep({
   // Calculate column widths (command: 70%, source: 30%)
   const commandWidth = Math.floor(terminalWidth * 0.65);
   const sourceWidth = Math.floor(terminalWidth * 0.3);
-
-  // Handle keyboard navigation
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        onBack();
-      } else if (hasConfigs) {
-        if (key.name === 'up') {
-          setSelectedIndex((prev) => Math.max(0, prev - 1));
-        } else if (key.name === 'down') {
-          setSelectedIndex((prev) =>
-            Math.min(hook.configs.length - 1, prev + 1),
-          );
-        } else if (key.name === 'return' && onSelectConfig) {
-          onSelectConfig(selectedIndex);
-        }
-      }
-    },
-    { isActive: true },
-  );
 
   // Get source display for config list
   const getConfigSourceDisplay = (config: {
@@ -136,6 +111,8 @@ export function HookDetailStep({
                     {`${index + 1}. [${hookType}] ${command}`}
                   </Text>
                 </Box>
+                {/* Spacer between columns */}
+                <Box width={2} />
                 {/* Right column: source */}
                 <Box width={sourceWidth}>
                   <Text color={theme.text.secondary} wrap="wrap">
@@ -146,13 +123,9 @@ export function HookDetailStep({
             );
           })}
           <Box marginTop={1}>
-            {onSelectConfig ? (
-              <Text color={theme.text.secondary}>
-                {t('Enter to select · Esc to go back')}
-              </Text>
-            ) : (
-              <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
-            )}
+            <Text color={theme.text.secondary}>
+              {t('Enter to select · Esc to go back')}
+            </Text>
           </Box>
         </>
       ) : (

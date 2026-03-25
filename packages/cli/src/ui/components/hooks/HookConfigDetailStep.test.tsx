@@ -19,11 +19,6 @@ vi.mock('../../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Mock useKeypress
-vi.mock('../../hooks/useKeypress.js', () => ({
-  useKeypress: vi.fn(),
-}));
-
 // Mock useTerminalSize
 vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 100, rows: 24 })),
@@ -44,8 +39,6 @@ vi.mock('../../semantic-colors.js', () => ({
 }));
 
 describe('HookConfigDetailStep', () => {
-  const mockOnBack = vi.fn();
-
   const createMockHookEvent = (): HookEventDisplayInfo => ({
     event: HookEventName.Stop,
     shortDescription: 'Right before Qwen Code concludes its response',
@@ -85,11 +78,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Hook details');
@@ -100,11 +89,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Event:');
@@ -116,11 +101,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Type:');
@@ -132,11 +113,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig(HooksConfigSource.User);
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Source:');
@@ -148,11 +125,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig(HooksConfigSource.Project);
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Local Settings');
@@ -167,11 +140,7 @@ describe('HookConfigDetailStep', () => {
     );
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Extensions');
@@ -186,11 +155,7 @@ describe('HookConfigDetailStep', () => {
     );
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Extension:');
@@ -202,11 +167,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig(HooksConfigSource.User);
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     // Should not have Extension label for User Settings
@@ -220,11 +181,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Command:');
@@ -245,11 +202,7 @@ describe('HookConfigDetailStep', () => {
     };
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Name:');
@@ -270,11 +223,7 @@ describe('HookConfigDetailStep', () => {
     };
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Desc:');
@@ -286,11 +235,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('To modify or remove this hook');
@@ -301,11 +246,7 @@ describe('HookConfigDetailStep', () => {
     const hookConfig = createMockHookConfig();
 
     const { lastFrame } = render(
-      <HookConfigDetailStep
-        hookEvent={hookEvent}
-        hookConfig={hookConfig}
-        onBack={mockOnBack}
-      />,
+      <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
     );
 
     expect(lastFrame()).toContain('Esc to go back');
@@ -330,11 +271,7 @@ describe('HookConfigDetailStep', () => {
       const hookConfig = createMockHookConfig();
 
       const { lastFrame } = render(
-        <HookConfigDetailStep
-          hookEvent={hookEvent}
-          hookConfig={hookConfig}
-          onBack={mockOnBack}
-        />,
+        <HookConfigDetailStep hookEvent={hookEvent} hookConfig={hookConfig} />,
       );
 
       expect(lastFrame()).toContain(event);

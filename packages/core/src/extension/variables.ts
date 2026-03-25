@@ -7,7 +7,8 @@
 import { type VariableSchema, VARIABLE_SCHEMA } from './variableSchema.js';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
-import type { HookDefinition, HookEventName } from '../hooks/types.js';
+import type { HookDefinition } from '../hooks/types.js';
+import type { HookEventName } from '../hooks/types.js';
 import * as fs from 'node:fs';
 import { glob } from 'glob';
 import { createDebugLogger } from '../utils/debugLogger.js';

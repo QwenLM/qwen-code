@@ -19,11 +19,6 @@ vi.mock('../../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Mock useKeypress
-vi.mock('../../hooks/useKeypress.js', () => ({
-  useKeypress: vi.fn(),
-}));
-
 // Mock useTerminalSize
 vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 100, rows: 24 })),
@@ -45,8 +40,6 @@ vi.mock('../../semantic-colors.js', () => ({
 }));
 
 describe('HookDetailStep', () => {
-  const mockOnBack = vi.fn();
-
   const createMockHookInfo = (
     event: HookEventName,
     configCount = 0,
@@ -78,7 +71,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     expect(lastFrame()).toContain(HookEventName.PreToolUse);
@@ -88,7 +81,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse, 0, true);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     expect(lastFrame()).toContain('Detailed description for PreToolUse');
@@ -98,7 +91,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.Stop, 0, false);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     // Stop event has empty description
@@ -110,7 +103,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -125,7 +118,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse, 0);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -137,7 +130,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse, 2);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -151,7 +144,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse, 2);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -163,7 +156,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse, 3);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -174,7 +167,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PreToolUse);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     expect(lastFrame()).toContain('Esc to go back');
@@ -184,7 +177,7 @@ describe('HookDetailStep', () => {
     const hook = createMockHookInfo(HookEventName.PostToolUse, 5);
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -205,7 +198,7 @@ describe('HookDetailStep', () => {
     };
 
     const { lastFrame } = render(
-      <HookDetailStep hook={hook} onBack={mockOnBack} />,
+      <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
     const output = lastFrame();
@@ -226,7 +219,7 @@ describe('HookDetailStep', () => {
       const hook = createMockHookInfo(event, 1);
 
       const { lastFrame } = render(
-        <HookDetailStep hook={hook} onBack={mockOnBack} />,
+        <HookDetailStep hook={hook} selectedIndex={0} />,
       );
 
       expect(lastFrame()).toContain(event);

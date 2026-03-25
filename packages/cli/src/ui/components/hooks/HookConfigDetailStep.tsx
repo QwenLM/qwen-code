@@ -6,7 +6,6 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useKeypress } from '../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookConfigDisplayInfo, HookEventDisplayInfo } from './types.js';
 import { HooksConfigSource } from '@qwen-code/qwen-code-core';
@@ -15,24 +14,13 @@ import { t } from '../../../i18n/index.js';
 interface HookConfigDetailStepProps {
   hookEvent: HookEventDisplayInfo;
   hookConfig: HookConfigDisplayInfo;
-  onBack: () => void;
 }
 
 export function HookConfigDetailStep({
   hookEvent,
   hookConfig,
-  onBack,
 }: HookConfigDetailStepProps): React.JSX.Element {
   const { columns: terminalWidth } = useTerminalSize();
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        onBack();
-      }
-    },
-    { isActive: true },
-  );
 
   // Get source display
   const getSourceDisplay = (): string => {
