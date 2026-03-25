@@ -945,16 +945,24 @@ export const AppContainer = (props: AppContainerProps) => {
   historyManagerRef.current = historyManager;
   const submitQueryRef = useRef(submitQuery);
   submitQueryRef.current = submitQuery;
-  const streamingStateRef = useRef(streamingState);
-  streamingStateRef.current = streamingState;
 
-  // Pending loop prompt waiting for Idle before submission (set when timer
-  // fires during active streaming).
-  const loopSubmitRef = useRef<Array<{ text: string }> | null>(null);
+  // Pending loop prompt (string) waiting for Idle before submission.
+  // Using state (not ref) so that setting it triggers a re-render and the
+  // drain effect fires — even when streamingState is already Idle.
+  const [pendingLoopPrompt, setPendingLoopPrompt] = useState<string | null>(
+    null,
+  );
   // Whether the current streaming response was initiated by the loop.
-  // Set true when a loop prompt is submitted; cleared by handleFinalSubmit
-  // (user-initiated) or when the completion effect processes the response.
   const loopInitiatedStreamRef = useRef(false);
+  // Track streamingState transitions: the completion effect must only fire
+  // when streamingState just transitioned TO Idle (from Responding/etc.),
+  // not when it was already Idle (e.g. after drain submitted a prompt but
+  // the async submitQuery hasn't changed state yet).
+  const prevStreamingStateRef = useRef(streamingState);
+  const streamingJustBecameIdle =
+    streamingState === StreamingState.Idle &&
+    prevStreamingStateRef.current !== StreamingState.Idle;
+  prevStreamingStateRef.current = streamingState;
 
   useEffect(() => {
     const loopManager = getLoopManager();
@@ -978,17 +986,10 @@ export const AppContainer = (props: AppContainerProps) => {
         },
         Date.now(),
       );
-      // Submit as Part[] to bypass slash-command parsing (consistent with
-      // the first-iteration submit_prompt path in loopCommand.ts).
-      const parts: Array<{ text: string }> = [{ text: prompt }];
-      if (streamingStateRef.current === StreamingState.Idle) {
-        // Common path: timer fires while idle — submit immediately.
-        loopInitiatedStreamRef.current = true;
-        void submitQueryRef.current(parts);
-      } else {
-        // Edge case: timer fires during active streaming — queue for later.
-        loopSubmitRef.current = parts;
-      }
+      // Queue the prompt as a string.  Submitting as string (not Part[])
+      // allows nested slash commands (e.g. /loop 5m /review) to be parsed
+      // and executed on each iteration via isSlashCommand().
+      setPendingLoopPrompt(prompt);
     });
     return () => {
       const lm = getLoopManager();
@@ -1005,20 +1006,11 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     const loopManager = getLoopManager();
     if (
+      !streamingJustBecameIdle ||
       !loopManager.isActive() ||
-      streamingState !== StreamingState.Idle ||
-      !loopManager.isWaitingForResponse()
+      !loopManager.isWaitingForResponse() ||
+      !loopInitiatedStreamRef.current
     ) {
-      return;
-    }
-    // loopInitiatedStreamRef is true for iterations submitted via the
-    // callback (2nd+).  For the FIRST iteration, submitted via the
-    // slash-command's submit_prompt return value, the ref is never set —
-    // but waitingForResponse is already true from manager.start(), so we
-    // accept it as a loop response when no queued prompt is pending.
-    if (!loopInitiatedStreamRef.current && loopSubmitRef.current !== null) {
-      // A queued prompt exists but hasn't been submitted yet — the stream
-      // that just finished is NOT from the loop (e.g. user's message).
       return;
     }
     loopInitiatedStreamRef.current = false;
@@ -1092,21 +1084,21 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
   }, [streamingState]);
 
-  // Drain queued loop prompt when streaming becomes Idle.
-  // This only fires for the edge case where the timer fired during streaming.
+  // Drain pending loop prompt when streaming is Idle.
+  // Submits as string so nested slash commands (e.g. /review) are parsed.
   useEffect(() => {
-    if (streamingState !== StreamingState.Idle || !loopSubmitRef.current) {
+    if (streamingState !== StreamingState.Idle || pendingLoopPrompt === null) {
       return;
     }
-    const parts = loopSubmitRef.current;
-    loopSubmitRef.current = null;
+    const prompt = pendingLoopPrompt;
+    setPendingLoopPrompt(null);
     // If the loop was stopped while the prompt was queued, discard it.
     if (!getLoopManager().isActive()) {
       return;
     }
     loopInitiatedStreamRef.current = true;
-    void submitQueryRef.current(parts);
-  }, [streamingState]);
+    void submitQueryRef.current(prompt);
+  }, [streamingState, pendingLoopPrompt]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);

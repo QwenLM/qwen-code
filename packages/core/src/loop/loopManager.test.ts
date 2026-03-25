@@ -29,6 +29,11 @@ describe('parseInterval', () => {
     expect(parseInterval('2h')).toBe(7_200_000);
   });
 
+  it('parses days', () => {
+    expect(parseInterval('1d')).toBe(86_400_000);
+    expect(parseInterval('2d')).toBe(172_800_000);
+  });
+
   it('returns null for invalid input', () => {
     expect(parseInterval('')).toBeNull();
     expect(parseInterval('abc')).toBeNull();
@@ -42,10 +47,16 @@ describe('parseInterval', () => {
     expect(parseInterval('5M')).toBe(300_000);
     expect(parseInterval('1H')).toBe(3_600_000);
     expect(parseInterval('30S')).toBe(30_000);
+    expect(parseInterval('1D')).toBe(86_400_000);
   });
 });
 
 describe('formatInterval', () => {
+  it('formats days', () => {
+    expect(formatInterval(86_400_000)).toBe('1d');
+    expect(formatInterval(172_800_000)).toBe('2d');
+  });
+
   it('formats hours', () => {
     expect(formatInterval(3_600_000)).toBe('1h');
     expect(formatInterval(7_200_000)).toBe('2h');

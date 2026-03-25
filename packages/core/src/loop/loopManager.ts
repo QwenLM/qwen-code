@@ -67,7 +67,7 @@ export type LoopIterationCallback = (prompt: string, iteration: number) => void;
  * Returns null if the string is not a valid interval.
  */
 export function parseInterval(input: string): number | null {
-  const match = input.match(/^(\d+(?:\.\d+)?)(s|m|h)$/i);
+  const match = input.match(/^(\d+(?:\.\d+)?)(s|m|h|d)$/i);
   if (!match) return null;
 
   const value = parseFloat(match[1]);
@@ -81,6 +81,8 @@ export function parseInterval(input: string): number | null {
       return Math.round(value * 60 * 1000);
     case 'h':
       return Math.round(value * 60 * 60 * 1000);
+    case 'd':
+      return Math.round(value * 24 * 60 * 60 * 1000);
     default:
       return null;
   }
@@ -91,6 +93,9 @@ export function parseInterval(input: string): number | null {
  * Prefers the largest unit that gives a clean representation.
  */
 export function formatInterval(ms: number): string {
+  if (ms >= 86_400_000 && ms % 86_400_000 === 0) {
+    return `${ms / 86_400_000}d`;
+  }
   if (ms >= 3600_000 && ms % 3600_000 === 0) {
     return `${ms / 3600_000}h`;
   }

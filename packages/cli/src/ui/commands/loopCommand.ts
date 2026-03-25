@@ -84,7 +84,19 @@ function parseLoopArgs(args: string): {
     }
   }
 
-  const prompt = tokens.slice(startIndex).join(' ');
+  let prompt = tokens.slice(startIndex).join(' ');
+
+  // Support natural language interval at the end: "check deploy every 5m"
+  if (intervalMs === DEFAULT_INTERVAL_MS) {
+    const everyMatch = prompt.match(/\s+every\s+(\d+(?:\.\d+)?[smhd])\s*$/i);
+    if (everyMatch) {
+      const parsed2 = parseInterval(everyMatch[1]);
+      if (parsed2 !== null) {
+        intervalMs = parsed2;
+        prompt = prompt.slice(0, everyMatch.index).trim();
+      }
+    }
+  }
 
   return { intervalMs, maxIterations, prompt };
 }
@@ -239,27 +251,21 @@ export const loopCommand: SlashCommand = {
       Date.now(),
     );
 
-    // Start the loop — skipFirstIteration because we return submit_prompt below
-    manager.start(
-      {
-        prompt: parsed.prompt,
-        intervalMs: parsed.intervalMs,
-        maxIterations: parsed.maxIterations,
-      },
-      true,
-    );
-
-    // Submit the first iteration via the command system
-    return {
-      type: 'submit_prompt' as const,
-      content: [{ text: parsed.prompt }],
-    };
+    // Start the loop — the iteration callback (registered in AppContainer)
+    // will queue the first prompt via setPendingLoopPrompt, which triggers
+    // a React state update → drain effect submits it as a string so that
+    // nested slash commands (e.g. /loop 5m /review) are properly parsed.
+    manager.start({
+      prompt: parsed.prompt,
+      intervalMs: parsed.intervalMs,
+      maxIterations: parsed.maxIterations,
+    });
   },
 
   completion: async (_context, partialArg) => {
     const trimmed = partialArg.trim();
     if (!trimmed) {
-      return ['status', 'stop', '5m ', '10m ', '30m ', '1h '];
+      return ['status', 'stop', '5m ', '10m ', '30m ', '1h ', '1d '];
     }
     if ('status'.startsWith(trimmed)) {
       return ['status'];
