@@ -318,6 +318,7 @@ export class RuleBasedProvider implements SuggestionProvider {
         rule.pattern instanceof RegExp
           ? rule.pattern.source
           : String(rule.pattern);
+      pattern.lastIndex = 0; // Reset for g/y flag safety
       return !pattern.test(patternStr);
     });
   }
