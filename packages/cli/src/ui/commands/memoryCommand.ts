@@ -6,7 +6,7 @@
 
 import {
   getErrorMessage,
-  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   QWEN_DIR,
 } from '@qwen-code/qwen-code-core';
@@ -17,6 +17,28 @@ import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+
+/**
+ * Read all existing memory files from the configured filenames in a directory.
+ * Returns an array of found files with their paths and contents.
+ */
+async function findAllExistingMemoryFiles(
+  dir: string,
+): Promise<Array<{ filePath: string; content: string }>> {
+  const results: Array<{ filePath: string; content: string }> = [];
+  for (const filename of getAllGeminiMdFilenames()) {
+    const filePath = path.join(dir, filename);
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      if (content.trim().length > 0) {
+        results.push({ filePath, content });
+      }
+    } catch {
+      // File doesn't exist, try next
+    }
+  }
+  return results;
+}
 
 export const memoryCommand: SlashCommand = {
   name: 'memory',
@@ -56,37 +78,27 @@ export const memoryCommand: SlashCommand = {
           },
           kind: CommandKind.BUILT_IN,
           action: async (context) => {
-            try {
-              const workingDir =
-                context.services.config?.getWorkingDir?.() ?? process.cwd();
-              const projectMemoryPath = path.join(
-                workingDir,
-                getCurrentGeminiMdFilename(),
-              );
-              const memoryContent = await fs.readFile(
-                projectMemoryPath,
-                'utf-8',
-              );
+            const workingDir =
+              context.services.config?.getWorkingDir?.() ?? process.cwd();
+            const results = await findAllExistingMemoryFiles(workingDir);
 
-              const messageContent =
-                memoryContent.trim().length > 0
-                  ? t(
-                      'Project memory content from {{path}}:\n\n---\n{{content}}\n---',
-                      {
-                        path: projectMemoryPath,
-                        content: memoryContent,
-                      },
-                    )
-                  : t('Project memory is currently empty.');
-
+            if (results.length > 0) {
+              const combined = results
+                .map((r) =>
+                  t(
+                    'Project memory content from {{path}}:\n\n---\n{{content}}\n---',
+                    { path: r.filePath, content: r.content },
+                  ),
+                )
+                .join('\n\n');
               context.ui.addItem(
                 {
                   type: MessageType.INFO,
-                  text: messageContent,
+                  text: combined,
                 },
                 Date.now(),
               );
-            } catch (_error) {
+            } else {
               context.ui.addItem(
                 {
                   type: MessageType.INFO,
@@ -106,32 +118,25 @@ export const memoryCommand: SlashCommand = {
           },
           kind: CommandKind.BUILT_IN,
           action: async (context) => {
-            try {
-              const globalMemoryPath = path.join(
-                os.homedir(),
-                QWEN_DIR,
-                getCurrentGeminiMdFilename(),
-              );
-              const globalMemoryContent = await fs.readFile(
-                globalMemoryPath,
-                'utf-8',
-              );
+            const globalDir = path.join(os.homedir(), QWEN_DIR);
+            const results = await findAllExistingMemoryFiles(globalDir);
 
-              const messageContent =
-                globalMemoryContent.trim().length > 0
-                  ? t('Global memory content:\n\n---\n{{content}}\n---', {
-                      content: globalMemoryContent,
-                    })
-                  : t('Global memory is currently empty.');
-
+            if (results.length > 0) {
+              const combined = results
+                .map((r) =>
+                  t('Global memory content:\n\n---\n{{content}}\n---', {
+                    content: r.content,
+                  }),
+                )
+                .join('\n\n');
               context.ui.addItem(
                 {
                   type: MessageType.INFO,
-                  text: messageContent,
+                  text: combined,
                 },
                 Date.now(),
               );
-            } catch (_error) {
+            } else {
               context.ui.addItem(
                 {
                   type: MessageType.INFO,
