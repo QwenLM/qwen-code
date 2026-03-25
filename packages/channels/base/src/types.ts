@@ -1,6 +1,11 @@
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
 export type ChannelType = 'telegram' | 'discord' | 'webhook';
+export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+
+export interface GroupConfig {
+  requireMention?: boolean; // default: true
+}
 
 export interface ChannelConfig {
   type: ChannelType;
@@ -11,6 +16,8 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  groupPolicy: GroupPolicy; // default: "disabled"
+  groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 }
 
 export interface Envelope {
@@ -20,6 +27,9 @@ export interface Envelope {
   chatId: string;
   text: string;
   threadId?: string;
+  isGroup: boolean;
+  isMentioned: boolean;
+  isReplyToBot: boolean;
 }
 
 export interface SessionTarget {

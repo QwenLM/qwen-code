@@ -99,6 +99,10 @@ export const startCommand: CommandModule<object, { name: string }> = {
       cwd: (rawConfig['cwd'] as string) || process.cwd(),
       approvalMode: rawConfig['approvalMode'] as string | undefined,
       instructions: rawConfig['instructions'] as string | undefined,
+      groupPolicy:
+        (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) ||
+        'disabled',
+      groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
     };
 
     const cliEntryPath = findCliEntryPath();

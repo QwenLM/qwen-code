@@ -33,7 +33,11 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
       "allowedUsers": ["123456789"],
       "sessionScope": "user",
       "cwd": "/path/to/working/directory",
-      "instructions": "Optional system instructions for the agent."
+      "instructions": "Optional system instructions for the agent.",
+      "groupPolicy": "disabled",
+      "groups": {
+        "*": { "requireMention": true }
+      }
     }
   }
 }
@@ -41,15 +45,17 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option         | Required | Description                                                                          |
-| -------------- | -------- | ------------------------------------------------------------------------------------ |
-| `type`         | Yes      | Channel type: `telegram` (more coming soon)                                          |
-| `token`        | Yes      | Bot token. Supports `$ENV_VAR` syntax to read from environment variables             |
-| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                 |
-| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies) |
-| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                     |
-| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                   |
-| `instructions` | No       | Custom instructions prepended to the first message of each session                   |
+| Option         | Required | Description                                                                                        |
+| -------------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `type`         | Yes      | Channel type: `telegram` (more coming soon)                                                        |
+| `token`        | Yes      | Bot token. Supports `$ENV_VAR` syntax to read from environment variables                           |
+| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                               |
+| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)               |
+| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                   |
+| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                                 |
+| `instructions` | No       | Custom instructions prepended to the first message of each session                                 |
+| `groupPolicy`  | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)   |
+| `groups`       | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats) |
 
 ### Sender Policy
 
@@ -111,6 +117,66 @@ qwen channel pairing approve my-channel <CODE>
 - Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
 - Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
+
+## Group Chats
+
+By default, the bot only works in direct messages. To enable group chat support, set `groupPolicy` to `"allowlist"` or `"open"`.
+
+### Group Policy
+
+Controls whether the bot participates in group chats at all:
+
+- **`disabled`** (default) — The bot ignores all group messages. Safest option.
+- **`allowlist`** — The bot only responds in groups explicitly listed in `groups` by chat ID. The `"*"` key provides default settings but does **not** act as a wildcard allow.
+- **`open`** — The bot responds in all groups it's added to. Use with caution.
+
+### Mention Gating
+
+In groups, the bot requires an `@mention` or a reply to one of its messages by default. This prevents the bot from responding to every message in a group chat.
+
+Configure per-group with the `groups` setting:
+
+```json
+{
+  "groups": {
+    "*": { "requireMention": true },
+    "-100123456": { "requireMention": false }
+  }
+}
+```
+
+- **`"*"`** — Default settings for all groups. Only sets config defaults, not an allowlist entry.
+- **Group chat ID** — Override settings for a specific group. Overrides `"*"` defaults.
+- **`requireMention`** (default: `true`) — When `true`, the bot only responds to messages that @mention it or reply to one of its messages. When `false`, the bot responds to all messages (useful for dedicated task groups).
+
+### How group messages are evaluated
+
+```
+1. groupPolicy — is this group allowed?           (no → ignore)
+2. requireMention — was the bot mentioned/replied to? (no → ignore)
+3. senderPolicy — is this sender approved?         (no → pairing flow)
+4. Route to session
+```
+
+### Telegram Setup for Groups
+
+1. Add the bot to a group
+2. **Disable privacy mode** in BotFather (`/mybots` → Bot Settings → Group Privacy → Turn Off) — otherwise the bot won't see non-command messages
+3. **Remove and re-add the bot** to the group after changing privacy mode (Telegram caches this setting)
+
+### Finding a Group Chat ID
+
+To find a group's chat ID for the `groups` allowlist:
+
+1. Stop the bot if it's running
+2. Send a message mentioning the bot in the group
+3. Use the Telegram Bot API to check queued updates:
+
+```bash
+curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | python3 -m json.tool
+```
+
+Look for `message.chat.id` in the response — group IDs are negative numbers (e.g., `-5170296765`).
 
 ## Slash Commands
 

@@ -61,13 +61,13 @@ export class AcpBridge extends EventEmitter {
     this.child.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim();
       if (msg) {
-        console.error('[AcpBridge]', msg);
+        process.stderr.write(`[AcpBridge] ${msg}\n`);
       }
     });
 
     this.child.on('exit', (code, signal) => {
-      console.error(
-        `[AcpBridge] Process exited (code=${code}, signal=${signal})`,
+      process.stderr.write(
+        `[AcpBridge] Process exited (code=${code}, signal=${signal})\n`,
       );
       this.connection = null;
       this.child = null;
@@ -197,6 +197,9 @@ export class AcpBridge extends EventEmitter {
         }
         break;
       }
+      default:
+        // Ignore other session update types
+        break;
     }
 
     this.emit('sessionUpdate', params);

@@ -15,6 +15,8 @@ const LOCAL_COMMANDS = new Set(['start', 'help', 'reset']);
 
 export class TelegramChannel extends ChannelBase {
   private bot: Telegraf;
+  private botId: number = 0;
+  private botUsername: string = '';
 
   constructor(name: string, config: ChannelConfig, bridge: AcpBridge) {
     super(name, config, bridge);
@@ -22,6 +24,9 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
+    const botInfo = await this.bot.telegram.getMe();
+    this.botId = botInfo.id;
+    this.botUsername = botInfo.username ?? '';
     // Register local-only commands
     this.bot.command('start', async (ctx) => {
       await ctx.reply(
@@ -74,6 +79,22 @@ export class TelegramChannel extends ChannelBase {
         }
       }
 
+      const isGroup =
+        msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+
+      // Check if the bot is mentioned via @username in message entities
+      const isMentioned =
+        msg.entities?.some(
+          (e) =>
+            e.type === 'mention' &&
+            this.botUsername &&
+            text.slice(e.offset, e.offset + e.length).toLowerCase() ===
+              `@${this.botUsername.toLowerCase()}`,
+        ) ?? false;
+
+      // Check if this is a reply to one of the bot's messages
+      const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId: String(msg.from.id),
@@ -82,11 +103,16 @@ export class TelegramChannel extends ChannelBase {
           (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
         chatId: String(msg.chat.id),
         text,
+        isGroup,
+        isMentioned,
+        isReplyToBot,
       };
 
       // Don't await — Telegraf has a 90s handler timeout that would kill long prompts
       this.handleInbound(envelope).catch((err) => {
-        console.error(`[Telegram:${this.name}] Error handling message:`, err);
+        process.stderr.write(
+          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        );
         ctx
           .reply('Sorry, something went wrong processing your message.')
           .catch(() => {});
@@ -94,7 +120,9 @@ export class TelegramChannel extends ChannelBase {
     });
 
     this.bot.launch({ dropPendingUpdates: true }).catch((err) => {
-      console.error(`[Telegram:${this.name}] Bot launch error:`, err);
+      process.stderr.write(
+        `[Telegram:${this.name}] Bot launch error: ${err}\n`,
+      );
     });
 
     process.once('SIGINT', () => this.bot.stop('SIGINT'));
@@ -102,6 +130,12 @@ export class TelegramChannel extends ChannelBase {
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
+    // Check group gate before showing "Working..." indicator
+    const groupResult = this.groupGate.check(envelope);
+    if (!groupResult.allowed) {
+      return;
+    }
+
     // Send "Working..." immediately for instant feedback
     const workingMsg = await this.bot.telegram
       .sendMessage(envelope.chatId, 'Working...')
@@ -138,5 +172,4 @@ export class TelegramChannel extends ChannelBase {
   disconnect(): void {
     this.bot.stop();
   }
-
 }

@@ -36,7 +36,11 @@ Add the channel to `~/.qwen/settings.json`:
       "allowedUsers": ["YOUR_USER_ID"],
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
-      "instructions": "You are a concise coding assistant responding via Telegram. Keep responses short."
+      "instructions": "You are a concise coding assistant responding via Telegram. Keep responses short.",
+      "groupPolicy": "disabled",
+      "groups": {
+        "*": { "requireMention": true }
+      }
     }
   }
 }
@@ -58,6 +62,17 @@ qwen channel start my-telegram
 
 Then open your bot in Telegram and send a message. You should see "Working..." appear immediately, followed by the agent's response.
 
+## Group Chats
+
+To use the bot in Telegram groups:
+
+1. Set `groupPolicy` to `"allowlist"` or `"open"` in your channel config
+2. **Disable privacy mode** in BotFather: `/mybots` → select your bot → Bot Settings → Group Privacy → Turn Off
+3. Add the bot to a group. If it was already in the group, **remove and re-add it** (Telegram caches privacy settings from when the bot joined)
+4. If using `groupPolicy: "allowlist"`, add the group's chat ID to `groups` in your config
+
+By default, the bot requires an @mention or a reply to respond in groups. Set `"requireMention": false` for a specific group to make it respond to all messages (useful for dedicated task groups). See [Group Chats](./overview#group-chats) for full details.
+
 ## Tips
 
 - **Keep instructions concise-focused** — Telegram has a 4096-character message limit. Adding instructions like "keep responses short" helps the agent stay within bounds.
@@ -75,6 +90,14 @@ The agent's markdown responses are automatically converted to Telegram-compatibl
 - Check that the bot token is correct and the environment variable is set
 - Verify your user ID is in `allowedUsers` if using `senderPolicy: "allowlist"`, or that you've been approved if using `"pairing"`
 - Check the terminal output for errors
+
+### Bot doesn't respond in groups
+
+- Check that `groupPolicy` is set to `"allowlist"` or `"open"` (default is `"disabled"`)
+- If using `"allowlist"`, verify the group's chat ID is in the `groups` config
+- Make sure **Group Privacy is turned off** in BotFather — without this, the bot can't see non-command messages in groups
+- If you changed privacy mode after adding the bot to a group, **remove and re-add the bot** to the group
+- By default, the bot requires an @mention or a reply. Send `@yourbotname hello` to test
 
 ### "Sorry, something went wrong processing your message"
 

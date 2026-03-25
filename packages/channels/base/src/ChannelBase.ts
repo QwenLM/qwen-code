@@ -1,4 +1,5 @@
 import type { ChannelConfig, Envelope } from './types.js';
+import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
@@ -7,6 +8,7 @@ import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: AcpBridge;
+  protected groupGate: GroupGate;
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
@@ -16,6 +18,8 @@ export abstract class ChannelBase {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
+
+    this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
     const pairingStore =
       config.senderPolicy === 'pairing' ? new PairingStore(name) : undefined;
@@ -41,6 +45,13 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   async handleInbound(envelope: Envelope): Promise<void> {
+    // 1. Group gate: policy + allowlist + mention gating
+    const groupResult = this.groupGate.check(envelope);
+    if (!groupResult.allowed) {
+      return; // silently drop — no pairing, no reply
+    }
+
+    // 2. Sender gate: allowlist / pairing / open
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
