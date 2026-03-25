@@ -204,6 +204,25 @@ export class WebViewProvider {
       });
     });
 
+    // Handle auto-reconnect failure: show VS Code notification with retry button
+    this.agentManager.onAutoReconnectFailed = (errorMessage: string) => {
+      vscode.window
+        .showWarningMessage(errorMessage, 'Retry Connection')
+        .then((selection) => {
+          if (selection === 'Retry Connection') {
+            this.doInitializeAgentConnection({ autoAuthenticate: true });
+          }
+        });
+
+      // Notify webview that connection was lost
+      this.sendMessageToWebView({
+        type: 'agentConnectionError',
+        data: {
+          message: errorMessage,
+        },
+      });
+    };
+
     // Setup end-turn handler from ACP stopReason notifications
     this.agentManager.onEndTurn((reason) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere
@@ -894,9 +913,19 @@ export class WebViewProvider {
       } catch (_error) {
         const errorMsg = getErrorMessage(_error);
         console.error('[WebViewProvider] Agent connection error:', _error);
-        vscode.window.showWarningMessage(
-          `Failed to connect to Qwen CLI: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
-        );
+
+        // Show warning with a "Retry Connection" action button
+        vscode.window
+          .showWarningMessage(
+            `Failed to connect to Qwen CLI: ${errorMsg}`,
+            'Retry Connection',
+          )
+          .then((selection) => {
+            if (selection === 'Retry Connection') {
+              this.doInitializeAgentConnection({ autoAuthenticate: true });
+            }
+          });
+
         // Fallback to empty conversation
         await this.initializeEmptyConversation();
 
