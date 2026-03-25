@@ -3,12 +3,15 @@
  * Extends ChannelBase with WeChat iLink Bot API integration.
  */
 
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ChannelBase } from '@qwen-code/channel-base';
 import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
 import type { AcpBridge } from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
-import type { ImageCdnRef } from './monitor.js';
+import type { CdnRef, FileCdnRef } from './monitor.js';
 import { sendText } from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping } from './api.js';
@@ -58,13 +61,15 @@ export class WeixinChannel extends ChannelBase {
           isReplyToBot: false,
         };
 
-        this.handleInboundWithImage(envelope, msg.image).catch((err) => {
-          const errMsg =
-            err instanceof Error ? err.message : JSON.stringify(err, null, 2);
-          process.stderr.write(
-            `[Weixin:${this.name}] Error handling message: ${errMsg}\n`,
-          );
-        });
+        this.handleInboundWithMedia(envelope, msg.image, msg.file).catch(
+          (err) => {
+            const errMsg =
+              err instanceof Error ? err.message : JSON.stringify(err, null, 2);
+            process.stderr.write(
+              `[Weixin:${this.name}] Error handling message: ${errMsg}\n`,
+            );
+          },
+        );
       },
       abortSignal: this.abortController.signal,
     }).catch((err) => {
@@ -78,9 +83,10 @@ export class WeixinChannel extends ChannelBase {
     );
   }
 
-  private async handleInboundWithImage(
+  private async handleInboundWithMedia(
     envelope: Envelope,
-    image?: ImageCdnRef,
+    image?: CdnRef,
+    file?: FileCdnRef,
   ): Promise<void> {
     // Check group gate before showing typing
     const groupResult = this.groupGate.check(envelope);
@@ -88,7 +94,7 @@ export class WeixinChannel extends ChannelBase {
       return;
     }
 
-    // Show typing indicator immediately — before image download
+    // Show typing indicator immediately — before CDN download
     await this.setTyping(envelope.chatId, true);
 
     try {
@@ -105,6 +111,26 @@ export class WeixinChannel extends ChannelBase {
           process.stderr.write(
             `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
           );
+        }
+      }
+
+      // Download file from CDN, save to temp dir
+      if (file) {
+        try {
+          const fileData = await downloadAndDecrypt(
+            file.encryptQueryParam,
+            file.aesKey,
+          );
+          const dir = join(tmpdir(), 'channel-files');
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          const filePath = join(dir, file.fileName);
+          writeFileSync(filePath, fileData);
+          envelope.text = `User sent a file. It has been saved to: ${filePath}`;
+        } catch (err) {
+          process.stderr.write(
+            `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
         }
       }
 

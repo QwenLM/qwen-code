@@ -31,9 +31,13 @@ function saveCursor(cursor: string): void {
   writeFileSync(cursorPath(), cursor, 'utf-8');
 }
 
-export interface ImageCdnRef {
+export interface CdnRef {
   encryptQueryParam: string;
   aesKey: string;
+}
+
+export interface FileCdnRef extends CdnRef {
+  fileName: string;
 }
 
 export interface ParsedMessage {
@@ -41,7 +45,9 @@ export interface ParsedMessage {
   messageId: string;
   text: string;
   /** CDN reference for deferred image download. */
-  image?: ImageCdnRef;
+  image?: CdnRef;
+  /** CDN reference for deferred file download. */
+  file?: FileCdnRef;
 }
 
 export type OnMessageCallback = (msg: ParsedMessage) => Promise<void>;
@@ -138,9 +144,10 @@ async function processMessage(
     contextTokens.set(fromUserId, msg.context_token);
   }
 
-  // Extract text and image CDN reference
+  // Extract text, image, and file CDN references
   let textContent = '';
-  let image: ImageCdnRef | undefined;
+  let image: CdnRef | undefined;
+  let file: FileCdnRef | undefined;
 
   if (msg.item_list) {
     for (const item of msg.item_list) {
@@ -154,17 +161,27 @@ async function processMessage(
             aesKey: media.aes_key,
           };
         }
+      } else if (item.type === MessageItemType.FILE && item.file_item) {
+        const media = item.file_item.media;
+        if (media?.encrypt_query_param && media.aes_key) {
+          file = {
+            encryptQueryParam: media.encrypt_query_param,
+            aesKey: media.aes_key,
+            fileName: item.file_item.file_name || `file_${Date.now()}`,
+          };
+        }
       }
     }
   }
 
-  // Need either text or image to proceed
-  if (!textContent && !image) return;
+  // Need either text, image, or file to proceed
+  if (!textContent && !image && !file) return;
 
   await onMessage({
     fromUserId,
     messageId: String(msg.message_id || ''),
-    text: textContent || '(image)',
+    text: textContent || (file ? `(file: ${file.fileName})` : '(image)'),
     image,
+    file,
   });
 }

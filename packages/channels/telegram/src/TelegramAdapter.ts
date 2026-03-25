@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Telegraf } from 'telegraf';
 import {
   telegramFormat,
@@ -79,44 +82,91 @@ export class TelegramChannel extends ChannelBase {
         }
       }
 
-      const isGroup =
-        msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-
-      // Check if the bot is mentioned via @username in message entities
-      const isMentioned =
-        msg.entities?.some(
-          (e) =>
-            e.type === 'mention' &&
-            this.botUsername &&
-            text.slice(e.offset, e.offset + e.length).toLowerCase() ===
-              `@${this.botUsername.toLowerCase()}`,
-        ) ?? false;
-
-      // Check if this is a reply to one of the bot's messages
-      const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
-
-      // Strip @botname from message text so the agent only sees the actual prompt
-      let cleanText = text;
-      if (isMentioned && this.botUsername) {
-        cleanText = text
-          .replace(new RegExp(`@${this.botUsername}`, 'gi'), '')
-          .trim();
-      }
-
-      const envelope: Envelope = {
-        channelName: this.name,
-        senderId: String(msg.from.id),
-        senderName:
-          msg.from.first_name +
-          (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
-        chatId: String(msg.chat.id),
-        text: cleanText,
-        isGroup,
-        isMentioned,
-        isReplyToBot,
-      };
+      const envelope = this.buildEnvelope(msg, text, msg.entities);
 
       // Don't await — Telegraf has a 90s handler timeout that would kill long prompts
+      this.handleInbound(envelope).catch((err) => {
+        process.stderr.write(
+          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        );
+        ctx
+          .reply('Sorry, something went wrong processing your message.')
+          .catch(() => {});
+      });
+    });
+
+    // Photo messages
+    this.bot.on('photo', async (ctx) => {
+      const msg = ctx.message;
+      const envelope = this.buildEnvelope(
+        msg,
+        msg.caption || '(image)',
+        msg.caption_entities,
+      );
+
+      // Pick the largest photo size (last in array)
+      const photo = msg.photo[msg.photo.length - 1];
+      if (!photo) return;
+
+      try {
+        const fileUrl = await ctx.telegram.getFileLink(photo.file_id);
+        const resp = await fetch(fileUrl.href);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        envelope.imageBase64 = buf.toString('base64');
+        envelope.imageMimeType = 'image/jpeg'; // Telegram always converts photos to JPEG
+      } catch (err) {
+        process.stderr.write(
+          `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
+        );
+      }
+
+      this.handleInbound(envelope).catch((err) => {
+        process.stderr.write(
+          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        );
+        ctx
+          .reply('Sorry, something went wrong processing your message.')
+          .catch(() => {});
+      });
+    });
+
+    // Document/file messages
+    this.bot.on('document', async (ctx) => {
+      const msg = ctx.message;
+      const doc = msg.document;
+      const fileName = doc.file_name || `file_${Date.now()}`;
+
+      const envelope = this.buildEnvelope(
+        msg,
+        msg.caption || `(file: ${fileName})`,
+        msg.caption_entities,
+      );
+
+      try {
+        const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
+        const resp = await fetch(fileUrl.href);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+
+        // Save to temp dir so the agent can read it via read-file tool
+        const dir = join(tmpdir(), 'channel-files');
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        const filePath = join(dir, fileName);
+        writeFileSync(filePath, buf);
+
+        envelope.text =
+          (msg.caption ? msg.caption + '\n\n' : '') +
+          `User sent a file. It has been saved to: ${filePath}`;
+      } catch (err) {
+        process.stderr.write(
+          `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
+        );
+        envelope.text =
+          (msg.caption || '') +
+          `\n\n(User sent a file "${fileName}" but download failed)`;
+      }
+
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
@@ -179,5 +229,48 @@ export class TelegramChannel extends ChannelBase {
 
   disconnect(): void {
     this.bot.stop();
+  }
+
+  private buildEnvelope(
+    msg: {
+      from: { id: number; first_name: string; last_name?: string };
+      chat: { id: number; type: string };
+      reply_to_message?: { from?: { id: number } };
+    },
+    text: string,
+    entities?: Array<{ type: string; offset: number; length: number }>,
+  ): Envelope {
+    const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+
+    const isMentioned =
+      entities?.some(
+        (e) =>
+          e.type === 'mention' &&
+          this.botUsername &&
+          text.slice(e.offset, e.offset + e.length).toLowerCase() ===
+            `@${this.botUsername.toLowerCase()}`,
+      ) ?? false;
+
+    const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
+
+    let cleanText = text;
+    if (isMentioned && this.botUsername) {
+      cleanText = text
+        .replace(new RegExp(`@${this.botUsername}`, 'gi'), '')
+        .trim();
+    }
+
+    return {
+      channelName: this.name,
+      senderId: String(msg.from.id),
+      senderName:
+        msg.from.first_name +
+        (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
+      chatId: String(msg.chat.id),
+      text: cleanText,
+      isGroup,
+      isMentioned,
+      isReplyToBot,
+    };
   }
 }
