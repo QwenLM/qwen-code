@@ -190,6 +190,7 @@ export function useFollowupSuggestions(
       clearTimeout(acceptTimeoutRef.current);
       acceptTimeoutRef.current = null;
     }
+    acceptingRef.current = false;
     setState(followupReducers.clear());
   }, []);
 
