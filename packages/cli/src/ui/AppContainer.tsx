@@ -1097,7 +1097,20 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
     loopInitiatedStreamRef.current = true;
-    void submitQueryRef.current(prompt);
+    // Submit the prompt.  If it's a client-side slash command (e.g. /help),
+    // submitQuery resolves without starting a stream — streamingState stays
+    // Idle, so the completion effect never fires.  After resolution, yield
+    // to React's render cycle and then manually complete the iteration.
+    void (async () => {
+      await submitQueryRef.current(prompt);
+      setTimeout(() => {
+        const lm = getLoopManager();
+        if (lm.isActive() && lm.isWaitingForResponse()) {
+          loopInitiatedStreamRef.current = false;
+          lm.onIterationComplete(true);
+        }
+      }, 0);
+    })();
   }, [streamingState, pendingLoopPrompt]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);

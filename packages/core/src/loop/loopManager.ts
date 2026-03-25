@@ -133,6 +133,26 @@ export class LoopManager {
    *   (caller will handle the first submission, e.g., via submit_prompt)
    */
   start(config: LoopConfig, skipFirstIteration = false): void {
+    // Validate config to prevent invalid timer states.
+    if (
+      !isFinite(config.intervalMs) ||
+      config.intervalMs < MIN_INTERVAL_MS ||
+      config.intervalMs > MAX_INTERVAL_MS
+    ) {
+      throw new Error(
+        `intervalMs must be between ${MIN_INTERVAL_MS} and ${MAX_INTERVAL_MS}, got ${config.intervalMs}`,
+      );
+    }
+    if (
+      !isFinite(config.maxIterations) ||
+      config.maxIterations < 0 ||
+      !Number.isInteger(config.maxIterations)
+    ) {
+      throw new Error(
+        `maxIterations must be a non-negative integer, got ${config.maxIterations}`,
+      );
+    }
+
     this.stop();
 
     this.state = {

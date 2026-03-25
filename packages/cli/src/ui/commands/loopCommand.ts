@@ -65,6 +65,7 @@ function parseLoopArgs(args: string): {
   }
 
   let intervalMs = DEFAULT_INTERVAL_MS;
+  let hasExplicitInterval = false;
   let maxIterations = 0;
   let startIndex = 0;
 
@@ -72,6 +73,7 @@ function parseLoopArgs(args: string): {
   const parsed = parseInterval(tokens[0]);
   if (parsed !== null) {
     intervalMs = parsed;
+    hasExplicitInterval = true;
     startIndex = 1;
   }
 
@@ -87,7 +89,8 @@ function parseLoopArgs(args: string): {
   let prompt = tokens.slice(startIndex).join(' ');
 
   // Support natural language interval at the end: "check deploy every 5m"
-  if (intervalMs === DEFAULT_INTERVAL_MS) {
+  // Only when no explicit leading interval was provided.
+  if (!hasExplicitInterval) {
     const everyMatch = prompt.match(/\s+every\s+(\d+(?:\.\d+)?[smhd])\s*$/i);
     if (everyMatch) {
       const parsed2 = parseInterval(everyMatch[1]);
