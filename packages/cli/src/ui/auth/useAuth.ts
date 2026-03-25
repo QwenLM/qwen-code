@@ -36,6 +36,11 @@ import {
   CODING_PLAN_ENV_KEY,
 } from '../../constants/codingPlan.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
+import {
+  ALIBABA_STANDARD_API_KEY_ENDPOINTS,
+  DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
+  type AlibabaStandardRegion,
+} from '../../constants/alibabaStandardApiKey.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
@@ -422,6 +427,115 @@ export const useAuthCommand = (
   );
 
   /**
+   * Handle Alibaba Cloud standard API key flow.
+   * Persists key to env.DASHSCOPE_API_KEY and creates a modelProviders.openai entry.
+   */
+  const handleAlibabaStandardSubmit = useCallback(
+    async (apiKey: string, region: AlibabaStandardRegion, modelId: string) => {
+      try {
+        setIsAuthenticating(true);
+        setAuthError(null);
+
+        const trimmedApiKey = apiKey.trim();
+        const trimmedModelId = modelId.trim();
+        if (!trimmedApiKey) {
+          throw new Error(t('API key cannot be empty.'));
+        }
+        if (!trimmedModelId) {
+          throw new Error(t('Model ID cannot be empty.'));
+        }
+
+        const baseUrl = ALIBABA_STANDARD_API_KEY_ENDPOINTS[region];
+        const persistScope = getPersistScopeForModelSelection(settings);
+
+        const settingsFile = settings.forScope(persistScope);
+        backupSettingsFile(settingsFile.path);
+
+        settings.setValue(
+          persistScope,
+          `env.${DASHSCOPE_STANDARD_API_KEY_ENV_KEY}`,
+          trimmedApiKey,
+        );
+        process.env[DASHSCOPE_STANDARD_API_KEY_ENV_KEY] = trimmedApiKey;
+
+        const newConfig: ProviderModelConfig = {
+          id: trimmedModelId,
+          name: `${trimmedModelId} (DashScope Standard)`,
+          baseUrl,
+          envKey: DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
+        };
+
+        const existingConfigs =
+          (
+            settings.merged.modelProviders as ModelProvidersConfig | undefined
+          )?.[AuthType.USE_OPENAI] || [];
+
+        const nonAlibabaStandardConfigs = existingConfigs.filter(
+          (existing) =>
+            !(
+              existing.envKey === DASHSCOPE_STANDARD_API_KEY_ENV_KEY &&
+              typeof existing.baseUrl === 'string' &&
+              Object.values(ALIBABA_STANDARD_API_KEY_ENDPOINTS).includes(
+                existing.baseUrl,
+              )
+            ),
+        );
+
+        const updatedConfigs = [newConfig, ...nonAlibabaStandardConfigs];
+
+        settings.setValue(
+          persistScope,
+          `modelProviders.${AuthType.USE_OPENAI}`,
+          updatedConfigs,
+        );
+        settings.setValue(
+          persistScope,
+          'security.auth.selectedType',
+          AuthType.USE_OPENAI,
+        );
+        settings.setValue(persistScope, 'model.name', trimmedModelId);
+
+        const updatedModelProviders: ModelProvidersConfig = {
+          ...(settings.merged.modelProviders as
+            | ModelProvidersConfig
+            | undefined),
+          [AuthType.USE_OPENAI]: updatedConfigs,
+        };
+        config.reloadModelProvidersConfig(updatedModelProviders);
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        setAuthError(null);
+        setAuthState(AuthState.Authenticated);
+        setPendingAuthType(undefined);
+        setIsAuthDialogOpen(false);
+        setIsAuthenticating(false);
+        onAuthChange?.();
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'Authenticated successfully with Alibaba Cloud Standard API Key. Settings updated with env.DASHSCOPE_API_KEY and model "{{modelId}}".',
+              { modelId: trimmedModelId },
+            ),
+          },
+          Date.now(),
+        );
+
+        const authEvent = new AuthEvent(
+          AuthType.USE_OPENAI,
+          'manual',
+          'success',
+        );
+        logAuth(config, authEvent);
+      } catch (error) {
+        handleAuthFailure(error);
+      }
+    },
+    [settings, config, handleAuthFailure, addItem, onAuthChange],
+  );
+
+  /**
    /**
     * We previously used a useEffect to trigger authentication automatically when
     * settings.security.auth.selectedType changed. This caused problems: if authentication failed,
@@ -472,6 +586,7 @@ export const useAuthCommand = (
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
+    handleAlibabaStandardSubmit,
     openAuthDialog,
     cancelAuthentication,
   };

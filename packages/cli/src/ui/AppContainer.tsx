@@ -456,6 +456,7 @@ export const AppContainer = (props: AppContainerProps) => {
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
+    handleAlibabaStandardSubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -1681,6 +1682,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1734,6 +1736,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
