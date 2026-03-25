@@ -940,6 +940,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Generate follow-up suggestions when streaming completes
   useEffect(() => {
+    // Clear suggestions when a new turn starts (Idle → Responding)
+    if (
+      prevStreamingStateRef.current === StreamingState.Idle &&
+      streamingState === StreamingState.Responding
+    ) {
+      setFollowupSuggestions([]);
+    }
+
     // Only trigger when transitioning from Responding to Idle
     if (
       prevStreamingStateRef.current === StreamingState.Responding &&
