@@ -1086,8 +1086,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Drain pending loop prompt when streaming is Idle.
   // Submits as string so nested slash commands (e.g. /review) are parsed.
+  // Waits for the user message queue to drain first to avoid submitQuery
+  // conflicts (useMessageQueue's effect fires before this one and sets
+  // isSubmittingQueryRef, which would cause our submitQuery to early-return).
   useEffect(() => {
-    if (streamingState !== StreamingState.Idle || pendingLoopPrompt === null) {
+    if (
+      streamingState !== StreamingState.Idle ||
+      pendingLoopPrompt === null ||
+      messageQueue.length > 0
+    ) {
       return;
     }
     const prompt = pendingLoopPrompt;
@@ -1111,7 +1118,7 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }, 0);
     })();
-  }, [streamingState, pendingLoopPrompt]);
+  }, [streamingState, pendingLoopPrompt, messageQueue.length]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);

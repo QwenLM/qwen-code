@@ -78,12 +78,18 @@ function parseLoopArgs(args: string): {
   }
 
   // Check for --max N
-  if (tokens[startIndex] === '--max' && startIndex + 1 < tokens.length) {
-    const maxVal = parseInt(tokens[startIndex + 1], 10);
-    if (!isNaN(maxVal) && maxVal > 0) {
-      maxIterations = maxVal;
-      startIndex += 2;
+  if (tokens[startIndex] === '--max') {
+    if (startIndex + 1 >= tokens.length) {
+      // --max without a value → trigger usage error via empty prompt
+      return { intervalMs, maxIterations: 0, prompt: '' };
     }
+    const maxVal = parseInt(tokens[startIndex + 1], 10);
+    if (isNaN(maxVal) || maxVal <= 0) {
+      // --max with invalid value → trigger usage error
+      return { intervalMs, maxIterations: 0, prompt: '' };
+    }
+    maxIterations = maxVal;
+    startIndex += 2;
   }
 
   let prompt = tokens.slice(startIndex).join(' ');
