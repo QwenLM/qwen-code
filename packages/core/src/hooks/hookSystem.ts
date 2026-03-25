@@ -22,6 +22,7 @@ import type {
   PreCompactTrigger,
   NotificationType,
   PermissionSuggestion,
+  HookEventName,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -85,6 +86,17 @@ export class HookSystem {
    */
   getAllHooks(): HookRegistryEntry[] {
     return this.hookRegistry.getAllHooks();
+  }
+
+  /**
+   * Check if there are any enabled hooks registered for a specific event.
+   * This is a fast-path check to avoid expensive MessageBus round-trips
+   * when no hooks are configured for a given event.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return (
+      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
+    );
   }
 
   async fireUserPromptSubmitEvent(
