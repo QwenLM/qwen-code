@@ -117,6 +117,12 @@ export function useFollowupSuggestionsCLI(
       return;
     }
 
+    // Cancel any pending suggestion timeout
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+
     // Lock synchronously to prevent multiple rapid calls in the same tick
     acceptingRef.current = true;
 
@@ -145,6 +151,10 @@ export function useFollowupSuggestionsCLI(
   }, []);
 
   const dismiss = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
     setState(followupReducers.clear());
   }, []);
 
