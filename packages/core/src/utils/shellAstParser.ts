@@ -8,10 +8,17 @@
  * Shell AST Parser — powered by web-tree-sitter + tree-sitter-bash.
  *
  * Provides:
- *   1. `initParser()`           – lazy singleton Parser initialisation
- *   2. `parseShellCommand()`    – parse a command string into a tree-sitter Tree
- *   3. `isShellCommandReadOnlyAST()` – AST-based read-only command detection
- *   4. `extractCommandRules()`  – extract minimum-scope wildcard permission rules
+ *   1. `initParser()`                    – lazy singleton Parser initialisation
+ *   2. `parseShellCommand()`             – parse a command string into a tree-sitter Tree
+ *   3. `isShellCommandReadOnlyAST()`     – AST-based read-only command detection
+ *   4. `extractCommandRules()`           – extract minimum-scope wildcard permission rules
+ *   5. `isParserReady()`                 – check if the parser singleton is initialised
+ *   6. `splitCommandsAST()`              – AST-based compound command splitting
+ *   7. `getCommandRootAST()`             – AST-based root command name extraction
+ *   8. `getCommandRootsAST()`            – AST-based root command names extraction
+ *   9. `detectCommandSubstitutionAST()`  – AST-based command-substitution detection (sync)
+ *  10. `tokenizeCommandAST()`            – AST-based command tokenization for shell-semantics
+ *  11. `extractRedirectsAST()`           – AST-based I/O redirect extraction
  */
 
 import Parser from 'web-tree-sitter';
@@ -1066,6 +1073,408 @@ export async function extractCommandRules(command: string): Promise<string[]> {
 
   // Deduplicate while preserving order
   return [...new Set(rules)];
+}
+
+// ---------------------------------------------------------------------------
+// Public API: isParserReady / ensureParserInitStarted / parseShellCommandSync
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether the tree-sitter parser singleton has been initialised.
+ * Useful for callers that want to try sync AST functions before falling back.
+ */
+export function isParserReady(): boolean {
+  return parserInstance !== null;
+}
+
+/**
+ * Trigger parser initialisation in a fire-and-forget manner.
+ *
+ * This is called automatically by all sync AST functions when the parser is
+ * not yet ready.  The current call will still fall back to the legacy
+ * implementation, but the parser will be initialising in the background so
+ * that subsequent calls can use the AST path.
+ *
+ * Safe to call multiple times — `initParser()` is idempotent.
+ */
+export function ensureParserInitStarted(): void {
+  if (!parserInstance && !initPromise) {
+    initParser().catch(() => {
+      // Swallow errors — the sync fallback path will continue to work.
+    });
+  }
+}
+
+/**
+ * Synchronously parse a shell command string.
+ * Requires the parser to have been initialised via `initParser()` — throws if not.
+ */
+function parseShellCommandSync(command: string): Parser.Tree {
+  if (!parserInstance) {
+    throw new Error(
+      'Shell AST parser not initialized. Call initParser() first.',
+    );
+  }
+  return parserInstance.parse(command);
+}
+
+// ---------------------------------------------------------------------------
+// Public API: splitCommandsAST
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect individual simple commands (leaf-level) from an AST node.
+ *
+ * Recursively descends into `program`, `list`, and `pipeline` nodes to
+ * extract each leaf `command` / `redirected_statement` as its text.
+ * This mirrors the behaviour of the string-based `splitCommands()`: every
+ * sub-command separated by `&&`, `||`, `;`, `|`, or `&` is returned as
+ * a separate string.
+ */
+function collectLeafCommands(node: SyntaxNode, commands: string[]): void {
+  switch (node.type) {
+    case 'program':
+    case 'list':
+    case 'pipeline':
+      for (const child of node.namedChildren) {
+        collectLeafCommands(child, commands);
+      }
+      break;
+
+    case 'command':
+    case 'redirected_statement':
+      commands.push(node.text.trim());
+      break;
+
+    case 'negated_command': {
+      // `! cmd` — include the whole text as a single command
+      commands.push(node.text.trim());
+      break;
+    }
+
+    case 'subshell':
+    case 'compound_statement':
+      // Include the whole construct as-is
+      commands.push(node.text.trim());
+      break;
+
+    case 'variable_assignment':
+    case 'variable_assignments':
+      // Pure assignments — skip
+      break;
+
+    default:
+      // For other node types (if/while/for/case/function_definition),
+      // include the whole text as a single "command".
+      if (node.text.trim()) {
+        commands.push(node.text.trim());
+      }
+      break;
+  }
+}
+
+/**
+ * Split a compound shell command into individual simple commands using AST.
+ *
+ * Unlike the string-based `splitCommands()`, this correctly handles all
+ * quoting contexts, heredocs, and nested constructs because parsing is
+ * delegated to tree-sitter-bash.
+ *
+ * Returns `null` if the parser has not been initialised yet.
+ */
+export function splitCommandsAST(command: string): string[] | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null;
+  }
+
+  const tree = parseShellCommandSync(command);
+  const commands: string[] = [];
+  collectLeafCommands(tree.rootNode, commands);
+  tree.delete();
+  return commands.filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Public API: getCommandRootAST / getCommandRootsAST
+// ---------------------------------------------------------------------------
+
+/**
+ * Find the first `command` node in the AST by depth-first traversal.
+ * Descends through `program`, `list`, `pipeline`, `redirected_statement`,
+ * `negated_command`, `subshell`, and `compound_statement`.
+ */
+function findFirstCommandNode(node: SyntaxNode): SyntaxNode | null {
+  if (node.type === 'command') return node;
+  if (node.type === 'redirected_statement') {
+    const body = node.namedChildren[0];
+    return body ? findFirstCommandNode(body) : null;
+  }
+  if (node.type === 'negated_command') {
+    const inner = node.namedChildren[0];
+    return inner ? findFirstCommandNode(inner) : null;
+  }
+  for (const child of node.namedChildren) {
+    const found = findFirstCommandNode(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Extract the root command name from a shell command using AST.
+ * Returns `null` if the parser is not ready.
+ *
+ * @example getCommandRootAST('ls -la /tmp')   // 'ls'
+ * @example getCommandRootAST('git status')     // 'git'
+ * @example getCommandRootAST('/usr/bin/grep foo bar')  // 'grep'
+ */
+export function getCommandRootAST(command: string): string | undefined | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null; // null = parser not ready
+  }
+
+  const tree = parseShellCommandSync(command);
+  const firstCmd = findFirstCommandNode(tree.rootNode);
+  if (!firstCmd) {
+    tree.delete();
+    return undefined;
+  }
+  const name = getCommandName(firstCmd);
+  tree.delete();
+  if (!name) return undefined;
+  // If the command is a path, return the last component
+  return name.split(/[\\/]/).pop();
+}
+
+/**
+ * Extract root command names from ALL sub-commands in a compound command.
+ * Returns `null` if the parser is not ready.
+ */
+export function getCommandRootsAST(command: string): string[] | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null;
+  }
+
+  const subCommands = splitCommandsAST(command);
+  if (!subCommands) return null;
+  return subCommands
+    .map((c) => getCommandRootAST(c))
+    .filter((c): c is string => !!c);
+}
+
+// ---------------------------------------------------------------------------
+// Public API: detectCommandSubstitutionAST (sync)
+// ---------------------------------------------------------------------------
+
+/**
+ * Synchronous AST-based detection of command substitution ($(), ``, <(), >()).
+ *
+ * Returns `null` if the parser is not ready — callers should fall back to
+ * the string-based implementation in that case.
+ *
+ * This is more accurate than the string-based implementation because
+ * tree-sitter correctly handles quoting contexts, heredocs, and nested
+ * constructs.
+ */
+export function detectCommandSubstitutionAST(command: string): boolean | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null;
+  }
+
+  const tree = parseShellCommandSync(command);
+  const result = containsCommandSubstitutionAST(tree.rootNode);
+  tree.delete();
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: tokenizeCommandAST
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of AST-based command tokenization for shell-semantics analysis.
+ */
+export interface ASTTokenizeResult {
+  /** The command name (lowercase, basename only). */
+  commandName: string;
+  /** Arguments (outer quotes stripped, redirects excluded). */
+  args: string[];
+  /** Read-redirect target paths (e.g. `< file`). */
+  redirectReads: string[];
+  /** Write-redirect target paths (e.g. `> file`, `>> file`). */
+  redirectWrites: string[];
+}
+
+/**
+ * Input-only redirection operators.
+ */
+const READ_REDIRECT_OPERATORS = new Set(['<']);
+
+/**
+ * Tokenize a single simple command using AST, extracting:
+ *   - command name
+ *   - argument list (quotes stripped, redirects removed)
+ *   - read/write redirect targets
+ *
+ * Returns `null` if the parser is not ready or the input is empty/invalid.
+ */
+export function tokenizeCommandAST(
+  simpleCommand: string,
+): ASTTokenizeResult | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null;
+  }
+  if (!simpleCommand.trim()) return null;
+
+  const tree = parseShellCommandSync(simpleCommand);
+  const root = tree.rootNode;
+
+  // Find the actual command node — it may be wrapped in redirected_statement
+  let commandNode: SyntaxNode | null = null;
+  let redirectParent: SyntaxNode | null = null;
+
+  const firstChild = root.namedChildCount > 0 ? root.namedChildren[0]! : null;
+  if (!firstChild) {
+    tree.delete();
+    return null;
+  }
+
+  if (firstChild.type === 'redirected_statement') {
+    redirectParent = firstChild;
+    commandNode = findFirstCommandNode(firstChild);
+  } else if (firstChild.type === 'command') {
+    commandNode = firstChild;
+  } else {
+    // Not a simple command
+    tree.delete();
+    return null;
+  }
+
+  if (!commandNode) {
+    tree.delete();
+    return null;
+  }
+
+  const cmdName = getCommandName(commandNode);
+  if (!cmdName) {
+    // Pure variable assignment, check if = is present
+    tree.delete();
+    return null;
+  }
+
+  const argNodes = getArgumentNodes(commandNode);
+  const args = argNodes.map((n) => stripOuterQuotes(n.text));
+
+  // Extract redirects
+  const redirectReads: string[] = [];
+  const redirectWrites: string[] = [];
+
+  const redirectSource = redirectParent ?? commandNode.parent;
+  if (redirectSource && redirectSource.type === 'redirected_statement') {
+    for (let i = 0; i < redirectSource.childCount; i++) {
+      const child = redirectSource.child(i)!;
+      if (child.type === 'file_redirect') {
+        const { op, target } = extractFileRedirect(child);
+        if (target) {
+          if (READ_REDIRECT_OPERATORS.has(op)) {
+            redirectReads.push(target);
+          } else if (WRITE_REDIRECT_OPERATORS.has(op)) {
+            redirectWrites.push(target);
+          }
+        }
+      } else if (child.type === 'heredoc_redirect') {
+        // heredoc redirects are input — skip (no path target)
+      } else if (child.type === 'herestring_redirect') {
+        // herestring redirects are input — skip
+      }
+    }
+  }
+
+  tree.delete();
+
+  return {
+    commandName: cmdName,
+    args,
+    redirectReads,
+    redirectWrites,
+  };
+}
+
+/**
+ * Extract the operator and target path from a `file_redirect` node.
+ */
+function extractFileRedirect(node: SyntaxNode): {
+  op: string;
+  target: string;
+} {
+  let op = '>';
+  let target = '';
+
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i)!;
+    if (child.type === 'file_descriptor') continue;
+    // First non-descriptor child is the operator
+    if (!target && WRITE_REDIRECT_OPERATORS.has(child.type)) {
+      op = child.type;
+      continue;
+    }
+    if (!target && READ_REDIRECT_OPERATORS.has(child.type)) {
+      op = child.type;
+      continue;
+    }
+    // The target word
+    if (
+      child.type === 'word' ||
+      child.type === 'string' ||
+      child.type === 'raw_string' ||
+      child.type === 'concatenation' ||
+      child.type === 'simple_expansion' ||
+      child.type === 'expansion'
+    ) {
+      target = stripOuterQuotes(child.text);
+    }
+  }
+
+  return { op, target };
+}
+
+// ---------------------------------------------------------------------------
+// Public API: isShellCommandReadOnlySync
+// ---------------------------------------------------------------------------
+
+/**
+ * Synchronous AST-based check whether a shell command is read-only.
+ * Returns `null` if the parser is not ready.
+ */
+export function isShellCommandReadOnlySync(command: string): boolean | null {
+  if (!parserInstance) {
+    ensureParserInitStarted();
+    return null;
+  }
+  if (typeof command !== 'string' || !command.trim()) return false;
+
+  const tree = parseShellCommandSync(command);
+  const root = tree.rootNode;
+
+  if (root.namedChildCount === 0) {
+    tree.delete();
+    return false;
+  }
+
+  for (const stmt of root.namedChildren) {
+    if (!evaluateStatementReadOnly(stmt)) {
+      tree.delete();
+      return false;
+    }
+  }
+
+  tree.delete();
+  return true;
 }
 
 // ---------------------------------------------------------------------------

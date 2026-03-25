@@ -9,7 +9,14 @@ import type { Config } from '../config/config.js';
 import os from 'node:os';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
-import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import {
+  isParserReady,
+  splitCommandsAST,
+  getCommandRootAST,
+  getCommandRootsAST,
+  detectCommandSubstitutionAST,
+  isShellCommandReadOnlySync,
+} from './shellAstParser.js';
 import {
   execFile,
   execFileSync,
@@ -114,12 +121,23 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 }
 
 /**
- * Splits a shell command into a list of individual commands, respecting quotes.
- * This is used to separate chained commands (e.g., using &&, ||, ;).
- * @param command The shell command string to parse
- * @returns An array of individual command strings
+ * Split a compound shell command string into individual simple commands.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised (accurate parsing
+ * of quoting, heredocs, and nested constructs).  Falls back to the legacy
+ * character-level state machine when the parser is not yet ready.
  */
 export function splitCommands(command: string): string[] {
+  // Prefer AST-based splitting when the parser is ready
+  const astResult = splitCommandsAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback (parser not yet initialised)
+  return splitCommandsLegacy(command);
+}
+
+/** @internal Legacy string-based command splitter (fallback). */
+function splitCommandsLegacy(command: string): string[] {
   const commands: string[] = [];
   let currentCommand = '';
   let inSingleQuotes = false;
@@ -205,30 +223,34 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
- * Extracts the root command from a given shell command string.
- * This is used to identify the base command for permission checks.
- * @param command The shell command string to parse
- * @returns The root command name, or undefined if it cannot be determined
+ * Extract the root command name from a shell command string.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised, falling back
+ * to regex-based extraction otherwise.
+ *
  * @example getCommandRoot("ls -la /tmp") returns "ls"
  * @example getCommandRoot("git status && npm test") returns "git"
  */
 export function getCommandRoot(command: string): string | undefined {
+  // Prefer AST-based extraction
+  const astResult = getCommandRootAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
+  return getCommandRootLegacy(command);
+}
+
+/** @internal Legacy regex-based command root extraction. */
+function getCommandRootLegacy(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
   }
 
-  // This regex is designed to find the first "word" of a command,
-  // while respecting quotes. It looks for a sequence of non-whitespace
-  // characters that are not inside quotes.
   const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
   if (match) {
-    // The first element in the match array is the full match.
-    // The subsequent elements are the capture groups.
-    // We prefer a captured group because it will be unquoted.
     const commandRoot = match[1] || match[2] || match[3];
     if (commandRoot) {
-      // If the command is a path, return the last component.
       return commandRoot.split(/[\\/]/).pop();
     }
   }
@@ -236,10 +258,21 @@ export function getCommandRoot(command: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Extract root command names from ALL sub-commands in a compound command.
+ *
+ * Uses tree-sitter-bash AST when the parser is initialised, falling back
+ * to the legacy string-based approach otherwise.
+ */
 export function getCommandRoots(command: string): string[] {
   if (!command) {
     return [];
   }
+  // Prefer AST-based extraction
+  const astResult = getCommandRootsAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
   return splitCommands(command)
     .map((c) => getCommandRoot(c))
     .filter((c): c is string => !!c);
@@ -262,20 +295,23 @@ export function stripShellWrapper(command: string): string {
 }
 
 /**
- * Detects command substitution patterns in a shell command, following bash quoting rules:
- * - Single quotes ('): Everything literal, no substitution possible
- * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
- * - No quotes: Command substitution with $(), <(), and backticks
+ * Detect command substitution patterns ($(), ``, <(), >()) in a shell command.
  *
- * This function also understands heredocs:
- * - If a heredoc delimiter is quoted (e.g. `<<'EOF'`), bash will not perform
- *   expansions in the heredoc body, so substitution-like text is allowed.
- * - If a heredoc delimiter is unquoted (e.g. `<<EOF`), bash will perform
- *   expansions in the heredoc body, so command substitution is blocked there too.
- * @param command The shell command string to check
- * @returns true if command substitution would be executed by bash
+ * Uses tree-sitter-bash AST when the parser is initialised (more accurate,
+ * correctly handles all quoting contexts and heredocs).  Falls back to the
+ * legacy character-level parser otherwise.
  */
 export function detectCommandSubstitution(command: string): boolean {
+  // Prefer AST-based detection
+  const astResult = detectCommandSubstitutionAST(command);
+  if (astResult !== null) return astResult;
+
+  // Legacy fallback
+  return detectCommandSubstitutionLegacy(command);
+}
+
+/** @internal Legacy string-based command substitution detection. */
+function detectCommandSubstitutionLegacy(command: string): boolean {
   type PendingHeredoc = {
     delimiter: string;
     isQuotedDelimiter: boolean;
@@ -988,17 +1024,72 @@ export function isCommandNeedsPermission(command: string): {
   requiresPermission: boolean;
   reason?: string;
 } {
-  const isAllowed = isShellCommandReadOnly(command);
+  // Prefer AST-based read-only check (sync)
+  if (isParserReady()) {
+    const isAllowed = isShellCommandReadOnlySync(command);
+    if (isAllowed !== null) {
+      if (isAllowed) {
+        return { requiresPermission: false };
+      }
+      return {
+        requiresPermission: true,
+        reason: 'Command requires permission to execute.',
+      };
+    }
+  }
 
-  if (isAllowed) {
+  // Lightweight sync fallback: check if the root command is a known read-only
+  // command.  This is less accurate than the full AST analysis (no redirect or
+  // sub-command awareness) but covers the common simple cases (e.g. `ls`,
+  // `cat`, `git status`) when the parser has not been initialised yet.
+  const root = getCommandRoot(command);
+  if (root && BASIC_READ_ONLY_COMMANDS.has(root)) {
     return { requiresPermission: false };
   }
 
+  // Conservatively require permission for anything else
   return {
     requiresPermission: true,
     reason: 'Command requires permission to execute.',
   };
 }
+
+/**
+ * Minimal set of commands known to be read-only for the lightweight fallback
+ * in `isCommandNeedsPermission`.  Intentionally conservative — only includes
+ * commands that are always read-only regardless of arguments.
+ */
+const BASIC_READ_ONLY_COMMANDS = new Set([
+  'cat',
+  'cd',
+  'cut',
+  'df',
+  'dirname',
+  'du',
+  'echo',
+  'env',
+  'grep',
+  'head',
+  'less',
+  'ls',
+  'more',
+  'printenv',
+  'printf',
+  'ps',
+  'pwd',
+  'rg',
+  'sort',
+  'stat',
+  'tail',
+  'tree',
+  'uniq',
+  'wc',
+  'which',
+  'where',
+  'whoami',
+  'basename',
+  'column',
+]);
 
 /**
  * Checks user arguments for potentially dangerous shell characters.

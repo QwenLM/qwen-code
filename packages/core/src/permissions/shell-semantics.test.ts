@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
+import {
+  initParser,
+  isParserReady,
+  _resetParser,
+} from '../utils/shellAstParser.js';
 
 const CWD = '/home/user/project';
 
@@ -409,6 +414,242 @@ describe('extractShellOperations', () => {
   it('$VAR paths are not included', () => {
     const ops = extractShellOperations('cat $SECRET_FILE', CWD);
     // $SECRET_FILE starts with $, filtered by looksLikePath
+    expect(ops).toEqual([]);
+  });
+});
+
+// =========================================================================
+// extractShellOperations — AST path (parser initialised)
+// =========================================================================
+
+describe('extractShellOperations (AST path)', () => {
+  beforeAll(async () => {
+    await initParser();
+    expect(isParserReady()).toBe(true);
+  });
+
+  afterAll(() => {
+    _resetParser();
+  });
+
+  // ── Basic commands ──────────────────────────────────────────────────────
+
+  it('returns [] for empty string', () => {
+    expect(extractShellOperations('', CWD)).toEqual([]);
+  });
+
+  it('returns [] for whitespace', () => {
+    expect(extractShellOperations('   ', CWD)).toEqual([]);
+  });
+
+  it('returns [] for unknown commands', () => {
+    expect(extractShellOperations('frobnicate /etc/passwd', CWD)).toEqual([]);
+  });
+
+  it('returns [] for env-var assignments', () => {
+    expect(extractShellOperations('FOO=bar', CWD)).toEqual([]);
+  });
+
+  // ── cat ──────────────────────────────────────────────────────────────────
+
+  it('cat: absolute path', () => {
+    const ops = extractShellOperations('cat /etc/passwd', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/passwd' },
+    ]);
+  });
+
+  it('cat: relative path resolved against cwd', () => {
+    const ops = extractShellOperations('cat secrets.txt', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'read_file', filePath: `${CWD}/secrets.txt` },
+    ]);
+  });
+
+  it('cat: multiple files', () => {
+    const ops = extractShellOperations('cat /a/b /c/d', CWD);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/a/b' },
+      { virtualTool: 'read_file', filePath: '/c/d' },
+    ]);
+  });
+
+  it('cat: flags are ignored', () => {
+    const ops = extractShellOperations('cat -n /etc/hosts', CWD);
+    expect(ops).toEqual([{ virtualTool: 'read_file', filePath: '/etc/hosts' }]);
+  });
+
+  it('cat: quoted path', () => {
+    const ops = extractShellOperations("cat '/etc/my file.conf'", CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/my file.conf' },
+    ]);
+  });
+
+  // ── head / tail ────────────────────────────────────────────────────────
+
+  it('head: -n value not treated as path', () => {
+    const ops = extractShellOperations('head -n 10 /var/log/syslog', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'read_file', filePath: '/var/log/syslog' },
+    ]);
+  });
+
+  it('tail: multiple files', () => {
+    const ops = extractShellOperations('tail -c 100 /a /b', CWD);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/a' },
+      { virtualTool: 'read_file', filePath: '/b' },
+    ]);
+  });
+
+  // ── ls / find ──────────────────────────────────────────────────────────
+
+  it('ls: no args defaults to cwd', () => {
+    const ops = extractShellOperations('ls', CWD);
+    expect(ops).toEqual([{ virtualTool: 'list_directory', filePath: CWD }]);
+  });
+
+  it('ls: explicit dir', () => {
+    const ops = extractShellOperations('ls /var/log', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'list_directory', filePath: '/var/log' },
+    ]);
+  });
+
+  it('find: first positional is starting dir', () => {
+    const ops = extractShellOperations('find /etc -name "*.conf"', CWD);
+    expect(ops).toEqual([{ virtualTool: 'list_directory', filePath: '/etc' }]);
+  });
+
+  // ── touch / mkdir ──────────────────────────────────────────────────────
+
+  it('touch: creates a file (write_file)', () => {
+    const ops = extractShellOperations('touch /tmp/new.txt', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'write_file', filePath: '/tmp/new.txt' },
+    ]);
+  });
+
+  // ── cp / mv ────────────────────────────────────────────────────────────
+
+  it('cp: src=read, dst=write', () => {
+    const ops = extractShellOperations('cp /etc/passwd /tmp/backup', CWD);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/passwd' },
+      { virtualTool: 'write_file', filePath: '/tmp/backup' },
+    ]);
+  });
+
+  it('mv: src=edit, dst=write', () => {
+    const ops = extractShellOperations('mv /tmp/a /tmp/b', CWD);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'edit', filePath: '/tmp/a' },
+      { virtualTool: 'write_file', filePath: '/tmp/b' },
+    ]);
+  });
+
+  // ── rm ─────────────────────────────────────────────────────────────────
+
+  it('rm: single file is edit', () => {
+    const ops = extractShellOperations('rm /tmp/secret.txt', CWD);
+    expect(ops).toEqual([{ virtualTool: 'edit', filePath: '/tmp/secret.txt' }]);
+  });
+
+  // ── Redirections ───────────────────────────────────────────────────────
+
+  it('redirect >: write_file', () => {
+    const ops = extractShellOperations('echo hello > /tmp/out.txt', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'write_file', filePath: '/tmp/out.txt' },
+    ]);
+  });
+
+  it('redirect >>: write_file', () => {
+    const ops = extractShellOperations('date >> /var/log/app.log', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'write_file', filePath: '/var/log/app.log' },
+    ]);
+  });
+
+  it('redirect <: read_file', () => {
+    const ops = extractShellOperations('sort < /tmp/data.txt', CWD);
+    expect(ops).toContainEqual({
+      virtualTool: 'read_file',
+      filePath: '/tmp/data.txt',
+    });
+  });
+
+  it('redirect 2>/dev/null: ignored (no op)', () => {
+    const ops = extractShellOperations('cat /etc/passwd 2>/dev/null', CWD);
+    expect(ops).not.toContainEqual(
+      expect.objectContaining({ filePath: '/dev/null' }),
+    );
+    expect(ops).toContainEqual({
+      virtualTool: 'read_file',
+      filePath: '/etc/passwd',
+    });
+  });
+
+  // ── curl / wget ────────────────────────────────────────────────────────
+
+  it('curl: extracts domain', () => {
+    const ops = extractShellOperations(
+      'curl https://api.example.com/data',
+      CWD,
+    );
+    expect(ops).toEqual([
+      { virtualTool: 'web_fetch', domain: 'api.example.com' },
+    ]);
+  });
+
+  it('wget: extracts domain', () => {
+    const ops = extractShellOperations(
+      'wget https://example.com/file.tar.gz',
+      CWD,
+    );
+    expect(ops).toEqual([{ virtualTool: 'web_fetch', domain: 'example.com' }]);
+  });
+
+  // ── sudo / prefix commands ─────────────────────────────────────────────
+
+  it('sudo cat: transparent wrapper', () => {
+    const ops = extractShellOperations('sudo cat /etc/sudoers', CWD);
+    expect(ops).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/sudoers' },
+    ]);
+  });
+
+  it('env cmd: transparent wrapper', () => {
+    const ops = extractShellOperations('env cat /etc/hosts', CWD);
+    expect(ops).toEqual([{ virtualTool: 'read_file', filePath: '/etc/hosts' }]);
+  });
+
+  // ── Combination: command + redirect ───────────────────────────────────
+
+  it('cat src > dst: both read and write', () => {
+    const ops = extractShellOperations('cat /etc/passwd > /tmp/copy', CWD);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/passwd' },
+      { virtualTool: 'write_file', filePath: '/tmp/copy' },
+    ]);
+  });
+
+  it('grep pattern file > out: read + write', () => {
+    const ops = extractShellOperations(
+      'grep secret /etc/config > /tmp/out',
+      CWD,
+    );
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/etc/config' },
+      { virtualTool: 'write_file', filePath: '/tmp/out' },
+    ]);
+  });
+
+  // ── Variables / unresolvable ────────────────────────────────────────────
+
+  it('$VAR paths are not included', () => {
+    const ops = extractShellOperations('cat $SECRET_FILE', CWD);
     expect(ops).toEqual([]);
   });
 });
