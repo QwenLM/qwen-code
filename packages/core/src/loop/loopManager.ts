@@ -103,8 +103,14 @@ export function formatInterval(ms: number): string {
     return `${ms / 60_000}m`;
   }
   if (ms >= 60_000) {
-    // Non-round minutes (e.g., 90_000 → "1.5m")
+    // Non-round minutes (e.g., 90_000 → "1.5m").
+    // If rounding would produce an integer minute value but the duration
+    // is not exactly divisible by 60_000 ms, fall back to seconds to
+    // avoid suggesting an exact minute duration (e.g., 62_000 → "62s").
     const rounded = Math.round((ms / 60_000) * 10) / 10;
+    if (ms % 60_000 !== 0 && Number.isInteger(rounded)) {
+      return `${ms / 1000}s`;
+    }
     return `${rounded}m`;
   }
   return `${ms / 1000}s`;
@@ -272,6 +278,11 @@ export class LoopManager {
     }
 
     this.state.timerId = setTimeout(() => {
+      // Timer has fired; clear the ID so LoopState reflects that no
+      // future iteration is currently scheduled.
+      if (this.state) {
+        this.state.timerId = null;
+      }
       this.executeIteration();
     }, this.state.config.intervalMs);
   }

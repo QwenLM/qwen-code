@@ -78,7 +78,7 @@ describe('formatInterval', () => {
   });
 
   it('rounds non-round minutes to one decimal', () => {
-    expect(formatInterval(62_000)).toBe('1m'); // 1.0333... rounds to 1.0
+    expect(formatInterval(62_000)).toBe('62s'); // not exactly divisible by 60s, fall back
     expect(formatInterval(80_000)).toBe('1.3m'); // 1.333... rounds to 1.3
   });
 
