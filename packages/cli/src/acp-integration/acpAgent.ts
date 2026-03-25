@@ -112,7 +112,9 @@ export async function runAcpAgent(
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
     runExitCleanup()
-      .catch(() => {})
+      .catch((err) => {
+        debugLogger.error('[ACP] Cleanup error:', err);
+      })
       .finally(() => {
         process.exit(0);
       });

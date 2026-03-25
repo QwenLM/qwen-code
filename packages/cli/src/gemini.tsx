@@ -409,6 +409,7 @@ export async function main() {
 
     if (config.getExperimentalZedIntegration()) {
       await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);
     }
