@@ -948,14 +948,22 @@ export const AppContainer = (props: AppContainerProps) => {
       // Get the last gemini message from history
       const history = historyManager.history;
 
-      // Also check tool_group items in history (these are preserved)
-      const toolGroupItems = history.filter(
-        (item) => item.type === 'tool_group',
-      );
+      // Collect only the most recent contiguous block of tool_group items
+      // to avoid suggesting based on older turns' tool activity
+      const recentToolGroupItems: typeof history = [];
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const item = history[i];
+        if (item.type === 'tool_group') {
+          recentToolGroupItems.push(item);
+        } else if (recentToolGroupItems.length > 0) {
+          break;
+        }
+      }
+      recentToolGroupItems.reverse();
 
       // Generate suggestions even if pendingToolCalls is empty - use history instead
-      const toolCalls = toolGroupItems
-        .slice(-10) // Get last 10 tool calls
+      const toolCalls = recentToolGroupItems
+        .slice(-10) // Get last 10 tool calls within the most recent turn
         .map((item) => {
           const toolGroup = item as {
             tools?: Array<{ name: string; status: ToolCallStatus }>;

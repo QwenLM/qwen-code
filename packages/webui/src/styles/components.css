@@ -473,12 +473,12 @@
 }
 
 /* Adjust placeholder width when showing counter to prevent overflow */
-.composer-input[data-suggestion-count]:not(
-    [data-suggestion-count='0']
-  ):empty::before,
-.composer-input[data-suggestion-count]:not(
-    [data-suggestion-count='0']
-  )[data-empty='true']::before {
+.composer-input[data-has-suggestion='true'][data-suggestion-count]:not(
+    [data-suggestion-count='1']
+  ):not([data-suggestion-count='0']):empty::before,
+.composer-input[data-has-suggestion='true'][data-suggestion-count]:not(
+    [data-suggestion-count='1']
+  ):not([data-suggestion-count='0'])[data-empty='true']::before {
   max-width: calc(100% - 60px); /* Reserve space for counter */
 }
 

@@ -967,8 +967,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // All remaining keys (readline shortcuts, text input) handled by BaseTextInput
-      // Dismiss follow-up suggestion when user starts typing
-      if (buffer.text.length === 0 && followup.state.isVisible) {
+      // Dismiss follow-up suggestion only on printable character input
+      if (
+        buffer.text.length === 0 &&
+        followup.state.isVisible &&
+        key.sequence &&
+        key.sequence.length === 1 &&
+        !key.ctrl &&
+        !key.meta
+      ) {
         followup.dismiss();
       }
       return false;
