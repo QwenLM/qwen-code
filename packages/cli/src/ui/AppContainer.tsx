@@ -762,8 +762,16 @@ export const AppContainer = (props: AppContainerProps) => {
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
+        // /btw runs alongside the current stream — don't clear the loop flag.
         void submitQuery(submittedValue);
         return;
+      }
+      // When Idle the user message will be drained immediately and take over
+      // the main stream, so mark it as non-loop.  When Responding/Confirming
+      // the message is only queued — the current (possibly loop) stream
+      // continues, so leave the flag untouched.
+      if (streamingState === StreamingState.Idle) {
+        loopInitiatedStreamRef.current = false;
       }
       addMessage(submittedValue);
     },
@@ -931,11 +939,22 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Loop command integration — refs to avoid stale closures in the callback
-  const addMessageRef = useRef(addMessage);
-  addMessageRef.current = addMessage;
+  // Loop command integration
+  // Refs to avoid stale closures; updated every render.
   const historyManagerRef = useRef(historyManager);
   historyManagerRef.current = historyManager;
+  const submitQueryRef = useRef(submitQuery);
+  submitQueryRef.current = submitQuery;
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+
+  // Pending loop prompt waiting for Idle before submission (set when timer
+  // fires during active streaming).
+  const loopSubmitRef = useRef<Array<{ text: string }> | null>(null);
+  // Whether the current streaming response was initiated by the loop.
+  // Set true when a loop prompt is submitted; cleared by handleFinalSubmit
+  // (user-initiated) or when the completion effect processes the response.
+  const loopInitiatedStreamRef = useRef(false);
 
   useEffect(() => {
     const loopManager = getLoopManager();
@@ -959,7 +978,17 @@ export const AppContainer = (props: AppContainerProps) => {
         },
         Date.now(),
       );
-      addMessageRef.current(prompt);
+      // Submit as Part[] to bypass slash-command parsing (consistent with
+      // the first-iteration submit_prompt path in loopCommand.ts).
+      const parts: Array<{ text: string }> = [{ text: prompt }];
+      if (streamingStateRef.current === StreamingState.Idle) {
+        // Common path: timer fires while idle — submit immediately.
+        loopInitiatedStreamRef.current = true;
+        void submitQueryRef.current(parts);
+      } else {
+        // Edge case: timer fires during active streaming — queue for later.
+        loopSubmitRef.current = parts;
+      }
     });
     return () => {
       const lm = getLoopManager();
@@ -968,23 +997,72 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, []);
 
-  // Notify loop manager when streaming completes
+  // Effect order matters: completion MUST run before drain so that when
+  // streamingState transitions to Idle we first process the just-completed
+  // response, and only then submit a queued prompt for the next iteration.
+
+  // Notify loop manager when a loop-initiated streaming response completes.
   useEffect(() => {
     const loopManager = getLoopManager();
-    if (!loopManager.isActive() || streamingState !== StreamingState.Idle) {
+    if (
+      !loopManager.isActive() ||
+      streamingState !== StreamingState.Idle ||
+      !loopManager.isWaitingForResponse()
+    ) {
       return;
     }
-
-    // Only process if the loop is waiting for a response (not a user-initiated prompt)
-    if (!loopManager.isWaitingForResponse()) {
+    // loopInitiatedStreamRef is true for iterations submitted via the
+    // callback (2nd+).  For the FIRST iteration, submitted via the
+    // slash-command's submit_prompt return value, the ref is never set —
+    // but waitingForResponse is already true from manager.start(), so we
+    // accept it as a loop response when no queued prompt is pending.
+    if (!loopInitiatedStreamRef.current && loopSubmitRef.current !== null) {
+      // A queued prompt exists but hasn't been submitted yet — the stream
+      // that just finished is NOT from the loop (e.g. user's message).
       return;
     }
+    loopInitiatedStreamRef.current = false;
 
-    // Check if the last response had errors
-    const history = historyManager.history;
-    const lastItem = history[history.length - 1];
-    const hadError =
-      lastItem && 'type' in lastItem && lastItem.type === MessageType.ERROR;
+    // Detect errors: check pending items (API/streaming errors that stay in
+    // pendingRetryErrorItem) and scan committed history for the current turn.
+    let hadError = false;
+
+    // 1. Check pending items for API/streaming errors (these never enter history).
+    if (
+      pendingGeminiHistoryItems.some(
+        (item) => 'type' in item && item.type === MessageType.ERROR,
+      )
+    ) {
+      hadError = true;
+    }
+
+    // 2. Scan committed history backward from end to the last USER item.
+    if (!hadError) {
+      const history = historyManager.history;
+      for (let i = history.length - 1; i >= 0; i--) {
+        const item = history[i];
+        if ('type' in item) {
+          if (item.type === MessageType.USER) break;
+          if (item.type === MessageType.ERROR) {
+            hadError = true;
+            break;
+          }
+          if (
+            item.type === ('tool_group' as string) &&
+            'tools' in item &&
+            Array.isArray(
+              (item as { tools: Array<{ status: string }> }).tools,
+            ) &&
+            (item as { tools: Array<{ status: string }> }).tools.some(
+              (tool) => tool.status === ToolCallStatus.Error,
+            )
+          ) {
+            hadError = true;
+            break;
+          }
+        }
+      }
+    }
     loopManager.onIterationComplete(!hadError);
 
     // If loop finished or paused, notify user
@@ -1012,6 +1090,22 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
+  }, [streamingState]);
+
+  // Drain queued loop prompt when streaming becomes Idle.
+  // This only fires for the edge case where the timer fired during streaming.
+  useEffect(() => {
+    if (streamingState !== StreamingState.Idle || !loopSubmitRef.current) {
+      return;
+    }
+    const parts = loopSubmitRef.current;
+    loopSubmitRef.current = null;
+    // If the loop was stopped while the prompt was queued, discard it.
+    if (!getLoopManager().isActive()) {
+      return;
+    }
+    loopInitiatedStreamRef.current = true;
+    void submitQueryRef.current(parts);
   }, [streamingState]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
