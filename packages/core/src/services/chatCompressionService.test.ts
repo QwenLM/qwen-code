@@ -105,6 +105,175 @@ describe('findCompressSplitPoint', () => {
     ];
     expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
   });
+
+  it('should compress everything when last message is a functionResponse', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix this bug' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'readFile', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'readFile',
+              response: { result: 'file content' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'writeFile', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'writeFile',
+              response: { result: 'ok' },
+            },
+          },
+        ],
+      },
+    ];
+    // Last message is functionResponse -> safe to compress everything
+    expect(findCompressSplitPoint(history, 0.7)).toBe(5);
+  });
+
+  it('should use tool completion split point when only one user query exists', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix this' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read1',
+              response: { result: 'a'.repeat(1000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read2', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read2',
+              response: { result: 'b'.repeat(1000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'write1', args: {} } }],
+      },
+    ];
+    // Only one non-functionResponse user message (index 0) -> lastSplitPoint=0
+    // Last message has functionCall -> can't compress everything
+    // But tool completion split points exist (at indices 3 and 5)
+    // Should use lastToolCompletionSplitPoint=5 instead of lastSplitPoint=0
+    expect(findCompressSplitPoint(history, 0.7)).toBe(5);
+  });
+
+  it('should prefer larger split point between primary and tool completion', () => {
+    const longContent = 'a'.repeat(10000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix bug A' }] },
+      { role: 'model', parts: [{ text: 'OK' }] },
+      { role: 'user', parts: [{ text: 'Fix bug B' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read1',
+              response: { result: longContent },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read2', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read2',
+              response: { result: longContent },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'write1', args: {} } }],
+      },
+    ];
+    // Primary split points at 0 and 2 (early, before the bulky tool outputs)
+    // Tool completion split points at 5 and 7 (after tool call pairs)
+    // Last message has functionCall -> can't compress everything
+    // Should use max(lastSplitPoint=2, lastToolCompletionSplitPoint=7) = 7
+    expect(findCompressSplitPoint(history, 0.7)).toBe(7);
+  });
+
+  it('should still prefer primary split point when it is better', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'resp1' }] },
+      {
+        role: 'user',
+        parts: [{ text: 'msg2 with some substantial content here' }],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'tool1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'tool1',
+              response: { result: 'short' },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'resp3' }] },
+      { role: 'user', parts: [{ text: 'msg4' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'tool2', args: {} } }],
+      },
+    ];
+    // Primary split points: 0, 2, 5, 7
+    // Tool completion: 5
+    // Last message has functionCall -> can't compress everything
+    // At 0.99 fraction, lastSplitPoint should be 7 which is > lastToolCompletion=5
+    expect(findCompressSplitPoint(history, 0.99)).toBe(7);
+  });
 });
 
 describe('ChatCompressionService', () => {

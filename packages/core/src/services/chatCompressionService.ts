@@ -93,6 +93,11 @@ export function findCompressSplitPoint(
   const targetCharCount = totalCharCount * fraction;
 
   let lastSplitPoint = 0; // 0 is always valid (compress nothing)
+  // In tool-heavy conversations, non-functionResponse user messages are rare.
+  // Track positions after tool call completions (functionResponse) as fallback
+  // split points, ensuring all function calls in the compressed portion have
+  // matching responses.
+  let lastToolCompletionSplitPoint = 0;
   let cumulativeCharCount = 0;
   for (let i = 0; i < contents.length; i++) {
     const content = contents[i];
@@ -104,6 +109,14 @@ export function findCompressSplitPoint(
         return i;
       }
       lastSplitPoint = i;
+    }
+    // After a functionResponse, all preceding function calls are properly
+    // paired, making the next position (i+1) a safe place to split.
+    if (
+      content.role === 'user' &&
+      content.parts?.some((part) => !!part.functionResponse)
+    ) {
+      lastToolCompletionSplitPoint = i + 1;
     }
     cumulativeCharCount += charCounts[i];
   }
@@ -117,9 +130,20 @@ export function findCompressSplitPoint(
   ) {
     return contents.length;
   }
+  // Also safe to compress everything if the last message completes a tool call
+  // sequence (all function calls have matching responses).
+  if (
+    lastContent?.role === 'user' &&
+    lastContent?.parts?.some((part) => !!part.functionResponse)
+  ) {
+    return contents.length;
+  }
 
-  // Can't compress everything so just compress at last splitpoint.
-  return lastSplitPoint;
+  // Use the split point that provides the most content to compress.
+  // In tool-heavy conversations with few user queries, lastSplitPoint may be
+  // near the beginning of the history while lastToolCompletionSplitPoint
+  // provides much better coverage.
+  return Math.max(lastSplitPoint, lastToolCompletionSplitPoint);
 }
 
 export class ChatCompressionService {
@@ -356,6 +380,28 @@ export class ChatCompressionService {
     const historyToKeep = curatedHistory.slice(splitPoint);
 
     if (historyToCompress.length === 0) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    // Guard: if historyToCompress is too small relative to the total history,
+    // skip compression. This prevents futile API calls where the model receives
+    // almost no context and generates a useless "summary" that inflates tokens.
+    const compressCharCount = historyToCompress.reduce(
+      (sum, c) => sum + JSON.stringify(c).length,
+      0,
+    );
+    const totalCharCount = curatedHistory.reduce(
+      (sum, c) => sum + JSON.stringify(c).length,
+      0,
+    );
+    if (totalCharCount > 0 && compressCharCount / totalCharCount < 0.05) {
       return {
         newHistory: null,
         info: {
