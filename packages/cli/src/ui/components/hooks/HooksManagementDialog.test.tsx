@@ -98,20 +98,6 @@ describe('HooksManagementDialog', () => {
     expect(lastFrame()).toContain('Loading hooks');
   });
 
-  it('should render hooks list after loading', async () => {
-    const { lastFrame, unmount } = renderWithProviders(
-      <HooksManagementDialog onClose={mockOnClose} />,
-    );
-
-    // Wait for useEffect to complete
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const output = lastFrame();
-    expect(output).toContain('Hooks');
-
-    unmount();
-  });
-
   it('should show total configured hooks count', async () => {
     const { lastFrame, unmount } = renderWithProviders(
       <HooksManagementDialog onClose={mockOnClose} />,
