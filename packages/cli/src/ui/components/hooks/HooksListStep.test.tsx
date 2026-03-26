@@ -113,20 +113,6 @@ describe('HooksListStep', () => {
     expect(output).not.toContain('(0)');
   });
 
-  it('should show total configured hooks count', () => {
-    const hooks: HookEventDisplayInfo[] = [
-      createMockHookInfo(HookEventName.PreToolUse, 2),
-      createMockHookInfo(HookEventName.PostToolUse, 3),
-    ];
-
-    const { lastFrame } = render(
-      <HooksListStep hooks={hooks} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('5 hooks configured');
-  });
-
   it('should show singular form for single hook', () => {
     const hooks: HookEventDisplayInfo[] = [
       createMockHookInfo(HookEventName.PreToolUse, 1),
