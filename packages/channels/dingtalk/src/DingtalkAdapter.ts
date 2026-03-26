@@ -4,6 +4,7 @@ import type {
   RobotMessage,
 } from 'dingtalk-stream-sdk-nodejs';
 import { ChannelBase } from '@qwen-code/channel-base';
+import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -84,25 +85,30 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
-    const body = {
-      msgtype: 'markdown',
-      markdown: {
-        title: 'Reply',
-        text,
-      },
-    };
+    const chunks = normalizeDingTalkMarkdown(text);
+    const title = extractTitle(text);
 
-    const resp = await fetch(webhook, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    for (const chunk of chunks) {
+      const body = {
+        msgtype: 'markdown',
+        markdown: {
+          title: chunks.length > 1 ? `${title} (cont.)` : title,
+          text: chunk,
+        },
+      };
 
-    if (!resp.ok) {
-      const detail = await resp.text().catch(() => '');
-      process.stderr.write(
-        `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
-      );
+      const resp = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
+        );
+      }
     }
   }
 
