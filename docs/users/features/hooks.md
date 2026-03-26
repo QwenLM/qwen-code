@@ -4,6 +4,14 @@
 
 Qwen Code hooks provide a powerful mechanism for extending and customizing the behavior of the Qwen Code application. Hooks allow users to execute custom scripts or programs at specific points in the application lifecycle, such as before tool execution, after tool execution, at session start/end, and during other key events.
 
+> **⚠️ EXPERIMENTAL FEATURE**
+>
+> Hooks are currently in an experimental stage. To enable hooks, start Qwen Code with the `--experimental-hooks` flag:
+>
+> ```bash
+> qwen --experimental-hooks
+> ```
+
 ## What are Hooks?
 
 Hooks are user-defined scripts or programs that are automatically executed by Qwen Code at predefined points in the application flow. They allow users to:
