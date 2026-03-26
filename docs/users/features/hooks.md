@@ -38,7 +38,7 @@ The Qwen Code hook system consists of several key components:
 Hooks fire at specific points during a Qwen Code session. When an event fires and a matcher matches, Qwen Code passes JSON context about the event to your hook handler. For command hooks, input arrives on stdin. Your handler can inspect the input, take action, and optionally return a decision. Some events fire once per session, while others fire repeatedly inside the agentic loop.
 
 <div align="center">
-<img src="./hook-lifecyclue.png" alt="Hook Lifecycle Diagram" width="400"/>
+<img src="https://img.alicdn.com/imgextra/i4/O1CN01sYWUTh1RDJl7Lz2ne_!!6000000002077-2-tps-812-1212.png" alt="Hook Lifecycle Diagram" width="400"/>
 </div>
 
 The following table lists all available hook events in Qwen Code:
