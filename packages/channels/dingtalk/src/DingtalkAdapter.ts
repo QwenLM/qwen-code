@@ -1,16 +1,45 @@
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
-import type {
-  DWClientDownStream,
-  RobotMessage,
-} from 'dingtalk-stream-sdk-nodejs';
+import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { ChannelBase } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
+import { downloadMedia } from './media.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   AcpBridge,
 } from '@qwen-code/channel-base';
+
+/**
+ * Raw DingTalk message data — the SDK's RobotMessage type only covers text,
+ * but DingTalk sends richer payloads for richText, picture, file, etc.
+ */
+ 
+interface DingTalkMessageData {
+  msgId?: string;
+  msgtype?: string;
+  conversationType?: string;
+  conversationId?: string;
+  sessionWebhook?: string;
+  senderId?: string;
+  senderStaffId?: string;
+  senderNick?: string;
+  isInAtList?: boolean;
+  text?: { content?: string };
+  content?: {
+    richText?: Array<{
+      type?: string;
+      text?: string;
+      downloadCode?: string;
+    }>;
+    downloadCode?: string;
+    fileName?: string;
+    recognition?: string;
+  };
+}
 
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -181,12 +210,136 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
+  /**
+   * Extract text and media download codes from an incoming DingTalk message.
+   * Handles text, richText, picture, file, audio, and video message types.
+   */
+  private extractContent(data: DingTalkMessageData): {
+    text: string;
+    downloadCodes: string[];
+    mediaType?: 'image' | 'file' | 'audio' | 'video';
+    fileName?: string;
+  } {
+    const msgtype = data.msgtype || 'text';
+
+    if (msgtype === 'richText') {
+      const richText = data.content?.richText;
+      if (!Array.isArray(richText)) {
+        return { text: '', downloadCodes: [] };
+      }
+      let text = '';
+      const codes: string[] = [];
+      for (const part of richText) {
+        const partType = part.type || 'text';
+        if (partType === 'text' && part.text) {
+          text += part.text;
+        } else if (partType === 'picture' && part.downloadCode) {
+          codes.push(part.downloadCode);
+        }
+      }
+      return {
+        text: text.trim() || (codes.length > 0 ? '(image)' : ''),
+        downloadCodes: codes,
+        mediaType: codes.length > 0 ? 'image' : undefined,
+      };
+    }
+
+    if (msgtype === 'picture') {
+      const code = data.content?.downloadCode;
+      return {
+        text: '(image)',
+        downloadCodes: code ? [code] : [],
+        mediaType: 'image',
+      };
+    }
+
+    if (msgtype === 'file') {
+      const code = data.content?.downloadCode;
+      const fileName = data.content?.fileName || undefined;
+      return {
+        text: `(file: ${fileName || 'file'})`,
+        downloadCodes: code ? [code] : [],
+        mediaType: 'file',
+        fileName,
+      };
+    }
+
+    if (msgtype === 'audio') {
+      const code = data.content?.downloadCode;
+      const recognition = data.content?.recognition;
+      return {
+        text: recognition || '(audio)',
+        downloadCodes: code ? [code] : [],
+        mediaType: 'audio',
+      };
+    }
+
+    if (msgtype === 'video') {
+      const code = data.content?.downloadCode;
+      return {
+        text: '(video)',
+        downloadCodes: code ? [code] : [],
+        mediaType: 'video',
+      };
+    }
+
+    // Default: text message
+    return { text: data.text?.content?.trim() || '', downloadCodes: [] };
+  }
+
+  /**
+   * Download a media file and attach it to the envelope.
+   * Images → base64 in envelope; files → saved to temp dir with path in text.
+   */
+  private async attachMedia(
+    envelope: Envelope,
+    downloadCode: string,
+    mediaType: 'image' | 'file' | 'audio' | 'video',
+    fileName?: string,
+  ): Promise<void> {
+    const token = this.getAccessToken();
+    const robotCode = this.config.clientId;
+    if (!token || !robotCode) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Cannot download media: missing token or robotCode.\n`,
+      );
+      return;
+    }
+
+    const media = await downloadMedia(downloadCode, robotCode, token);
+    if (!media) return;
+
+    if (mediaType === 'image') {
+      envelope.imageBase64 = media.buffer.toString('base64');
+      envelope.imageMimeType = media.mimeType.startsWith('image/')
+        ? media.mimeType
+        : 'image/jpeg';
+    } else {
+      // Save non-image files to temp dir so the agent can read them
+      const dir = join(tmpdir(), 'channel-files');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const safeName = fileName || `dingtalk_${mediaType}_${Date.now()}`;
+      const filePath = join(dir, safeName);
+      writeFileSync(filePath, media.buffer);
+
+      const prefix =
+        envelope.text &&
+        envelope.text !== `(file: ${fileName || 'file'})` &&
+        envelope.text !== '(audio)' &&
+        envelope.text !== '(video)'
+          ? envelope.text + '\n\n'
+          : '';
+      envelope.text =
+        prefix + `User sent a ${mediaType}. It has been saved to: ${filePath}`;
+    }
+  }
+
   private onMessage(downstream: DWClientDownStream): void {
     try {
-      const data: RobotMessage =
+      const data: DingTalkMessageData =
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
-          : (downstream.data as unknown as RobotMessage);
+          : (downstream.data as DingTalkMessageData);
       const msgId = data.msgId || downstream.headers.messageId;
 
       // Dedup: DingTalk retries unACKed messages
@@ -198,7 +351,6 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const isGroup = data.conversationType === '2';
-      const text = data.text?.content?.trim() || '';
       const sessionWebhook = data.sessionWebhook;
       const conversationId = data.conversationId;
 
@@ -214,27 +366,25 @@ export class DingtalkChannel extends ChannelBase {
         this.webhooks.set(conversationId, sessionWebhook);
       }
 
-      // In group chats, check isInAtList from the raw data
-      const rawData =
-        typeof downstream.data === 'string'
-          ? JSON.parse(downstream.data)
-          : downstream.data;
-      const isMentioned = Boolean(rawData.isInAtList);
+      const isMentioned = Boolean(data.isInAtList);
+
+      // Extract text and media info from message
+      const content = this.extractContent(data);
+      let cleanText = content.text;
 
       // Strip @bot mention from text
-      let cleanText = text;
       if (isMentioned) {
-        cleanText = text.replace(/@\S+/g, '').trim();
+        cleanText = cleanText.replace(/@\S+/g, '').trim();
       }
 
       const chatId = conversationId || sessionWebhook;
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderId || data.senderStaffId,
+        senderId: data.senderId || data.senderStaffId || '',
         senderName: data.senderNick || 'Unknown',
         chatId,
-        text: cleanText || text,
+        text: cleanText || content.text,
         isGroup,
         isMentioned,
         isReplyToBot: false,
@@ -249,6 +399,15 @@ export class DingtalkChannel extends ChannelBase {
           this.attachReaction(reactionMsgId, reactionConvId).catch(() => {});
         }
         try {
+          // Download media if present (first downloadCode only for images)
+          if (content.downloadCodes.length > 0 && content.mediaType) {
+            await this.attachMedia(
+              envelope,
+              content.downloadCodes[0]!,
+              content.mediaType,
+              content.fileName,
+            );
+          }
           await this.handleInbound(envelope);
         } finally {
           if (reactionMsgId && reactionConvId) {
