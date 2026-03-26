@@ -17,7 +17,7 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 2.
 
-First, check if `--comment` flag is present in the arguments. If so, note that findings should be posted as PR inline comments in Step 4. The `--comment` flag is only valid when reviewing a PR (not local changes or a file path). Remove `--comment` from the arguments before proceeding.
+First, check if `--comment` flag is present in the arguments. If so, note that findings should be posted as PR inline comments in Step 4. Remove `--comment` from the arguments before proceeding. If `--comment` is used but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
 Based on the remaining arguments:
 
@@ -136,11 +136,9 @@ Each verification agent must **independently** (without seeing other agents' fin
 
 **After all verification agents complete:** remove all rejected findings. Only confirmed findings proceed to Step 3.
 
-## Step 3: Restore environment and present findings
+## Step 3: Present findings
 
-If you checked out a PR branch in Step 1, restore the original state first: check out the original branch, `git stash pop` if changes were stashed, and remove the temp file.
-
-Then present the confirmed findings from Step 2.5 as a single, well-organized review. Use this format:
+Present the confirmed findings from Step 2.5 as a single, well-organized review. Use this format:
 
 ### Summary
 
@@ -183,14 +181,29 @@ git rev-parse HEAD
 Then, for each confirmed finding, post an **inline comment** on the specific file and line using `gh api`:
 
 ```bash
+# Single-line finding:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   -f body="**[{severity}]** {issue description}
 
 {suggested fix}" \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
-  -F line={line_number}
+  -F line={line_number} \
+  -f side="RIGHT"
+
+# Multi-line finding (e.g., line range 42-50):
+gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
+  -f body="**[{severity}]** {issue description}
+
+{suggested fix}" \
+  -f commit_id="{commit_sha}" \
+  -f path="{file_path}" \
+  -F start_line={start_line} \
+  -F line={end_line} \
+  -f side="RIGHT"
 ```
+
+If posting an inline comment fails (e.g., line not part of the diff, auth error), include the finding in the overall review summary comment instead.
 
 **Important rules:**
 - Only post **ONE comment per unique issue** — do not duplicate across lines
@@ -209,6 +222,12 @@ If there are **no confirmed findings**, post a single comment:
 ```bash
 gh pr review {pr_number} --comment --body "No issues found. LGTM! ✅"
 ```
+
+## Step 5: Restore environment
+
+If you checked out a PR branch in Step 1, restore the original state now: check out the original branch, `git stash pop` if changes were stashed, and remove the temp file.
+
+This step runs **after** Step 4 to ensure the PR branch is still checked out when posting inline comments (Step 4 needs the correct commit SHA from the PR branch).
 
 ## Guidelines
 
