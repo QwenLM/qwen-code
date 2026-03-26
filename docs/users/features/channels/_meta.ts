@@ -3,4 +3,5 @@ export default {
   telegram: 'Telegram',
   weixin: 'WeChat',
   dingtalk: 'DingTalk',
+  'custom-channels': 'Custom Channel Plugins',
 };
