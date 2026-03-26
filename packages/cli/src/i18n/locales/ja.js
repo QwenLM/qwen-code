@@ -895,7 +895,10 @@ export default {
   "Allow execution of: '{{command}}'?": "'{{command}}' の実行を許可しますか?",
   'Yes, allow always ...': 'はい、常に許可...',
   'Always allow in this project': 'このプロジェクトで常に許可',
+  'Always allow {{action}} in this project':
+    'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
+  'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',

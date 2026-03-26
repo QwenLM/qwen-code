@@ -1212,7 +1212,11 @@ export default {
   "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
   'Yes, allow always ...': 'Yes, allow always ...',
   'Always allow in this project': 'Always allow in this project',
+  'Always allow {{action}} in this project':
+    'Always allow {{action}} in this project',
   'Always allow for this user': 'Always allow for this user',
+  'Always allow {{action}} for this user':
+    'Always allow {{action}} for this user',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',

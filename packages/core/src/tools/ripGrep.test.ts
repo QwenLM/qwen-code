@@ -436,6 +436,116 @@ describe('RipGrepTool', () => {
     });
   });
 
+  describe('multi-directory workspace', () => {
+    it('should search across all workspace directories when no path is specified', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(
+        path.join(secondDir, 'extra.txt'),
+        'hello from second dir',
+      );
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}${secondDir}/extra.txt:1:hello from second dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('across 2 workspace directories');
+      expect(result.llmContent).toContain('Found 2 matches');
+
+      // Verify both paths were passed to runRipgrep
+      expect(runRipgrep).toHaveBeenCalledWith(
+        expect.arrayContaining([tempRootDir, secondDir]),
+        expect.anything(),
+      );
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should search only specified path when path is given (ignoring multi-dir)', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, 'other.txt'), 'other content');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileC.txt:1:another world in sub dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'world', path: 'sub' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('in path "sub"');
+      expect(result.llmContent).not.toContain('across');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should load .qwenignore from each workspace directory', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.qwenignore'), 'ignored.txt\n');
+      await fs.writeFile(
+        path.join(tempRootDir, '.qwenignore'),
+        'other-ignored.txt\n',
+      );
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'test' };
+      const invocation = multiDirGrepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify both .qwenignore files were passed
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.qwenignore'));
+      expect(ignoreFileArgs).toContain(path.join(secondDir, '.qwenignore'));
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+  });
+
   describe('abort signal handling', () => {
     it('should handle AbortSignal during search', async () => {
       const controller = new AbortController();

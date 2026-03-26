@@ -1089,7 +1089,11 @@ export default {
   "Allow execution of: '{{command}}'?": "Разрешить выполнение: '{{command}}'?",
   'Yes, allow always ...': 'Да, всегда разрешать ...',
   'Always allow in this project': 'Всегда разрешать в этом проекте',
+  'Always allow {{action}} in this project':
+    'Всегда разрешать {{action}} в этом проекте',
   'Always allow for this user': 'Всегда разрешать для этого пользователя',
+  'Always allow {{action}} for this user':
+    'Всегда разрешать {{action}} для этого пользователя',
   'Yes, and auto-accept edits': 'Да, и автоматически принимать правки',
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',

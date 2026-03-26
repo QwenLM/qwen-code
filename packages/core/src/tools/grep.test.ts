@@ -357,6 +357,48 @@ describe('GrepTool', () => {
       // Clean up
       await fs.rm(secondDir, { recursive: true, force: true });
     });
+
+    it('should convert relative paths to absolute when searching multiple directories', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(
+        path.join(secondDir, 'extra.txt'),
+        'world content in second dir',
+      );
+
+      const multiDirConfig = {
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+        getFileExclusions: () => ({
+          getGlobExcludes: () => [],
+        }),
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
+      } as unknown as Config;
+
+      const multiDirGrepTool = new GrepTool(multiDirConfig);
+
+      const params: GrepToolParams = { pattern: 'world' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should show "across N workspace directories"
+      expect(result.llmContent).toContain('across 2 workspace directories');
+
+      // File paths from the second directory should be absolute
+      expect(result.llmContent).toContain(
+        `File: ${path.resolve(secondDir, 'extra.txt')}`,
+      );
+
+      // File paths from the first directory should also be absolute
+      expect(result.llmContent).toContain(
+        `File: ${path.resolve(tempRootDir, 'fileA.txt')}`,
+      );
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
   });
 
   describe('getDescription', () => {

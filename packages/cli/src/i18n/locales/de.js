@@ -1159,7 +1159,11 @@ export default {
     "Ausführung erlauben von: '{{command}}'?",
   'Yes, allow always ...': 'Ja, immer erlauben ...',
   'Always allow in this project': 'In diesem Projekt immer erlauben',
+  'Always allow {{action}} in this project':
+    '{{action}} in diesem Projekt immer erlauben',
   'Always allow for this user': 'Für diesen Benutzer immer erlauben',
+  'Always allow {{action}} for this user':
+    '{{action}} für diesen Benutzer immer erlauben',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
