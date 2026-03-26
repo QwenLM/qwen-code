@@ -1,6 +1,6 @@
 # Channels
 
-Channels let you interact with a Qwen Code agent from messaging platforms like Telegram or WeChat, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
+Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, or DingTalk, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin))
+1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [DingTalk](./dingtalk))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -47,8 +47,10 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option         | Required | Description                                                                                                                              |
 | -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`         | Yes      | Channel type: `telegram` or `weixin`                                                                                                     |
-| `token`        | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat                                          |
+| `type`         | Yes      | Channel type: `telegram`, `weixin`, or `dingtalk`                                                                                        |
+| `token`        | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                              |
+| `clientId`     | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                              |
+| `clientSecret` | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                           |
 | `model`        | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input |
 | `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                     |
 | `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                     |
@@ -209,11 +211,11 @@ Files work with any model — no multimodal support required.
 
 ### Platform differences
 
-| Feature  | Telegram                                     | WeChat                           |
-| -------- | -------------------------------------------- | -------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption |
-| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption |
-| Captions | Photo/file captions included as message text | Not applicable                   |
+| Feature  | Telegram                                     | WeChat                           | DingTalk                                      |
+| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   |
+| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message |
 
 ## Slash Commands
 
@@ -225,7 +227,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
 
-These commands work on all channel types (Telegram, WeChat, etc.).
+These commands work on all channel types (Telegram, WeChat, DingTalk).
 
 ## Running
 
