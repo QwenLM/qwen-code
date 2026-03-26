@@ -31,6 +31,8 @@ export interface Envelope {
   isGroup: boolean;
   isMentioned: boolean;
   isReplyToBot: boolean;
+  /** Text of the message being replied to (quoted/referenced message). */
+  referencedText?: string;
   /** Base64-encoded image data (e.g. from WeChat CDN download). */
   imageBase64?: string;
   /** MIME type for the image (e.g. "image/jpeg", "image/png"). */

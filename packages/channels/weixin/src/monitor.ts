@@ -48,6 +48,8 @@ export interface ParsedMessage {
   image?: CdnRef;
   /** CDN reference for deferred file download. */
   file?: FileCdnRef;
+  /** Text of the referenced (replied-to) message. */
+  refText?: string;
 }
 
 export type OnMessageCallback = (msg: ParsedMessage) => Promise<void>;
@@ -144,16 +146,29 @@ async function processMessage(
     contextTokens.set(fromUserId, msg.context_token);
   }
 
-  // Extract text, image, and file CDN references
+  // Extract text, image, file CDN references, and referenced message
   let textContent = '';
   let image: CdnRef | undefined;
   let file: FileCdnRef | undefined;
+  let refText: string | undefined;
 
   if (msg.item_list) {
     for (const item of msg.item_list) {
       if (item.type === MessageItemType.TEXT && item.text_item?.text) {
         textContent += (textContent ? '\n' : '') + item.text_item.text;
-      } else if (item.type === MessageItemType.IMAGE && item.image_item) {
+      }
+
+      // Extract referenced message text
+      if (item.ref_msg) {
+        const refItem = item.ref_msg.message_item;
+        if (refItem?.text_item?.text) {
+          refText = refItem.text_item.text;
+        } else if (item.ref_msg.title) {
+          refText = item.ref_msg.title;
+        }
+      }
+
+      if (item.type === MessageItemType.IMAGE && item.image_item) {
         const media = item.image_item.media;
         if (media?.encrypt_query_param && media.aes_key) {
           image = {
@@ -183,5 +198,6 @@ async function processMessage(
     text: textContent || (file ? `(file: ${file.fileName})` : '(image)'),
     image,
     file,
+    refText,
   });
 }

@@ -62,6 +62,11 @@ export interface VideoItem {
   video_size?: number;
 }
 
+export interface RefMessage {
+  message_item?: MessageItem;
+  title?: string;
+}
+
 export interface MessageItem {
   type?: number;
   text_item?: TextItem;
@@ -69,6 +74,7 @@ export interface MessageItem {
   voice_item?: VoiceItem;
   file_item?: FileItem;
   video_item?: VideoItem;
+  ref_msg?: RefMessage;
 }
 
 export interface WeixinMessage {

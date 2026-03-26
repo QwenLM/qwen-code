@@ -197,10 +197,15 @@ export abstract class ChannelBase {
       this.config.cwd,
     );
 
-    // Prepend channel instructions on first message of a session
+    // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
+    if (envelope.referencedText) {
+      promptText = `[Replying to: "${envelope.referencedText}"]\n\n${promptText}`;
+    }
+
+    // Prepend channel instructions on first message of a session
     if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${envelope.text}`;
+      promptText = `${this.config.instructions}\n\n${promptText}`;
       this.instructedSessions.add(sessionId);
     }
 

@@ -68,6 +68,7 @@ export class WeixinChannel extends ChannelBase {
           isGroup: false,
           isMentioned: false,
           isReplyToBot: false,
+          referencedText: msg.refText,
         };
 
         this.handleInboundWithMedia(envelope, msg.image, msg.file).catch(

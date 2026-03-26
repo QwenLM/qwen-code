@@ -207,7 +207,7 @@ export class TelegramChannel extends ChannelBase {
     msg: {
       from: { id: number; first_name: string; last_name?: string };
       chat: { id: number; type: string };
-      reply_to_message?: { from?: { id: number } };
+      reply_to_message?: { from?: { id: number }; text?: string };
     },
     text: string,
     entities?: Array<{ type: string; offset: number; length: number }>,
@@ -232,6 +232,9 @@ export class TelegramChannel extends ChannelBase {
         .trim();
     }
 
+    // Extract referenced message text (when user replies to a message)
+    const referencedText = msg.reply_to_message?.text || undefined;
+
     return {
       channelName: this.name,
       senderId: String(msg.from.id),
@@ -243,6 +246,7 @@ export class TelegramChannel extends ChannelBase {
       isGroup,
       isMentioned,
       isReplyToBot,
+      referencedText,
     };
   }
 }
