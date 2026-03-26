@@ -21,6 +21,8 @@ export abstract class ChannelBase {
   protected name: string;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
+  /** Per-session promise chain to serialize prompt + send. */
+  private sessionQueues: Map<string, Promise<void>> = new Map();
 
   constructor(
     name: string,
@@ -82,7 +84,11 @@ export abstract class ChannelBase {
   /** Register shared slash commands. Called from constructor. */
   private registerSharedCommands(): void {
     const clearHandler: CommandHandler = async (envelope) => {
-      const removed = this.router.removeSession(this.name, envelope.senderId);
+      const removed = this.router.removeSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+      );
       if (removed) {
         this.instructedSessions.clear();
         await this.sendMessage(
@@ -132,7 +138,11 @@ export abstract class ChannelBase {
     });
 
     this.registerCommand('status', async (envelope) => {
-      const hasSession = this.router.hasSession(this.name, envelope.senderId);
+      const hasSession = this.router.hasSession(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+      );
       const policy = this.config.senderPolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
@@ -209,14 +219,24 @@ export abstract class ChannelBase {
       this.instructedSessions.add(sessionId);
     }
 
-    const response = await this.bridge.prompt(sessionId, promptText, {
-      imageBase64: envelope.imageBase64,
-      imageMimeType: envelope.imageMimeType,
-    });
+    // Serialize prompt + send per session to prevent textChunk listener
+    // pollution when concurrent messages hit the same session.
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const current = prev.then(async () => {
+      const response = await this.bridge.prompt(sessionId, promptText, {
+        imageBase64: envelope.imageBase64,
+        imageMimeType: envelope.imageMimeType,
+      });
 
-    if (response) {
-      await this.sendMessage(envelope.chatId, response);
-    }
+      if (response) {
+        await this.sendMessage(envelope.chatId, response);
+      }
+    });
+    this.sessionQueues.set(
+      sessionId,
+      current.catch(() => {}),
+    );
+    await current;
   }
 
   protected async onPairingRequired(

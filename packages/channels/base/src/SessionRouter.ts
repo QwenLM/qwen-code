@@ -48,7 +48,7 @@ export class SessionRouter {
         return `${channelName}:__single__`;
       case 'user':
       default:
-        return `${channelName}:${senderId}`;
+        return `${channelName}:${senderId}:${chatId}`;
     }
   }
 
@@ -78,18 +78,46 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
-  hasSession(channelName: string, senderId: string): boolean {
-    return this.toSession.has(`${channelName}:${senderId}`);
+  hasSession(channelName: string, senderId: string, chatId?: string): boolean {
+    const key = chatId
+      ? this.routingKey(channelName, senderId, chatId)
+      : `${channelName}:${senderId}`;
+    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match
+    if (chatId) return this.toSession.has(key);
+    for (const k of this.toSession.keys()) {
+      if (k.startsWith(`${channelName}:${senderId}`)) return true;
+    }
+    return false;
   }
 
-  removeSession(channelName: string, senderId: string): boolean {
-    const key = `${channelName}:${senderId}`;
+  removeSession(
+    channelName: string,
+    senderId: string,
+    chatId?: string,
+  ): boolean {
+    if (chatId) {
+      const key = this.routingKey(channelName, senderId, chatId);
+      return this.deleteByKey(key);
+    }
+    // No chatId: remove all sessions for this sender on this channel
+    let removed = false;
+    const prefix = `${channelName}:${senderId}`;
+    for (const k of [...this.toSession.keys()]) {
+      if (k.startsWith(prefix)) {
+        this.deleteByKey(k);
+        removed = true;
+      }
+    }
+    if (removed) this.persist();
+    return removed;
+  }
+
+  private deleteByKey(key: string): boolean {
     const sessionId = this.toSession.get(key);
     if (!sessionId) return false;
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
-    this.persist();
     return true;
   }
 
