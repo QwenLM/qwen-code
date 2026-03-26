@@ -4,20 +4,20 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 ## How It Works
 
-When you run `qwen channel start <name>`, Qwen Code:
+When you run `qwen channel start`, Qwen Code:
 
-1. Reads the channel configuration from your `settings.json`
-2. Spawns an agent process using the [Agent Client Protocol (ACP)](../../developers/architecture)
-3. Connects to the messaging platform (e.g., Telegram) and starts listening for messages
-4. Routes incoming messages to the agent and sends responses back to the chat
+1. Reads channel configurations from your `settings.json`
+2. Spawns a single agent process using the [Agent Client Protocol (ACP)](../../developers/architecture)
+3. Connects to each messaging platform and starts listening for messages
+4. Routes incoming messages to the agent and sends responses back to the correct chat
 
-Each channel runs as a long-lived process that bridges a messaging platform to a Qwen Code agent.
+All channels share one agent process with isolated sessions per user. Each channel can have its own working directory, model, and instructions.
 
 ## Quick Start
 
 1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin))
 2. Add the channel configuration to `~/.qwen/settings.json`
-3. Run `qwen channel start <name>`
+3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
 ## Configuration
 
@@ -228,7 +228,26 @@ All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the ag
 ## Running
 
 ```bash
+# Start all configured channels (shared agent process)
+qwen channel start
+
+# Start a single channel
 qwen channel start my-channel
 ```
 
 The bot runs in the foreground. Press `Ctrl+C` to stop.
+
+### Multi-Channel Mode
+
+When you run `qwen channel start` without a name, all channels defined in `settings.json` start together sharing a single agent process. Each channel maintains its own sessions — a Telegram user and a WeChat user get separate conversations, even though they share the same agent.
+
+Each channel uses its own `cwd` from its config, so different channels can work on different projects simultaneously.
+
+### Crash Recovery
+
+If the agent process crashes unexpectedly, the channel service automatically restarts it and attempts to restore all active sessions. Users can continue their conversations without starting over.
+
+- Sessions are persisted to `~/.qwen/channels/sessions.json` while the service is running
+- On crash: the agent restarts within 3 seconds and reloads saved sessions
+- After 3 consecutive crashes, the service exits with an error
+- On clean shutdown (Ctrl+C): session data is cleared — the next start is always fresh

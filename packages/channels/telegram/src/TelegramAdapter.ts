@@ -9,6 +9,7 @@ import {
 import { ChannelBase } from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
+  ChannelBaseOptions,
   Envelope,
   AcpBridge,
 } from '@qwen-code/channel-base';
@@ -21,8 +22,13 @@ export class TelegramChannel extends ChannelBase {
   private botId: number = 0;
   private botUsername: string = '';
 
-  constructor(name: string, config: ChannelConfig, bridge: AcpBridge) {
-    super(name, config, bridge);
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: AcpBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
     this.bot = new Telegraf(config.token);
   }
 

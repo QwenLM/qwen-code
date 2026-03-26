@@ -1,18 +1,38 @@
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import type { SessionScope, SessionTarget } from './types.js';
 import type { AcpBridge } from './AcpBridge.js';
+
+interface PersistedEntry {
+  sessionId: string;
+  target: SessionTarget;
+  cwd: string;
+}
 
 export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
+  private toCwd: Map<string, string> = new Map(); // session ID → cwd
 
   private bridge: AcpBridge;
-  private cwd: string;
+  private defaultCwd: string;
   private scope: SessionScope;
+  private persistPath: string | undefined;
 
-  constructor(bridge: AcpBridge, cwd: string, scope: SessionScope = 'user') {
+  constructor(
+    bridge: AcpBridge,
+    defaultCwd: string,
+    scope: SessionScope = 'user',
+    persistPath?: string,
+  ) {
     this.bridge = bridge;
-    this.cwd = cwd;
+    this.defaultCwd = defaultCwd;
     this.scope = scope;
+    this.persistPath = persistPath;
+  }
+
+  /** Replace the bridge instance (used after crash recovery restart). */
+  setBridge(bridge: AcpBridge): void {
+    this.bridge = bridge;
   }
 
   private routingKey(
@@ -37,6 +57,7 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    cwd?: string,
   ): Promise<string> {
     const key = this.routingKey(channelName, senderId, chatId, threadId);
     const existing = this.toSession.get(key);
@@ -44,9 +65,12 @@ export class SessionRouter {
       return existing;
     }
 
-    const sessionId = await this.bridge.newSession(this.cwd);
+    const sessionCwd = cwd || this.defaultCwd;
+    const sessionId = await this.bridge.newSession(sessionCwd);
     this.toSession.set(key, sessionId);
     this.toTarget.set(sessionId, { channelName, senderId, chatId, threadId });
+    this.toCwd.set(sessionId, sessionCwd);
+    this.persist();
     return sessionId;
   }
 
@@ -64,6 +88,107 @@ export class SessionRouter {
     if (!sessionId) return false;
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
+    this.toCwd.delete(sessionId);
+    this.persist();
     return true;
+  }
+
+  /** Get all session entries for crash recovery. */
+  getAll(): Array<{ key: string; sessionId: string; target: SessionTarget }> {
+    const entries: Array<{
+      key: string;
+      sessionId: string;
+      target: SessionTarget;
+    }> = [];
+    for (const [key, sessionId] of this.toSession) {
+      const target = this.toTarget.get(sessionId);
+      if (target) {
+        entries.push({ key, sessionId, target });
+      }
+    }
+    return entries;
+  }
+
+  /**
+   * Restore session mappings from a previous bridge.
+   * Called after bridge restart — attempts loadSession for each saved mapping.
+   * Failed loads are silently dropped (new session on next message).
+   */
+  async restoreSessions(): Promise<{
+    restored: number;
+    failed: number;
+  }> {
+    if (!this.persistPath || !existsSync(this.persistPath)) {
+      return { restored: 0, failed: 0 };
+    }
+
+    let entries: Record<string, PersistedEntry>;
+    try {
+      entries = JSON.parse(readFileSync(this.persistPath, 'utf-8'));
+    } catch {
+      return { restored: 0, failed: 0 };
+    }
+
+    let restored = 0;
+    let failed = 0;
+
+    for (const [key, entry] of Object.entries(entries)) {
+      try {
+        const sessionId = await this.bridge.loadSession(
+          entry.sessionId,
+          entry.cwd,
+        );
+        this.toSession.set(key, sessionId);
+        this.toTarget.set(sessionId, entry.target);
+        this.toCwd.set(sessionId, entry.cwd);
+        restored++;
+      } catch {
+        // Session can't be loaded — will create fresh on next message
+        failed++;
+      }
+    }
+
+    // Update persist file to only include successfully restored sessions
+    if (failed > 0) {
+      this.persist();
+    }
+
+    return { restored, failed };
+  }
+
+  /** Clear in-memory state and delete persist file. Used on clean shutdown. */
+  clearAll(): void {
+    this.toSession.clear();
+    this.toTarget.clear();
+    this.toCwd.clear();
+    if (this.persistPath && existsSync(this.persistPath)) {
+      try {
+        unlinkSync(this.persistPath);
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  private persist(): void {
+    if (!this.persistPath) return;
+
+    const data: Record<string, PersistedEntry> = {};
+    for (const [key, sessionId] of this.toSession) {
+      const target = this.toTarget.get(sessionId);
+      if (target) {
+        data[key] = {
+          sessionId,
+          target,
+          cwd: this.toCwd.get(sessionId) || this.defaultCwd,
+        };
+      }
+    }
+
+    try {
+      writeFileSync(this.persistPath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch {
+      // best-effort — don't break message flow for persistence failure
+    }
   }
 }

@@ -57,7 +57,11 @@ Or add it to a `.env` file that gets sourced before running.
 ## Running
 
 ```bash
+# Start only the Telegram channel
 qwen channel start my-telegram
+
+# Or start all configured channels together
+qwen channel start
 ```
 
 Then open your bot in Telegram and send a message. You should see "Working..." appear immediately, followed by the agent's response.

@@ -7,8 +7,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ChannelBase } from '@qwen-code/channel-base';
-import type { ChannelConfig, Envelope } from '@qwen-code/channel-base';
-import type { AcpBridge } from '@qwen-code/channel-base';
+import type {
+  ChannelConfig,
+  ChannelBaseOptions,
+  Envelope,
+  AcpBridge,
+} from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
@@ -25,8 +29,13 @@ export class WeixinChannel extends ChannelBase {
   private baseUrl: string;
   private token: string = '';
 
-  constructor(name: string, config: ChannelConfig, bridge: AcpBridge) {
-    super(name, config, bridge);
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: AcpBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
     this.baseUrl =
       (config as ChannelConfig & { baseUrl?: string }).baseUrl ||
       DEFAULT_BASE_URL;

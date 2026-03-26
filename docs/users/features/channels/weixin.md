@@ -44,7 +44,11 @@ Note: WeChat channels do not use a `token` field — credentials come from the Q
 ### 3. Start the channel
 
 ```bash
+# Start only the WeChat channel
 qwen channel start my-weixin
+
+# Or start all configured channels together
+qwen channel start
 ```
 
 Open WeChat and send a message to the bot. You should see a typing indicator ("...") while the agent processes, followed by the response.

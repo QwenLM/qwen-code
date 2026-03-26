@@ -5,6 +5,7 @@ export type {
   ToolCallEvent,
 } from './AcpBridge.js';
 export { ChannelBase } from './ChannelBase.js';
+export type { ChannelBaseOptions } from './ChannelBase.js';
 export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';

@@ -5,6 +5,10 @@ import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
+export interface ChannelBaseOptions {
+  router?: SessionRouter;
+}
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: AcpBridge;
@@ -14,7 +18,12 @@ export abstract class ChannelBase {
   protected name: string;
   private instructedSessions: Set<string> = new Set();
 
-  constructor(name: string, config: ChannelConfig, bridge: AcpBridge) {
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: AcpBridge,
+    options?: ChannelBaseOptions,
+  ) {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
@@ -28,19 +37,30 @@ export abstract class ChannelBase {
       config.allowedUsers,
       pairingStore,
     );
-    this.router = new SessionRouter(bridge, config.cwd, config.sessionScope);
+    this.router =
+      options?.router ||
+      new SessionRouter(bridge, config.cwd, config.sessionScope);
 
-    bridge.on('toolCall', (event: ToolCallEvent) => {
-      const target = this.router.getTarget(event.sessionId);
-      if (target) {
-        this.onToolCall(target.chatId, event);
-      }
-    });
+    // When running standalone (no gateway), register toolCall listener directly.
+    // In gateway mode, the ChannelManager dispatches events instead.
+    if (!options?.router) {
+      bridge.on('toolCall', (event: ToolCallEvent) => {
+        const target = this.router.getTarget(event.sessionId);
+        if (target) {
+          this.onToolCall(target.chatId, event);
+        }
+      });
+    }
   }
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
+
+  /** Replace the bridge instance (used after crash recovery restart). */
+  setBridge(bridge: AcpBridge): void {
+    this.bridge = bridge;
+  }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
@@ -65,6 +85,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      this.config.cwd,
     );
 
     // Prepend channel instructions on first message of a session

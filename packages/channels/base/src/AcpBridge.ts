@@ -129,6 +129,16 @@ export class AcpBridge extends EventEmitter {
     return response.sessionId;
   }
 
+  async loadSession(sessionId: string, cwd: string): Promise<string> {
+    const conn = this.ensureConnection();
+    const response = await conn.loadSession({
+      sessionId,
+      cwd,
+      mcpServers: [],
+    });
+    return response.sessionId;
+  }
+
   async prompt(
     sessionId: string,
     text: string,
