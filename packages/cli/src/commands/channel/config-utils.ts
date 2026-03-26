@@ -1,5 +1,6 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
 import * as path from 'node:path';
+import { getPlugin, supportedTypes } from './channel-registry.js';
 
 export function resolveEnvVars(value: string): string {
   if (value.startsWith('$')) {
@@ -23,46 +24,45 @@ export function findCliEntryPath(): string {
   throw new Error('Cannot determine CLI entry path');
 }
 
-const SUPPORTED_TYPES = ['telegram', 'weixin', 'dingtalk'];
-
 export function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
-): ChannelConfig & { baseUrl?: string } {
+): ChannelConfig & Record<string, unknown> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
   }
 
   const channelType = rawConfig['type'] as string;
-  if (!SUPPORTED_TYPES.includes(channelType)) {
+  const plugin = getPlugin(channelType);
+  if (!plugin) {
     throw new Error(
-      `Channel type "${channelType}" is not supported. Available: ${SUPPORTED_TYPES.join(', ')}`,
+      `Channel type "${channelType}" is not supported. Available: ${supportedTypes().join(', ')}`,
     );
   }
 
-  let token = '';
-  if (channelType !== 'weixin' && channelType !== 'dingtalk') {
-    if (!rawConfig['token']) {
-      throw new Error(`Channel "${name}" is missing required field "token".`);
-    }
-    token = resolveEnvVars(rawConfig['token'] as string);
-  }
-
-  // DingTalk uses clientId + clientSecret instead of token
-  let clientId: string | undefined;
-  let clientSecret: string | undefined;
-  if (channelType === 'dingtalk') {
-    if (!rawConfig['clientId'] || !rawConfig['clientSecret']) {
+  // Validate plugin-required fields
+  for (const field of plugin.requiredConfigFields ?? []) {
+    if (!rawConfig[field]) {
       throw new Error(
-        `Channel "${name}" requires "clientId" and "clientSecret" for DingTalk.`,
+        `Channel "${name}" (${channelType}) requires "${field}".`,
       );
     }
-    clientId = resolveEnvVars(rawConfig['clientId'] as string);
-    clientSecret = resolveEnvVars(rawConfig['clientSecret'] as string);
   }
 
+  // Resolve env vars for known credential fields
+  const token = rawConfig['token']
+    ? resolveEnvVars(rawConfig['token'] as string)
+    : '';
+  const clientId = rawConfig['clientId']
+    ? resolveEnvVars(rawConfig['clientId'] as string)
+    : undefined;
+  const clientSecret = rawConfig['clientSecret']
+    ? resolveEnvVars(rawConfig['clientSecret'] as string)
+    : undefined;
+
   return {
-    type: channelType as ChannelConfig['type'],
+    ...rawConfig,
+    type: channelType,
     token,
     clientId,
     clientSecret,
@@ -79,6 +79,5 @@ export function parseChannelConfig(
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
-    baseUrl: rawConfig['baseUrl'] as string | undefined,
   };
 }

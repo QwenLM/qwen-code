@@ -5,9 +5,7 @@ import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import type { ChannelBase, ToolCallEvent } from '@qwen-code/channel-base';
-import { TelegramChannel } from '@qwen-code/channel-telegram';
-import { WeixinChannel } from '@qwen-code/channel-weixin';
-import { DingtalkChannel } from '@qwen-code/channel-dingtalk';
+import { getPlugin } from './channel-registry.js';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import {
   readServiceInfo,
@@ -36,13 +34,11 @@ function createChannel(
   bridge: AcpBridge,
   options?: { router?: SessionRouter },
 ): ChannelBase {
-  if (config.type === 'weixin') {
-    return new WeixinChannel(name, config, bridge, options);
+  const channelPlugin = getPlugin(config.type);
+  if (!channelPlugin) {
+    throw new Error(`Unknown channel type: "${config.type}".`);
   }
-  if (config.type === 'dingtalk') {
-    return new DingtalkChannel(name, config, bridge, options);
-  }
-  return new TelegramChannel(name, config, bridge, options);
+  return channelPlugin.createChannel(name, config, bridge, options);
 }
 
 function registerToolCallDispatch(
@@ -205,7 +201,21 @@ async function startAll(): Promise<void> {
   let shuttingDown = false;
   let crashCount = 0;
 
-  const bridgeOpts = { cliEntryPath, cwd: defaultCwd };
+  // All channels share one bridge process. Use the first channel's model.
+  const models = [
+    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
+  ];
+  if (models.length > 1) {
+    writeStderrLine(
+      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
+        `Shared bridge will use "${models[0]}".`,
+    );
+  }
+  const bridgeOpts = {
+    cliEntryPath,
+    cwd: defaultCwd,
+    model: models[0],
+  };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();
 

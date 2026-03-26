@@ -1,11 +1,9 @@
+import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
+
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
-export type ChannelType =
-  | 'telegram'
-  | 'weixin'
-  | 'dingtalk'
-  | 'discord'
-  | 'webhook';
+export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 
 export interface GroupConfig {
@@ -51,4 +49,31 @@ export interface SessionTarget {
   senderId: string;
   chatId: string;
   threadId?: string;
+}
+
+/**
+ * A channel plugin registers a channel type and provides a factory
+ * to create adapter instances. Both built-in adapters and external
+ * plugins conform to this interface.
+ */
+export interface ChannelPlugin {
+  /** Unique channel type ID (e.g., "telegram", "tmcp-dingtalk"). */
+  channelType: string;
+
+  /** Human-readable name for CLI output. */
+  displayName: string;
+
+  /**
+   * Config fields required by this channel type, beyond the shared
+   * ChannelConfig fields. Validated at startup.
+   */
+  requiredConfigFields?: string[];
+
+  /** Create a channel adapter instance. */
+  createChannel(
+    name: string,
+    config: ChannelConfig & Record<string, unknown>,
+    bridge: AcpBridge,
+    options?: ChannelBaseOptions,
+  ): ChannelBase;
 }

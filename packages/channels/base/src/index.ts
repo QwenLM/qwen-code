@@ -15,6 +15,7 @@ export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
 export type {
   ChannelConfig,
+  ChannelPlugin,
   ChannelType,
   Envelope,
   GroupConfig,
