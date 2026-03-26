@@ -16,6 +16,7 @@ import {
   type HookDefinition,
   type HookConfig,
   createDebugLogger,
+  HOOKS_CONFIG_FIELDS,
 } from '@qwen-code/qwen-code-core';
 import type {
   HooksManagementDialogProps,
@@ -86,7 +87,11 @@ function isValidHooksRecord(
     return false;
   }
   const record = hooks as Record<string, unknown>;
-  for (const value of Object.values(record)) {
+  for (const [key, value] of Object.entries(record)) {
+    // Skip non-event configuration fields
+    if (HOOKS_CONFIG_FIELDS.includes(key)) {
+      continue;
+    }
     if (!Array.isArray(value)) {
       return false;
     }
