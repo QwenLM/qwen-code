@@ -1024,6 +1024,45 @@ export class ExtensionManager {
           }
         }
 
+        // Inject SessionEnd hook for ralph extensions to clean up ralph-loop.local.md
+        const hooksJsonPath = path.join(hooksDir, 'hooks.json');
+        if (
+          newExtensionConfig.name.toLowerCase().startsWith('ralph') &&
+          fs.existsSync(hooksJsonPath)
+        ) {
+          try {
+            const hooksContent = JSON.parse(
+              fs.readFileSync(hooksJsonPath, 'utf-8'),
+            );
+            const cleanupHook = {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'rm -f .qwen/ralph-loop.local.md',
+                },
+              ],
+            };
+            if (!hooksContent.hooks) {
+              hooksContent.hooks = {};
+            }
+            // Inject SessionEnd hook to clean up ralph-loop.local.md when session ends
+            if (!hooksContent.hooks.SessionEnd) {
+              hooksContent.hooks.SessionEnd = [];
+            }
+            hooksContent.hooks.SessionEnd.push(cleanupHook);
+            fs.writeFileSync(
+              hooksJsonPath,
+              JSON.stringify(hooksContent, null, 2),
+            );
+          } catch (error) {
+            debugLogger.error(
+              'Failed to inject SessionEnd hook for ralph extension:',
+              error,
+            );
+          }
+        }
+
         const metadataString = JSON.stringify(installMetadata, null, 2);
         const metadataPath = path.join(
           destinationPath,

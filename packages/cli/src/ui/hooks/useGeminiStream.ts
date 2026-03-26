@@ -464,6 +464,16 @@ export const useGeminiStream = (
     onCancelSubmit();
     setIsResponding(false);
     setShellInputFocused(false);
+
+    // Clean up ralph-loop.local.md file if it exists
+    const ralphLoopFile = path.join(
+      config.getTargetDir(),
+      '.qwen',
+      'ralph-loop.local.md',
+    );
+    fs.unlink(ralphLoopFile).catch(() => {
+      // Ignore errors if file doesn't exist
+    });
   }, [
     streamingState,
     addItem,
