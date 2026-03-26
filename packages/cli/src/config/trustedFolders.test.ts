@@ -123,6 +123,40 @@ describe('Trusted Folders Loading', () => {
       );
       expect(folders.isPathTrusted('/user/someotherfolder')).toBe(undefined);
     });
+
+    it('should handle case-insensitive path matching on Windows', () => {
+      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
+
+      const { folders } = setup({
+        config: {
+          'C:\\Users\\folder': TrustLevel.TRUST_FOLDER,
+          'C:\\Secret': TrustLevel.DO_NOT_TRUST,
+        },
+      });
+
+      expect(folders.isPathTrusted('C:\\USERS\\FOLDER\\file.txt')).toBe(true);
+      expect(folders.isPathTrusted('c:\\users\\folder')).toBe(true);
+      expect(folders.isPathTrusted('C:\\SECRET\\file.txt')).toBe(false);
+      expect(folders.isPathTrusted('c:\\secret')).toBe(false);
+    });
+
+    it('should remain case-sensitive on POSIX systems', () => {
+      vi.spyOn(osActual, 'platform').mockReturnValue('linux');
+
+      const { folders } = setup({
+        config: {
+          '/home/user/folder': TrustLevel.TRUST_FOLDER,
+          '/secret': TrustLevel.DO_NOT_TRUST,
+        },
+      });
+
+      expect(folders.isPathTrusted('/home/user/folder/file.txt')).toBe(true);
+      expect(folders.isPathTrusted('/secret/file.txt')).toBe(false);
+      expect(folders.isPathTrusted('/HOME/USER/FOLDER/file.txt')).toBe(
+        undefined,
+      );
+      expect(folders.isPathTrusted('/SECRET/file.txt')).toBe(undefined);
+    });
   });
 
   it('should load user rules if only user file exists', () => {

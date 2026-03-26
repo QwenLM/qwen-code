@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  normalizePathForComparison,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -566,6 +567,10 @@ export function loadSettings(
     workspaceDir,
   ).getWorkspaceSettingsPath();
 
+  const isWorkspaceSameAsHome =
+    normalizePathForComparison(realWorkspaceDir) ===
+    normalizePathForComparison(realHomeDir);
+
   const loadAndMigrate = (
     filePath: string,
     scope: SettingScope,
@@ -666,7 +671,7 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  if (realWorkspaceDir !== realHomeDir) {
+  if (!isWorkspaceSameAsHome) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
       SettingScope.Workspace,

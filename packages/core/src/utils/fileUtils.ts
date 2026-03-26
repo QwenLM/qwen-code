@@ -20,6 +20,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import { normalizePathForComparison } from './paths.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -380,17 +381,19 @@ export function isWithinRoot(
   const normalizedPathToCheck = path.resolve(pathToCheck);
   const normalizedRootDirectory = path.resolve(rootDirectory);
 
-  // Ensure the rootDirectory path ends with a separator for correct startsWith comparison,
-  // unless it's the root path itself (e.g., '/' or 'C:\').
   const rootWithSeparator =
     normalizedRootDirectory === path.sep ||
     normalizedRootDirectory.endsWith(path.sep)
       ? normalizedRootDirectory
       : normalizedRootDirectory + path.sep;
 
+  const pathToCompare = normalizePathForComparison(normalizedPathToCheck);
+  const rootWithSepToCompare = normalizePathForComparison(rootWithSeparator);
+  const rootDirToCompare = normalizePathForComparison(normalizedRootDirectory);
+
   return (
-    normalizedPathToCheck === normalizedRootDirectory ||
-    normalizedPathToCheck.startsWith(rootWithSeparator)
+    pathToCompare === rootDirToCompare ||
+    pathToCompare.startsWith(rootWithSepToCompare)
   );
 }
 

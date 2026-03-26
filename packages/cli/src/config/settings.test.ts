@@ -2328,9 +2328,45 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.merged.tools?.sandbox).toBe(false); // User setting
-      expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
-      expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      expect(settings.merged.tools?.sandbox).toBe(false);
+      expect(settings.merged.context?.fileName).toBe('USER.md');
+      expect(settings.merged.ui?.theme).toBe('dark');
+    });
+
+    it('should handle case-insensitive workspace vs home comparison on Windows', () => {
+      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
+      vi.spyOn(osActual, 'homedir').mockReturnValue('C:\\Users\\Aditya');
+      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
+
+      loadSettings('C:\\USERS\\ADITYA\\project');
+
+      expect(fs.existsSync).not.toHaveBeenCalledWith(
+        'C:\\USERS\\ADITYA\\project\\.qwen\\settings.json',
+      );
+    });
+
+    it('should handle case-insensitive workspace vs home on Windows - different paths', () => {
+      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
+      vi.spyOn(osActual, 'homedir').mockReturnValue('C:\\Users\\Aditya');
+      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
+
+      loadSettings('C:\\Projects\\myproject');
+
+      expect(fs.existsSync).toHaveBeenCalledWith(
+        'C:\\Projects\\myproject\\.qwen\\settings.json',
+      );
+    });
+
+    it('should remain case-sensitive for workspace vs home on POSIX', () => {
+      vi.spyOn(osActual, 'platform').mockReturnValue('linux');
+      vi.spyOn(osActual, 'homedir').mockReturnValue('/home/user');
+      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
+
+      loadSettings('/HOME/USER/project');
+
+      expect(fs.existsSync).toHaveBeenCalledWith(
+        '/HOME/USER/project/.qwen/settings.json',
+      );
     });
   });
 

@@ -245,6 +245,12 @@ export function isSubpaths(parentPath: string[], childPath: string): boolean {
   return parentPath.some((p) => isSubpath(p, childPath));
 }
 
+export function normalizePathForComparison(p: string): string {
+  return os.platform() === 'win32'
+    ? path.normalize(p).toLowerCase()
+    : path.normalize(p);
+}
+
 /**
  * Resolves a path with tilde (~) expansion and relative path resolution.
  * Handles tilde expansion for home directory and resolves relative paths

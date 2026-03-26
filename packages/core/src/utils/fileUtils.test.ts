@@ -148,6 +148,35 @@ describe('fileUtils', () => {
       const rootSuper = path.resolve('/project/root/sub');
       expect(isWithinRoot(pathToCheckSuper, rootSuper)).toBe(false);
     });
+
+    it('should handle case-insensitive comparison on Windows', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+
+      const root = 'C:\\Project\\Root';
+      expect(isWithinRoot('C:\\PROJECT\\ROOT\\file.txt', root)).toBe(true);
+      expect(isWithinRoot('c:\\project\\root\\subdir\\file.txt', root)).toBe(
+        true,
+      );
+      expect(isWithinRoot('C:\\PROJECT\\ROOT', root)).toBe(true);
+      expect(isWithinRoot('C:\\Project\\Other', root)).toBe(false);
+    });
+
+    it('should handle case-insensitive root comparison on Windows', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+
+      const root = 'c:\\project\\root';
+      expect(isWithinRoot('C:\\PROJECT\\ROOT\\file.txt', root)).toBe(true);
+      expect(isWithinRoot('C:\\Project\\Root', root)).toBe(true);
+    });
+
+    it('should remain case-sensitive on POSIX systems', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+      const root = '/project/root';
+      expect(isWithinRoot('/project/root/file.txt', root)).toBe(true);
+      expect(isWithinRoot('/PROJECT/ROOT/file.txt', root)).toBe(false);
+      expect(isWithinRoot('/project/ROOT', root)).toBe(false);
+    });
   });
 
   describe('fileExists', () => {
