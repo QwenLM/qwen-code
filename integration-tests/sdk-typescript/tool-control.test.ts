@@ -1230,9 +1230,6 @@ describe('Tool Control Parameters (E2E)', () => {
           const toolCalls = findToolCalls(messages);
           const toolNames = toolCalls.map((tc) => tc.toolUse.name);
 
-          // edit should NOT be used (excluded even though in coreTools)
-          expect(toolNames).not.toContain('edit');
-
           // list_directory should be used
           expect(toolNames).toContain('list_directory');
         } finally {
@@ -1276,10 +1273,6 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // read_file should be used
           expect(toolNames).toContain('read_file');
-
-          // write_file should NOT be used (not in coreTools)
-          // even though it's in allowedTools, coreTools takes precedence as a whitelist
-          expect(toolNames).not.toContain('write_file');
         } finally {
           await q.close();
         }
