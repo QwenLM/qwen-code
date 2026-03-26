@@ -4,14 +4,19 @@ import type { CommandModule } from 'yargs';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
-import type { ChannelBase, ToolCallEvent } from '@qwen-code/channel-base';
-import { getPlugin } from './channel-registry.js';
+import type {
+  ChannelBase,
+  ChannelPlugin,
+  ToolCallEvent,
+} from '@qwen-code/channel-base';
+import { getPlugin, registerPlugin } from './channel-registry.js';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import {
   readServiceInfo,
   writeServiceInfo,
   removeServiceInfo,
 } from './pidfile.js';
+import { getExtensionManager } from '../extensions/utils.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const RESTART_DELAY_MS = 3000;
@@ -26,6 +31,68 @@ function loadChannelsConfig(): Record<string, unknown> {
     settings.merged as unknown as { channels?: Record<string, unknown> }
   ).channels;
   return channels || {};
+}
+
+/**
+ * Load channel plugins from active extensions.
+ * Extensions declare channels in their qwen-extension.json manifest.
+ */
+async function loadChannelsFromExtensions(): Promise<number> {
+  let loaded = 0;
+  try {
+    const extensionManager = await getExtensionManager();
+    const extensions = extensionManager
+      .getLoadedExtensions()
+      .filter((e) => e.isActive && e.channels);
+
+    for (const ext of extensions) {
+      for (const [channelType, channelDef] of Object.entries(ext.channels!)) {
+        if (getPlugin(channelType)) {
+          writeStderrLine(
+            `[Extensions] Skipping channel "${channelType}" from "${ext.name}": type already registered`,
+          );
+          continue;
+        }
+
+        const entryPath = path.join(ext.path, channelDef.entry);
+        try {
+          const module = (await import(entryPath)) as {
+            plugin?: ChannelPlugin;
+          };
+          const plugin = module.plugin;
+
+          if (!plugin || typeof plugin.createChannel !== 'function') {
+            writeStderrLine(
+              `[Extensions] "${ext.name}": channel entry point does not export a valid plugin object`,
+            );
+            continue;
+          }
+
+          if (plugin.channelType !== channelType) {
+            writeStderrLine(
+              `[Extensions] "${ext.name}": channelType mismatch — manifest says "${channelType}", plugin says "${plugin.channelType}"`,
+            );
+            continue;
+          }
+
+          registerPlugin(plugin);
+          loaded++;
+          writeStdoutLine(
+            `[Extensions] Loaded channel "${channelType}" from "${ext.name}"`,
+          );
+        } catch (err) {
+          writeStderrLine(
+            `[Extensions] Failed to load channel "${channelType}" from "${ext.name}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    writeStderrLine(
+      `[Extensions] Failed to load extensions: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return loaded;
 }
 
 function createChannel(
@@ -73,6 +140,8 @@ function checkDuplicateInstance(): void {
 async function startSingle(name: string): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
+
+  await loadChannelsFromExtensions();
 
   if (!channelsConfig[name]) {
     writeStderrLine(
@@ -169,6 +238,8 @@ async function startSingle(name: string): Promise<void> {
 async function startAll(): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
+
+  await loadChannelsFromExtensions();
 
   if (Object.keys(channelsConfig).length === 0) {
     writeStderrLine(
