@@ -888,8 +888,6 @@ describe('Tool Control Parameters (E2E)', () => {
             'Read test.txt, write "modified" to it, and list the directory.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            pathToQwenExecutable:
-              '/Users/mingholy/qwen-code/main/packages/cli/index.ts',
             cwd: testDir,
             permissionMode: 'default',
             // Limit available tools
