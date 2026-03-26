@@ -1122,7 +1122,7 @@ describe('Tool Control Parameters (E2E)', () => {
                 ...input,
                 file_path: (input['file_path'] as string).replace(
                   'test.txt',
-                  'test.txt',
+                  './test.txt',
                 ),
               };
               return { behavior: 'allow', updatedInput: modifiedInput };
