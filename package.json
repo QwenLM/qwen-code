@@ -9,7 +9,8 @@
     "packages/*",
     "packages/channels/base",
     "packages/channels/telegram",
-    "packages/channels/weixin"
+    "packages/channels/weixin",
+    "packages/channels/dingtalk"
   ],
   "repository": {
     "type": "git",

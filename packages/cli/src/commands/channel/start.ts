@@ -7,6 +7,7 @@ import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
 import type { ChannelBase, ToolCallEvent } from '@qwen-code/channel-base';
 import { TelegramChannel } from '@qwen-code/channel-telegram';
 import { WeixinChannel } from '@qwen-code/channel-weixin';
+import { DingtalkChannel } from '@qwen-code/channel-dingtalk';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import {
   readServiceInfo,
@@ -37,6 +38,9 @@ function createChannel(
 ): ChannelBase {
   if (config.type === 'weixin') {
     return new WeixinChannel(name, config, bridge, options);
+  }
+  if (config.type === 'dingtalk') {
+    return new DingtalkChannel(name, config, bridge, options);
   }
   return new TelegramChannel(name, config, bridge, options);
 }

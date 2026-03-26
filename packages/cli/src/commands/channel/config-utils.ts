@@ -23,7 +23,7 @@ export function findCliEntryPath(): string {
   throw new Error('Cannot determine CLI entry path');
 }
 
-const SUPPORTED_TYPES = ['telegram', 'weixin'];
+const SUPPORTED_TYPES = ['telegram', 'weixin', 'dingtalk'];
 
 export function parseChannelConfig(
   name: string,
@@ -41,16 +41,31 @@ export function parseChannelConfig(
   }
 
   let token = '';
-  if (channelType !== 'weixin') {
+  if (channelType !== 'weixin' && channelType !== 'dingtalk') {
     if (!rawConfig['token']) {
       throw new Error(`Channel "${name}" is missing required field "token".`);
     }
     token = resolveEnvVars(rawConfig['token'] as string);
   }
 
+  // DingTalk uses clientId + clientSecret instead of token
+  let clientId: string | undefined;
+  let clientSecret: string | undefined;
+  if (channelType === 'dingtalk') {
+    if (!rawConfig['clientId'] || !rawConfig['clientSecret']) {
+      throw new Error(
+        `Channel "${name}" requires "clientId" and "clientSecret" for DingTalk.`,
+      );
+    }
+    clientId = resolveEnvVars(rawConfig['clientId'] as string);
+    clientSecret = resolveEnvVars(rawConfig['clientSecret'] as string);
+  }
+
   return {
     type: channelType as ChannelConfig['type'],
     token,
+    clientId,
+    clientSecret,
     senderPolicy:
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
