@@ -10,6 +10,7 @@ import os from 'node:os';
 import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
 import { createDebugLogger, unescapePath } from '@qwen-code/qwen-code-core';
+import { parse } from 'shell-quote';
 import {
   toCodePoints,
   cpLen,
@@ -1835,11 +1836,17 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      const editor =
+      const editorString =
         opts.editor ??
         process.env['VISUAL'] ??
         process.env['EDITOR'] ??
         (process.platform === 'win32' ? 'notepad' : 'vi');
+
+      // Parse the editor command to handle arguments (e.g., "emacsclient -c")
+      const parsedEditor = parse(editorString, process.env) as string[];
+      const editorCommand = parsedEditor[0];
+      const editorArgs = parsedEditor.slice(1);
+
       const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
       const filePath = pathMod.join(tmpDir, 'buffer.txt');
       fs.writeFileSync(filePath, text, 'utf8');
@@ -1849,9 +1856,13 @@ export function useTextBuffer({
       const wasRaw = stdin?.isRaw ?? false;
       try {
         setRawMode?.(false);
-        const { status, error } = spawnSync(editor, [filePath], {
-          stdio: 'inherit',
-        });
+        const { status, error } = spawnSync(
+          editorCommand,
+          [...editorArgs, filePath],
+          {
+            stdio: 'inherit',
+          },
+        );
         if (error) throw error;
         if (typeof status === 'number' && status !== 0)
           throw new Error(`External editor exited with status ${status}`);
