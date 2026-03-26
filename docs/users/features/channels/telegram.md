@@ -88,7 +88,7 @@ You can send photos and documents to the bot, not just text.
 ## Tips
 
 - **Keep instructions concise-focused** — Telegram has a 4096-character message limit. Adding instructions like "keep responses short" helps the agent stay within bounds.
-- **Use `sessionScope: "user"`** — This gives each user their own conversation. Use `/reset` to start fresh.
+- **Use `sessionScope: "user"`** — This gives each user their own conversation. Use `/clear` to start fresh.
 - **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of users, or `"pairing"` to let new users request access with a code you approve via CLI. See [DM Pairing](./overview#dm-pairing) for details.
 
 ## Message Formatting

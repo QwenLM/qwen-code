@@ -9,6 +9,9 @@ export interface ChannelBaseOptions {
   router?: SessionRouter;
 }
 
+/** Handler for a slash command. Return true if handled, false to forward to agent. */
+type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: AcpBridge;
@@ -17,6 +20,7 @@ export abstract class ChannelBase {
   protected router: SessionRouter;
   protected name: string;
   private instructedSessions: Set<string> = new Set();
+  private commands: Map<string, CommandHandler> = new Map();
 
   constructor(
     name: string,
@@ -41,6 +45,8 @@ export abstract class ChannelBase {
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
 
+    this.registerSharedCommands();
+
     // When running standalone (no gateway), register toolCall listener directly.
     // In gateway mode, the ChannelManager dispatches events instead.
     if (!options?.router) {
@@ -64,6 +70,98 @@ export abstract class ChannelBase {
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
+  /**
+   * Register a slash command handler. Subclasses can call this to add
+   * platform-specific commands (e.g., /start for Telegram).
+   * Overrides shared commands if the same name is registered.
+   */
+  protected registerCommand(name: string, handler: CommandHandler): void {
+    this.commands.set(name.toLowerCase(), handler);
+  }
+
+  /** Register shared slash commands. Called from constructor. */
+  private registerSharedCommands(): void {
+    const clearHandler: CommandHandler = async (envelope) => {
+      const removed = this.router.removeSession(this.name, envelope.senderId);
+      if (removed) {
+        this.instructedSessions.clear();
+        await this.sendMessage(
+          envelope.chatId,
+          'Session cleared. Your next message will start a fresh conversation.',
+        );
+      } else {
+        await this.sendMessage(envelope.chatId, 'No active session to clear.');
+      }
+      return true;
+    };
+
+    this.registerCommand('clear', clearHandler);
+    this.registerCommand('reset', clearHandler);
+    this.registerCommand('new', clearHandler);
+
+    this.registerCommand('help', async (envelope) => {
+      const lines = [
+        'Commands:',
+        '/help — Show this help',
+        '/clear — Clear your session (aliases: /reset, /new)',
+        '/status — Show session info',
+      ];
+
+      // Platform-specific commands (registered by adapters, not shared ones)
+      const sharedCmds = new Set(['help', 'clear', 'reset', 'new', 'status']);
+      const platformCmds = [...this.commands.keys()].filter(
+        (c) => !sharedCmds.has(c),
+      );
+      if (platformCmds.length > 0) {
+        for (const cmd of platformCmds) {
+          lines.push(`/${cmd}`);
+        }
+      }
+
+      const agentCommands = this.bridge.availableCommands;
+      if (agentCommands.length > 0) {
+        lines.push('', 'Agent commands (forwarded to Qwen Code):');
+        for (const cmd of agentCommands) {
+          lines.push(`/${cmd.name} — ${cmd.description}`);
+        }
+      }
+
+      lines.push('', 'Send any text to chat with the agent.');
+      await this.sendMessage(envelope.chatId, lines.join('\n'));
+      return true;
+    });
+
+    this.registerCommand('status', async (envelope) => {
+      const hasSession = this.router.hasSession(this.name, envelope.senderId);
+      const policy = this.config.senderPolicy;
+      const lines = [
+        `Session: ${hasSession ? 'active' : 'none'}`,
+        `Access: ${policy}`,
+        `Channel: ${this.name}`,
+      ];
+      await this.sendMessage(envelope.chatId, lines.join('\n'));
+      return true;
+    });
+  }
+
+  /** Check if a message text matches a registered local command. */
+  protected isLocalCommand(text: string): boolean {
+    const parsed = this.parseCommand(text);
+    return parsed !== null && this.commands.has(parsed.command);
+  }
+
+  /**
+   * Parse a slash command from message text.
+   * Returns { command, args } or null if not a slash command.
+   */
+  private parseCommand(text: string): { command: string; args: string } | null {
+    if (!text.startsWith('/')) return null;
+    // Handle /command@botname format (Telegram groups)
+    const match = text.match(/^\/([a-zA-Z0-9_]+)(?:@\S+)?\s*(.*)/s);
+    if (!match) return null;
+    return { command: match[1].toLowerCase(), args: match[2].trim() };
+  }
+
   async handleInbound(envelope: Envelope): Promise<void> {
     // 1. Group gate: policy + allowlist + mention gating
     const groupResult = this.groupGate.check(envelope);
@@ -78,6 +176,17 @@ export abstract class ChannelBase {
         await this.onPairingRequired(envelope.chatId, result.pairingCode);
       }
       return;
+    }
+
+    // 3. Slash command handling — before session/agent routing
+    const parsed = this.parseCommand(envelope.text);
+    if (parsed) {
+      const handler = this.commands.get(parsed.command);
+      if (handler) {
+        const handled = await handler(envelope, parsed.args);
+        if (handled) return;
+      }
+      // Unrecognized commands fall through to the agent
     }
 
     const sessionId = await this.router.resolve(

@@ -217,13 +217,15 @@ Files work with any model — no multimodal support required.
 
 ## Slash Commands
 
-Channels support slash commands. Some are handled locally by the adapter:
+Channels support slash commands. These are handled locally (no agent round-trip):
 
-- `/start` — Welcome message
 - `/help` — List available commands
-- `/reset` — Reset your session and start fresh
+- `/clear` — Clear your session and start fresh (aliases: `/reset`, `/new`)
+- `/status` — Show session info and access policy
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
+
+These commands work on all channel types (Telegram, WeChat, etc.).
 
 ## Running
 
