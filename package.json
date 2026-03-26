@@ -10,7 +10,8 @@
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
-    "packages/channels/dingtalk"
+    "packages/channels/dingtalk",
+    "packages/channels/mock"
   ],
   "repository": {
     "type": "git",
