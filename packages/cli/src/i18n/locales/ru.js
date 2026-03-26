@@ -605,6 +605,119 @@ export default {
   'List all configured hooks': 'Показать все настроенные хуки',
   'Enable a disabled hook': 'Включить отключенный хук',
   'Disable an active hook': 'Отключить активный хук',
+  // Hooks - Dialog
+  Hooks: 'Хуки',
+  'Loading hooks...': 'Загрузка хуков...',
+  'Error loading hooks:': 'Ошибка загрузки хуков:',
+  'Press Escape to close': 'Нажмите Escape для закрытия',
+  'No hook selected': 'Хук не выбран',
+  // Hooks - List Step
+  'No hook events found.': 'События хуков не найдены.',
+  '{{count}} hook configured': '{{count}} хук настроен',
+  '{{count}} hooks configured': '{{count}} хуков настроено',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
+  // Hooks - Detail Step
+  'Exit codes:': 'Коды выхода:',
+  'Configured hooks:': 'Настроенные хуки:',
+  'No hooks configured for this event.':
+    'Для этого события нет настроенных хуков.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'Чтобы добавить хуки, отредактируйте settings.json напрямую или спросите Qwen.',
+  'Enter to select · Esc to go back': 'Enter для выбора · Esc для возврата',
+  // Hooks - Config Detail Step
+  'Hook details': 'Детали хука',
+  'Event:': 'Событие:',
+  'Extension:': 'Расширение:',
+  'Desc:': 'Описание:',
+  'No hook config selected': 'Конфигурация хука не выбрана',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'Чтобы изменить или удалить этот хук, отредактируйте settings.json напрямую или спросите Qwen.',
+  // Hooks - Source
+  Project: 'Проект',
+  User: 'Пользователь',
+  System: 'Система',
+  Extension: 'Расширение',
+  'Local Settings': 'Локальные настройки',
+  'User Settings': 'Пользовательские настройки',
+  'System Settings': 'Системные настройки',
+  Extensions: 'Расширения',
+  // Hooks - Status
+  '✓ Enabled': '✓ Включен',
+  '✗ Disabled': '✗ Отключен',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Перед выполнением инструмента',
+  'After tool execution': 'После выполнения инструмента',
+  'After tool execution fails': 'При неудачном выполнении инструмента',
+  'When notifications are sent': 'При отправке уведомлений',
+  'When the user submits a prompt': 'Когда пользователь отправляет промпт',
+  'When a new session is started': 'При запуске новой сессии',
+  'Right before Qwen Code concludes its response':
+    'Непосредственно перед завершением ответа Qwen Code',
+  'When a subagent (Agent tool call) is started':
+    'При запуске субагента (вызов инструмента Agent)',
+  'Right before a subagent concludes its response':
+    'Непосредственно перед завершением ответа субагента',
+  'Before conversation compaction': 'Перед сжатием разговора',
+  'When a session is ending': 'При завершении сессии',
+  'When a permission dialog is displayed': 'При отображении диалога разрешений',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Ввод в команду — это JSON аргументов вызова инструмента.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Ввод в команду — это JSON с полями "inputs" (аргументы вызова инструмента) и "response" (ответ вызова инструмента).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Ввод в команду — это JSON с сообщением уведомления и типом.',
+  'Input to command is JSON with original user prompt text.':
+    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with session start source.':
+    'Ввод в команду — это JSON с источником запуска сессии.',
+  'Input to command is JSON with session end reason.':
+    'Ввод в команду — это JSON с причиной завершения сессии.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Ввод в команду — это JSON с agent_id и agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Ввод в команду — это JSON с agent_id, agent_type и agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Ввод в команду — это JSON с деталями сжатия.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr не отображаются',
+  'show stderr to model and continue conversation':
+    'показать stderr модели и продолжить разговор',
+  'show stderr to user only': 'показать stderr только пользователю',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout отображается в режиме транскрипции (ctrl+o)',
+  'show stderr to model immediately': 'показать stderr модели немедленно',
+  'show stderr to user only but continue with tool call':
+    'показать stderr только пользователю, но продолжить вызов инструмента',
+  'block processing, erase original prompt, and show stderr to user only':
+    'заблокировать обработку, стереть исходный промпт и показать stderr только пользователю',
+  'stdout shown to Qwen': 'stdout показан Qwen',
+  'show stderr to user only (blocking errors ignored)':
+    'показать stderr только пользователю (блокирующие ошибки игнорируются)',
+  'command completes successfully': 'команда успешно завершена',
+  'stdout shown to subagent': 'stdout показан субагенту',
+  'show stderr to subagent and continue having it run':
+    'показать stderr субагенту и продолжить его выполнение',
+  'stdout appended as custom compact instructions':
+    'stdout добавлен как пользовательские инструкции сжатия',
+  'block compaction': 'заблокировать сжатие',
+  'show stderr to user only but continue with compaction':
+    'показать stderr только пользователю, но продолжить сжатие',
+  'use hook decision if provided':
+    'использовать решение хука, если предоставлено',
+  // Hooks - Messages
+  'Config not loaded.': 'Конфигурация не загружена.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Хуки не включены. Включите хуки в настройках, чтобы использовать эту функцию.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'Хуки не настроены. Добавьте хуки в файл settings.json.',
+  'Configured Hooks ({{count}} total)': 'Настроенные хуки (всего {{count}})',
 
   // ============================================================================
   // Commands - Session Export
@@ -718,7 +831,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Режим подтверждения рабочего пространства существует и имеет приоритет. Изменение на уровне пользователя не будет иметь эффекта.',
   'Apply To': 'Применить к',
-  'User Settings': 'Настройки пользователя',
   'Workspace Settings': 'Настройки рабочего пространства',
 
   // ============================================================================
@@ -773,7 +885,6 @@ export default {
   'List configured MCP servers and tools':
     'Просмотр настроенных MCP-серверов и инструментов',
   'Restarts MCP servers.': 'Перезапустить MCP-серверы.',
-  'Config not loaded.': 'Конфигурация не загружена.',
   'Could not retrieve tool registry.':
     'Не удалось получить реестр инструментов.',
   'No MCP servers configured with OAuth authentication.':
@@ -951,7 +1062,6 @@ export default {
   'View tools': 'Просмотреть инструменты',
   '(disabled)': '(отключен)',
   'Error:': 'Ошибка:',
-  Extension: 'Расширение',
   tool: 'инструмент',
   connected: 'подключен',
   connecting: 'подключение',
