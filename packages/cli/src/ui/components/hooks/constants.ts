@@ -44,7 +44,7 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 'Other', description: t('show stderr to user only') },
     ],
     [HookEventName.UserPromptSubmit]: [
-      { code: 0, description: t('stdout shown to model') },
+      { code: 0, description: t('stdout shown to Qwen') },
       {
         code: 2,
         description: t(
@@ -54,7 +54,7 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 'Other', description: t('show stderr to user only') },
     ],
     [HookEventName.SessionStart]: [
-      { code: 0, description: t('stdout shown to model') },
+      { code: 0, description: t('stdout shown to Qwen') },
       {
         code: 'Other',
         description: t('show stderr to user only (blocking errors ignored)'),

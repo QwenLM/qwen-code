@@ -720,7 +720,7 @@ export default {
     '仅向用户显示 stderr 但继续工具调用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止处理，擦除原始提示，仅向用户显示 stderr',
-  'stdout shown to model': '向模型显示 stdout',
+  'stdout shown to Qwen': '向 Qwen 显示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '仅向用户显示 stderr（忽略阻塞错误）',
   'command completes successfully': '命令成功完成',

@@ -687,7 +687,7 @@ export default {
     'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
   'block processing, erase original prompt, and show stderr to user only':
     'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
-  'stdout shown to model': 'stdout dem Modell anzeigen',
+  'stdout shown to Qwen': 'stdout dem Qwen anzeigen',
   'show stderr to user only (blocking errors ignored)':
     'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',
   'command completes successfully': 'Befehl erfolgreich abgeschlossen',

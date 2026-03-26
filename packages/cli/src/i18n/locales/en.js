@@ -760,7 +760,7 @@ export default {
     'show stderr to user only but continue with tool call',
   'block processing, erase original prompt, and show stderr to user only':
     'block processing, erase original prompt, and show stderr to user only',
-  'stdout shown to model': 'stdout shown to model',
+  'stdout shown to Qwen': 'stdout shown to Qwen',
   'show stderr to user only (blocking errors ignored)':
     'show stderr to user only (blocking errors ignored)',
   'command completes successfully': 'command completes successfully',

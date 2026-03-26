@@ -472,7 +472,7 @@ export default {
     'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
   'block processing, erase original prompt, and show stderr to user only':
     '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
-  'stdout shown to model': 'stdout をモデルに表示',
+  'stdout shown to Qwen': 'stdout をモデルに表示',
   'show stderr to user only (blocking errors ignored)':
     'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
   'command completes successfully': 'コマンドが正常に完了',
