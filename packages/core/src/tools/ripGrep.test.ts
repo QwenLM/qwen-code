@@ -544,6 +544,36 @@ describe('RipGrepTool', () => {
 
       await fs.rm(secondDir, { recursive: true, force: true });
     });
+
+    it('should deduplicate matches from overlapping workspace directories', async () => {
+      // This tests the fix: when ripgrep receives overlapping search paths
+      // (e.g. /parent and /parent/sub), it may report the same file twice.
+      // The deduplication layer must remove duplicates.
+      const subDir = path.join(tempRootDir, 'sub');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [subDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      // Simulate ripgrep returning the same file:line twice (once from each search root)
+      const dupLine = `${path.join(subDir, 'fileC.txt')}:1:hello world`;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${dupLine}${EOL}${dupLine}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Despite two identical lines in the raw output, only 1 match should be reported.
+      expect(result.llmContent).toContain('Found 1 match');
+    });
   });
 
   describe('abort signal handling', () => {
