@@ -8,6 +8,11 @@ import type { ChannelBase, ToolCallEvent } from '@qwen-code/channel-base';
 import { TelegramChannel } from '@qwen-code/channel-telegram';
 import { WeixinChannel } from '@qwen-code/channel-weixin';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
+import {
+  readServiceInfo,
+  writeServiceInfo,
+  removeServiceInfo,
+} from './pidfile.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const RESTART_DELAY_MS = 3000;
@@ -52,8 +57,21 @@ function registerToolCallDispatch(
   });
 }
 
+/** Check for duplicate instance and abort if one is already running. */
+function checkDuplicateInstance(): void {
+  const existing = readServiceInfo();
+  if (existing) {
+    writeStderrLine(
+      `Error: Channel service is already running (PID ${existing.pid}, started ${existing.startedAt}).`,
+    );
+    writeStderrLine('Use "qwen channel stop" to stop it first.');
+    process.exit(1);
+  }
+}
+
 /** Start a single channel with its own bridge + crash recovery. */
 async function startSingle(name: string): Promise<void> {
+  checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
   if (!channelsConfig[name]) {
@@ -92,6 +110,7 @@ async function startSingle(name: string): Promise<void> {
   registerToolCallDispatch(bridge, router, channels);
   await channel.connect();
 
+  writeServiceInfo([name]);
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
   bridge.on('disconnected', async () => {
@@ -103,6 +122,7 @@ async function startSingle(name: string): Promise<void> {
         `[Channel] Bridge crashed ${crashCount} times. Giving up.`,
       );
       router.clearAll();
+      removeServiceInfo();
       process.exit(1);
     }
 
@@ -136,6 +156,7 @@ async function startSingle(name: string): Promise<void> {
     channel.disconnect();
     bridge.stop();
     router.clearAll();
+    removeServiceInfo();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
@@ -146,6 +167,7 @@ async function startSingle(name: string): Promise<void> {
 
 /** Start all configured channels with a shared bridge + crash recovery. */
 async function startAll(): Promise<void> {
+  checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
   if (Object.keys(channelsConfig).length === 0) {
@@ -215,6 +237,7 @@ async function startAll(): Promise<void> {
     process.exit(1);
   }
 
+  writeServiceInfo(parsed.map((p) => p.name));
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
@@ -228,6 +251,7 @@ async function startAll(): Promise<void> {
         `[Channel] Bridge crashed ${crashCount} times. Giving up.`,
       );
       router.clearAll();
+      removeServiceInfo();
       process.exit(1);
     }
 
@@ -270,6 +294,7 @@ async function startAll(): Promise<void> {
     }
     bridge.stop();
     router.clearAll();
+    removeServiceInfo();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

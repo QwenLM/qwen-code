@@ -233,15 +233,29 @@ qwen channel start
 
 # Start a single channel
 qwen channel start my-channel
+
+# Check if the service is running
+qwen channel status
+
+# Stop the running service
+qwen channel stop
 ```
 
-The bot runs in the foreground. Press `Ctrl+C` to stop.
+The bot runs in the foreground. Press `Ctrl+C` to stop, or use `qwen channel stop` from another terminal.
 
 ### Multi-Channel Mode
 
 When you run `qwen channel start` without a name, all channels defined in `settings.json` start together sharing a single agent process. Each channel maintains its own sessions — a Telegram user and a WeChat user get separate conversations, even though they share the same agent.
 
 Each channel uses its own `cwd` from its config, so different channels can work on different projects simultaneously.
+
+### Service Management
+
+The channel service uses a PID file (`~/.qwen/channels/service.pid`) to track the running instance:
+
+- **Duplicate prevention**: Running `qwen channel start` while a service is already running will show an error instead of starting a second instance
+- **`qwen channel stop`**: Gracefully stops the running service from another terminal
+- **`qwen channel status`**: Shows whether the service is running, its uptime, and session counts per channel
 
 ### Crash Recovery
 
@@ -250,4 +264,4 @@ If the agent process crashes unexpectedly, the channel service automatically res
 - Sessions are persisted to `~/.qwen/channels/sessions.json` while the service is running
 - On crash: the agent restarts within 3 seconds and reloads saved sessions
 - After 3 consecutive crashes, the service exits with an error
-- On clean shutdown (Ctrl+C): session data is cleared — the next start is always fresh
+- On clean shutdown (Ctrl+C or `qwen channel stop`): session data is cleared — the next start is always fresh
