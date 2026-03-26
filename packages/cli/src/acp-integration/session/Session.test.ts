@@ -34,6 +34,7 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
@@ -50,7 +51,7 @@ describe('Session', () => {
       addHistory: vi.fn(),
     } as unknown as GeminiChat;
 
-    const toolRegistry = { getTool: vi.fn() };
+    mockToolRegistry = { getTool: vi.fn() };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
     mockConfig = {
@@ -65,8 +66,9 @@ describe('Session', () => {
       getChatRecordingService: vi.fn().mockReturnValue({
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
+        recordToolResult: vi.fn(),
       }),
-      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
@@ -274,6 +276,148 @@ describe('Session', () => {
         process.cwd(),
         expect.any(Function),
       );
+    });
+
+    it('hides allow-always options when confirmation already forbids them', async () => {
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { path: '/tmp/file.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Need permission',
+          prompt: 'Allow?',
+          hideAlwaysAllow: true,
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Inspect file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-1',
+                  name: 'read_file',
+                  args: { path: '/tmp/file.txt' },
+                },
+              ],
+            },
+          };
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run tool' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          options: [
+            expect.objectContaining({ kind: 'allow_once' }),
+            expect.objectContaining({ kind: 'reject_once' }),
+          ],
+        }),
+      );
+      const options = (mockClient.requestPermission as ReturnType<typeof vi.fn>)
+        .mock.calls[0][0].options as Array<{ kind: string }>;
+      expect(options.some((option) => option.kind === 'allow_always')).toBe(
+        false,
+      );
+    });
+
+    it('respects permission-request hook allow decisions without opening ACP permission dialog', async () => {
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: { path: '/tmp/updated.txt' },
+          denyMessage: undefined,
+        });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { path: '/tmp/original.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Need permission',
+          prompt: 'Allow?',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Inspect file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getEnableHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-2',
+                  name: 'read_file',
+                  args: { path: '/tmp/original.txt' },
+                },
+              ],
+            },
+          };
+        })(),
+      );
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+      } finally {
+        hookSpy.mockRestore();
+      }
+
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+      );
+      expect(invocation.params).toEqual({ path: '/tmp/updated.txt' });
+      expect(executeSpy).toHaveBeenCalled();
     });
   });
 });

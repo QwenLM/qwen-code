@@ -74,6 +74,12 @@ export const ToolConfirmationMessage: React.FC<
   }, [config]);
 
   const handleConfirm = async (outcome: ToolConfirmationOutcome) => {
+    // Call onConfirm before resolving the IDE diff so that the CLI outcome
+    // (e.g. ProceedAlways) is processed first.  resolveDiffFromCli would
+    // otherwise trigger the scheduler's ideConfirmation .then() handler
+    // with ProceedOnce, racing with the intended CLI outcome.
+    onConfirm(outcome);
+
     if (confirmationDetails.type === 'edit') {
       if (config.getIdeMode() && isDiffingEnabled) {
         const cliOutcome =
@@ -84,7 +90,6 @@ export const ToolConfirmationMessage: React.FC<
         );
       }
     }
-    onConfirm(outcome);
   };
 
   const isTrustedFolder = config.isTrustedFolder();

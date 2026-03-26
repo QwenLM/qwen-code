@@ -127,25 +127,40 @@ export class ShellToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const command = stripShellWrapper(this.params.command);
+    const pm = this.config.getPermissionManager?.();
 
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
-    const nonReadOnlySubCommands: string[] = [];
+    const confirmableSubCommands: string[] = [];
     for (const sub of subCommands) {
+      let isReadOnly = false;
       try {
-        const isReadOnly = await isShellCommandReadOnlyAST(sub);
-        if (!isReadOnly) {
-          nonReadOnlySubCommands.push(sub);
-        }
+        isReadOnly = await isShellCommandReadOnlyAST(sub);
       } catch {
-        nonReadOnlySubCommands.push(sub); // conservative: include if check fails
+        // conservative: treat unknown commands as requiring confirmation
       }
+
+      if (isReadOnly) {
+        continue;
+      }
+
+      if (pm) {
+        try {
+          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+            continue;
+          }
+        } catch (e) {
+          debugLogger.warn('PermissionManager command check failed:', e);
+        }
+      }
+
+      confirmableSubCommands.push(sub);
     }
 
     // Fallback to all sub-commands if everything was filtered out (shouldn't
     // normally happen since getDefaultPermission already returned 'ask').
     const effectiveSubCommands =
-      nonReadOnlySubCommands.length > 0 ? nonReadOnlySubCommands : subCommands;
+      confirmableSubCommands.length > 0 ? confirmableSubCommands : subCommands;
 
     const rootCommands = [
       ...new Set(

@@ -488,6 +488,9 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: undefined,
+          },
         );
       });
     });
@@ -528,7 +531,58 @@ describe('SubAgentTracker', () => {
       eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+          },
+        );
+      });
+    });
+
+    it('should forward answers payload from ACP permission responses', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+        },
+        answers: {
+          answer: 'yes',
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const confirmationDetails = {
+        type: 'ask_user_question',
+        title: 'Question',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Question',
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      } as unknown as AgentApprovalRequestEvent['confirmationDetails'];
+      const event = createApprovalEvent({
+        name: 'ask_user_question',
+        callId: 'call-ask',
+        confirmationDetails,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: {
+              answer: 'yes',
+            },
+          },
+        );
       });
     });
   });

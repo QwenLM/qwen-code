@@ -133,12 +133,12 @@ export class ShellProcessor implements IPromptProcessor {
 
       // Security check on the final, escaped command string.
       const { allAllowed, disallowedCommands, blockReason, isHardDenial } =
-        checkCommandPermissions(command, config, sessionShellAllowlist);
+        await checkCommandPermissions(command, config, sessionShellAllowlist);
 
       // Determine if this command is explicitly auto-approved via PermissionManager
       const pm = config.getPermissionManager?.();
       const isAllowedBySettings = pm
-        ? pm.isCommandAllowed(command) === 'allow'
+        ? (await pm.isCommandAllowed(command)) === 'allow'
         : false;
 
       if (!allAllowed) {
