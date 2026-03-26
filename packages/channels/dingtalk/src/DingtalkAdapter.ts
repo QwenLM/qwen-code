@@ -17,7 +17,26 @@ import type {
  * Raw DingTalk message data — the SDK's RobotMessage type only covers text,
  * but DingTalk sends richer payloads for richText, picture, file, etc.
  */
- 
+
+interface DingTalkRichTextPart {
+  type?: string;
+  text?: string;
+  downloadCode?: string;
+  atName?: string;
+}
+
+interface DingTalkRepliedMsg {
+  msgId?: string;
+  msgType?: string;
+  senderId?: string;
+  content?: {
+    text?: string;
+    richText?: DingTalkRichTextPart[];
+    downloadCode?: string;
+    fileName?: string;
+  };
+}
+
 interface DingTalkMessageData {
   msgId?: string;
   msgtype?: string;
@@ -27,14 +46,21 @@ interface DingTalkMessageData {
   senderId?: string;
   senderStaffId?: string;
   senderNick?: string;
+  chatbotUserId?: string;
   isInAtList?: boolean;
-  text?: { content?: string };
+  text?: {
+    content?: string;
+    isReplyMsg?: boolean;
+    repliedMsg?: DingTalkRepliedMsg;
+  };
+  quoteMessage?: {
+    msgId?: string;
+    senderId?: string;
+    text?: { content?: string };
+    msgtype?: string;
+  };
   content?: {
-    richText?: Array<{
-      type?: string;
-      text?: string;
-      downloadCode?: string;
-    }>;
+    richText?: DingTalkRichTextPart[];
     downloadCode?: string;
     fileName?: string;
     recognition?: string;
@@ -211,6 +237,85 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   /**
+   * Extract quoted/referenced message context from a reply.
+   * DingTalk provides this via text.repliedMsg (newer) or quoteMessage (legacy).
+   */
+  private extractQuotedContext(data: DingTalkMessageData): {
+    referencedText?: string;
+    isReplyToBot: boolean;
+  } {
+    // Newer format: text.repliedMsg
+    if (data.text?.isReplyMsg && data.text.repliedMsg) {
+      const replied = data.text.repliedMsg;
+      const isReplyToBot =
+        !!data.chatbotUserId && replied.senderId === data.chatbotUserId;
+
+      // Note: DingTalk doesn't include content for interactiveCard replies
+      // (bot responses sent via webhook). Only user message quotes have text.
+      const text = this.summarizeRepliedContent(replied);
+      return { referencedText: text || undefined, isReplyToBot };
+    }
+
+    // Legacy format: quoteMessage
+    if (data.quoteMessage) {
+      const quote = data.quoteMessage;
+      const isReplyToBot =
+        !!data.chatbotUserId && quote.senderId === data.chatbotUserId;
+      const text = quote.text?.content?.trim();
+      return { referencedText: text || undefined, isReplyToBot };
+    }
+
+    return { isReplyToBot: false };
+  }
+
+  /**
+   * Build a text summary from a repliedMsg, handling text, richText, and
+   * media message types with placeholders.
+   */
+  private summarizeRepliedContent(replied: DingTalkRepliedMsg): string {
+    const msgType = replied.msgType;
+    const content = replied.content;
+
+    // Direct text content
+    if (content?.text?.trim()) {
+      return content.text.trim();
+    }
+
+    // RichText: concatenate text parts, placeholder for images
+    if (content?.richText && Array.isArray(content.richText)) {
+      const parts: string[] = [];
+      for (const part of content.richText) {
+        const partType = part.type || 'text';
+        if (partType === 'text' && part.text) {
+          parts.push(part.text);
+        } else if (partType === 'picture') {
+          parts.push('[image]');
+        } else if (partType === 'at' && part.atName) {
+          parts.push(`@${part.atName}`);
+        }
+      }
+      const summary = parts.join('').trim();
+      if (summary) return summary;
+    }
+
+    // Media type placeholders
+    switch (msgType) {
+      case 'picture':
+        return '[image]';
+      case 'file':
+        return `[file: ${content?.fileName || 'file'}]`;
+      case 'audio':
+        return '[audio]';
+      case 'video':
+        return '[video]';
+      default:
+        break;
+    }
+
+    return '';
+  }
+
+  /**
    * Extract text and media download codes from an incoming DingTalk message.
    * Handles text, richText, picture, file, audio, and video message types.
    */
@@ -377,6 +482,9 @@ export class DingtalkChannel extends ChannelBase {
         cleanText = cleanText.replace(/@\S+/g, '').trim();
       }
 
+      // Extract quoted message context
+      const quoted = this.extractQuotedContext(data);
+
       const chatId = conversationId || sessionWebhook;
 
       const envelope: Envelope = {
@@ -387,7 +495,8 @@ export class DingtalkChannel extends ChannelBase {
         text: cleanText || content.text,
         isGroup,
         isMentioned,
-        isReplyToBot: false,
+        isReplyToBot: quoted.isReplyToBot,
+        referencedText: quoted.referencedText,
       };
 
       // Attach 👀 reaction, process message, then recall reaction
