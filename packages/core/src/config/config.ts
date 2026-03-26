@@ -1201,18 +1201,20 @@ export class Config {
     authType: AuthType,
     requiresRefresh: boolean,
   ): Promise<void> {
-    if (!this.contentGeneratorConfig) {
-      return;
-    }
-
-    // Hot update path: only supported for qwen-oauth.
-    // For other auth types we always refresh to recreate the ContentGenerator.
+    // Hot update path: only supported for qwen-oauth when contentGeneratorConfig exists.
+    // For initial auth or non-qwen providers, we always refresh to create/recreate
+    // the ContentGenerator.
     //
     // Rationale:
-    // - Non-qwen providers may need to re-validate credentials / baseUrl / envKey.
-    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources.
-    // - Refresh keeps runtime behavior consistent and centralized.
-    if (authType === AuthType.QWEN_OAUTH && !requiresRefresh) {
+    // - Initial auth: contentGeneratorConfig doesn't exist yet, need to create it
+    // - Non-qwen providers: may need to re-validate credentials / baseUrl / envKey
+    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources
+    // - Refresh keeps behavior consistent and centralized
+    if (
+      authType === AuthType.QWEN_OAUTH &&
+      !requiresRefresh &&
+      this.contentGeneratorConfig
+    ) {
       const { config, sources } = resolveContentGeneratorConfigWithSources(
         this,
         authType,
@@ -1249,7 +1251,7 @@ export class Config {
       return;
     }
 
-    // Full refresh path
+    // Full refresh path (initial auth or non-qwen-oauth or requiresRefresh)
     await this.refreshAuth(authType);
   }
 

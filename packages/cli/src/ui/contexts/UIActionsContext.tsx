@@ -48,6 +48,7 @@ export interface UIActions {
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
+  closeAuthDialog: () => void;
   handleEditorSelect: (
     editorType: EditorType | undefined,
     scope: SettingScope,
@@ -83,6 +84,8 @@ export interface UIActions {
   closeExtensionsManagerDialog: () => void;
   // MCP dialog
   closeMcpDialog: () => void;
+  // Model dialog
+  openModelDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
