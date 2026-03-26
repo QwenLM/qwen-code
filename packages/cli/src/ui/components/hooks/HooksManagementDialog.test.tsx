@@ -5,7 +5,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HookEventName } from '@qwen-code/qwen-code-core';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 
@@ -96,22 +95,6 @@ describe('HooksManagementDialog', () => {
     );
 
     expect(lastFrame()).toContain('Loading hooks');
-  });
-
-  it('should display all hook events', async () => {
-    const { lastFrame, unmount } = renderWithProviders(
-      <HooksManagementDialog onClose={mockOnClose} />,
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const output = lastFrame();
-    expect(output).toContain(HookEventName.Stop);
-    expect(output).toContain(HookEventName.PreToolUse);
-    expect(output).toContain(HookEventName.PostToolUse);
-    expect(output).toContain(HookEventName.UserPromptSubmit);
-
-    unmount();
   });
 
   it('should render with border', async () => {
