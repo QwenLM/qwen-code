@@ -98,6 +98,16 @@ Your browser does not support the video tag.
 
 </details>
 
+## 🦞 Use Qwen Code for Coding Tasks in Claw
+
+Copy the prompt below and paste it into your agent:
+
+```
+Use Qwen Code as a coding agent. First, fetch and read this skill reference:
+https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/.qwen/skills/qwen-code-claw/SKILL.md
+Then follow the instructions inside to install, authenticate, and use Qwen Code via acpx for all coding tasks.
+```
+
 ## Authentication
 
 Qwen Code supports two authentication methods:
