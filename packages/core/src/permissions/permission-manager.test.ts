@@ -20,6 +20,7 @@ import {
   splitCompoundCommand,
   buildPermissionRules,
   getRuleDisplayName,
+  buildHumanReadableRuleLabel,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
@@ -1590,5 +1591,176 @@ describe('buildPermissionRules', () => {
       });
       expect(rules).toEqual(['mcp__puppeteer__navigate']);
     });
+  });
+});
+
+// ─── buildHumanReadableRuleLabel ─────────────────────────────────────────────
+
+describe('buildHumanReadableRuleLabel', () => {
+  it('returns empty string for empty rules array', () => {
+    expect(buildHumanReadableRuleLabel([])).toBe('');
+  });
+
+  it('converts bare Read rule to "read files"', () => {
+    expect(buildHumanReadableRuleLabel(['Read'])).toBe('read files');
+  });
+
+  it('converts bare Bash rule to "run commands"', () => {
+    expect(buildHumanReadableRuleLabel(['Bash'])).toBe('run commands');
+  });
+
+  it('converts bare WebSearch rule to "search the web"', () => {
+    expect(buildHumanReadableRuleLabel(['WebSearch'])).toBe('search the web');
+  });
+
+  it('converts Read with absolute path specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Read(//Users/mochi/.qwen/**)']);
+    expect(label).toBe('read files in /Users/mochi/.qwen/');
+  });
+
+  it('converts Read with relative path specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Read(/src/**)']);
+    expect(label).toBe('read files in /src/');
+  });
+
+  it('converts Edit with path specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Edit(//tmp/**)']);
+    expect(label).toBe('edit files in /tmp/');
+  });
+
+  it('converts Bash with command specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Bash(git *)']);
+    expect(label).toBe("run 'git *' commands");
+  });
+
+  it('converts WebFetch with domain specifier', () => {
+    const label = buildHumanReadableRuleLabel(['WebFetch(github.com)']);
+    expect(label).toBe('fetch from github.com');
+  });
+
+  it('converts Skill with literal specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Skill(Explore)']);
+    expect(label).toBe('use skill "Explore"');
+  });
+
+  it('converts Agent with literal specifier', () => {
+    const label = buildHumanReadableRuleLabel(['Agent(research)']);
+    expect(label).toBe('use agent "research"');
+  });
+
+  it('joins multiple rules with commas', () => {
+    const label = buildHumanReadableRuleLabel([
+      'Read(//Users/alice/**)',
+      'Bash(npm *)',
+    ]);
+    expect(label).toBe("read files in /Users/alice/, run 'npm *' commands");
+  });
+
+  it('handles unknown display names gracefully', () => {
+    const label = buildHumanReadableRuleLabel(['mcp__server__tool']);
+    expect(label).toBe('mcp__server__tool');
+  });
+
+  it('handles unknown display name with specifier', () => {
+    const label = buildHumanReadableRuleLabel(['UnknownCategory(someValue)']);
+    expect(label).toBe('unknowncategory "someValue"');
+  });
+
+  it('cleans path with /* suffix', () => {
+    const label = buildHumanReadableRuleLabel(['Read(//home/user/docs/*)']);
+    expect(label).toBe('read files in /home/user/docs/');
+  });
+
+  it('round-trips from buildPermissionRules for file tool', () => {
+    const rules = buildPermissionRules({
+      toolName: 'read_file',
+      filePath: '/Users/alice/.secrets',
+    });
+    const label = buildHumanReadableRuleLabel(rules);
+    expect(label).toBe('read files in /Users/alice/');
+  });
+
+  it('round-trips from buildPermissionRules for shell command', () => {
+    const rules = buildPermissionRules({
+      toolName: 'run_shell_command',
+      command: 'git status',
+    });
+    const label = buildHumanReadableRuleLabel(rules);
+    expect(label).toBe("run 'git status' commands");
+  });
+
+  it('round-trips from buildPermissionRules for web fetch', () => {
+    const rules = buildPermissionRules({
+      toolName: 'web_fetch',
+      domain: 'example.com',
+    });
+    const label = buildHumanReadableRuleLabel(rules);
+    expect(label).toBe('fetch from example.com');
+  });
+});
+
+// ─── PermissionManager.findMatchingDenyRule ──────────────────────────────────
+
+describe('PermissionManager.findMatchingDenyRule', () => {
+  it('returns the raw deny rule string when context matches', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+    );
+    pm.initialize();
+
+    const result = pm.findMatchingDenyRule({
+      toolName: 'run_shell_command',
+      command: 'rm -rf /tmp/foo',
+    });
+    expect(result).toBe('Bash(rm *)');
+  });
+
+  it('returns undefined when no deny rule matches', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+    );
+    pm.initialize();
+
+    const result = pm.findMatchingDenyRule({
+      toolName: 'run_shell_command',
+      command: 'git status',
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it('matches session deny rules', () => {
+    const pm = new PermissionManager(makeConfig());
+    pm.initialize();
+    pm.addSessionDenyRule('Read(//secret/**)');
+
+    const result = pm.findMatchingDenyRule({
+      toolName: 'read_file',
+      filePath: '/secret/key.pem',
+    });
+    expect(result).toBe('Read(//secret/**)');
+  });
+
+  it('returns undefined for non-denied tool', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['ShellTool'] }),
+    );
+    pm.initialize();
+
+    const result = pm.findMatchingDenyRule({ toolName: 'read_file' });
+    expect(result).toBeUndefined();
+  });
+
+  it('matches bare tool deny rule', () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['ShellTool'] }),
+    );
+    pm.initialize();
+
+    const result = pm.findMatchingDenyRule({
+      toolName: 'run_shell_command',
+      command: 'echo hello',
+    });
+    // rule.raw preserves the original rule string as written in config
+    expect(result).toBe('ShellTool');
   });
 });

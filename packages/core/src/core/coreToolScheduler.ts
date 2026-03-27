@@ -705,7 +705,13 @@ export class CoreToolScheduler {
         // This check should happen before registry lookup to provide a clear permission error
         const pm = this.config.getPermissionManager?.();
         if (pm && !(await pm.isToolEnabled(reqInfo.name))) {
-          const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+          const matchingRule = pm.findMatchingDenyRule({
+            toolName: reqInfo.name,
+          });
+          const ruleInfo = matchingRule
+            ? ` Matching deny rule: "${matchingRule}".`
+            : '';
+          const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -869,10 +875,16 @@ export class CoreToolScheduler {
 
           if (finalPermission === 'deny') {
             // Hard deny: security violation or PM explicit deny
-            const denyMessage =
-              defaultPermission === 'deny'
-                ? `Tool "${reqInfo.name}" is denied: command substitution is not allowed for security reasons.`
-                : `Tool "${reqInfo.name}" is denied by permission rules.`;
+            let denyMessage: string;
+            if (defaultPermission === 'deny') {
+              denyMessage = `Tool "${reqInfo.name}" is denied: command substitution is not allowed for security reasons.`;
+            } else {
+              const matchingRule = pm?.findMatchingDenyRule(pmCtx);
+              const ruleInfo = matchingRule
+                ? ` Matching deny rule: "${matchingRule}".`
+                : '';
+              denyMessage = `Tool "${reqInfo.name}" is denied by permission rules.${ruleInfo}`;
+            }
             this.setStatusInternal(
               reqInfo.callId,
               'error',
@@ -945,7 +957,7 @@ export class CoreToolScheduler {
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
             if (shouldAutoDeny) {
-              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',

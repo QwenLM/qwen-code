@@ -17,7 +17,11 @@ import type {
   Config,
   EditorType,
 } from '@qwen-code/qwen-code-core';
-import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  IdeClient,
+  ToolConfirmationOutcome,
+  buildHumanReadableRuleLabel,
+} from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
@@ -248,16 +252,24 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel = executionProps.permissionRules?.length
-        ? ` [${executionProps.permissionRules.join(', ')}]`
+      const friendlyLabel = executionProps.permissionRules?.length
+        ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
         : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
@@ -329,18 +341,26 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel =
+      const friendlyLabel =
         'permissionRules' in infoProps &&
         (infoProps as { permissionRules?: string[] }).permissionRules?.length
-          ? ` [${(infoProps as { permissionRules?: string[] }).permissionRules!.join(', ')}]`
+          ? ` ${buildHumanReadableRuleLabel((infoProps as { permissionRules?: string[] }).permissionRules!)}`
           : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
@@ -406,16 +426,24 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel = mcpProps.permissionRules?.length
-        ? ` [${mcpProps.permissionRules.join(', ')}]`
+      const friendlyLabel = mcpProps.permissionRules?.length
+        ? ` ${buildHumanReadableRuleLabel(mcpProps.permissionRules)}`
         : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
