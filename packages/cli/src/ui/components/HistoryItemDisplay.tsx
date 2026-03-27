@@ -42,6 +42,7 @@ import { McpStatus } from './views/McpStatus.js';
 import { ContextUsage } from './views/ContextUsage.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
+import { BtwMessage } from './messages/BtwMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -225,6 +226,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'insight_progress' && (
         <InsightProgressMessage progress={itemForDisplay.progress} />
+      )}
+      {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
+        <BtwMessage btw={itemForDisplay.btw} />
       )}
     </Box>
   );

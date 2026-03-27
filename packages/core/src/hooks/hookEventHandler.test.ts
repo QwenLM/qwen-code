@@ -25,6 +25,13 @@ import type {
   AggregatedHookResult,
 } from './index.js';
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
+import type { HookExecutionResult } from './types.js';
+import { logHookCall } from '../telemetry/loggers.js';
+
+// Mock the telemetry loggers module
+vi.mock('../telemetry/loggers.js', () => ({
+  logHookCall: vi.fn(),
+}));
 
 describe('HookEventHandler', () => {
   let mockConfig: Config;
@@ -712,6 +719,7 @@ describe('HookEventHandler', () => {
         expect.any(Object), // input object
         expect.any(Function), // onHookStart callback
         expect.any(Function), // onHookEnd callback
+        undefined, // signal
       );
     });
 
@@ -2243,6 +2251,363 @@ describe('HookEventHandler', () => {
         stop_hook_active: boolean;
       };
       expect(input.stop_hook_active).toBe(true);
+    });
+  });
+
+  describe('telemetry', () => {
+    const createMockHookExecutionResult = (
+      success: boolean,
+      hookConfig: HookConfig,
+      duration: number = 100,
+      output?: HookOutput,
+      error?: Error,
+    ): HookExecutionResult => ({
+      hookConfig,
+      eventName: HookEventName.PreToolUse,
+      success,
+      output,
+      stdout: 'stdout',
+      stderr: success ? undefined : 'stderr',
+      exitCode: success ? 0 : 1,
+      duration,
+      error,
+    });
+
+    beforeEach(() => {
+      vi.mocked(logHookCall).mockClear();
+    });
+
+    it('should call logHookCall for each hook execution', async () => {
+      const hookConfig1: HookConfig = {
+        type: HookType.Command,
+        command: 'hook1.sh',
+        name: 'first-hook',
+        source: HooksConfigSource.Project,
+      };
+      const hookConfig2: HookConfig = {
+        type: HookType.Command,
+        command: 'hook2.sh',
+        name: 'second-hook',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig1, hookConfig2]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result1 = createMockHookExecutionResult(true, hookConfig1, 50);
+      const result2 = createMockHookExecutionResult(true, hookConfig2, 75);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result1,
+        result2,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test prompt');
+
+      expect(logHookCall).toHaveBeenCalledTimes(2);
+    });
+
+    it('should log hook call with correct event name', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'read_file',
+        { path: '/test' },
+        'tool-123',
+        PermissionMode.Default,
+      );
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_event_name: HookEventName.PreToolUse,
+        }),
+      );
+    });
+
+    it('should log hook call with hook name from config', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: '/path/to/my-hook.sh',
+        name: 'my-custom-hook',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_name: 'my-custom-hook',
+        }),
+      );
+    });
+
+    it('should log hook call with command as name when no name specified', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: '/path/to/hook-script.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_name: '/path/to/hook-script.sh',
+        }),
+      );
+    });
+
+    it('should log hook call with duration', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const duration = 250;
+      const result = createMockHookExecutionResult(true, hookConfig, duration);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          duration_ms: duration,
+        }),
+      );
+    });
+
+    it('should log hook call with success status', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          success: true,
+        }),
+      );
+    });
+
+    it('should log hook call with failure status', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'failing-hook.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(
+        false,
+        hookConfig,
+        100,
+        undefined,
+        new Error('Hook failed'),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(false),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          success: false,
+          error: 'Hook failed',
+        }),
+      );
+    });
+
+    it('should log hook call with exit code', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      result.exitCode = 0;
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          exit_code: 0,
+        }),
+      );
+    });
+
+    it('should log hook call with hook type', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_type: 'command',
+        }),
+      );
+    });
+
+    it('should not call logHookCall when no hooks are configured', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      await hookEventHandler.fireUserPromptSubmitEvent('test');
+
+      expect(logHookCall).not.toHaveBeenCalled();
+    });
+
+    it('should log telemetry for different event types', async () => {
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'test.sh',
+        source: HooksConfigSource.Project,
+      };
+
+      const mockPlan = createMockExecutionPlan([hookConfig]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+
+      const result = createMockHookExecutionResult(true, hookConfig);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        result,
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      // Test SessionStart
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Startup,
+        'test-model',
+      );
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_event_name: HookEventName.SessionStart,
+        }),
+      );
+
+      vi.mocked(logHookCall).mockClear();
+
+      // Test SessionEnd
+      await hookEventHandler.fireSessionEndEvent(SessionEndReason.Clear);
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_event_name: HookEventName.SessionEnd,
+        }),
+      );
+
+      vi.mocked(logHookCall).mockClear();
+
+      // Test Stop
+      await hookEventHandler.fireStopEvent(true, 'last message');
+      expect(logHookCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          hook_event_name: HookEventName.Stop,
+        }),
+      );
     });
   });
 });

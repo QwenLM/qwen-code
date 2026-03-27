@@ -308,6 +308,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private setupEventListeners(
     updateOutput?: (output: ToolResultDisplay) => void,
   ): void {
+    let pendingConfirmationCallId: string | undefined;
+
     this.eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
     });
@@ -344,9 +346,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           responseParts: event.responseParts,
         };
 
+        // When a tool result arrives for the tool that had a pending
+        // confirmation, clear the stale prompt. This handles the case where
+        // the IDE diff-tab accept resolved the tool via CoreToolScheduler's
+        // ideConfirmation.then path, which bypasses the UI's onConfirm wrapper.
+        const clearPending =
+          pendingConfirmationCallId === event.callId
+            ? { pendingConfirmation: undefined }
+            : {};
+        if (pendingConfirmationCallId === event.callId) {
+          pendingConfirmationCallId = undefined;
+        }
+
         this.updateDisplay(
           {
             toolCalls: [...this.currentToolCalls!],
+            ...clearPending,
           },
           updateOutput,
         );
@@ -398,6 +413,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
 
         // Bridge scheduler confirmation details to UI inline prompt
+        pendingConfirmationCallId = event.callId;
         const details: ToolCallConfirmationDetails = {
           ...(event.confirmationDetails as Omit<
             ToolCallConfirmationDetails,
@@ -409,6 +425,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ) => {
             // Clear the inline prompt immediately
             // and optimistically mark the tool as executing for proceed outcomes.
+            pendingConfirmationCallId = undefined;
             const proceedOutcomes = new Set<ToolConfirmationOutcome>([
               ToolConfirmationOutcome.ProceedOnce,
               ToolConfirmationOutcome.ProceedAlways,
@@ -525,6 +542,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             agentId,
             agentType,
             PermissionMode.Default,
+            signal,
           );
 
           // Inject additional context from hook output into subagent context
@@ -572,6 +590,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               subagent.getFinalText(),
               stopHookActive,
               PermissionMode.Default,
+              signal,
             );
 
             const typedStopOutput = stopHookOutput as

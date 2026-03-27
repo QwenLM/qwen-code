@@ -48,6 +48,24 @@ export interface ShellConfiguration {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
+    // Detect Git Bash / MSYS2 / MinTTY environments
+    // These environments should use bash instead of cmd/PowerShell
+    const msystem = process.env['MSYSTEM'];
+    const term = process.env['TERM'] || '';
+    const isGitBash =
+      msystem?.startsWith('MINGW') ||
+      msystem?.startsWith('MSYS') ||
+      term.includes('msys') ||
+      term.includes('cygwin');
+
+    if (isGitBash) {
+      return {
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      };
+    }
+
     const comSpec = process.env['ComSpec'] || 'cmd.exe';
     const executable = comSpec.toLowerCase();
 
@@ -126,6 +144,16 @@ export function splitCommands(command: string): string[] {
   let inDoubleQuotes = false;
   let i = 0;
 
+  const previousNonWhitespaceChar = (index: number): string | undefined => {
+    for (let j = index - 1; j >= 0; j--) {
+      const ch = command[j];
+      if (ch && !/\s/.test(ch)) {
+        return ch;
+      }
+    }
+    return undefined;
+  };
+
   while (i < command.length) {
     const char = command[i];
     const nextChar = command[i + 1];
@@ -145,14 +173,30 @@ export function splitCommands(command: string): string[] {
     if (!inSingleQuotes && !inDoubleQuotes) {
       if (
         (char === '&' && nextChar === '&') ||
-        (char === '|' && nextChar === '|')
+        (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
         commands.push(currentCommand.trim());
         currentCommand = '';
         i++; // Skip the next character
-      } else if (char === ';' || char === '&' || char === '|') {
+      } else if (char === ';') {
         commands.push(currentCommand.trim());
         currentCommand = '';
+      } else if (char === '&') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>' || prevChar === '<') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
+      } else if (char === '|') {
+        const prevChar = previousNonWhitespaceChar(i);
+        if (prevChar === '>') {
+          currentCommand += char;
+        } else {
+          commands.push(currentCommand.trim());
+          currentCommand = '';
+        }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
         commands.push(currentCommand.trim());
@@ -866,14 +910,18 @@ export function execCommand(
             reject(error);
           } else {
             resolve({
-              stdout: stdout ?? '',
-              stderr: stderr ?? '',
+              stdout: String(stdout ?? ''),
+              stderr: String(stderr ?? ''),
               code: typeof error.code === 'number' ? error.code : 1,
             });
           }
           return;
         }
-        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: 0 });
+        resolve({
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+          code: 0,
+        });
       },
     );
     child.on('error', reject);

@@ -366,6 +366,87 @@ describe('GlobTool', () => {
     });
   });
 
+  describe('multi-directory workspace', () => {
+    it('should search across all workspace directories when no path is specified', async () => {
+      // Create a second workspace directory
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), ''); // Fake git repo
+      await fs.writeFile(path.join(secondDir, 'extra.txt'), 'extra content');
+      await fs.writeFile(path.join(secondDir, 'bonus.txt'), 'bonus content');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should find files from both directories
+      expect(result.llmContent).toContain(path.join(tempRootDir, 'fileA.txt'));
+      expect(result.llmContent).toContain(path.join(secondDir, 'extra.txt'));
+      expect(result.llmContent).toContain(path.join(secondDir, 'bonus.txt'));
+      expect(result.llmContent).toContain('across 2 workspace directories');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should deduplicate entries across overlapping directories', async () => {
+      // Use the same directory twice to test deduplication
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [tempRootDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should still only have 2 txt files (fileA.txt, FileB.TXT), not doubled
+      expect(result.llmContent).toContain('Found 2 file(s)');
+    });
+
+    it('should use single directory description when only one workspace dir', async () => {
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('in the workspace directory');
+      expect(result.llmContent).not.toContain('across');
+    });
+
+    it('should search only the specified path when path is provided (ignoring multi-dir)', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), '');
+      await fs.writeFile(path.join(secondDir, 'other.txt'), 'other');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt', path: 'sub' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should NOT find files from secondDir
+      expect(result.llmContent).not.toContain('other.txt');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+  });
+
   describe('ignore file handling', () => {
     it('should respect .gitignore files by default', async () => {
       await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.ignored.txt');
