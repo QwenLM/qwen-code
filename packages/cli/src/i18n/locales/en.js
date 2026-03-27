@@ -1833,8 +1833,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    "Paste your api key of Bailian Coding Plan and you're all set!",
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    "Paste your api key of ModelStudio Coding Plan and you're all set!",
   Custom: 'Custom',
   'More instructions about configuring `modelProviders` manually.':
     'More instructions about configuring `modelProviders` manually.',

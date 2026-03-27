@@ -1650,7 +1650,7 @@ export default {
   // ============================================================================
   'API-KEY': 'API-KEY',
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
     '粘贴您的百炼 Coding Plan API Key，即可完成设置！',
   Custom: '自定义',
   'More instructions about configuring `modelProviders` manually.':
