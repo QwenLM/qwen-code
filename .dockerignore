@@ -5,6 +5,8 @@ node_modules
 # Build artifacts (rebuilt from scratch inside the container)
 dist
 **/dist
+**/tsconfig.tsbuildinfo
+**/tsconfig.tsbuildinfo
 
 # Version control
 .git
