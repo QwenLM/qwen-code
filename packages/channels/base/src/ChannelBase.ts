@@ -1,4 +1,5 @@
 import type { ChannelConfig, Envelope } from './types.js';
+import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
@@ -246,11 +247,22 @@ export abstract class ChannelBase {
     // Serialize prompt + send per session to prevent textChunk listener
     // pollution when concurrent messages hit the same session.
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
-      // Forward streaming chunks to the subclass hook
+      const streamer = useBlockStreaming
+        ? new BlockStreamer({
+            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
+            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
+            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
+            send: (text) => this.sendMessage(envelope.chatId, text),
+          })
+        : null;
+
+      // Forward streaming chunks to the subclass hook (and block streamer)
       const onChunk = (sid: string, chunk: string) => {
         if (sid === sessionId) {
           this.onResponseChunk(envelope.chatId, chunk, sessionId);
+          streamer?.push(chunk);
         }
       };
       this.bridge.on('textChunk', onChunk);
@@ -262,7 +274,11 @@ export abstract class ChannelBase {
         });
 
         if (response) {
-          await this.onResponseComplete(envelope.chatId, response, sessionId);
+          if (streamer) {
+            await streamer.flush();
+          } else {
+            await this.onResponseComplete(envelope.chatId, response, sessionId);
+          }
         }
       } finally {
         this.bridge.off('textChunk', onChunk);

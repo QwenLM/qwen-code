@@ -10,6 +10,18 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
 }
 
+export interface BlockStreamingChunkConfig {
+  /** Minimum characters before emitting a block. Default: 400. */
+  minChars?: number;
+  /** Force-emit when buffer exceeds this size. Default: 1000. */
+  maxChars?: number;
+}
+
+export interface BlockStreamingCoalesceConfig {
+  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
+  idleMs?: number;
+}
+
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -24,6 +36,13 @@ export interface ChannelConfig {
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
+
+  /** Enable block streaming — emit completed blocks as separate messages. */
+  blockStreaming?: 'on' | 'off';
+  /** Chunk size bounds for block streaming. */
+  blockStreamingChunk?: BlockStreamingChunkConfig;
+  /** Idle coalescing for block streaming. */
+  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Envelope {

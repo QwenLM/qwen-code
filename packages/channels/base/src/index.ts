@@ -4,6 +4,8 @@ export type {
   AvailableCommand,
   ToolCallEvent,
 } from './AcpBridge.js';
+export { BlockStreamer } from './BlockStreamer.js';
+export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
 export type { ChannelBaseOptions } from './ChannelBase.js';
 export { PairingStore } from './PairingStore.js';
@@ -14,6 +16,8 @@ export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
 export type {
+  BlockStreamingChunkConfig,
+  BlockStreamingCoalesceConfig,
   ChannelConfig,
   ChannelPlugin,
   ChannelType,
