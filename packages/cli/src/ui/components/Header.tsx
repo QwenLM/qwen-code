@@ -143,7 +143,7 @@ export const Header: React.FC<HeaderProps> = ({
         </Text>
         {/* Empty line for spacing */}
         <Text color={theme.text.secondary}>
-          Built-in DataWorks Official Skills{' '}
+          Built-in DataWorks Official Skills
         </Text>
         {/* Auth and Model line */}
         <Text>
