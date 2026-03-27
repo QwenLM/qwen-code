@@ -540,7 +540,16 @@ export function KeypressProvider({
       }
     };
 
+    // Matches terminal query responses (DA1, DA2, Kitty protocol query)
+    // that may arrive late from startup detection in kittyProtocolDetector.
+    // These are never valid user input.
+    // eslint-disable-next-line no-control-regex
+    const TERMINAL_RESPONSE_RE = /^\x1b\[[?>][\d;]*[uc]$/;
+
     const handleKeypress = async (_: unknown, key: Key) => {
+      if (TERMINAL_RESPONSE_RE.test(key.sequence)) {
+        return;
+      }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
         return;
       }
