@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-plugin-example",
-  "version": "0.1.0",
+  "version": "0.13.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "^0.1.0",
+    "@qwen-code/channel-base": "file:../base",
     "ws": "^8.18.0"
   },
   "devDependencies": {

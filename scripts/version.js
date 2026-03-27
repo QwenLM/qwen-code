@@ -104,9 +104,28 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 7. Run `npm install` to update package-lock.json.
+// 7. Rewrite file: references to semver for packages that will be published to npm.
+// During development, channel packages use file: for monorepo linking.
+// At release time, published packages need real semver references so they resolve from npm.
+const publishedCrossRefs = [
+  {
+    packagePath: 'packages/channels/plugin-example/package.json',
+    dep: '@qwen-code/channel-base',
+  },
+];
+for (const { packagePath, dep } of publishedCrossRefs) {
+  const pkgPath = resolve(process.cwd(), packagePath);
+  const pkgJson = readJson(pkgPath);
+  if (pkgJson.dependencies?.[dep]?.startsWith('file:')) {
+    pkgJson.dependencies[dep] = `^${newVersion}`;
+    console.log(`Updated ${dep} in ${packagePath} to ^${newVersion}`);
+    writeJson(pkgPath, pkgJson);
+  }
+}
+
+// 8. Run `npm install` to update package-lock.json.
 run(
-  'npm install --workspace packages/cli --workspace packages/core --package-lock-only',
+  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only',
 );
 
 console.log(`Successfully bumped versions to v${newVersion}.`);
