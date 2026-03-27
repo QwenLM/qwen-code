@@ -59,15 +59,16 @@ For a complete working example, see [`@qwen-code/channel-plugin-example`](../plu
 
 ```
 Inbound:  Platform message
-            → Envelope
+            → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
             → SenderGate (allowlist / pairing / open)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create ACP session)
+            → Resolve attachments (images → bridge, files → prompt text)
             → AcpBridge.prompt() → agent
 
 Outbound: Agent response
-            → ChannelBase
+            → BlockStreamer (if enabled: split into blocks at paragraph boundaries)
             → sendMessage() → platform
 ```
 
@@ -81,6 +82,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | --------------- | ---------------------------------------------------------------- |
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter     |
 | `AcpBridge`     | Spawns and communicates with the `qwen-code --acp` agent process |
+| `BlockStreamer` | Progressive multi-message delivery for block streaming           |
 | `SessionRouter` | Maps senders to ACP sessions with configurable scoping           |
 | `SenderGate`    | DM access control (allowlist / pairing / open)                   |
 | `GroupGate`     | Group chat policy and @mention gating                            |
@@ -90,6 +92,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 
 | Type            | Description                                    |
 | --------------- | ---------------------------------------------- |
+| `Attachment`    | Structured file/image/audio/video attachment   |
 | `ChannelConfig` | Channel configuration from `settings.json`     |
 | `ChannelPlugin` | Plugin factory interface (what you export)     |
 | `Envelope`      | Normalized inbound message format              |
@@ -117,12 +120,16 @@ constructor(name: string, config: ChannelConfig, bridge: AcpBridge, options?: Ch
 
 **Provided methods:**
 
-| Method                           | Description                                                                                                                       |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`        | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler. |
-| `setBridge(bridge)`              | Replace the ACP bridge after crash recovery                                                                                       |
-| `registerCommand(name, handler)` | Register a custom slash command (e.g. `/mycommand`)                                                                               |
-| `onToolCall(chatId, event)`      | Hook called on agent tool invocations — override to show indicators                                                               |
+| Method                                            | Description                                                                                                                       |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                         | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler. |
+| `setBridge(bridge)`                               | Replace the ACP bridge after crash recovery                                                                                       |
+| `registerCommand(name, handler)`                  | Register a custom slash command (e.g. `/mycommand`)                                                                               |
+| `onToolCall(chatId, event)`                       | Hook called on agent tool invocations — override to show indicators                                                               |
+| `onResponseChunk(chatId, chunk, sessionId)`       | Hook called per streaming text chunk — override for progressive display (default: no-op)                                          |
+| `onResponseComplete(chatId, fullText, sessionId)` | Hook called when full response is ready — override to customize delivery (default: `sendMessage()`)                               |
+
+**Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -244,10 +251,43 @@ interface Envelope {
   isMentioned: boolean; // true if bot was @mentioned
   isReplyToBot: boolean; // true if replying to bot's message
   referencedText?: string; // quoted message text
-  imageBase64?: string; // base64-encoded image
-  imageMimeType?: string; // e.g. 'image/jpeg'
+  imageBase64?: string; // base64-encoded image (legacy — prefer attachments)
+  imageMimeType?: string; // e.g. 'image/jpeg' (legacy — prefer attachments)
+  attachments?: Attachment[]; // structured file/image/audio/video attachments
+}
+
+interface Attachment {
+  type: 'image' | 'file' | 'audio' | 'video';
+  data?: string; // base64-encoded data (images, small files)
+  filePath?: string; // absolute path to local file (large files)
+  mimeType: string; // e.g. 'application/pdf', 'image/jpeg'
+  fileName?: string; // original file name from the platform
 }
 ```
+
+`handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
+
+## Block Streaming
+
+When `blockStreaming: "on"` is set in a channel's config, the agent's response is delivered as multiple separate messages instead of one large wall of text. The `BlockStreamer` accumulates streaming chunks and emits completed blocks based on paragraph boundaries and size heuristics.
+
+**Config fields** (on `ChannelConfig`):
+
+| Field                    | Type                     | Default         | Description                                                                 |
+| ------------------------ | ------------------------ | --------------- | --------------------------------------------------------------------------- |
+| `blockStreaming`         | `'on' \| 'off'`          | `'off'`         | Enable/disable block streaming                                              |
+| `blockStreamingChunk`    | `{ minChars, maxChars }` | `{ 400, 1000 }` | `minChars`: don't emit until this size. `maxChars`: force-emit at this size |
+| `blockStreamingCoalesce` | `{ idleMs }`             | `{ 1500 }`      | Emit buffered text after this many ms of silence from the agent             |
+
+**How it works:**
+
+1. Text accumulates as the agent streams its response
+2. When the buffer reaches `minChars` and hits a paragraph break (`\n\n`), that block is sent as a separate message
+3. If the buffer reaches `maxChars` without a paragraph break, it force-splits at the best break point (newline > space)
+4. If the agent goes quiet for `idleMs`, the buffer is flushed (as long as it's past `minChars`)
+5. When the agent finishes, any remaining text is sent immediately regardless of `minChars`
+
+Block streaming and `onResponseChunk` work independently — plugins can override `onResponseChunk` for their own purposes while block streaming handles delivery.
 
 ## Further reading
 

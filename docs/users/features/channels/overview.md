@@ -47,20 +47,23 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option         | Required | Description                                                                                                                              |
-| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`         | Yes      | Channel type: `telegram`, `weixin`, `dingtalk`, or a custom type from an extension (see [Plugins](./plugins))                            |
-| `token`        | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                              |
-| `clientId`     | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                              |
-| `clientSecret` | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                           |
-| `model`        | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input |
-| `senderPolicy` | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                     |
-| `allowedUsers` | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                     |
-| `sessionScope` | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                         |
-| `cwd`          | No       | Working directory for the agent. Defaults to the current directory                                                                       |
-| `instructions` | No       | Custom instructions prepended to the first message of each session                                                                       |
-| `groupPolicy`  | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                         |
-| `groups`       | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                       |
+| Option                   | Required | Description                                                                                                                              |
+| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                   | Yes      | Channel type: `telegram`, `weixin`, `dingtalk`, or a custom type from an extension (see [Plugins](./plugins))                            |
+| `token`                  | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                              |
+| `clientId`               | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                              |
+| `clientSecret`           | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                           |
+| `model`                  | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input |
+| `senderPolicy`           | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                     |
+| `allowedUsers`           | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                     |
+| `sessionScope`           | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                         |
+| `cwd`                    | No       | Working directory for the agent. Defaults to the current directory                                                                       |
+| `instructions`           | No       | Custom instructions prepended to the first message of each session                                                                       |
+| `groupPolicy`            | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                         |
+| `groups`                 | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                       |
+| `blockStreaming`         | No       | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                          |
+| `blockStreamingChunk`    | No       | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                      |
+| `blockStreamingCoalesce` | No       | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                |
 
 ### Sender Policy
 
@@ -218,6 +221,34 @@ Files work with any model — no multimodal support required.
 | Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   |
 | Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   |
 | Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message |
+
+## Block Streaming
+
+By default, the agent works for a while and then sends one large response. With block streaming enabled, the response arrives as multiple shorter messages while the agent is still working — similar to how ChatGPT or Claude show progressive output.
+
+```json
+{
+  "channels": {
+    "my-channel": {
+      "type": "telegram",
+      "blockStreaming": "on",
+      "blockStreamingChunk": { "minChars": 400, "maxChars": 1000 },
+      "blockStreamingCoalesce": { "idleMs": 1500 },
+      ...
+    }
+  }
+}
+```
+
+### How it works
+
+- The agent's response is split into blocks at paragraph boundaries and sent as separate messages
+- `minChars` (default 400) — don't send a block until it's at least this long, to avoid spamming tiny messages
+- `maxChars` (default 1000) — if a block gets this long without a natural break, send it anyway
+- `idleMs` (default 1500) — if the agent pauses (e.g., running a tool), send what's buffered so far
+- When the agent finishes, any remaining text is sent immediately
+
+Only `blockStreaming` is required. The chunk and coalesce settings are optional and have sensible defaults.
 
 ## Slash Commands
 

@@ -94,4 +94,11 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 3. Export a `plugin` object conforming to `ChannelPlugin`
 4. Add a `qwen-extension.json` manifest
 
+### Features you get for free
+
+- **Block streaming** — enable `blockStreaming: "on"` in config and the agent's response is automatically split into multiple messages at paragraph boundaries
+- **Attachments** — populate `envelope.attachments` with images/files and `handleInbound()` routes them to the agent (images as vision input, files as paths in the prompt)
+- **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
+- Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
+
 Full guide: [Channel Plugin Developer Guide](../../docs/developers/channel-plugins.md)
