@@ -740,7 +740,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
-        _meta: { bom: true, encoding: 'utf-8' },
+        _meta: { bom: true, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
@@ -768,7 +768,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
-        _meta: { bom: false, encoding: 'utf-8' },
+        _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
