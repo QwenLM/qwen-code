@@ -137,6 +137,8 @@ export interface UIState {
   isExtensionsManagerDialogOpen: boolean;
   // MCP dialog
   isMcpDialogOpen: boolean;
+  // Hooks dialog
+  isHooksDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking

@@ -119,61 +119,106 @@ class GlobToolInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
+  /**
+   * Runs glob search in a single directory and returns filtered entries.
+   */
+  private async globInDirectory(
+    searchDir: string,
+    pattern: string,
+    signal: AbortSignal,
+  ): Promise<GlobPath[]> {
+    let effectivePattern = pattern;
+    const fullPath = path.join(searchDir, effectivePattern);
+    if (fs.existsSync(fullPath)) {
+      effectivePattern = escape(effectivePattern);
+    }
+
+    const entries = (await glob(effectivePattern, {
+      cwd: searchDir,
+      withFileTypes: true,
+      nodir: true,
+      stat: true,
+      nocase: true,
+      dot: true,
+      follow: false,
+      signal,
+    })) as GlobPath[];
+
+    // Filter using paths relative to the project root (the base that
+    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
+    // Using searchDir-relative paths would cause ignore rules to be
+    // evaluated against incorrect paths when searchDir != projectRoot.
+    const projectRoot = this.config.getTargetDir();
+    const relativePaths = entries.map((p) =>
+      path.relative(projectRoot, p.fullpath()),
+    );
+
+    const { filteredPaths } = this.fileService.filterFilesWithReport(
+      relativePaths,
+      this.getFileFilteringOptions(),
+    );
+
+    const normalizePathForComparison = (p: string) =>
+      process.platform === 'win32' || process.platform === 'darwin'
+        ? p.toLowerCase()
+        : p;
+
+    const filteredAbsolutePaths = new Set(
+      filteredPaths.map((p) =>
+        normalizePathForComparison(path.resolve(projectRoot, p)),
+      ),
+    );
+
+    return entries.filter((entry) =>
+      filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
+    );
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Default to target directory if no path is provided
-      const searchDirAbs = resolveAndValidatePath(
-        this.config,
-        this.params.path,
-        { allowExternalPaths: true },
-      );
-      const searchLocationDescription = this.params.path
-        ? `within ${searchDirAbs}`
-        : `in the workspace directory`;
+      // Determine which directories to search
+      const searchDirs: string[] = [];
+      let searchLocationDescription: string;
 
-      // Collect entries from the search directory
-      let pattern = this.params.pattern;
-      const fullPath = path.join(searchDirAbs, pattern);
-      if (fs.existsSync(fullPath)) {
-        pattern = escape(pattern);
+      if (this.params.path) {
+        // User specified a path — search only that directory
+        const searchDirAbs = resolveAndValidatePath(
+          this.config,
+          this.params.path,
+          { allowExternalPaths: true },
+        );
+        searchDirs.push(searchDirAbs);
+        searchLocationDescription = `within ${searchDirAbs}`;
+      } else {
+        // No path specified — search all workspace directories
+        const workspaceDirs = this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        searchDirs.push(...workspaceDirs);
+        searchLocationDescription =
+          workspaceDirs.length > 1
+            ? `across ${workspaceDirs.length} workspace directories`
+            : `in the workspace directory`;
       }
 
-      const allEntries = (await glob(pattern, {
-        cwd: searchDirAbs,
-        withFileTypes: true,
-        nodir: true,
-        stat: true,
-        nocase: true,
-        dot: true,
-        follow: false,
-        signal,
-      })) as GlobPath[];
+      // Collect entries from all search directories
+      const pattern = this.params.pattern;
+      const allFilteredEntries: GlobPath[] = [];
+      const seenPaths = new Set<string>();
 
-      const relativePaths = allEntries.map((p) =>
-        path.relative(this.config.getTargetDir(), p.fullpath()),
-      );
+      for (const searchDir of searchDirs) {
+        const entries = await this.globInDirectory(searchDir, pattern, signal);
+        for (const entry of entries) {
+          // Deduplicate entries that might appear in overlapping directories
+          const normalized = entry.fullpath();
+          if (!seenPaths.has(normalized)) {
+            seenPaths.add(normalized);
+            allFilteredEntries.push(entry);
+          }
+        }
+      }
 
-      const { filteredPaths } = this.fileService.filterFilesWithReport(
-        relativePaths,
-        this.getFileFilteringOptions(),
-      );
-
-      const normalizePathForComparison = (p: string) =>
-        process.platform === 'win32' || process.platform === 'darwin'
-          ? p.toLowerCase()
-          : p;
-
-      const filteredAbsolutePaths = new Set(
-        filteredPaths.map((p) =>
-          normalizePathForComparison(
-            path.resolve(this.config.getTargetDir(), p),
-          ),
-        ),
-      );
-
-      const filteredEntries = allEntries.filter((entry) =>
-        filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
-      );
+      const filteredEntries = allFilteredEntries;
 
       if (!filteredEntries || filteredEntries.length === 0) {
         return {

@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import { type CodingPlanRegion } from '../../constants/codingPlan.js';
+import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
 import type { AuthState } from '../types.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
@@ -44,6 +45,11 @@ export interface UIActions {
   handleCodingPlanSubmit: (
     apiKey: string,
     region?: CodingPlanRegion,
+  ) => Promise<void>;
+  handleAlibabaStandardSubmit: (
+    apiKey: string,
+    region: AlibabaStandardRegion,
+    modelIdsInput: string,
   ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;
@@ -83,6 +89,10 @@ export interface UIActions {
   closeExtensionsManagerDialog: () => void;
   // MCP dialog
   closeMcpDialog: () => void;
+  // Hooks dialog
+  openHooksDialog: () => void;
+  // Hooks dialog
+  closeHooksDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

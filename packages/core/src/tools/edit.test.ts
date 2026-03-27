@@ -922,5 +922,48 @@ describe('EditTool', () => {
       expect(params.old_string).toBe(initialContent);
       expect(params.new_string).toBe(modifiedContent);
     });
+
+    it('should not call ideClient.openDiff in AUTO_EDIT mode', async () => {
+      const initialContent = 'some old content here';
+      fs.writeFileSync(filePath, initialContent);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      expect(ideClient.openDiff).not.toHaveBeenCalled();
+      expect(confirmation).toBeDefined();
+      expect((confirmation as any).ideConfirmation).toBeUndefined();
+    });
+
+    it('should not call ideClient.openDiff in YOLO mode', async () => {
+      const initialContent = 'some old content here';
+      fs.writeFileSync(filePath, initialContent);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.YOLO,
+      );
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      expect(ideClient.openDiff).not.toHaveBeenCalled();
+      expect((confirmation as any).ideConfirmation).toBeUndefined();
+    });
   });
 });
