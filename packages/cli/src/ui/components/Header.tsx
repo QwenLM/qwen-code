@@ -139,10 +139,12 @@ export const Header: React.FC<HeaderProps> = ({
           <Text bold color={theme.text.accent}>
             &gt;_ DataWorks DataAgent (Power by Qwen Code)
           </Text>
-          <Text color={theme.text.secondary}> (v{version})</Text>
+          <Text color={theme.text.accent}> (v{version})</Text>
         </Text>
         {/* Empty line for spacing */}
-        <Text> </Text>
+        <Text color={theme.text.secondary}>
+          Built-in DataWorks Official Skills
+        </Text>
         {/* Auth and Model line */}
         <Text>
           <Text color={theme.text.secondary}>{authModelText}</Text>
