@@ -524,8 +524,18 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with Alibaba Cloud Standard API Key. Settings updated with env.DASHSCOPE_API_KEY and {{modelCount}} model(s).',
+              'Alibaba Cloud ModelStudio Standard API Key successfully entered. Settings updated with env.DASHSCOPE_API_KEY and {{modelCount}} model(s).',
               { modelCount: String(modelIds.length) },
+            ),
+          },
+          Date.now(),
+        );
+
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              'You can use /model to see new ModelStudio Standard models and switch between them.',
             ),
           },
           Date.now(),

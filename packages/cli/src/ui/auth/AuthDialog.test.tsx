@@ -603,7 +603,7 @@ describe('AuthDialog', () => {
     await wait();
 
     expect(lastFrame()).toContain('Select API Key Type');
-    expect(lastFrame()).toContain('Alibaba Cloud Standard API Key');
+    expect(lastFrame()).toContain('Alibaba Cloud ModelStudio Standard API Key');
     expect(lastFrame()).toContain('Custom API Key');
 
     // Move to Custom API Key and enter
@@ -615,7 +615,7 @@ describe('AuthDialog', () => {
     unmount();
   });
 
-  it('shows Alibaba Cloud Standard API Key region endpoint', async () => {
+  it('shows Alibaba Cloud ModelStudio Standard API Key region endpoint', async () => {
     const settings: LoadedSettings = new LoadedSettings(
       {
         settings: { ui: { customThemes: {} }, mcpServers: {} },
@@ -658,7 +658,7 @@ describe('AuthDialog', () => {
     stdin.write('\r');
     await wait();
 
-    // API Key type -> Alibaba Cloud Standard API Key (default)
+    // API Key type -> Alibaba Cloud ModelStudio Standard API Key (default)
     stdin.write('\r');
     await wait();
 
@@ -667,7 +667,9 @@ describe('AuthDialog', () => {
     stdin.write('\r');
     await wait();
 
-    expect(lastFrame()).toContain('Enter Alibaba Cloud Standard API Key');
+    expect(lastFrame()).toContain(
+      'Enter Alibaba Cloud ModelStudio Standard API Key',
+    );
     expect(lastFrame()).toContain(
       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     );

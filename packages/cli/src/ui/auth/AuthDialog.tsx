@@ -58,6 +58,18 @@ type ViewLevel =
   | 'custom-info';
 
 const ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER = 'qwen3.5-plus,glm-5,kimi-k2.5';
+const ALIBABA_STANDARD_API_DOCUMENTATION_URLS: Record<
+  AlibabaStandardRegion,
+  string
+> = {
+  'cn-beijing': 'https://bailian.console.aliyun.com/cn-beijing?tab=api#/api',
+  'sg-singapore':
+    'https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=api#/api/?type=model&url=2712195',
+  'us-virginia':
+    'https://modelstudio.console.alibabacloud.com/us-east-1?tab=api#/api/?type=model&url=2712195',
+  'cn-hongkong':
+    'https://modelstudio.console.alibabacloud.com/cn-hongkong?tab=api#/api/?type=model&url=2712195',
+};
 
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
@@ -203,8 +215,8 @@ export function AuthDialog(): React.JSX.Element {
   const apiKeyTypeItems = [
     {
       key: 'ALIBABA_STANDARD_API_KEY',
-      title: t('Alibaba Cloud Standard API Key'),
-      label: t('Alibaba Cloud Standard API Key'),
+      title: t('Alibaba Cloud ModelStudio Standard API Key'),
+      label: t('Alibaba Cloud ModelStudio Standard API Key'),
       description: t('Quick setup for Model Studio (China/International)'),
       value: 'ALIBABA_STANDARD_API_KEY' as ApiKeyOption,
     },
@@ -527,13 +539,23 @@ export function AuthDialog(): React.JSX.Element {
 
   const renderAlibabaStandardApiKeyInputView = () => (
     <Box marginTop={1} flexDirection="column">
-      <Text color={theme.text.primary}>
-        {t('Enter your Alibaba Cloud Model Studio API key')}
-      </Text>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
           Endpoint: {ALIBABA_STANDARD_API_KEY_ENDPOINTS[alibabaStandardRegion]}
         </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary}>{t('Documentation')}:</Text>
+      </Box>
+      <Box marginTop={0}>
+        <Link
+          url={ALIBABA_STANDARD_API_DOCUMENTATION_URLS[alibabaStandardRegion]}
+          fallback={false}
+        >
+          <Text color={theme.text.link}>
+            {ALIBABA_STANDARD_API_DOCUMENTATION_URLS[alibabaStandardRegion]}
+          </Text>
+        </Link>
       </Box>
       <Box marginTop={1}>
         <TextInput
@@ -633,9 +655,11 @@ export function AuthDialog(): React.JSX.Element {
       case 'custom-info':
         return t('Custom Configuration');
       case 'alibaba-standard-region-select':
-        return t('Select Region for Alibaba Cloud Standard API Key');
+        return t(
+          'Select Region for Alibaba Cloud ModelStudio Standard API Key',
+        );
       case 'alibaba-standard-api-key-input':
-        return t('Enter Alibaba Cloud Standard API Key');
+        return t('Enter Alibaba Cloud ModelStudio Standard API Key');
       case 'alibaba-standard-model-id-input':
         return t('Enter Model IDs');
       default:
