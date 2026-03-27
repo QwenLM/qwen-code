@@ -12,5 +12,10 @@ export const plugin: ChannelPlugin = {
   displayName: 'Plugin Example',
   requiredConfigFields: ['serverWsUrl'],
   createChannel: (name, config, bridge, options) =>
-    new MockPluginChannel(name, config as MockPluginConfig, bridge, options),
+    new MockPluginChannel(
+      name,
+      config as typeof config & { serverWsUrl: string },
+      bridge,
+      options,
+    ),
 };
