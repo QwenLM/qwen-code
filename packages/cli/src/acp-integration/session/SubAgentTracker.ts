@@ -226,12 +226,13 @@ export class SubAgentTracker {
         const editDetails = event.confirmationDetails as unknown as {
           type: 'edit';
           fileName: string;
+          filePath: string;
           originalContent: string | null;
           newContent: string;
         };
         content.push({
           type: 'diff',
-          path: editDetails.fileName,
+          path: editDetails.filePath || editDetails.fileName,
           oldText: editDetails.originalContent ?? '',
           newText: editDetails.newContent,
         });

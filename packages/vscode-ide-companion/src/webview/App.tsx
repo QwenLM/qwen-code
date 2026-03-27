@@ -481,10 +481,18 @@ export const App: React.FC = () => {
 
   // Set loading state to false after initial mount and when we have authentication info
   useEffect(() => {
-    // If we have determined authentication status, we're done loading
     if (isAuthenticated !== null) {
       setIsLoading(false);
+      return;
     }
+
+    // Safety-net timeout: if initialization takes too long (e.g. CLI crashed
+    // before the error could be surfaced), stop the spinner and let the user
+    // see the onboarding / error UI instead of hanging forever.
+    const timeout = setTimeout(() => {
+      setIsLoading(false);
+    }, 30_000);
+    return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
   // Handle permission response
