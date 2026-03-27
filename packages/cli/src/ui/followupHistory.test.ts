@@ -30,13 +30,21 @@ function createTool(
   };
 }
 
+let nextId = 1;
+
 function createToolGroup(
   tools: IndividualToolCallDisplay[],
 ): Extract<HistoryItem, { type: 'tool_group' }> {
   return {
     type: 'tool_group',
     tools,
+    id: nextId++,
   };
+}
+
+/** Create a minimal HistoryItem with auto-incremented id */
+function h(item: { type: string; text: string }): HistoryItem {
+  return { ...item, id: nextId++ } as HistoryItem;
 }
 
 describe('extractModifiedFileFromTool', () => {
@@ -75,8 +83,8 @@ describe('extractModifiedFileFromTool', () => {
 describe('extractFollowupSuggestionContext', () => {
   it('uses only tool calls and assistant content from the most recent turn', () => {
     const context = extractFollowupSuggestionContext([
-      { type: 'user', text: 'old turn' },
-      { type: 'gemini', text: 'I created an old file' },
+      h({ type: 'user', text: 'old turn' }),
+      h({ type: 'gemini', text: 'I created an old file' }),
       createToolGroup([
         createTool({
           name: 'WriteFile',
@@ -85,8 +93,8 @@ describe('extractFollowupSuggestionContext', () => {
             'Successfully created and wrote to new file: /tmp/src/old.ts.',
         }),
       ]),
-      { type: 'user', text: 'current turn' },
-      { type: 'gemini', text: 'I fixed the current bug' },
+      h({ type: 'user', text: 'current turn' }),
+      h({ type: 'gemini', text: 'I fixed the current bug' }),
       createToolGroup([
         createTool({
           name: 'Edit',
@@ -94,7 +102,7 @@ describe('extractFollowupSuggestionContext', () => {
           status: UIToolCallStatus.Success,
         }),
       ]),
-    ] satisfies HistoryItem[]);
+    ]);
 
     expect(context).not.toBeNull();
     expect(context?.lastMessage).toBe('I fixed the current bug');
@@ -108,25 +116,25 @@ describe('extractFollowupSuggestionContext', () => {
 
   it('returns null when the current turn has no tool calls', () => {
     const context = extractFollowupSuggestionContext([
-      { type: 'user', text: 'old turn' },
-      { type: 'gemini', text: 'I edited a file earlier' },
+      h({ type: 'user', text: 'old turn' }),
+      h({ type: 'gemini', text: 'I edited a file earlier' }),
       createToolGroup([
         createTool({
           name: 'Edit',
           description: 'src/old.ts: before => after',
         }),
       ]),
-      { type: 'user', text: 'current turn' },
-      { type: 'gemini', text: 'No tool calls this time' },
-    ] satisfies HistoryItem[]);
+      h({ type: 'user', text: 'current turn' }),
+      h({ type: 'gemini', text: 'No tool calls this time' }),
+    ]);
 
     expect(context).toBeNull();
   });
 
   it('maps tool statuses for followup generation', () => {
     const history: HistoryItem[] = [
-      { type: 'user', text: 'current turn' },
-      { type: 'gemini', text: 'The shell command failed' },
+      h({ type: 'user', text: 'current turn' }),
+      h({ type: 'gemini', text: 'The shell command failed' }),
       createToolGroup([
         createTool({
           name: 'Shell',

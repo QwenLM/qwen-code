@@ -15,11 +15,17 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   INITIAL_FOLLOWUP_STATE,
   createFollowupController,
-  type FollowupSuggestion,
-  type FollowupState,
-} from './followupState.js';
+} from '@qwen-code/qwen-code-core';
+import type {
+  FollowupSuggestion,
+  FollowupState,
+} from '@qwen-code/qwen-code-core';
 
-export type { FollowupSuggestion, FollowupState } from './followupState.js';
+// Re-export types from core for convenience
+export type {
+  FollowupSuggestion,
+  FollowupState,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Options for the hook
@@ -59,25 +65,6 @@ export interface UseFollowupSuggestionsReturn {
  * Delegates all timer/debounce/state logic to the shared
  * `createFollowupController` from core. Adds a `getPlaceholder`
  * helper specific to the WebUI input form.
- *
- * @example
- * ```tsx
- * const { state, getPlaceholder, setSuggestions, accept, dismiss, next, previous } = useFollowupSuggestions({
- *   onAccept: (suggestion) => setInputText(suggestion),
- * });
- *
- * // After streaming completes:
- * setSuggestions([{ text: 'commit this', priority: 100 }]);
- *
- * // Pass to InputForm:
- * <InputForm
- *   followupState={state}
- *   onNextFollowup={next}
- *   onPreviousFollowup={previous}
- *   onAcceptFollowup={accept}
- *   onDismissFollowup={dismiss}
- * />
- * ```
  */
 export function useFollowupSuggestions(
   options: UseFollowupSuggestionsOptions = {},
