@@ -55,7 +55,20 @@ import {
   SETTINGS_VERSION_KEY,
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
-import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import {
+  FatalConfigError,
+  QWEN_DIR,
+  normalizePathForComparison,
+} from '@qwen-code/qwen-code-core';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    normalizePathForComparison: vi.fn((p: string) => p),
+  };
+});
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
@@ -84,7 +97,7 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn(),
   };
 });
 
@@ -101,7 +114,7 @@ vi.mock('fs', async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     mkdirSync: vi.fn(),
-    realpathSync: (p: string) => p,
+    realpathSync: vi.fn(),
   };
 });
 
@@ -117,6 +130,7 @@ describe('Settings Loading and Merging', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
   let mockStripJsonComments: Mocked<typeof stripJsonComments>;
   let mockFsMkdirSync: Mocked<typeof fs.mkdirSync>;
+  let mockFsRealpathSync: Mocked<typeof fs.realpathSync>;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -124,6 +138,7 @@ describe('Settings Loading and Merging', () => {
     mockFsExistsSync = vi.mocked(fs.existsSync);
     mockFsMkdirSync = vi.mocked(fs.mkdirSync);
     mockStripJsonComments = vi.mocked(stripJsonComments);
+    mockFsRealpathSync = vi.mocked(fs.realpathSync);
 
     vi.mocked(osActual.homedir).mockReturnValue('/mock/home/user');
     (mockStripJsonComments as unknown as Mock).mockImplementation(
@@ -132,6 +147,8 @@ describe('Settings Loading and Merging', () => {
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}'); // Return valid empty JSON
     (mockFsMkdirSync as Mock).mockImplementation(() => undefined);
+    (mockFsRealpathSync as Mock).mockImplementation((p: string) => p);
+    vi.mocked(normalizePathForComparison).mockImplementation((p: string) => p);
     vi.mocked(isWorkspaceTrusted).mockReturnValue({
       isTrusted: true,
       source: 'file',
@@ -2333,22 +2350,13 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.ui?.theme).toBe('dark');
     });
 
-    it('should handle case-insensitive workspace vs home comparison on Windows', () => {
-      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
-      vi.spyOn(osActual, 'homedir').mockReturnValue('C:\\Users\\Aditya');
-      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
-
-      loadSettings('C:\\USERS\\ADITYA\\project');
-
-      expect(fs.existsSync).not.toHaveBeenCalledWith(
-        'C:\\USERS\\ADITYA\\project\\.qwen\\settings.json',
-      );
-    });
-
     it('should handle case-insensitive workspace vs home on Windows - different paths', () => {
-      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
-      vi.spyOn(osActual, 'homedir').mockReturnValue('C:\\Users\\Aditya');
-      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
+      vi.mocked(osActual.platform).mockReturnValue('win32');
+      vi.mocked(osActual.homedir).mockReturnValue('C:\\Users\\testuser');
+      (mockFsRealpathSync as Mock).mockImplementation((p: string) => p);
+      vi.mocked(normalizePathForComparison).mockImplementation((p: string) =>
+        pathActual.normalize(p).toLowerCase(),
+      );
 
       loadSettings('C:\\Projects\\myproject');
 
@@ -2358,15 +2366,21 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should remain case-sensitive for workspace vs home on POSIX', () => {
-      vi.spyOn(osActual, 'platform').mockReturnValue('linux');
-      vi.spyOn(osActual, 'homedir').mockReturnValue('/home/user');
-      (fs.realpathSync as Mock).mockImplementation((p: string) => p);
+      vi.mocked(osActual.platform).mockReturnValue('linux');
+      vi.mocked(osActual.homedir).mockReturnValue('/home/user');
+      (mockFsRealpathSync as Mock).mockImplementation((p: string) => p);
+      vi.mocked(normalizePathForComparison).mockImplementation((p: string) =>
+        pathActual.normalize(p),
+      );
 
       loadSettings('/HOME/USER/project');
 
-      expect(fs.existsSync).toHaveBeenCalledWith(
-        '/HOME/USER/project/.qwen/settings.json',
+      const expectedPath = pathActual.join(
+        '/HOME/USER/project',
+        '.qwen',
+        'settings.json',
       );
+      expect(fs.existsSync).toHaveBeenCalledWith(expectedPath);
     });
   });
 

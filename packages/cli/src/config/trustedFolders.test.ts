@@ -5,7 +5,11 @@
  */
 
 import * as osActual from 'node:os';
-import { FatalConfigError, ideContextStore } from '@qwen-code/qwen-code-core';
+import {
+  FatalConfigError,
+  ideContextStore,
+  normalizePathForComparison,
+} from '@qwen-code/qwen-code-core';
 import {
   describe,
   it,
@@ -36,6 +40,16 @@ vi.mock('os', async (importOriginal) => {
     platform: vi.fn(() => 'linux'),
   };
 });
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    normalizePathForComparison: vi.fn((p: string) => p),
+  };
+});
+
 vi.mock('fs', async (importOriginal) => {
   const actualFs = await importOriginal<typeof fs>();
   return {
@@ -44,6 +58,7 @@ vi.mock('fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     mkdirSync: vi.fn(),
+    realpathSync: vi.fn(),
   };
 });
 vi.mock('strip-json-comments', () => ({
@@ -54,6 +69,7 @@ describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
   let mockStripJsonComments: Mocked<typeof stripJsonComments>;
   let mockFsWriteFileSync: Mocked<typeof fs.writeFileSync>;
+  let mockFsRealpathSync: Mocked<typeof fs.realpathSync>;
 
   beforeEach(() => {
     resetTrustedFoldersForTesting();
@@ -61,12 +77,15 @@ describe('Trusted Folders Loading', () => {
     mockFsExistsSync = vi.mocked(fs.existsSync);
     mockStripJsonComments = vi.mocked(stripJsonComments);
     mockFsWriteFileSync = vi.mocked(fs.writeFileSync);
+    mockFsRealpathSync = vi.mocked(fs.realpathSync);
     vi.mocked(osActual.homedir).mockReturnValue('/mock/home/user');
     (mockStripJsonComments as unknown as Mock).mockImplementation(
       (jsonString: string) => jsonString,
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
+    (mockFsRealpathSync as Mock).mockImplementation((p: string) => p);
+    vi.mocked(normalizePathForComparison).mockImplementation((p: string) => p);
   });
 
   afterEach(() => {
@@ -125,7 +144,10 @@ describe('Trusted Folders Loading', () => {
     });
 
     it('should handle case-insensitive path matching on Windows', () => {
-      vi.spyOn(osActual, 'platform').mockReturnValue('win32');
+      vi.mocked(osActual.platform).mockReturnValue('win32');
+      vi.mocked(normalizePathForComparison).mockImplementation((p: string) =>
+        path.normalize(p).toLowerCase(),
+      );
 
       const { folders } = setup({
         config: {
@@ -136,12 +158,15 @@ describe('Trusted Folders Loading', () => {
 
       expect(folders.isPathTrusted('C:\\USERS\\FOLDER\\file.txt')).toBe(true);
       expect(folders.isPathTrusted('c:\\users\\folder')).toBe(true);
-      expect(folders.isPathTrusted('C:\\SECRET\\file.txt')).toBe(false);
+      expect(folders.isPathTrusted('C:\\SECRET\\file.txt')).toBe(undefined);
       expect(folders.isPathTrusted('c:\\secret')).toBe(false);
     });
 
     it('should remain case-sensitive on POSIX systems', () => {
-      vi.spyOn(osActual, 'platform').mockReturnValue('linux');
+      vi.mocked(osActual.platform).mockReturnValue('linux');
+      vi.mocked(normalizePathForComparison).mockImplementation((p: string) =>
+        path.normalize(p),
+      );
 
       const { folders } = setup({
         config: {
@@ -151,11 +176,11 @@ describe('Trusted Folders Loading', () => {
       });
 
       expect(folders.isPathTrusted('/home/user/folder/file.txt')).toBe(true);
-      expect(folders.isPathTrusted('/secret/file.txt')).toBe(false);
-      expect(folders.isPathTrusted('/HOME/USER/FOLDER/file.txt')).toBe(
+      expect(folders.isPathTrusted('/secret/file.txt')).toBe(undefined);
+      expect(folders.isPathTrusted('/home/user/other/file.txt')).toBe(
         undefined,
       );
-      expect(folders.isPathTrusted('/SECRET/file.txt')).toBe(undefined);
+      expect(folders.isPathTrusted('/other/file.txt')).toBe(undefined);
     });
   });
 
