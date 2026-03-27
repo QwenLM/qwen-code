@@ -14,4 +14,5 @@ export default {
   sandbox: 'Sandboxing',
   language: 'i18n',
   channels: 'Channels',
+  hooks: 'Hooks',
 };

@@ -1373,12 +1373,18 @@ export function getExtensionId(
   installMetadata?: ExtensionInstallMetadata,
 ): string {
   let idValue = config.name;
-  const githubUrlParts =
+  let githubUrlParts = null;
+  if (
     installMetadata &&
     (installMetadata.type === 'git' ||
       installMetadata.type === 'github-release')
-      ? parseGitHubRepoForReleases(installMetadata.source)
-      : null;
+  ) {
+    try {
+      githubUrlParts = parseGitHubRepoForReleases(installMetadata.source);
+    } catch {
+      // Non-GitHub URL (GitLab, Bitbucket, etc.) - use source as-is
+    }
+  }
   if (githubUrlParts) {
     idValue = `https://github.com/${githubUrlParts.owner}/${githubUrlParts.repo}`;
   } else {

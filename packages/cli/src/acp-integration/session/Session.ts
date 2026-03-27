@@ -623,7 +623,7 @@ export class Session implements SessionContext {
         if (confirmationDetails.type === 'edit') {
           content.push({
             type: 'diff',
-            path: confirmationDetails.fileName,
+            path: confirmationDetails.filePath || confirmationDetails.fileName,
             oldText: confirmationDetails.originalContent,
             newText: confirmationDetails.newContent,
           });

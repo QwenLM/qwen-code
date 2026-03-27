@@ -95,26 +95,52 @@ class GrepToolInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Default to target directory if no path is provided
-      const searchDirAbs = resolveAndValidatePath(
-        this.config,
-        this.params.path,
-        { allowExternalPaths: true },
-      );
-      const searchDirDisplay = this.params.path || '.';
+      // Determine which directories to search
+      const searchDirs: string[] = [];
+      let searchLocationDescription: string;
 
-      // Perform grep search
-      const rawMatches = await this.performGrepSearch({
-        pattern: this.params.pattern,
-        path: searchDirAbs,
-        glob: this.params.glob,
-        signal,
-      });
+      if (this.params.path) {
+        // User specified a path — search only that directory
+        const searchDirAbs = resolveAndValidatePath(
+          this.config,
+          this.params.path,
+          { allowExternalPaths: true },
+        );
+        searchDirs.push(searchDirAbs);
+        searchLocationDescription = `in path "${this.params.path}"`;
+      } else {
+        // No path specified — search all workspace directories
+        const workspaceDirs = this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        searchDirs.push(...workspaceDirs);
+        searchLocationDescription =
+          workspaceDirs.length > 1
+            ? `across ${workspaceDirs.length} workspace directories`
+            : `in the workspace directory`;
+      }
 
-      // Build search description
-      const searchLocationDescription = this.params.path
-        ? `in path "${searchDirDisplay}"`
-        : `in the workspace directory`;
+      // Perform grep search across all directories
+      const rawMatches: GrepMatch[] = [];
+      for (const searchDir of searchDirs) {
+        const matches = await this.performGrepSearch({
+          pattern: this.params.pattern,
+          path: searchDir,
+          glob: this.params.glob,
+          signal,
+        });
+        // When searching multiple directories, convert relative file paths
+        // to absolute paths so results from different directories are
+        // unambiguous.
+        if (searchDirs.length > 1) {
+          for (const match of matches) {
+            if (!path.isAbsolute(match.filePath)) {
+              match.filePath = path.resolve(searchDir, match.filePath);
+            }
+          }
+        }
+        rawMatches.push(...matches);
+      }
 
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
