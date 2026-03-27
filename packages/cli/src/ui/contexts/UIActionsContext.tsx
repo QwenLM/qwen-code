@@ -49,7 +49,7 @@ export interface UIActions {
   handleAlibabaStandardSubmit: (
     apiKey: string,
     region: AlibabaStandardRegion,
-    modelId: string,
+    modelIdsInput: string,
   ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string | null) => void;

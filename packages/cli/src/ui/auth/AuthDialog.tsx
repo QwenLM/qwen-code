@@ -57,6 +57,8 @@ type ViewLevel =
   | 'alibaba-standard-model-id-input'
   | 'custom-info';
 
+const ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER = 'qwen3.5-plus,glm-5,kimi-k2.5';
+
 export function AuthDialog(): React.JSX.Element {
   const { pendingAuthType, authError } = useUIState();
   const {
@@ -334,21 +336,21 @@ export function AuthDialog(): React.JSX.Element {
 
     setAlibabaStandardApiKeyError(null);
     if (!alibabaStandardModelId.trim()) {
-      setAlibabaStandardModelId('qwen3.5-plus');
+      setAlibabaStandardModelId(ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER);
     }
     setViewLevel('alibaba-standard-model-id-input');
   };
 
   const handleAlibabaStandardModelSubmit = () => {
     const trimmedApiKey = alibabaStandardApiKey.trim();
-    const trimmedModelId = alibabaStandardModelId.trim();
+    const trimmedModelIds = alibabaStandardModelId.trim();
     if (!trimmedApiKey) {
       setAlibabaStandardApiKeyError(t('API key cannot be empty.'));
       setViewLevel('alibaba-standard-api-key-input');
       return;
     }
-    if (!trimmedModelId) {
-      setAlibabaStandardModelIdError(t('Model ID cannot be empty.'));
+    if (!trimmedModelIds) {
+      setAlibabaStandardModelIdError(t('Model IDs cannot be empty.'));
       return;
     }
 
@@ -356,7 +358,7 @@ export function AuthDialog(): React.JSX.Element {
     void handleAlibabaStandardSubmit(
       trimmedApiKey,
       alibabaStandardRegion,
-      trimmedModelId,
+      trimmedModelIds,
     );
   };
 
@@ -478,9 +480,6 @@ export function AuthDialog(): React.JSX.Element {
   const renderApiKeyTypeSelectView = () => (
     <>
       <Box marginTop={1}>
-        <Text color={theme.text.primary}>{t('Select API Key type')}</Text>
-      </Box>
-      <Box marginTop={1}>
         <DescriptiveRadioButtonSelect
           items={apiKeyTypeItems}
           initialIndex={apiKeyTypeIndex}
@@ -504,9 +503,6 @@ export function AuthDialog(): React.JSX.Element {
 
   const renderAlibabaStandardRegionSelectView = () => (
     <>
-      <Box marginTop={1}>
-        <Text color={theme.text.primary}>{t('Select region')}</Text>
-      </Box>
       <Box marginTop={1}>
         <DescriptiveRadioButtonSelect
           items={alibabaStandardRegionItems}
@@ -567,10 +563,11 @@ export function AuthDialog(): React.JSX.Element {
 
   const renderAlibabaStandardModelIdInputView = () => (
     <Box marginTop={1} flexDirection="column">
-      <Text color={theme.text.primary}>{t('Enter model ID')}</Text>
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
-          {t('Examples: qwen3.5-plus, glm-5, kimi-k2.5')}
+          {t(
+            'You can enter multiple model IDs, separated by commas. Examples: qwen3.5-plus,glm-5,kimi-k2.5',
+          )}
         </Text>
       </Box>
       <Box marginTop={1}>
@@ -583,7 +580,7 @@ export function AuthDialog(): React.JSX.Element {
             }
           }}
           onSubmit={handleAlibabaStandardModelSubmit}
-          placeholder="qwen3.5-plus"
+          placeholder={ALIBABA_STANDARD_MODEL_IDS_PLACEHOLDER}
         />
       </Box>
       {alibabaStandardModelIdError && (
@@ -640,7 +637,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'alibaba-standard-api-key-input':
         return t('Enter Alibaba Cloud Standard API Key');
       case 'alibaba-standard-model-id-input':
-        return t('Enter Model ID');
+        return t('Enter Model IDs');
       default:
         return t('Select Authentication Method');
     }

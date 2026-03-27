@@ -431,18 +431,27 @@ export const useAuthCommand = (
    * Persists key to env.DASHSCOPE_API_KEY and creates a modelProviders.openai entry.
    */
   const handleAlibabaStandardSubmit = useCallback(
-    async (apiKey: string, region: AlibabaStandardRegion, modelId: string) => {
+    async (
+      apiKey: string,
+      region: AlibabaStandardRegion,
+      modelIdsInput: string,
+    ) => {
       try {
         setIsAuthenticating(true);
         setAuthError(null);
 
         const trimmedApiKey = apiKey.trim();
-        const trimmedModelId = modelId.trim();
+        const modelIds = modelIdsInput
+          .split(',')
+          .map((id) => id.trim())
+          .filter(
+            (id, index, array) => id.length > 0 && array.indexOf(id) === index,
+          );
         if (!trimmedApiKey) {
           throw new Error(t('API key cannot be empty.'));
         }
-        if (!trimmedModelId) {
-          throw new Error(t('Model ID cannot be empty.'));
+        if (modelIds.length === 0) {
+          throw new Error(t('Model IDs cannot be empty.'));
         }
 
         const baseUrl = ALIBABA_STANDARD_API_KEY_ENDPOINTS[region];
@@ -458,12 +467,12 @@ export const useAuthCommand = (
         );
         process.env[DASHSCOPE_STANDARD_API_KEY_ENV_KEY] = trimmedApiKey;
 
-        const newConfig: ProviderModelConfig = {
-          id: trimmedModelId,
-          name: `${trimmedModelId} (DashScope Standard)`,
+        const newConfigs: ProviderModelConfig[] = modelIds.map((modelId) => ({
+          id: modelId,
+          name: `[ModelStudio Standard] ${modelId}`,
           baseUrl,
           envKey: DASHSCOPE_STANDARD_API_KEY_ENV_KEY,
-        };
+        }));
 
         const existingConfigs =
           (
@@ -481,7 +490,7 @@ export const useAuthCommand = (
             ),
         );
 
-        const updatedConfigs = [newConfig, ...nonAlibabaStandardConfigs];
+        const updatedConfigs = [...newConfigs, ...nonAlibabaStandardConfigs];
 
         settings.setValue(
           persistScope,
@@ -493,7 +502,7 @@ export const useAuthCommand = (
           'security.auth.selectedType',
           AuthType.USE_OPENAI,
         );
-        settings.setValue(persistScope, 'model.name', trimmedModelId);
+        settings.setValue(persistScope, 'model.name', modelIds[0]);
 
         const updatedModelProviders: ModelProvidersConfig = {
           ...(settings.merged.modelProviders as
@@ -515,8 +524,8 @@ export const useAuthCommand = (
           {
             type: MessageType.INFO,
             text: t(
-              'Authenticated successfully with Alibaba Cloud Standard API Key. Settings updated with env.DASHSCOPE_API_KEY and model "{{modelId}}".',
-              { modelId: trimmedModelId },
+              'Authenticated successfully with Alibaba Cloud Standard API Key. Settings updated with env.DASHSCOPE_API_KEY and {{modelCount}} model(s).',
+              { modelCount: String(modelIds.length) },
             ),
           },
           Date.now(),
