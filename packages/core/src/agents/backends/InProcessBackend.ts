@@ -19,7 +19,14 @@ import {
   type ContentGeneratorConfig,
   createContentGenerator,
 } from '../../core/contentGenerator.js';
-import { AUTH_ENV_MAPPINGS } from '../../models/constants.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
+import { WorkspaceContext } from '../../utils/workspaceContext.js';
+import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
+import {
+  AUTH_ENV_MAPPINGS,
+  MODEL_GENERATION_CONFIG_FIELDS,
+} from '../../models/constants.js';
+import type { ResolvedModelConfig } from '../../models/types.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { AgentEventEmitter } from '../runtime/agent-events.js';
@@ -33,9 +40,6 @@ import type {
 } from './types.js';
 import { DISPLAY_MODE } from './types.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import type { ToolRegistry } from '../../tools/tool-registry.js';
 
 const debugLogger = createDebugLogger('IN_PROCESS_BACKEND');
 
@@ -332,15 +336,10 @@ export class InProcessBackend implements Backend {
  * - `getWorkingDir()` / `getTargetDir()` → agent's worktree cwd
  * - `getWorkspaceContext()` → WorkspaceContext rooted at agent's cwd
  * - `getFileService()` → FileDiscoveryService rooted at agent's cwd
- *   (so .qwenignore checks resolve against the agent's worktree)
  * - `getToolRegistry()` → per-agent tool registry with core tools bound to
- *   the agent Config (so tools resolve paths against the agent's worktree)
+ *   the agent Config
  * - `getContentGenerator()` / `getContentGeneratorConfig()` / `getAuthType()`
- *   → per-agent ContentGenerator when `authOverrides` is provided, enabling
- *   agents to target different model providers in the same Arena session
- *
- * Uses prototypal delegation so all other Config methods/properties resolve
- * against the original instance transparently.
+ *   → per-agent ContentGenerator when `authOverrides` is provided
  */
 async function createPerAgentConfig(
   base: Config,
@@ -361,9 +360,6 @@ async function createPerAgentConfig(
   const agentFileService = new FileDiscoveryService(cwd);
   override.getFileService = () => agentFileService;
 
-  // Build a per-agent tool registry: core tools are constructed with
-  // the per-agent Config so they resolve paths against cwd. Discovered
-  // (MCP/command) tools are copied from the parent registry as-is.
   const agentRegistry: ToolRegistry = await override.createToolRegistry(
     undefined,
     { skipDiscovery: true },
@@ -371,9 +367,6 @@ async function createPerAgentConfig(
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   override.getToolRegistry = () => agentRegistry;
 
-  // Build a per-agent ContentGenerator when auth overrides are provided.
-  // This enables Arena agents to use different providers (OpenAI, Anthropic,
-  // Gemini, etc.) than the parent process.
   if (authOverrides?.authType) {
     try {
       const agentGeneratorConfig = buildAgentContentGeneratorConfig(
@@ -406,16 +399,6 @@ async function createPerAgentConfig(
   return override as Config;
 }
 
-/**
- * Build a ContentGeneratorConfig for a per-agent ContentGenerator.
- * Inherits operational settings (timeout, retries, proxy, sampling, etc.)
- * from the parent's config and overlays the agent-specific auth fields.
- *
- * For cross-provider agents the parent's API key / base URL are invalid,
- * so we resolve credentials from the provider-specific environment
- * variables (e.g. ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL). This mirrors
- * what a PTY subprocess does during its own initialization.
- */
 function buildAgentContentGeneratorConfig(
   base: Config,
   modelId: string | undefined,
@@ -423,34 +406,101 @@ function buildAgentContentGeneratorConfig(
 ): ContentGeneratorConfig {
   const parentConfig = base.getContentGeneratorConfig();
   const sameProvider = authOverrides.authType === parentConfig.authType;
+  const modelsConfig = base.getModelsConfig();
+  const resolvedModel = modelId
+    ? modelsConfig.getResolvedModel(authOverrides.authType as AuthType, modelId)
+    : undefined;
 
-  const resolvedApiKey = resolveCredentialField(
+  const nextConfig: ContentGeneratorConfig = {
+    ...parentConfig,
+    model: modelId ?? parentConfig.model,
+    authType: authOverrides.authType as AuthType,
+  };
+
+  // When switching providers, clear generation config fields so parent
+  // settings (samplingParams, reasoning, extra_body, etc.) don't leak.
+  if (!sameProvider) {
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (nextConfig as any)[field] = undefined;
+    }
+  }
+
+  if (resolvedModel) {
+    applyResolvedModelConfig(
+      nextConfig,
+      resolvedModel,
+      parentConfig,
+      authOverrides,
+    );
+    return nextConfig;
+  }
+
+  nextConfig.apiKey = resolveCredentialField(
     authOverrides.apiKey,
     sameProvider ? parentConfig.apiKey : undefined,
     authOverrides.authType,
     'apiKey',
   );
+  nextConfig.baseUrl =
+    authOverrides.baseUrl ??
+    resolveCredentialField(
+      undefined,
+      sameProvider ? parentConfig.baseUrl : undefined,
+      authOverrides.authType,
+      'baseUrl',
+    );
+  nextConfig.apiKeyEnvKey = sameProvider
+    ? parentConfig.apiKeyEnvKey
+    : undefined;
 
-  const resolvedBaseUrl = resolveCredentialField(
-    authOverrides.baseUrl,
-    sameProvider ? parentConfig.baseUrl : undefined,
-    authOverrides.authType,
-    'baseUrl',
-  );
-
-  return {
-    ...parentConfig,
-    model: modelId ?? parentConfig.model,
-    authType: authOverrides.authType as AuthType,
-    apiKey: resolvedApiKey,
-    baseUrl: resolvedBaseUrl,
-  };
+  return nextConfig;
 }
 
-/**
- * Resolve a credential field (apiKey or baseUrl) with the following
- * priority: explicit override → same-provider parent value → env var.
- */
+function applyResolvedModelConfig(
+  targetConfig: ContentGeneratorConfig,
+  resolvedModel: ResolvedModelConfig,
+  parentConfig: ContentGeneratorConfig,
+  authOverrides: NonNullable<InProcessSpawnConfig['authOverrides']>,
+): void {
+  const sameProvider = authOverrides.authType === parentConfig.authType;
+  targetConfig.model = resolvedModel.id;
+  targetConfig.authType = resolvedModel.authType;
+  targetConfig.baseUrl =
+    authOverrides.baseUrl ??
+    resolvedModel.baseUrl ??
+    (sameProvider ? parentConfig.baseUrl : undefined);
+
+  if (resolvedModel.envKey) {
+    targetConfig.apiKey =
+      authOverrides.apiKey ??
+      process.env[resolvedModel.envKey] ??
+      (sameProvider ? parentConfig.apiKey : undefined);
+    targetConfig.apiKeyEnvKey = resolvedModel.envKey;
+  } else {
+    targetConfig.apiKey = resolveCredentialField(
+      authOverrides.apiKey,
+      sameProvider ? parentConfig.apiKey : undefined,
+      authOverrides.authType,
+      'apiKey',
+    );
+    targetConfig.apiKeyEnvKey = sameProvider
+      ? parentConfig.apiKeyEnvKey
+      : undefined;
+  }
+
+  // Apply registry-defined generation config fields. Cross-provider
+  // clearing is already handled by buildAgentContentGeneratorConfig,
+  // so here we only overwrite when the registry provides a value.
+  for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+    const registryValue = resolvedModel.generationConfig[field];
+    if (registryValue !== undefined) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (targetConfig as any)[field] = registryValue;
+    }
+  }
+}
+
 function resolveCredentialField(
   explicitValue: string | undefined,
   inheritedValue: string | undefined,

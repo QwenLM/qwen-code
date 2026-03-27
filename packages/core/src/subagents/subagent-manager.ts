@@ -36,6 +36,7 @@ import type {
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { parseSubagentModelSelection } from './model-selection.js';
 
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
@@ -568,10 +569,8 @@ export class SubagentManager {
       frontmatter['tools'] = config.tools;
     }
 
-    // No outputs section
-
-    if (config.modelConfig) {
-      frontmatter['modelConfig'] = config.modelConfig;
+    if (config.model && config.model !== 'inherit') {
+      frontmatter['model'] = config.model;
     }
 
     if (config.runConfig) {
@@ -640,25 +639,28 @@ export class SubagentManager {
    * @returns Runtime configuration for AgentHeadless
    */
   convertToRuntimeConfig(config: SubagentConfig): SubagentRuntimeConfig {
-    // Build prompt configuration
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
 
-    // Build model configuration
+    const selection = parseSubagentModelSelection(config.model);
+    if (selection.authType) {
+      throw new SubagentError(
+        `Cross-provider model selectors (e.g. "${config.model}") are not supported for subagents. Use a bare model ID instead, or use Arena for cross-provider agents.`,
+        SubagentErrorCode.INVALID_CONFIG,
+        config.name,
+      );
+    }
     const modelConfig: ModelConfig = {
-      ...config.modelConfig,
+      ...(selection.modelId ? { model: selection.modelId } : {}),
     };
 
-    // Build run configuration
     const runConfig: RunConfig = {
       ...config.runConfig,
     };
 
-    // Build tool configuration if tools are specified
     let toolConfig: ToolConfig | undefined;
     if (config.tools && config.tools.length > 0) {
-      // Transform tools array to ensure all entries are tool names (not display names)
       const toolNames = this.transformToToolNames(config.tools);
       toolConfig = {
         tools: toolNames,
@@ -740,10 +742,6 @@ export class SubagentManager {
     return {
       ...base,
       ...updates,
-      // Handle nested objects specially
-      modelConfig: updates.modelConfig
-        ? { ...base.modelConfig, ...updates.modelConfig }
-        : base.modelConfig,
       runConfig: updates.runConfig
         ? { ...base.runConfig, ...updates.runConfig }
         : base.runConfig,
@@ -956,13 +954,20 @@ function parseSubagentContent(
 
     // Extract optional fields
     const tools = frontmatter['tools'] as string[] | undefined;
-    const modelConfig = frontmatter['modelConfig'] as
+    const modelRaw = frontmatter['model'];
+    const legacyModelConfig = frontmatter['modelConfig'] as
       | Record<string, unknown>
       | undefined;
     const runConfig = frontmatter['runConfig'] as
       | Record<string, unknown>
       | undefined;
     const color = frontmatter['color'] as string | undefined;
+    const model =
+      modelRaw != null && modelRaw !== ''
+        ? String(modelRaw)
+        : typeof legacyModelConfig?.['model'] === 'string'
+          ? legacyModelConfig['model']
+          : undefined;
 
     const config: SubagentConfig = {
       name,
@@ -970,7 +975,7 @@ function parseSubagentContent(
       tools,
       systemPrompt: systemPrompt.trim(),
       filePath,
-      modelConfig: modelConfig as Partial<ModelConfig>,
+      model,
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,

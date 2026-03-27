@@ -83,11 +83,11 @@ describe('SubagentManager', () => {
           tools: ['read_file', 'write_file'],
         };
       }
-      if (yamlString.includes('modelConfig:')) {
+      if (yamlString.includes('model:')) {
         return {
           name: 'test-agent',
           description: 'A test subagent',
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
         };
       }
       if (yamlString.includes('runConfig:')) {
@@ -130,17 +130,8 @@ describe('SubagentManager', () => {
       for (const [key, value] of Object.entries(obj)) {
         if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
-        } else if (
-          key === 'modelConfig' &&
-          typeof value === 'object' &&
-          value
-        ) {
-          yaml += `modelConfig:\n`;
-          for (const [k, v] of Object.entries(
-            value as Record<string, unknown>,
-          )) {
-            yaml += `  ${k}: ${v}\n`;
-          }
+        } else if (key === 'model') {
+          yaml += `model: ${value}\n`;
         } else if (key === 'runConfig' && typeof value === 'object' && value) {
           yaml += `runConfig:\n`;
           for (const [k, v] of Object.entries(
@@ -229,13 +220,11 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
-    it('should parse content with model config', () => {
+    it('should parse content with model selector', () => {
       const markdownWithModel = `---
 name: test-agent
 description: A test subagent
-modelConfig:
-  model: custom-model
-  temp: 0.5
+model: custom-model
 ---
 
 You are a helpful assistant.
@@ -247,7 +236,33 @@ You are a helpful assistant.
         'project',
       );
 
-      expect(config.modelConfig).toEqual({ model: 'custom-model', temp: 0.5 });
+      expect(config.model).toBe('custom-model');
+    });
+
+    it('should parse legacy modelConfig frontmatter for compatibility', () => {
+      const markdownWithLegacyModel = `---
+name: test-agent
+description: A test subagent
+modelConfig:
+  model: legacy-model
+---
+
+You are a helpful assistant.
+`;
+
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-agent',
+        description: 'A test subagent',
+        modelConfig: { model: 'legacy-model' },
+      });
+
+      const config = manager.parseSubagentContent(
+        markdownWithLegacyModel,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.model).toBe('legacy-model');
     });
 
     it('should parse content with run config', () => {
@@ -419,24 +434,22 @@ You are a helpful assistant.
       expect(serialized).toContain('- write_file');
     });
 
-    it('should serialize configuration with model config', () => {
+    it('should serialize configuration with model selector', () => {
       const configWithModel: SubagentConfig = {
         ...validConfig,
-        modelConfig: { model: 'custom-model', temp: 0.5 },
+        model: 'custom-model',
       };
 
       const serialized = manager.serializeSubagent(configWithModel);
 
-      expect(serialized).toContain('modelConfig:');
       expect(serialized).toContain('model: custom-model');
-      expect(serialized).toContain('temp: 0.5');
     });
 
     it('should not include empty optional fields', () => {
       const serialized = manager.serializeSubagent(validConfig);
 
       expect(serialized).not.toContain('tools:');
-      expect(serialized).not.toContain('modelConfig:');
+      expect(serialized).not.toContain('model:');
       expect(serialized).not.toContain('runConfig:');
     });
   });
@@ -1104,26 +1117,28 @@ System prompt 3`);
         ]);
       });
 
-      it('should merge custom model and run configurations', () => {
+      it('should set modelConfig.model from model selector and merge run configurations', () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
           runConfig: { max_time_minutes: 5 },
         };
 
         const runtimeConfig = manager.convertToRuntimeConfig(configWithCustom);
 
         expect(runtimeConfig.modelConfig.model).toBe('custom-model');
-        expect(runtimeConfig.modelConfig.temp).toBe(0.5);
         expect(runtimeConfig.runConfig.max_time_minutes).toBe(5);
-        // No default values are provided anymore
-        expect(Object.keys(runtimeConfig.modelConfig)).toEqual([
-          'model',
-          'temp',
-        ]);
-        expect(Object.keys(runtimeConfig.runConfig)).toEqual([
-          'max_time_minutes',
-        ]);
+      });
+
+      it('should reject cross-provider model selectors', () => {
+        const configWithCrossProvider: SubagentConfig = {
+          ...validConfig,
+          model: 'openai:gpt-4',
+        };
+
+        expect(() =>
+          manager.convertToRuntimeConfig(configWithCrossProvider),
+        ).toThrow(/Cross-provider model selectors/);
       });
     });
 
@@ -1144,19 +1159,18 @@ System prompt 3`);
       it('should merge nested configurations', () => {
         const configWithNested: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'original-model', temp: 0.7 },
+          model: 'original-model',
           runConfig: { max_time_minutes: 10, max_turns: 20 },
         };
 
         const updates = {
-          modelConfig: { temp: 0.5 },
+          model: 'updated-model',
           runConfig: { max_time_minutes: 5 },
         };
 
         const merged = manager.mergeConfigurations(configWithNested, updates);
 
-        expect(merged.modelConfig!.model).toBe('original-model'); // Should keep original
-        expect(merged.modelConfig!.temp).toBe(0.5); // Should update
+        expect(merged.model).toBe('updated-model');
         expect(merged.runConfig!.max_time_minutes).toBe(5); // Should update
         expect(merged.runConfig!.max_turns).toBe(20); // Should keep original
       });

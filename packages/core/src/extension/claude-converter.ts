@@ -182,14 +182,9 @@ export function convertClaudeAgentConfig(
     qwenAgent['tools'] = claudeBuildInToolsTransform(claudeAgent.tools);
   }
 
-  // Convert model to modelConfig
+  // Preserve Claude's top-level model selector.
   if (claudeAgent.model) {
-    // Map Claude model names to Qwen model config
-    // Claude uses: sonnet, opus, haiku, inherit
-    // We preserve the model name for now, the actual mapping will be handled at runtime
-    qwenAgent['modelConfig'] = {
-      model: claudeAgent.model === 'inherit' ? undefined : claudeAgent.model,
-    };
+    qwenAgent['model'] = claudeAgent.model;
   }
 
   // Preserve unsupported fields as-is for potential future compatibility
