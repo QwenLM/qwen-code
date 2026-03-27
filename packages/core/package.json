@@ -1,6 +1,6 @@
 {
-  "name": "@qwen-code/qwen-code-core",
-  "version": "0.13.1",
+  "name": "@alife/dataworks-qwen-code-core",
+  "version": "0.0.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -22,6 +22,9 @@
     "vendor",
     "scripts/postinstall.js"
   ],
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.1",
     "@google/genai": "1.30.0",
