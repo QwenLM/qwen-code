@@ -238,6 +238,28 @@ export abstract class ChannelBase {
       promptText = `[Replying to: "${envelope.referencedText}"]\n\n${promptText}`;
     }
 
+    // Resolve attachments: extract image for bridge, append file paths to text
+    let imageBase64 = envelope.imageBase64;
+    let imageMimeType = envelope.imageMimeType;
+    if (envelope.attachments?.length) {
+      const filePaths: string[] = [];
+      for (const att of envelope.attachments) {
+        if (att.type === 'image' && att.data && !imageBase64) {
+          imageBase64 = att.data;
+          imageMimeType = att.mimeType;
+        } else if (att.filePath) {
+          const label = att.type === 'file' ? 'file' : att.type;
+          const name = att.fileName ? ` "${att.fileName}"` : '';
+          filePaths.push(
+            `User sent a ${label}${name}. It has been saved to: ${att.filePath}`,
+          );
+        }
+      }
+      if (filePaths.length > 0) {
+        promptText = promptText + '\n\n' + filePaths.join('\n');
+      }
+    }
+
     // Prepend channel instructions on first message of a session
     if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
       promptText = `${this.config.instructions}\n\n${promptText}`;
@@ -269,8 +291,8 @@ export abstract class ChannelBase {
 
       try {
         const response = await this.bridge.prompt(sessionId, promptText, {
-          imageBase64: envelope.imageBase64,
-          imageMimeType: envelope.imageMimeType,
+          imageBase64,
+          imageMimeType,
         });
 
         if (response) {

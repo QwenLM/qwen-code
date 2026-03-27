@@ -45,6 +45,19 @@ export interface ChannelConfig {
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
+export interface Attachment {
+  /** Content category. */
+  type: 'image' | 'file' | 'audio' | 'video';
+  /** Base64-encoded data (for images or small files). */
+  data?: string;
+  /** Absolute path to a local file (for large files saved to disk). */
+  filePath?: string;
+  /** MIME type (e.g. "image/jpeg", "application/pdf"). */
+  mimeType: string;
+  /** Original file name from the platform. */
+  fileName?: string;
+}
+
 export interface Envelope {
   channelName: string;
   senderId: string;
@@ -63,6 +76,8 @@ export interface Envelope {
   imageBase64?: string;
   /** MIME type for the image (e.g. "image/jpeg", "image/png"). */
   imageMimeType?: string;
+  /** Structured attachments (images, files, audio, video). */
+  attachments?: Attachment[];
 }
 
 export interface SessionTarget {

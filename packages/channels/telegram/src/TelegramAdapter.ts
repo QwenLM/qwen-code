@@ -123,9 +123,15 @@ export class TelegramChannel extends ChannelBase {
         const filePath = join(dir, fileName);
         writeFileSync(filePath, buf);
 
-        envelope.text =
-          (msg.caption ? msg.caption + '\n\n' : '') +
-          `User sent a file. It has been saved to: ${filePath}`;
+        envelope.text = msg.caption || '';
+        envelope.attachments = [
+          {
+            type: 'file',
+            filePath,
+            mimeType: doc.mime_type || 'application/octet-stream',
+            fileName,
+          },
+        ];
       } catch (err) {
         process.stderr.write(
           `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,

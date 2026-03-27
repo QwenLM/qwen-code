@@ -135,7 +135,14 @@ export class WeixinChannel extends ChannelBase {
           if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
           const filePath = join(dir, file.fileName);
           writeFileSync(filePath, fileData);
-          envelope.text = `User sent a file. It has been saved to: ${filePath}`;
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: 'application/octet-stream',
+              fileName: file.fileName,
+            },
+          ];
         } catch (err) {
           process.stderr.write(
             `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,

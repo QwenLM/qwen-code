@@ -415,10 +415,17 @@ export class DingtalkChannel extends ChannelBase {
     if (!media) return;
 
     if (mediaType === 'image') {
-      envelope.imageBase64 = media.buffer.toString('base64');
-      envelope.imageMimeType = media.mimeType.startsWith('image/')
+      const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
+      envelope.attachments = [
+        ...(envelope.attachments || []),
+        {
+          type: 'image',
+          data: media.buffer.toString('base64'),
+          mimeType,
+        },
+      ];
     } else {
       // Save non-image files to temp dir so the agent can read them
       const dir = join(tmpdir(), 'channel-files');
@@ -427,15 +434,24 @@ export class DingtalkChannel extends ChannelBase {
       const filePath = join(dir, safeName);
       writeFileSync(filePath, media.buffer);
 
-      const prefix =
-        envelope.text &&
-        envelope.text !== `(file: ${fileName || 'file'})` &&
-        envelope.text !== '(audio)' &&
-        envelope.text !== '(video)'
-          ? envelope.text + '\n\n'
-          : '';
-      envelope.text =
-        prefix + `User sent a ${mediaType}. It has been saved to: ${filePath}`;
+      // Clean up placeholder text like "(audio)", "(video)", "(file: name)"
+      if (
+        envelope.text === `(file: ${fileName || 'file'})` ||
+        envelope.text === '(audio)' ||
+        envelope.text === '(video)'
+      ) {
+        envelope.text = '';
+      }
+
+      envelope.attachments = [
+        ...(envelope.attachments || []),
+        {
+          type: mediaType,
+          filePath,
+          mimeType: media.mimeType,
+          fileName: safeName,
+        },
+      ];
     }
   }
 
