@@ -6,7 +6,11 @@ import type {
   AcpBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import type { InboundMessage, OutboundMessage } from './protocol.js';
+import type {
+  InboundMessage,
+  OutboundMessage,
+  ChunkMessage,
+} from './protocol.js';
 
 export interface MockPluginConfig extends ChannelConfig {
   serverWsUrl: string;
@@ -74,6 +78,30 @@ export class MockPluginChannel extends ChannelBase {
     this.handleInbound(envelope).catch(() => {
       // errors handled internally by ChannelBase
     });
+  }
+
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    _sessionId: string,
+  ): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const msg: ChunkMessage = {
+      type: 'chunk',
+      messageId: this.pendingMessageId || 'unknown',
+      chatId,
+      text: chunk,
+    };
+    this.ws.send(JSON.stringify(msg));
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    _sessionId: string,
+  ): Promise<void> {
+    await this.sendMessage(chatId, fullText);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

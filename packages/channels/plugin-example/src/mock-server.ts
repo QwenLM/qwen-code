@@ -53,9 +53,10 @@ export function createMockServer(
   const pendingRequests = new Map<
     string,
     {
-      resolve: (text: string) => void;
+      resolve: (result: { text: string; chunks: string[] }) => void;
       reject: (err: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      chunks: string[];
     }
   >();
 
@@ -73,12 +74,17 @@ export function createMockServer(
     ws.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.type === 'outbound' && msg.messageId) {
+        if (msg.type === 'chunk' && msg.messageId) {
+          const pending = pendingRequests.get(msg.messageId);
+          if (pending) {
+            pending.chunks.push(msg.text);
+          }
+        } else if (msg.type === 'outbound' && msg.messageId) {
           const pending = pendingRequests.get(msg.messageId);
           if (pending) {
             clearTimeout(pending.timer);
             pendingRequests.delete(msg.messageId);
-            pending.resolve(msg.text);
+            pending.resolve({ text: msg.text, chunks: pending.chunks });
           }
         }
       } catch {
@@ -138,18 +144,35 @@ export function createMockServer(
             }),
           );
 
-          const responsePromise = new Promise<string>((resolve, reject) => {
+          const responsePromise = new Promise<{
+            text: string;
+            chunks: string[];
+          }>((resolve, reject) => {
             const timer = setTimeout(() => {
               pendingRequests.delete(messageId);
               reject(new Error('Timeout waiting for agent response'));
             }, responseTimeoutMs);
-            pendingRequests.set(messageId, { resolve, reject, timer });
+            pendingRequests.set(messageId, {
+              resolve,
+              reject,
+              timer,
+              chunks: [],
+            });
           });
 
           responsePromise
-            .then((responseText) => {
+            .then((result) => {
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ messageId, text: responseText }));
+              res.end(
+                JSON.stringify({
+                  messageId,
+                  text: result.text,
+                  streaming: {
+                    chunks: result.chunks.length,
+                    bytes: result.chunks.reduce((n, c) => n + c.length, 0),
+                  },
+                }),
+              );
             })
             .catch((err: Error) => {
               res.writeHead(504, { 'Content-Type': 'application/json' });
@@ -215,7 +238,12 @@ export function createMockServer(
               pendingRequests.delete(messageId);
               reject(new Error('Timeout waiting for agent response'));
             }, responseTimeoutMs);
-            pendingRequests.set(messageId, { resolve, reject, timer });
+            pendingRequests.set(messageId, {
+              resolve: (result) => resolve(result.text),
+              reject,
+              timer,
+              chunks: [],
+            });
           });
         },
 
