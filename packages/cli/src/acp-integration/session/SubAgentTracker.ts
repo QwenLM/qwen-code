@@ -26,43 +26,14 @@ import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
-  PermissionOption,
   RequestPermissionRequest,
-  ToolCallContent,
 } from '@agentclientprotocol/sdk';
+import {
+  buildPermissionRequestContent,
+  toPermissionOptions,
+} from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
-
-/**
- * Permission option kind type matching ACP schema.
- */
-type PermissionKind =
-  | 'allow_once'
-  | 'reject_once'
-  | 'allow_always'
-  | 'reject_always';
-
-/**
- * Configuration for permission options displayed to users.
- */
-interface PermissionOptionConfig {
-  optionId: ToolConfirmationOutcome;
-  name: string;
-  kind: PermissionKind;
-}
-
-const basicPermissionOptions: readonly PermissionOptionConfig[] = [
-  {
-    optionId: ToolConfirmationOutcome.ProceedOnce,
-    name: 'Allow',
-    kind: 'allow_once',
-  },
-  {
-    optionId: ToolConfirmationOutcome.Cancel,
-    name: 'Reject',
-    kind: 'reject_once',
-  },
-] as const;
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.
@@ -219,24 +190,6 @@ export class SubAgentTracker {
       if (abortSignal.aborted) return;
 
       const state = this.toolStates.get(event.callId);
-      const content: ToolCallContent[] = [];
-
-      // Handle edit confirmation type - show diff
-      if (event.confirmationDetails.type === 'edit') {
-        const editDetails = event.confirmationDetails as unknown as {
-          type: 'edit';
-          fileName: string;
-          filePath: string;
-          originalContent: string | null;
-          newContent: string;
-        };
-        content.push({
-          type: 'diff',
-          path: editDetails.filePath || editDetails.fileName,
-          oldText: editDetails.originalContent ?? '',
-          newText: editDetails.newContent,
-        });
-      }
 
       // Build permission request
       const fullConfirmationDetails = {
@@ -251,12 +204,12 @@ export class SubAgentTracker {
 
       const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
-        options: this.toPermissionOptions(fullConfirmationDetails),
+        options: toPermissionOptions(fullConfirmationDetails),
         toolCall: {
           toolCallId: event.callId,
           status: 'pending',
           title,
-          content,
+          content: buildPermissionRequestContent(fullConfirmationDetails),
           locations,
           kind,
           rawInput: state?.args,
@@ -274,7 +227,9 @@ export class SubAgentTracker {
                 .parse(output.outcome.optionId);
 
         // Respond to subagent with the outcome
-        await event.respond(outcome);
+        await event.respond(outcome, {
+          answers: 'answers' in output ? output.answers : undefined,
+        });
       } catch (error) {
         // If permission request fails, cancel the tool call
         debugLogger.error(
@@ -323,93 +278,5 @@ export class SubAgentTracker {
         event.thought ?? false,
       );
     };
-  }
-
-  /**
-   * Converts confirmation details to permission options for the client.
-   */
-  private toPermissionOptions(
-    confirmation: ToolCallConfirmationDetails,
-  ): PermissionOption[] {
-    const hideAlwaysAllow =
-      'hideAlwaysAllow' in confirmation && confirmation.hideAlwaysAllow;
-    switch (confirmation.type) {
-      case 'edit':
-        return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: 'Allow All Edits',
-            kind: 'allow_always',
-          },
-          ...basicPermissionOptions,
-        ];
-      case 'exec':
-        return [
-          ...(hideAlwaysAllow
-            ? []
-            : [
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-                  name: `Always Allow in project: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
-                  kind: 'allow_always' as const,
-                },
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-                  name: `Always Allow for user: ${(confirmation as { rootCommand?: string }).rootCommand ?? 'command'}`,
-                  kind: 'allow_always' as const,
-                },
-              ]),
-          ...basicPermissionOptions,
-        ];
-      case 'mcp':
-        return [
-          ...(hideAlwaysAllow
-            ? []
-            : [
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-                  name: `Always Allow in project: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
-                  kind: 'allow_always' as const,
-                },
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-                  name: `Always Allow for user: ${(confirmation as { toolName?: string }).toolName ?? 'tool'}`,
-                  kind: 'allow_always' as const,
-                },
-              ]),
-          ...basicPermissionOptions,
-        ];
-      case 'info':
-        return [
-          ...(hideAlwaysAllow
-            ? []
-            : [
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
-                  name: 'Always Allow in project',
-                  kind: 'allow_always' as const,
-                },
-                {
-                  optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
-                  name: 'Always Allow for user',
-                  kind: 'allow_always' as const,
-                },
-              ]),
-          ...basicPermissionOptions,
-        ];
-      case 'plan':
-        return [
-          {
-            optionId: ToolConfirmationOutcome.ProceedAlways,
-            name: 'Always Allow Plans',
-            kind: 'allow_always',
-          },
-          ...basicPermissionOptions,
-        ];
-      default: {
-        // Fallback for unknown types
-        return [...basicPermissionOptions];
-      }
-    }
   }
 }

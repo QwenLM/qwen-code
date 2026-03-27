@@ -121,7 +121,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Perform grep search across all directories
-      const rawMatches: GrepMatch[] = [];
+      let rawMatches: GrepMatch[] = [];
       for (const searchDir of searchDirs) {
         const matches = await this.performGrepSearch({
           pattern: this.params.pattern,
@@ -140,6 +140,18 @@ class GrepToolInvocation extends BaseToolInvocation<
           }
         }
         rawMatches.push(...matches);
+      }
+
+      // Deduplicate matches that might appear from overlapping workspace
+      // directories (e.g. parent + child both in workspace dirs).
+      if (searchDirs.length > 1) {
+        const seen = new Set<string>();
+        rawMatches = rawMatches.filter((match) => {
+          const key = `${match.filePath}:${match.lineNumber}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
       }
 
       const filterDescription = this.params.glob

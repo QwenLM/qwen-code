@@ -399,6 +399,33 @@ describe('GrepTool', () => {
 
       await fs.rm(secondDir, { recursive: true, force: true });
     });
+
+    it('should deduplicate matches from overlapping workspace directories', async () => {
+      // This tests the fix: when workspace dirs overlap (parent + child),
+      // the same file should appear only once in the results.
+      const subDir = path.join(tempRootDir, 'sub');
+
+      const multiDirConfig = {
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [subDir]),
+        getFileExclusions: () => ({
+          getGlobExcludes: () => [],
+        }),
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
+      } as unknown as Config;
+
+      const multiDirGrepTool = new GrepTool(multiDirConfig);
+      // 'sub dir' exists only in sub/fileC.txt — a file that lives under both
+      // tempRootDir and subDir, so without deduplication it would appear twice.
+      const params: GrepToolParams = { pattern: 'sub dir' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // sub/fileC.txt (or its absolute path equivalent) should appear only once
+      expect(result.llmContent).toContain('Found 1 match');
+    });
   });
 
   describe('getDescription', () => {

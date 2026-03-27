@@ -144,11 +144,13 @@ class GlobToolInvocation extends BaseToolInvocation<
       signal,
     })) as GlobPath[];
 
-    // Filter using paths relative to the search directory so that
-    // .gitignore / .qwenignore patterns match correctly regardless of
-    // which workspace directory the file belongs to.
+    // Filter using paths relative to the project root (the base that
+    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
+    // Using searchDir-relative paths would cause ignore rules to be
+    // evaluated against incorrect paths when searchDir != projectRoot.
+    const projectRoot = this.config.getTargetDir();
     const relativePaths = entries.map((p) =>
-      path.relative(searchDir, p.fullpath()),
+      path.relative(projectRoot, p.fullpath()),
     );
 
     const { filteredPaths } = this.fileService.filterFilesWithReport(
@@ -163,7 +165,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
     const filteredAbsolutePaths = new Set(
       filteredPaths.map((p) =>
-        normalizePathForComparison(path.resolve(searchDir, p)),
+        normalizePathForComparison(path.resolve(projectRoot, p)),
       ),
     );
 

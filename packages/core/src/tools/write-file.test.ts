@@ -321,6 +321,36 @@ describe('WriteFileTool', () => {
         expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
       });
 
+      it('should not call openDiff in AUTO_EDIT mode', async () => {
+        mockConfigInternal.getApprovalMode.mockReturnValue(
+          ApprovalMode.AUTO_EDIT,
+        );
+        const filePath = path.join(rootDir, 'ide_auto_edit_file.txt');
+        const params = { file_path: filePath, content: 'test' };
+        const invocation = tool.build(params);
+
+        const confirmation = (await invocation.getConfirmationDetails(
+          abortSignal,
+        )) as ToolEditConfirmationDetails;
+
+        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+        expect(confirmation.ideConfirmation).toBeUndefined();
+      });
+
+      it('should not call openDiff in YOLO mode', async () => {
+        mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.YOLO);
+        const filePath = path.join(rootDir, 'ide_yolo_file.txt');
+        const params = { file_path: filePath, content: 'test' };
+        const invocation = tool.build(params);
+
+        const confirmation = (await invocation.getConfirmationDetails(
+          abortSignal,
+        )) as ToolEditConfirmationDetails;
+
+        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+        expect(confirmation.ideConfirmation).toBeUndefined();
+      });
+
       it('should update params.content with IDE content when onConfirm is called', async () => {
         const filePath = path.join(rootDir, 'ide_onconfirm_file.txt');
         const params = { file_path: filePath, content: 'original-content' };

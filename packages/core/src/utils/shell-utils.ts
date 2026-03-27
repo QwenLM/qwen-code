@@ -670,16 +670,16 @@ export function detectCommandSubstitution(command: string): boolean {
  *   presence activates "Default Deny" mode.
  * @returns An object detailing which commands are not allowed.
  */
-export function checkCommandPermissions(
+export async function checkCommandPermissions(
   command: string,
   config: Config,
   sessionAllowlist?: Set<string>,
-): {
+): Promise<{
   allAllowed: boolean;
   disallowedCommands: string[];
   blockReason?: string;
   isHardDenial?: boolean;
-} {
+}> {
   // Disallow command substitution for security.
   if (detectCommandSubstitution(command)) {
     return {
@@ -717,7 +717,7 @@ export function checkCommandPermissions(
         if (isSessionAllowed) continue;
       }
 
-      const decision = pm.isCommandAllowed(cmd);
+      const decision = await pm.isCommandAllowed(cmd);
 
       if (decision === 'deny') {
         return {
@@ -994,12 +994,15 @@ export function isCommandAvailable(command: string): {
   return { available: path !== null, error };
 }
 
-export function isCommandAllowed(
+export async function isCommandAllowed(
   command: string,
   config: Config,
-): { allowed: boolean; reason?: string } {
+): Promise<{ allowed: boolean; reason?: string }> {
   // By not providing a sessionAllowlist, we invoke "default allow" behavior.
-  const { allAllowed, blockReason } = checkCommandPermissions(command, config);
+  const { allAllowed, blockReason } = await checkCommandPermissions(
+    command,
+    config,
+  );
   if (allAllowed) {
     return { allowed: true };
   }

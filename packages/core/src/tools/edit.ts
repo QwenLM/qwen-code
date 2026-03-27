@@ -297,9 +297,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
+    const approvalMode = this.config.getApprovalMode();
     const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
+      this.config.getIdeMode() &&
+      ideClient.isDiffingEnabled() &&
+      approvalMode !== ApprovalMode.AUTO_EDIT &&
+      approvalMode !== ApprovalMode.YOLO
         ? ideClient.openDiff(this.params.file_path, editData.newContent)
         : undefined;
 

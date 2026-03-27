@@ -17,15 +17,13 @@ import {
   type AgentHeadless,
   ContextState,
 } from '../agents/runtime/agent-headless.js';
-import {
-  AgentEventType,
-} from '../agents/runtime/agent-events.js';
+import { AgentEventType } from '../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
-
-  AgentEventEmitter} from '../agents/runtime/agent-events.js';
+  AgentEventEmitter,
+} from '../agents/runtime/agent-events.js';
 import { partToString } from '../utils/partUtils.js';
 import type { HookSystem } from '../hooks/hookSystem.js';
 import { PermissionMode } from '../hooks/types.js';

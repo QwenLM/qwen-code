@@ -55,6 +55,7 @@ export * from './output/types.js';
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
 export * from './core/coreToolScheduler.js';
+export * from './core/permission-helpers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/logger.js';
@@ -259,5 +260,6 @@ export type { HookRegistryEntry } from './hooks/index.js';
 // Export hook triggers for notification hooks
 export {
   fireNotificationHook,
+  firePermissionRequestHook,
   type NotificationHookResult,
 } from './core/toolHookTriggers.js';
