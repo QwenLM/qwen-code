@@ -365,6 +365,43 @@ export class PermissionManager {
     return decision !== 'deny';
   }
 
+  /**
+   * Find the first deny rule that matches the given context.
+   * Returns the raw rule string if found, or undefined if no deny rule matches.
+   *
+   * Useful for providing user-visible feedback about which rule caused a denial.
+   */
+  findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
+    const { toolName, command, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    for (const rule of [
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ]) {
+      if (matchesRule(rule, ...matchArgs)) {
+        return rule.raw;
+      }
+    }
+    return undefined;
+  }
+
   // ---------------------------------------------------------------------------
   // Shell command helper
   // ---------------------------------------------------------------------------

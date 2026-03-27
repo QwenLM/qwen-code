@@ -185,6 +185,40 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
+const getErrnoCode = (error: unknown): string | undefined => {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isExpectedPtyReadExitError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'EIO') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return message.includes('read EIO');
+};
+
+const isExpectedPtyExitRaceError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'ESRCH' || code === 'EBADF') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return (
+    message.includes('ioctl(2) failed, EBADF') ||
+    message.includes('Cannot resize a pty that has already exited')
+  );
+};
+
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
@@ -768,6 +802,20 @@ export class ShellExecutionService {
           handleOutput(bufferData);
         });
 
+        // Handle PTY errors - EIO is expected when the PTY process exits
+        // due to race conditions between the exit event and read operations.
+        // This is a normal behavior on macOS/Linux and should not crash the app.
+        // See: https://github.com/microsoft/node-pty/issues/178
+        ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+          if (isExpectedPtyReadExitError(err)) {
+            // EIO is expected when the PTY process exits - ignore it
+            return;
+          }
+
+          // Surface unexpected PTY errors to preserve existing crash behavior.
+          throw err;
+        });
+
         ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
@@ -938,7 +986,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;
@@ -968,7 +1018,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;

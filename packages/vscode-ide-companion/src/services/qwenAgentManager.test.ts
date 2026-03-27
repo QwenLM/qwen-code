@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { extractSessionListItems } from './qwenAgentManager.js';
+import {
+  extractSessionListItems,
+  QwenAgentManager,
+} from './qwenAgentManager.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
 
 vi.mock('vscode', () => ({
   window: {
@@ -52,5 +56,50 @@ describe('extractSessionListItems', () => {
     expect(extractSessionListItems({ sessions: 'not-array' })).toEqual([]);
     expect(extractSessionListItems({ items: 123 })).toEqual([]);
     expect(extractSessionListItems({})).toEqual([]);
+  });
+});
+
+describe('QwenAgentManager.setModelFromUi', () => {
+  it('emits the selected model metadata from the available models list', async () => {
+    const manager = new QwenAgentManager();
+    const onModelChanged = vi.fn();
+    manager.onModelChanged(onModelChanged);
+
+    const selectedModel: ModelInfo = {
+      modelId: 'qwen3-coder-plus',
+      name: 'Qwen3 Coder Plus',
+      _meta: {
+        contextLimit: 262144,
+      },
+    };
+
+    (
+      manager as unknown as {
+        baselineAvailableModels: ModelInfo[];
+      }
+    ).baselineAvailableModels = [
+      {
+        modelId: 'qwen3-coder-base',
+        name: 'Qwen3 Coder Base',
+        _meta: {
+          contextLimit: 131072,
+        },
+      },
+      selectedModel,
+    ];
+
+    (
+      manager as unknown as {
+        connection: {
+          setModel: (modelId: string) => Promise<{ modelId: string }>;
+        };
+      }
+    ).connection = {
+      setModel: vi.fn().mockResolvedValue({ modelId: selectedModel.modelId }),
+    };
+
+    await manager.setModelFromUi(selectedModel.modelId);
+
+    expect(onModelChanged).toHaveBeenCalledWith(selectedModel);
   });
 });
