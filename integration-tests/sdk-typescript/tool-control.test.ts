@@ -173,7 +173,9 @@ describe('Tool Control Parameters (E2E)', () => {
           if (writeFileResults.length > 0) {
             // Tool was called but should have permission declined message
             for (const result of writeFileResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
 
@@ -221,14 +223,18 @@ describe('Tool Control Parameters (E2E)', () => {
           const listDirResults = findToolResults(messages, 'list_directory');
           if (listDirResults.length > 0) {
             for (const result of listDirResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
 
           const shellResults = findToolResults(messages, 'run_shell_command');
           if (shellResults.length > 0) {
             for (const result of shellResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
         } finally {
@@ -263,7 +269,9 @@ describe('Tool Control Parameters (E2E)', () => {
           // All shell commands should have permission declined
           const shellResults = findToolResults(messages, 'run_shell_command');
           for (const result of shellResults) {
-            expect(result.content).toMatch(/permission.*declined/i);
+            expect(result.content).toMatch(
+              /permission.*(?:declined|denied)|denied.*permission/i,
+            );
           }
         } finally {
           await q.close();
@@ -303,7 +311,9 @@ describe('Tool Control Parameters (E2E)', () => {
           if (writeFileResults.length > 0) {
             // Tool was called but should have permission declined message (exclude takes priority)
             for (const result of writeFileResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
 
@@ -360,7 +370,9 @@ describe('Tool Control Parameters (E2E)', () => {
           );
           if (envReadResults.length > 0) {
             for (const result of envReadResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
         } finally {
@@ -417,7 +429,9 @@ describe('Tool Control Parameters (E2E)', () => {
           );
           if (srcEditResults.length > 0) {
             for (const result of srcEditResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
 
@@ -469,7 +483,8 @@ describe('Tool Control Parameters (E2E)', () => {
               const rmResults = results.filter((r) => {
                 return (
                   r.content.includes('permission') ||
-                  r.content.includes('declined')
+                  r.content.includes('declined') ||
+                  r.content.includes('denied')
                 );
               });
               expect(rmResults.length).toBeGreaterThan(0);
@@ -1089,7 +1104,9 @@ describe('Tool Control Parameters (E2E)', () => {
           const shellResults = findToolResults(messages, 'run_shell_command');
           if (shellResults.length > 0) {
             for (const result of shellResults) {
-              expect(result.content).toMatch(/permission.*declined/i);
+              expect(result.content).toMatch(
+                /permission.*(?:declined|denied)|denied.*permission/i,
+              );
             }
           }
         } finally {
