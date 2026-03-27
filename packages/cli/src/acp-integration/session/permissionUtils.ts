@@ -76,7 +76,7 @@ export function buildPermissionRequestContent(
   if (confirmation.type === 'edit') {
     content.push({
       type: 'diff',
-      path: confirmation.fileName,
+      path: confirmation.filePath ?? confirmation.fileName,
       oldText: confirmation.originalContent ?? '',
       newText: confirmation.newContent,
     });
