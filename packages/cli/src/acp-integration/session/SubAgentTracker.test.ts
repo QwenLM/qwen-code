@@ -585,6 +585,86 @@ describe('SubAgentTracker', () => {
         );
       });
     });
+
+    it('should use filePath over fileName for diff content path', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-path-test',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: 'test.ts',
+          filePath: '/workspace/src/test.ts',
+          originalContent: 'old content',
+          newContent: 'new content',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/src/test.ts',
+                oldText: 'old content',
+                newText: 'new content',
+              },
+            ],
+          }),
+        }),
+      );
+    });
+
+    it('should fall back to fileName when filePath is not available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-fallback-test',
+        description: 'Editing file',
+        confirmationDetails: {
+          type: 'edit' as const,
+          title: 'Edit file',
+          fileName: 'fallback.ts',
+          fileDiff: '',
+          originalContent: 'old',
+          newContent: 'new',
+        } as Omit<ToolEditConfirmationDetails, 'onConfirm'>,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: 'fallback.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          }),
+        }),
+      );
+    });
   });
 
   describe('permission options', () => {

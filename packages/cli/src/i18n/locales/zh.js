@@ -632,6 +632,114 @@ export default {
   'List all configured hooks': '列出所有已配置的 Hook',
   'Enable a disabled hook': '启用已禁用的 Hook',
   'Disable an active hook': '禁用已启用的 Hook',
+  // Hooks - Dialog
+  Hooks: 'Hook',
+  'Loading hooks...': '正在加载 Hook...',
+  'Error loading hooks:': '加载 Hook 出错：',
+  'Press Escape to close': '按 Escape 关闭',
+  'No hook selected': '未选择 Hook',
+  // Hooks - List Step
+  'No hook events found.': '未找到 Hook 事件。',
+  '{{count}} hook configured': '{{count}} 个 Hook 已配置',
+  '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
+  // Hooks - Detail Step
+  'Exit codes:': '退出码：',
+  'Configured hooks:': '已配置的 Hook：',
+  'No hooks configured for this event.': '此事件未配置 Hook。',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    '要添加 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Enter to select · Esc to go back': 'Enter 选择 · Esc 返回',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook 详情',
+  'Event:': '事件：',
+  'Extension:': '扩展：',
+  'Desc:': '描述：',
+  'No hook config selected': '未选择 Hook 配置',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  // Hooks - Source
+  Project: '项目',
+  User: '用户',
+  System: '系统',
+  Extension: '扩展',
+  'Local Settings': '本地设置',
+  'User Settings': '用户设置',
+  'System Settings': '系统设置',
+  Extensions: '扩展',
+  // Hooks - Status
+  '✓ Enabled': '✓ 已启用',
+  '✗ Disabled': '✗ 已禁用',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': '工具执行前',
+  'After tool execution': '工具执行后',
+  'After tool execution fails': '工具执行失败后',
+  'When notifications are sent': '发送通知时',
+  'When the user submits a prompt': '用户提交提示时',
+  'When a new session is started': '新会话开始时',
+  'Right before Qwen Code concludes its response': 'Qwen Code 结束响应之前',
+  'When a subagent (Agent tool call) is started':
+    '子智能体（Agent 工具调用）启动时',
+  'Right before a subagent concludes its response': '子智能体结束响应之前',
+  'Before conversation compaction': '对话压缩前',
+  'When a session is ending': '会话结束时',
+  'When a permission dialog is displayed': '显示权限对话框时',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    '命令输入为工具调用参数的 JSON。',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    '命令输入为包含 "inputs"（工具调用参数）和 "response"（工具调用响应）字段的 JSON。',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
+  'Input to command is JSON with notification message and type.':
+    '命令输入为包含通知消息和类型的 JSON。',
+  'Input to command is JSON with original user prompt text.':
+    '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with session start source.':
+    '命令输入为包含会话启动来源的 JSON。',
+  'Input to command is JSON with session end reason.':
+    '命令输入为包含会话结束原因的 JSON。',
+  'Input to command is JSON with agent_id and agent_type.':
+    '命令输入为包含 agent_id 和 agent_type 的 JSON。',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    '命令输入为包含 agent_id、agent_type 和 agent_transcript_path 的 JSON。',
+  'Input to command is JSON with compaction details.':
+    '命令输入为包含压缩详情的 JSON。',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    '命令输入为包含 tool_name、tool_input 和 tool_use_id 的 JSON。输出包含 hookSpecificOutput 的 JSON，其中包含允许或拒绝的决定。',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr 不显示',
+  'show stderr to model and continue conversation':
+    '向模型显示 stderr 并继续对话',
+  'show stderr to user only': '仅向用户显示 stderr',
+  'stdout shown in transcript mode (ctrl+o)': 'stdout 以转录模式显示 (ctrl+o)',
+  'show stderr to model immediately': '立即向模型显示 stderr',
+  'show stderr to user only but continue with tool call':
+    '仅向用户显示 stderr 但继续工具调用',
+  'block processing, erase original prompt, and show stderr to user only':
+    '阻止处理，擦除原始提示，仅向用户显示 stderr',
+  'stdout shown to Qwen': '向 Qwen 显示 stdout',
+  'show stderr to user only (blocking errors ignored)':
+    '仅向用户显示 stderr（忽略阻塞错误）',
+  'command completes successfully': '命令成功完成',
+  'stdout shown to subagent': '向子智能体显示 stdout',
+  'show stderr to subagent and continue having it run':
+    '向子智能体显示 stderr 并继续运行',
+  'stdout appended as custom compact instructions':
+    'stdout 作为自定义压缩指令追加',
+  'block compaction': '阻止压缩',
+  'show stderr to user only but continue with compaction':
+    '仅向用户显示 stderr 但继续压缩',
+  'use hook decision if provided': '如果提供则使用 Hook 决定',
+  // Hooks - Messages
+  'Config not loaded.': '配置未加载。',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hook 未启用。请在设置中启用 Hook 以使用此功能。',
+  'No hooks configured. Add hooks in your settings.json file.':
+    '未配置 Hook。请在 settings.json 文件中添加 Hook。',
+  'Configured Hooks ({{count}} total)': '已配置的 Hook（共 {{count}} 个）',
 
   // ============================================================================
   // Commands - Session Export
@@ -732,7 +840,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
   'Apply To': '应用于',
-  'User Settings': '用户设置',
   'Workspace Settings': '工作区设置',
 
   // ============================================================================
@@ -782,7 +889,6 @@ export default {
   'List configured MCP servers and tools': '列出已配置的 MCP 服务器和工具',
   'Restarts MCP servers.': '重启 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',
-  'Config not loaded.': '配置未加载',
   'Could not retrieve tool registry.': '无法检索工具注册表',
   'No MCP servers configured with OAuth authentication.':
     '未配置支持 OAuth 认证的 MCP 服务器',
@@ -841,7 +947,6 @@ export default {
   'Server:': '服务器：',
   '(disabled)': '(已禁用)',
   'Error:': '错误：',
-  Extension: '扩展',
   tool: '工具',
   tools: '个工具',
   connected: '已连接',

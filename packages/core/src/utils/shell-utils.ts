@@ -48,6 +48,24 @@ export interface ShellConfiguration {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
+    // Detect Git Bash / MSYS2 / MinTTY environments
+    // These environments should use bash instead of cmd/PowerShell
+    const msystem = process.env['MSYSTEM'];
+    const term = process.env['TERM'] || '';
+    const isGitBash =
+      msystem?.startsWith('MINGW') ||
+      msystem?.startsWith('MSYS') ||
+      term.includes('msys') ||
+      term.includes('cygwin');
+
+    if (isGitBash) {
+      return {
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      };
+    }
+
     const comSpec = process.env['ComSpec'] || 'cmd.exe';
     const executable = comSpec.toLowerCase();
 
