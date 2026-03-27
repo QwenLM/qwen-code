@@ -3431,4 +3431,80 @@ describe('useGeminiStream', () => {
       });
     });
   });
+
+  describe('HookSystemMessage Event', () => {
+    it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: '🔄 Ralph iteration 3 | No completion promise set',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with hook system message');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: '🔄 Ralph iteration 3 | No completion promise set',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should display HookSystemMessage after content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Here is the response',
+          };
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: 'Stop hook feedback message',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'query with response and hook message',
+        );
+      });
+
+      // Verify content was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Here is the response',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify hook system message was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: 'Stop hook feedback message',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
 });

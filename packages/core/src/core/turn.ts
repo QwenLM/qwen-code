@@ -218,6 +218,7 @@ export type ServerGeminiStopHookLoopEvent = {
   value: {
     iterationCount: number;
     reasons: string[];
+    stopHookCount: number;
   };
 };
 

@@ -379,6 +379,16 @@ export type HistoryItemStopHookLoop = HistoryItemBase & {
   type: 'stop_hook_loop';
   iterationCount: number;
   reasons: string[];
+  stopHookCount: number;
+};
+
+/**
+ * Stop hook system message.
+ * Displayed when Stop hooks return a systemMessage to show to the user.
+ */
+export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
+  type: 'stop_hook_system_message';
+  message: string;
 };
 
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
@@ -417,7 +427,8 @@ export type HistoryItemWithoutId =
   | HistoryItemInsightProgress
   | HistoryItemBtw
   | HistoryItemUserPromptSubmitBlocked
-  | HistoryItemStopHookLoop;
+  | HistoryItemStopHookLoop
+  | HistoryItemStopHookSystemMessage;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 

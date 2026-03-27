@@ -7,7 +7,7 @@
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
-import { HookAggregator } from './hookAggregator.js';
+import { HookAggregator, type AggregatedHookResult } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
@@ -104,15 +104,12 @@ export class HookSystem {
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
     signal?: AbortSignal,
-  ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireStopEvent(
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
       signal,
     );
-    return result.finalOutput
-      ? createHookOutput('Stop', result.finalOutput)
-      : undefined;
   }
 
   async fireSessionStartEvent(

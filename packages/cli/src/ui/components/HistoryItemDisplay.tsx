@@ -26,7 +26,8 @@ import {
   RetryCountdownMessage,
   SuccessMessage,
 } from './messages/StatusMessages.js';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
+import { theme } from '../semantic-colors.js';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
@@ -237,8 +238,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'stop_hook_loop' && (
         <InfoMessage
-          text={`Ran ${itemForDisplay.iterationCount} stop hooks\n  ⎿  Stop hook reason: ${itemForDisplay.reasons[itemForDisplay.reasons.length - 1]}`}
+          text={`Ran ${itemForDisplay.stopHookCount} stop hooks\n  ⎿  Stop hook error: ${itemForDisplay.reasons[itemForDisplay.reasons.length - 1]}`}
         />
+      )}
+      {itemForDisplay.type === 'stop_hook_system_message' && (
+        <Box>
+          <Text color={theme.text.primary}>
+            {`  ⎿  Stop says: ${itemForDisplay.message}`}
+          </Text>
+        </Box>
       )}
     </Box>
   );

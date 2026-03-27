@@ -761,6 +761,7 @@ export class GeminiClient {
             value: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
             },
           };
         }

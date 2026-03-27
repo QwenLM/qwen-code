@@ -995,7 +995,11 @@ export const useGeminiStream = (
 
   const handleStopHookLoopEvent = useCallback(
     (
-      value: { iterationCount: number; reasons: string[] },
+      value: {
+        iterationCount: number;
+        reasons: string[];
+        stopHookCount: number;
+      },
       userMessageTimestamp: number,
     ) => {
       if (pendingHistoryItemRef.current) {
@@ -1007,6 +1011,7 @@ export const useGeminiStream = (
           type: 'stop_hook_loop',
           iterationCount: value.iterationCount,
           reasons: value.reasons,
+          stopHookCount: value.stopHookCount,
         } as HistoryItemWithoutId,
         userMessageTimestamp,
       );
@@ -1095,11 +1100,12 @@ export const useGeminiStream = (
             }
             break;
           case ServerGeminiEventType.HookSystemMessage:
-            // Display system message from hooks (e.g., Ralph Loop iteration info)
-            // This is handled as a content event to show in the UI
-            geminiMessageBuffer = handleContentEvent(
-              event.value + '\n',
-              geminiMessageBuffer,
+            // Display system message from Stop hooks with "Stop says:" prefix
+            addItem(
+              {
+                type: 'stop_hook_system_message',
+                message: event.value,
+              } as HistoryItemWithoutId,
               userMessageTimestamp,
             );
             break;
@@ -1142,6 +1148,7 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
+      addItem,
     ],
   );
 
