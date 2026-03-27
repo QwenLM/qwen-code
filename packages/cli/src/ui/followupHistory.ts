@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  extractSuggestionContext,
-  type SuggestionContext,
-  type ToolResultDisplay,
+import type {
+  SuggestionContext,
+  ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, IndividualToolCallDisplay } from './types.js';
 import { ToolCallStatus } from './types.js';
@@ -127,11 +126,11 @@ export function extractFollowupSuggestionContext(
   const hasError = toolCalls.some((tool) => tool.status === 'error');
   const wasCancelled = toolCalls.some((tool) => tool.status === 'cancelled');
 
-  return extractSuggestionContext({
+  return {
     lastMessage: lastGeminiItem.text.slice(0, 1000),
     toolCalls,
     modifiedFiles,
     hasError,
     wasCancelled,
-  });
+  };
 }

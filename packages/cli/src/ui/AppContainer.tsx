@@ -41,7 +41,7 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
-  getGenerator,
+  generateFollowupSuggestions,
   type FollowupSuggestion,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -972,7 +972,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const context = extractFollowupSuggestionContext(history);
 
       if (context) {
-        const result = getGenerator().generate(context);
+        const result = generateFollowupSuggestions(context);
         if (result.shouldShow && result.suggestions.length > 0) {
           setFollowupSuggestions(result.suggestions);
         } else {

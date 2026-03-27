@@ -301,28 +301,6 @@ export class RuleBasedProvider implements SuggestionProvider {
       };
     });
   }
-
-  /**
-   * Add a custom rule to the provider
-   */
-  addRule(rule: SuggestionRule): void {
-    this.rules.push(rule);
-    this.rules.sort((a, b) => (b.priority || 0) - (a.priority || 0));
-  }
-
-  /**
-   * Remove rules matching a pattern
-   */
-  removeRules(pattern: RegExp): void {
-    this.rules = this.rules.filter((rule) => {
-      const patternStr =
-        rule.pattern instanceof RegExp
-          ? rule.pattern.source
-          : String(rule.pattern);
-      pattern.lastIndex = 0; // Reset for g/y flag safety
-      return !pattern.test(patternStr);
-    });
-  }
 }
 
 /**

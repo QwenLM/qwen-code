@@ -154,23 +154,6 @@ describe('RuleBasedProvider', () => {
     expect(result.suggestions.length).toBeLessThanOrEqual(5);
   });
 
-  it('handles custom rules via addRule', () => {
-    provider.addRule({
-      pattern: /CustomTool/,
-      suggestions: [
-        { text: 'custom action', description: 'Do something custom' },
-      ],
-      priority: 200,
-    });
-    const result = provider.getSuggestions(
-      makeContext({
-        toolCalls: [{ name: 'CustomTool', input: {}, status: 'success' }],
-      }),
-    );
-    expect(result.shouldShow).toBe(true);
-    expect(result.suggestions[0].text).toBe('custom action');
-  });
-
   it('does not suggest Edit rule when no files were modified', () => {
     const result = provider.getSuggestions(
       makeContext({

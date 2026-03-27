@@ -175,6 +175,11 @@
           "type": "boolean",
           "default": true
         },
+        "enableFollowupSuggestions": {
+          "description": "Show context-aware follow-up suggestions after task completion (e.g., \"commit this\", \"run tests\"). Press Tab to accept, arrow keys to cycle.",
+          "type": "boolean",
+          "default": true
+        },
         "accessibility": {
           "description": "Accessibility settings.",
           "type": "object",
