@@ -211,6 +211,92 @@ describe('InputPrompt', () => {
 
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  describe('follow-up suggestions', () => {
+    it('accepts the visible follow-up suggestion on tab when the buffer is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          followupSuggestions={[{ text: 'commit this', priority: 100 }]}
+        />,
+      );
+      await wait(350);
+
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+      unmount();
+    });
+
+    it('does not accept a follow-up suggestion while command completion is active', async () => {
+      mockCommandCompletion.showSuggestions = true;
+      mockCommandCompletion.suggestions = [
+        {
+          value: '/clear',
+          label: '/clear',
+          description: 'Clear screen',
+        },
+      ] as UseCommandCompletionReturn['suggestions'];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          followupSuggestions={[{ text: 'commit this', priority: 100 }]}
+        />,
+      );
+      await wait(350);
+
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith('commit this');
+      expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('cycles to the next follow-up suggestion with the right arrow key', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          followupSuggestions={[
+            { text: 'commit this', priority: 100 },
+            { text: 'review changes', priority: 90 },
+          ]}
+        />,
+      );
+      await wait(350);
+
+      stdin.write('\u001B[C');
+      await wait();
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith('review changes');
+      unmount();
+    });
+
+    it('cycles to the previous follow-up suggestion with the left arrow key', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt
+          {...props}
+          followupSuggestions={[
+            { text: 'commit this', priority: 100 },
+            { text: 'review changes', priority: 90 },
+          ]}
+        />,
+      );
+      await wait(350);
+
+      stdin.write('\u001B[D');
+      await wait();
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith('review changes');
+      unmount();
+    });
+  });
+
   it('should call shellHistory.getPreviousCommand on up arrow in shell mode', async () => {
     props.shellModeActive = true;
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

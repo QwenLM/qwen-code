@@ -185,4 +185,70 @@ describe('RuleBasedProvider', () => {
     );
     expect(hasCommitSuggestion).toBe(false);
   });
+
+  it('suggests after running tests (Shell + message matching)', () => {
+    const result = provider.getSuggestions(
+      makeContext({
+        lastMessage: 'I ran the test suite and 3 tests failed',
+        toolCalls: [{ name: 'Shell', input: {}, status: 'success' }],
+      }),
+    );
+    expect(result.shouldShow).toBe(true);
+    expect(
+      result.suggestions.some((s) => s.text.includes('fix failing tests')),
+    ).toBe(true);
+  });
+
+  it('suggests after git commit (Shell + message matching)', () => {
+    const result = provider.getSuggestions(
+      makeContext({
+        lastMessage: 'Changes have been committed successfully',
+        toolCalls: [{ name: 'Shell', input: {}, status: 'success' }],
+      }),
+    );
+    expect(result.shouldShow).toBe(true);
+    expect(result.suggestions.some((s) => s.text.includes('git push'))).toBe(
+      true,
+    );
+  });
+
+  it('suggests after installing dependencies (Shell + message matching)', () => {
+    const result = provider.getSuggestions(
+      makeContext({
+        lastMessage: 'Dependencies have been installed successfully',
+        toolCalls: [{ name: 'Shell', input: {}, status: 'success' }],
+      }),
+    );
+    expect(result.shouldShow).toBe(true);
+    expect(
+      result.suggestions.some((s) => s.text.includes('restart server')),
+    ).toBe(true);
+  });
+
+  it('suggests after build operations (Shell + message matching)', () => {
+    const result = provider.getSuggestions(
+      makeContext({
+        lastMessage: 'Build completed successfully with no errors',
+        toolCalls: [{ name: 'Shell', input: {}, status: 'success' }],
+      }),
+    );
+    expect(result.shouldShow).toBe(true);
+    expect(
+      result.suggestions.some((s) => s.text.includes('check bundle size')),
+    ).toBe(true);
+  });
+
+  it('does not suggest Shell rules without Shell tool call', () => {
+    const result = provider.getSuggestions(
+      makeContext({
+        lastMessage: 'I ran the test suite and it passed',
+        toolCalls: [{ name: 'Edit', input: {}, status: 'success' }],
+        modifiedFiles: [{ path: 'foo.ts', type: 'edited' }],
+      }),
+    );
+    // Should have Edit suggestions but not Shell test suggestions
+    expect(result.suggestions.some((s) => s.text === 'fix failing tests')).toBe(
+      false,
+    );
+  });
 });

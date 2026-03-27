@@ -33,47 +33,49 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
       context.modifiedFiles.length > 0,
     priority: 100,
   },
-  // After running tests
+  // After running tests (matched via assistant message since history
+  // does not store Shell tool arguments)
   {
-    pattern: /Shell/,
+    pattern: /test|spec|suite/i,
+    matchMessage: true,
     suggestions: [
       { text: 'fix failing tests', description: 'Fix the tests that failed' },
       { text: 'run all tests', description: 'Run the full test suite' },
     ],
     condition: (context) => {
-      const testCommands = [
-        'npm test',
-        'pytest',
-        'cargo test',
-        'go test',
-        'jest',
-        'vitest',
-      ];
-      return context.toolCalls.some((call) => {
-        const cmdInput = call.input as Record<string, unknown>;
-        const command = String(cmdInput['command'] || '');
-        return testCommands.some((cmd) => command.includes(cmd));
-      });
+      const hasShellCall = context.toolCalls.some(
+        (call) => call.name === 'Shell',
+      );
+      const lastMessageLower = context.lastMessage.toLowerCase();
+      const messageHasKeywords =
+        lastMessageLower.includes('test') ||
+        lastMessageLower.includes('spec') ||
+        lastMessageLower.includes('suite');
+      return hasShellCall && messageHasKeywords;
     },
     priority: 90,
   },
-  // After git operations
+  // After git commit/add operations (matched via assistant message since
+  // history does not store Shell tool arguments)
   {
-    pattern: /Shell/,
+    pattern: /commit|staged|push/i,
+    matchMessage: true,
     suggestions: [
       { text: 'git push', description: 'Push commits to remote' },
       { text: 'create PR', description: 'Create a pull request' },
       { text: 'amend commit', description: 'Amend the last commit' },
     ],
-    condition: (context) =>
-      context.toolCalls.some((call) => {
-        const cmdInput = call.input as Record<string, unknown>;
-        const command = String(cmdInput['command'] || '');
-        return (
-          command.includes('git ') &&
-          (command.includes('add') || command.includes('commit'))
-        );
-      }),
+    condition: (context) => {
+      const hasShellCall = context.toolCalls.some(
+        (call) => call.name === 'Shell',
+      );
+      const lastMessageLower = context.lastMessage.toLowerCase();
+      const messageHasKeywords =
+        lastMessageLower.includes('commit') ||
+        lastMessageLower.includes('staged') ||
+        lastMessageLower.includes('push');
+      return hasShellCall && messageHasKeywords;
+    },
     priority: 85,
   },
   // After creating new files
@@ -130,48 +132,47 @@ export const DEFAULT_SUGGESTION_RULES: SuggestionRule[] = [
       return hasToolCalls && messageHasKeywords;
     },
   },
-  // After dependency operations
+  // After dependency operations (matched via assistant message since
+  // history does not store Shell tool arguments)
   {
-    pattern: /Shell/,
+    pattern: /install|dependenc|package/i,
+    matchMessage: true,
     suggestions: [
       { text: 'restart server', description: 'Restart the development server' },
       { text: 'clear cache', description: 'Clear node_modules and reinstall' },
     ],
     condition: (context) => {
-      const installCommands = [
-        'npm install',
-        'npm add',
-        'yarn add',
-        'pnpm add',
-        'bun add',
-      ];
-      return context.toolCalls.some((call) => {
-        const cmdInput = call.input as Record<string, unknown>;
-        const command = String(cmdInput['command'] || '');
-        return installCommands.some((cmd) => command.includes(cmd));
-      });
+      const hasShellCall = context.toolCalls.some(
+        (call) => call.name === 'Shell',
+      );
+      const lastMessageLower = context.lastMessage.toLowerCase();
+      const messageHasKeywords =
+        lastMessageLower.includes('install') ||
+        lastMessageLower.includes('dependenc') ||
+        lastMessageLower.includes('package');
+      return hasShellCall && messageHasKeywords;
     },
     priority: 60,
   },
-  // After build operations
+  // After build operations (matched via assistant message since history
+  // does not store Shell tool arguments)
   {
-    pattern: /Shell/,
+    pattern: /build|compil|bundle/i,
+    matchMessage: true,
     suggestions: [
       { text: 'run build', description: 'Build for production' },
       { text: 'check bundle size', description: 'Analyze the build output' },
     ],
     condition: (context) => {
-      const buildCommands = [
-        'npm run build',
-        'yarn build',
-        'pnpm build',
-        'bun build',
-      ];
-      return context.toolCalls.some((call) => {
-        const cmdInput = call.input as Record<string, unknown>;
-        const command = String(cmdInput['command'] || '');
-        return buildCommands.some((cmd) => command.includes(cmd));
-      });
+      const hasShellCall = context.toolCalls.some(
+        (call) => call.name === 'Shell',
+      );
+      const lastMessageLower = context.lastMessage.toLowerCase();
+      const messageHasKeywords =
+        lastMessageLower.includes('build') ||
+        lastMessageLower.includes('compil') ||
+        lastMessageLower.includes('bundle');
+      return hasShellCall && messageHasKeywords;
     },
     priority: 55,
   },

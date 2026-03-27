@@ -42,7 +42,6 @@ import {
   SessionEndReason,
   SessionStartSource,
   getGenerator,
-  extractSuggestionContext,
   type FollowupSuggestion,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -88,6 +87,7 @@ import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
+import { extractFollowupSuggestionContext } from './followupHistory.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
@@ -945,6 +945,9 @@ export const AppContainer = (props: AppContainerProps) => {
   ]);
 
   // Generate follow-up suggestions when streaming completes
+  const followupSuggestionsEnabled =
+    settings.merged.ui?.enableFollowupSuggestions !== false;
+
   useEffect(() => {
     // Clear suggestions when a new turn starts (Idle → Responding)
     if (
@@ -954,106 +957,35 @@ export const AppContainer = (props: AppContainerProps) => {
       setFollowupSuggestions([]);
     }
 
+    // Skip suggestion generation if feature is disabled
+    if (!followupSuggestionsEnabled) {
+      prevStreamingStateRef.current = streamingState;
+      return;
+    }
+
     // Only trigger when transitioning from Responding to Idle
     if (
       prevStreamingStateRef.current === StreamingState.Responding &&
       streamingState === StreamingState.Idle
     ) {
-      // Get the last gemini message from history
       const history = historyManager.history;
+      const context = extractFollowupSuggestionContext(history);
 
-      // Collect tool_group items from the most recent turn (after the last
-      // user message) to avoid suggesting based on older turns' tool activity
-      const lastUserIndex = history.findLastIndex(
-        (item) => item.type === 'user',
-      );
-      const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0;
-      const recentToolGroupItems: typeof history = [];
-      for (let i = startIndex; i < history.length; i += 1) {
-        if (history[i].type === 'tool_group') {
-          recentToolGroupItems.push(history[i]);
-        }
-      }
-
-      // Flatten to individual tool calls, then cap at 10
-      const toolCalls = recentToolGroupItems
-        .flatMap((item) => {
-          const toolGroup = item as {
-            tools?: Array<{ name: string; status: ToolCallStatus }>;
-          };
-          if (toolGroup.tools) {
-            return toolGroup.tools.map((tool) => ({
-              name: tool.name,
-              input: {} as Record<string, unknown>, // History doesn't store args
-              status:
-                tool.status === ToolCallStatus.Success
-                  ? 'success'
-                  : tool.status === ToolCallStatus.Error
-                    ? 'error'
-                    : 'cancelled',
-            }));
-          }
-          return [];
-        })
-        .slice(-10);
-
-      // Only proceed if we have tool calls
-      if (toolCalls.length > 0) {
-        const lastGeminiIndex = history.findLastIndex(
-          (item) => item.type === 'gemini',
-        );
-
-        if (lastGeminiIndex >= 0) {
-          const lastGeminiItem = history[lastGeminiIndex];
-
-          // Extract modified files from tool calls (based on tool names only)
-          const modifiedFiles = toolCalls
-            .filter((call) => call.name === 'Edit' || call.name === 'WriteFile')
-            .map((call) => {
-              // Can't get filePath from history, so count by tool name
-              const type = call.name === 'WriteFile' ? 'created' : 'edited';
-              return { path: '(file)', type }; // Placeholder path
-            })
-            .filter(
-              (
-                f,
-              ): f is {
-                path: string;
-                type: 'created' | 'edited' | 'deleted';
-              } => f !== null,
-            );
-
-          // Derive error/cancellation flags from actual tool call statuses
-          const hasError = toolCalls.some((call) => call.status === 'error');
-          const wasCancelled = toolCalls.some(
-            (call) => call.status === 'cancelled',
-          );
-
-          // Generate suggestions
-          const context = extractSuggestionContext({
-            lastMessage: (lastGeminiItem.text || '').slice(0, 1000),
-            toolCalls,
-            modifiedFiles,
-            hasError,
-            wasCancelled,
-          });
-
-          const result = getGenerator().generate(context);
-          if (result.shouldShow && result.suggestions.length > 0) {
-            setFollowupSuggestions(result.suggestions);
-          } else {
-            setFollowupSuggestions([]);
-          }
+      if (context) {
+        const result = getGenerator().generate(context);
+        if (result.shouldShow && result.suggestions.length > 0) {
+          setFollowupSuggestions(result.suggestions);
+        } else {
+          setFollowupSuggestions([]);
         }
       } else {
-        // No tool calls, clear suggestions
         setFollowupSuggestions([]);
       }
     }
 
     prevStreamingStateRef.current = streamingState;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
-  }, [streamingState]);
+  }, [streamingState, followupSuggestionsEnabled]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);

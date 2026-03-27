@@ -42,18 +42,12 @@ export default defineConfig({
       },
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react-dom',
-        'react/jsx-runtime',
-        '@qwen-code/qwen-code-core',
-      ],
+      external: ['react', 'react-dom', 'react/jsx-runtime'],
       output: {
         globals: {
           react: 'React',
           'react-dom': 'ReactDOM',
           'react/jsx-runtime': 'ReactJSXRuntime',
-          '@qwen-code/qwen-code-core': 'QwenCodeCore',
         },
         assetFileNames: 'styles.[ext]',
       },

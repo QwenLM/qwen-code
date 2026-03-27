@@ -5,7 +5,7 @@
  *
  * Follow-up Suggestions Hook
  *
- * React hook for managing follow-up suggestions in the Web UI.
+ * Thin React wrapper around the framework-agnostic controller from core.
  *
  * Note: For browser environments, the parent component should handle
  * suggestion generation and pass the results to this hook.
@@ -14,23 +14,12 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   INITIAL_FOLLOWUP_STATE,
-  followupReducers,
-} from '@qwen-code/qwen-code-core';
-import type {
-  FollowupSuggestion,
-  FollowupState,
-} from '@qwen-code/qwen-code-core';
+  createFollowupController,
+  type FollowupSuggestion,
+  type FollowupState,
+} from './followupState.js';
 
-// Re-export types from core for convenience
-export type {
-  FollowupSuggestion,
-  FollowupState,
-} from '@qwen-code/qwen-code-core';
-
-/** Delay before showing suggestion after response completes */
-const SUGGESTION_DELAY_MS = 300;
-/** Debounce lock duration to prevent rapid-fire accepts */
-const ACCEPT_DEBOUNCE_MS = 100;
+export type { FollowupSuggestion, FollowupState } from './followupState.js';
 
 /**
  * Options for the hook
@@ -65,18 +54,19 @@ export interface UseFollowupSuggestionsReturn {
 }
 
 /**
- * Hook for managing follow-up suggestions
+ * Hook for managing follow-up suggestions in the Web UI.
+ *
+ * Delegates all timer/debounce/state logic to the shared
+ * `createFollowupController` from core. Adds a `getPlaceholder`
+ * helper specific to the WebUI input form.
  *
  * @example
  * ```tsx
- * import { useFollowupSuggestions } from '@qwen-code/webui';
- * import type { FollowupSuggestion } from '@qwen-code/qwen-code-core';
- *
  * const { state, getPlaceholder, setSuggestions, accept, dismiss, next, previous } = useFollowupSuggestions({
  *   onAccept: (suggestion) => setInputText(suggestion),
  * });
  *
- * // After streaming completes, call:
+ * // After streaming completes:
  * setSuggestions([{ text: 'commit this', priority: 100 }]);
  *
  * // Pass to InputForm:
@@ -96,37 +86,25 @@ export function useFollowupSuggestions(
 
   const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
 
+  // Keep a mutable ref so the controller always sees the latest callback
   const onAcceptRef = useRef(onAccept);
   onAcceptRef.current = onAccept;
 
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const acceptingRef = useRef(false);
-  const acceptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const setSuggestions = useCallback(
-    (suggestions: FollowupSuggestion[]) => {
-      if (!enabled) {
-        return;
-      }
-
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
-
-      // Empty array clears immediately; non-empty is delayed for UX
-      if (suggestions.length === 0) {
-        setState(followupReducers.clear());
-        return;
-      }
-
-      timeoutRef.current = setTimeout(() => {
-        setState(followupReducers.setSuggestions(suggestions));
-      }, SUGGESTION_DELAY_MS);
-    },
+  // Create the controller once — it is stable across renders
+  const controller = useMemo(
+    () =>
+      createFollowupController({
+        enabled,
+        onStateChange: setState,
+        getOnAccept: () => onAcceptRef.current,
+      }),
     [enabled],
   );
 
+  // Clean up timers on unmount
+  useEffect(() => () => controller.cleanup(), [controller]);
+
+  // WebUI-specific helper: resolves placeholder text
   const getPlaceholder = useCallback(
     (defaultPlaceholder: string) => {
       if (state.isVisible && state.suggestion) {
@@ -137,108 +115,17 @@ export function useFollowupSuggestions(
     [state.isVisible, state.suggestion],
   );
 
-  const accept = useCallback(() => {
-    if (acceptingRef.current) {
-      return;
-    }
-
-    // Cancel any pending suggestion timeout
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-
-    // Lock synchronously to prevent multiple rapid calls in the same tick
-    acceptingRef.current = true;
-
-    setState((prev) => {
-      const text = followupReducers.getAcceptText(prev);
-      if (text === null) {
-        // Nothing to accept — release lock
-        acceptingRef.current = false;
-        return prev;
-      }
-
-      // Schedule side effects outside the updater via microtask
-      queueMicrotask(() => {
-        onAcceptRef.current?.(text);
-
-        if (acceptTimeoutRef.current) {
-          clearTimeout(acceptTimeoutRef.current);
-        }
-        acceptTimeoutRef.current = setTimeout(() => {
-          acceptingRef.current = false;
-        }, ACCEPT_DEBOUNCE_MS);
-      });
-
-      return followupReducers.clear();
-    });
-  }, []);
-
-  const dismiss = useCallback(() => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    setState(followupReducers.clear());
-  }, []);
-
-  const next = useCallback(() => {
-    setState((prev) => followupReducers.next(prev) ?? prev);
-  }, []);
-
-  const previous = useCallback(() => {
-    setState((prev) => followupReducers.previous(prev) ?? prev);
-  }, []);
-
-  const clear = useCallback(() => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    if (acceptTimeoutRef.current) {
-      clearTimeout(acceptTimeoutRef.current);
-      acceptTimeoutRef.current = null;
-    }
-    acceptingRef.current = false;
-    setState(followupReducers.clear());
-  }, []);
-
-  // Clean up timeouts on unmount
-  useEffect(
-    () => () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
-      if (acceptTimeoutRef.current) {
-        clearTimeout(acceptTimeoutRef.current);
-        acceptTimeoutRef.current = null;
-      }
-    },
-    [],
-  );
-
   return useMemo(
     () => ({
       state,
       getPlaceholder,
-      setSuggestions,
-      accept,
-      dismiss,
-      next,
-      previous,
-      clear,
+      setSuggestions: controller.setSuggestions,
+      accept: controller.accept,
+      dismiss: controller.dismiss,
+      next: controller.next,
+      previous: controller.previous,
+      clear: controller.clear,
     }),
-    [
-      state,
-      getPlaceholder,
-      setSuggestions,
-      accept,
-      dismiss,
-      next,
-      previous,
-      clear,
-    ],
+    [state, getPlaceholder, controller],
   );
 }

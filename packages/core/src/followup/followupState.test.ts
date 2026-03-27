@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { INITIAL_FOLLOWUP_STATE, followupReducers } from './followupState.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  INITIAL_FOLLOWUP_STATE,
+  followupReducers,
+  createFollowupController,
+} from './followupState.js';
 import type { FollowupState } from './followupState.js';
 
 describe('followupReducers', () => {
@@ -146,5 +150,154 @@ describe('followupReducers', () => {
       };
       expect(followupReducers.getAcceptText(state)).toBeNull();
     });
+  });
+});
+
+describe('createFollowupController', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sets suggestions after delay', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([{ text: 'commit this', priority: 100 }]);
+
+    // Not yet — delay hasn't elapsed
+    expect(onStateChange).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(300);
+
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    const state = onStateChange.mock.calls[0][0] as FollowupState;
+    expect(state.isVisible).toBe(true);
+    expect(state.suggestion).toBe('commit this');
+
+    ctrl.cleanup();
+  });
+
+  it('clears immediately when given empty suggestions', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([]);
+
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    expect(onStateChange.mock.calls[0][0]).toEqual(INITIAL_FOLLOWUP_STATE);
+
+    ctrl.cleanup();
+  });
+
+  it('does not set suggestions when disabled', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({
+      enabled: false,
+      onStateChange,
+    });
+
+    ctrl.setSuggestions([{ text: 'commit this', priority: 100 }]);
+    vi.advanceTimersByTime(300);
+
+    expect(onStateChange).not.toHaveBeenCalled();
+
+    ctrl.cleanup();
+  });
+
+  it('accept invokes onAccept callback and clears state', () => {
+    const onStateChange = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+    });
+
+    // Set suggestions and advance timer
+    ctrl.setSuggestions([{ text: 'commit this', priority: 100 }]);
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.accept();
+
+    // State should be cleared
+    expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
+
+    // Callback fires via microtask — flush it
+    vi.advanceTimersByTime(0);
+
+    ctrl.cleanup();
+  });
+
+  it('dismiss clears state', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([{ text: 'a', priority: 100 }]);
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.dismiss();
+
+    expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
+
+    ctrl.cleanup();
+  });
+
+  it('next cycles through suggestions', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([
+      { text: 'a', priority: 100 },
+      { text: 'b', priority: 90 },
+    ]);
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.next();
+
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    const state = onStateChange.mock.calls[0][0] as FollowupState;
+    expect(state.currentIndex).toBe(1);
+    expect(state.suggestion).toBe('b');
+
+    ctrl.cleanup();
+  });
+
+  it('previous cycles through suggestions', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([
+      { text: 'a', priority: 100 },
+      { text: 'b', priority: 90 },
+    ]);
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.previous();
+
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    const state = onStateChange.mock.calls[0][0] as FollowupState;
+    expect(state.currentIndex).toBe(1);
+    expect(state.suggestion).toBe('b');
+
+    ctrl.cleanup();
+  });
+
+  it('cleanup prevents pending timers from firing', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestions([{ text: 'a', priority: 100 }]);
+    ctrl.cleanup();
+
+    vi.advanceTimersByTime(300);
+
+    expect(onStateChange).not.toHaveBeenCalled();
   });
 });
