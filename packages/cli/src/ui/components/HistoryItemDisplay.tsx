@@ -6,7 +6,10 @@
 
 import type React from 'react';
 import { useMemo } from 'react';
-import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeSensitiveText,
+} from '../utils/textUtils.js';
 import type { HistoryItem } from '../types.js';
 import {
   UserMessage,
@@ -233,7 +236,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <ErrorMessage
-          text={`UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${itemForDisplay.originalPrompt}`}
+          text={`UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${sanitizeSensitiveText(itemForDisplay.originalPrompt)}`}
         />
       )}
       {itemForDisplay.type === 'stop_hook_loop' && (

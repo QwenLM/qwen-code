@@ -754,7 +754,10 @@ export class GeminiClient {
           continueReason,
         ];
 
-        // Emit StopHookLoop event if this is not the first iteration
+        // Emit StopHookLoop event for iterations after the first one.
+        // The first iteration (currentIterationCount === 1) is the initial request,
+        // so there's no prior stop hook execution to report. We only emit this event
+        // when stop hooks have been executed multiple times (loop detected).
         if (currentIterationCount > 1) {
           yield {
             type: GeminiEventType.StopHookLoop,
