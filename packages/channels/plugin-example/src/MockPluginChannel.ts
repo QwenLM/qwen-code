@@ -65,14 +65,11 @@ export class MockPluginChannel extends ChannelBase {
       senderName: msg.senderName,
       chatId: msg.chatId,
       text: msg.text,
+      messageId: msg.messageId,
       isGroup: false,
       isMentioned: false,
       isReplyToBot: false,
     };
-
-    // Store messageId for response correlation
-    (envelope as unknown as Record<string, unknown>)['_messageId'] =
-      msg.messageId;
 
     this.handleInbound(envelope).catch(() => {
       // errors handled internally by ChannelBase
@@ -84,11 +81,9 @@ export class MockPluginChannel extends ChannelBase {
       return;
     }
 
-    const messageId = this.pendingMessageId || 'unknown';
-
     const outbound: OutboundMessage = {
       type: 'outbound',
-      messageId,
+      messageId: this.pendingMessageId || 'unknown',
       chatId,
       text,
     };
@@ -104,9 +99,7 @@ export class MockPluginChannel extends ChannelBase {
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
-    this.pendingMessageId = (envelope as unknown as Record<string, unknown>)[
-      '_messageId'
-    ] as string | undefined;
+    this.pendingMessageId = envelope.messageId;
     try {
       await super.handleInbound(envelope);
     } finally {

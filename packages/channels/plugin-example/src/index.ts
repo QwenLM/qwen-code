@@ -8,8 +8,8 @@ export type { MockServerHandle, MockServerOptions } from './mock-server.js';
 export type { InboundMessage, OutboundMessage, WsMessage } from './protocol.js';
 
 export const plugin: ChannelPlugin = {
-  channelType: 'mock-plugin',
-  displayName: 'Mock Plugin',
+  channelType: 'plugin-example',
+  displayName: 'Plugin Example',
   requiredConfigFields: ['serverWsUrl'],
   createChannel: (name, config, bridge, options) =>
     new MockPluginChannel(name, config as MockPluginConfig, bridge, options),

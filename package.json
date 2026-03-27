@@ -11,7 +11,7 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
-    "packages/channels/mock"
+    "packages/channels/plugin-example"
   ],
   "repository": {
     "type": "git",

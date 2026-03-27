@@ -19,7 +19,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
-Want to connect a platform that isn't built in? See [Custom Channel Plugins](./custom-channels) to build your own adapter as an extension.
+Want to connect a platform that isn't built in? See [Plugins](./plugins) to add a custom adapter as an extension.
 
 ## Configuration
 
@@ -49,7 +49,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option         | Required | Description                                                                                                                              |
 | -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`         | Yes      | Channel type: `telegram`, `weixin`, `dingtalk`, or a custom type from an extension (see [Custom Channel Plugins](./custom-channels))     |
+| `type`         | Yes      | Channel type: `telegram`, `weixin`, `dingtalk`, or a custom type from an extension (see [Plugins](./plugins))                            |
 | `token`        | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                              |
 | `clientId`     | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                              |
 | `clientSecret` | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                           |

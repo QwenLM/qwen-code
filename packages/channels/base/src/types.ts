@@ -33,6 +33,8 @@ export interface Envelope {
   chatId: string;
   text: string;
   threadId?: string;
+  /** Platform-specific message ID for response correlation. */
+  messageId?: string;
   isGroup: boolean;
   isMentioned: boolean;
   isReplyToBot: boolean;

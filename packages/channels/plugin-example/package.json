@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/channel-mock",
+  "name": "@qwen-code/channel-plugin-example",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",

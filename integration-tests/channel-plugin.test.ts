@@ -7,7 +7,7 @@
 /**
  * Channel Plugin Integration Test — Real E2E with WebSocket
  *
- * Tests the actual MockPluginChannel (from @qwen-code/channel-mock) connected
+ * Tests the actual MockPluginChannel (from @qwen-code/channel-plugin-example) connected
  * to an in-process mock server via WebSocket. The full message flow is:
  *
  *   server.sendMessage("What is 2+2?")
@@ -39,8 +39,8 @@ import type { ChannelConfig } from '../packages/channels/base/dist/index.js';
 import {
   MockPluginChannel,
   createMockServer,
-} from '../packages/channels/mock/src/index.js';
-import type { MockServerHandle } from '../packages/channels/mock/src/index.js';
+} from '../packages/channels/plugin-example/src/index.js';
+import type { MockServerHandle } from '../packages/channels/plugin-example/src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(__dirname, '..', 'dist', 'cli.js');
@@ -60,7 +60,7 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
     const baseDir =
       process.env['INTEGRATION_TEST_FILE_DIR'] ||
       join(__dirname, '..', '.integration-tests', `channel-${Date.now()}`);
-    testDir = join(baseDir, 'channel-mock-e2e');
+    testDir = join(baseDir, 'channel-plugin-example-e2e');
     mkdirSync(testDir, { recursive: true });
 
     // 1. Start mock server on random ports (no port conflicts)
@@ -75,7 +75,7 @@ describe('Channel Plugin (Mock WebSocket E2E)', () => {
 
     // 3. Create and connect MockPluginChannel via WebSocket
     const config: ChannelConfig & Record<string, unknown> = {
-      type: 'mock-plugin',
+      type: 'plugin-example',
       token: '',
       senderPolicy: 'open',
       allowedUsers: [],
