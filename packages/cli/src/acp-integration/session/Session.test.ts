@@ -346,6 +346,63 @@ describe('Session', () => {
       );
     });
 
+    it('returns permission error for disabled tools (L1 isToolEnabled check)', async () => {
+      const executeSpy = vi.fn();
+      const invocation = {
+        params: { path: '/tmp/file.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Need permission',
+          prompt: 'Allow?',
+          onConfirm: vi.fn(),
+        }),
+        getDescription: vi.fn().mockReturnValue('Write file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'write_file',
+        kind: core.Kind.Edit,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      // Mock a PermissionManager that denies the tool
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-denied',
+                  name: 'write_file',
+                  args: { path: '/tmp/file.txt' },
+                },
+              ],
+            },
+          };
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write something' }],
+      });
+
+      // Tool should NOT have been executed
+      expect(executeSpy).not.toHaveBeenCalled();
+      // No permission dialog should have been opened
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+    });
+
     it('respects permission-request hook allow decisions without opening ACP permission dialog', async () => {
       const hookSpy = vi
         .spyOn(core, 'firePermissionRequestHook')
