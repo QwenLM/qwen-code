@@ -83,9 +83,9 @@ describe('parseChannelConfig', () => {
   });
 
   it('resolves env vars in token, clientId, clientSecret', () => {
-    process.env.TEST_TOKEN = 'tok123';
-    process.env.TEST_CID = 'cid456';
-    process.env.TEST_SEC = 'sec789';
+    process.env['TEST_TOKEN'] = 'tok123';
+    process.env['TEST_CID'] = 'cid456';
+    process.env['TEST_SEC'] = 'sec789';
 
     const result = parseChannelConfig('bot', {
       type: 'bare',
@@ -98,9 +98,9 @@ describe('parseChannelConfig', () => {
     expect(result.clientId).toBe('cid456');
     expect(result.clientSecret).toBe('sec789');
 
-    delete process.env.TEST_TOKEN;
-    delete process.env.TEST_CID;
-    delete process.env.TEST_SEC;
+    delete process.env['TEST_TOKEN'];
+    delete process.env['TEST_CID'];
+    delete process.env['TEST_SEC'];
   });
 
   it('preserves explicit config values over defaults', () => {
