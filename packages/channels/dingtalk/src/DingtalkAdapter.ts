@@ -81,6 +81,8 @@ export class DingtalkChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  /** Map messageId → conversationId for reaction attach/recall in hooks. */
+  private reactionContext: Map<string, string> = new Map();
 
   constructor(
     name: string,
@@ -234,6 +236,31 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
+  }
+
+  protected override onPromptStart(
+    _chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId) return;
+    const convId = this.reactionContext.get(messageId);
+    if (convId) {
+      this.attachReaction(messageId, convId).catch(() => {});
+    }
+  }
+
+  protected override onPromptEnd(
+    _chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId) return;
+    const convId = this.reactionContext.get(messageId);
+    if (convId) {
+      this.recallReaction(messageId, convId).catch(() => {});
+      this.reactionContext.delete(messageId);
+    }
   }
 
   /**
@@ -515,30 +542,26 @@ export class DingtalkChannel extends ChannelBase {
         referencedText: quoted.referencedText,
       };
 
-      // Attach 👀 reaction, process message, then recall reaction
-      const reactionMsgId = msgId;
-      const reactionConvId = conversationId;
+      // Store messageId + conversationId for reaction hooks
+      envelope.messageId = msgId;
+      if (msgId && conversationId) {
+        this.reactionContext.set(msgId, conversationId);
+      }
 
       const processMessage = async () => {
-        if (reactionMsgId && reactionConvId) {
-          this.attachReaction(reactionMsgId, reactionConvId).catch(() => {});
+        // Download media if present (first downloadCode only for images)
+        if (content.downloadCodes.length > 0 && content.mediaType) {
+          await this.attachMedia(
+            envelope,
+            content.downloadCodes[0]!,
+            content.mediaType,
+            content.fileName,
+          );
         }
-        try {
-          // Download media if present (first downloadCode only for images)
-          if (content.downloadCodes.length > 0 && content.mediaType) {
-            await this.attachMedia(
-              envelope,
-              content.downloadCodes[0]!,
-              content.mediaType,
-              content.fileName,
-            );
-          }
-          await this.handleInbound(envelope);
-        } finally {
-          if (reactionMsgId && reactionConvId) {
-            this.recallReaction(reactionMsgId, reactionConvId).catch(() => {});
-          }
-        }
+        // reactionContext cleanup is handled by onPromptEnd (not here),
+        // because in collect mode handleInbound returns immediately after
+        // buffering — the context must survive until the prompt actually runs.
+        await this.handleInbound(envelope);
       };
 
       // Don't await — stream callback should return quickly

@@ -1,4 +1,4 @@
-import type { ChannelConfig, Envelope } from './types.js';
+import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
@@ -22,8 +22,19 @@ export abstract class ChannelBase {
   protected name: string;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
-  /** Per-session promise chain to serialize prompt + send. */
+  /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+
+  /** Per-session active prompt tracking for dispatch modes. */
+  private activePrompts: Map<
+    string,
+    { cancelled: boolean; done: Promise<void>; resolve: () => void }
+  > = new Map();
+  /** Per-session message buffer for collect mode. */
+  private collectBuffers: Map<
+    string,
+    Array<{ text: string; envelope: Envelope }>
+  > = new Map();
 
   constructor(
     name: string,
@@ -72,6 +83,27 @@ export abstract class ChannelBase {
   }
 
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
+
+  /**
+   * Called when a prompt actually begins processing (inside the session queue).
+   * Override to show a platform-specific working indicator (e.g., typing, reaction).
+   * Not called for buffered messages (collect mode) or gated/blocked messages.
+   */
+  protected onPromptStart(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  /**
+   * Called when a prompt finishes (response sent or cancelled).
+   * Override to hide the working indicator.
+   */
+  protected onPromptEnd(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
 
   /**
    * Called for each text chunk as the agent streams its response.
@@ -266,11 +298,64 @@ export abstract class ChannelBase {
       this.instructedSessions.add(sessionId);
     }
 
-    // Serialize prompt + send per session to prevent textChunk listener
-    // pollution when concurrent messages hit the same session.
+    // Resolve dispatch mode: per-group override → channel config → default
+    const groupCfg = envelope.isGroup
+      ? this.config.groups[envelope.chatId] || this.config.groups['*']
+      : undefined;
+    const mode: DispatchMode =
+      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
+
+    const active = this.activePrompts.get(sessionId);
+
+    if (active) {
+      // A prompt is already running for this session
+      switch (mode) {
+        case 'collect': {
+          // Buffer the message; it will be coalesced when the active prompt finishes
+          let buffer = this.collectBuffers.get(sessionId);
+          if (!buffer) {
+            buffer = [];
+            this.collectBuffers.set(sessionId, buffer);
+          }
+          buffer.push({ text: promptText, envelope });
+          return;
+        }
+        case 'steer': {
+          // Cancel the running prompt, then fall through to send a new one
+          active.cancelled = true;
+          await this.bridge.cancelSession(sessionId).catch(() => {});
+          // Wait for the active prompt to finish winding down
+          await active.done;
+          // Prepend a cancellation note so the agent understands context
+          promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
+          break;
+        }
+        case 'followup': {
+          // Chain onto the session queue (existing sequential behavior)
+          break;
+        }
+        default: {
+          // Exhaustive check — should never happen
+          const _exhaustive: never = mode;
+          throw new Error(`Unknown dispatch mode: ${_exhaustive}`);
+        }
+      }
+    }
+
+    // Run the prompt (with followup-mode serialization for safety)
     const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
     const useBlockStreaming = this.config.blockStreaming === 'on';
     const current = prev.then(async () => {
+      // Register this prompt as active
+      let doneResolve: () => void = () => {};
+      const done = new Promise<void>((r) => {
+        doneResolve = r;
+      });
+      const promptState = { cancelled: false, done, resolve: doneResolve };
+      this.activePrompts.set(sessionId, promptState);
+
+      this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
+
       const streamer = useBlockStreaming
         ? new BlockStreamer({
             minChars: this.config.blockStreamingChunk?.minChars ?? 400,
@@ -280,7 +365,6 @@ export abstract class ChannelBase {
           })
         : null;
 
-      // Forward streaming chunks to the subclass hook (and block streamer)
       const onChunk = (sid: string, chunk: string) => {
         if (sid === sessionId) {
           this.onResponseChunk(envelope.chatId, chunk, sessionId);
@@ -295,7 +379,8 @@ export abstract class ChannelBase {
           imageMimeType,
         });
 
-        if (response) {
+        // If cancelled (steer mode), skip sending the response
+        if (!promptState.cancelled && response) {
           if (streamer) {
             await streamer.flush();
           } else {
@@ -304,6 +389,30 @@ export abstract class ChannelBase {
         }
       } finally {
         this.bridge.off('textChunk', onChunk);
+        this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
+        this.activePrompts.delete(sessionId);
+        // Signal any steer waiter that we're done
+        promptState.resolve();
+
+        // Drain collect buffer if any messages accumulated
+        const buffer = this.collectBuffers.get(sessionId);
+        if (buffer && buffer.length > 0) {
+          this.collectBuffers.delete(sessionId);
+          const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          // Re-enter handleInbound with the coalesced message
+          const syntheticEnvelope: Envelope = {
+            ...lastEnvelope,
+            text: coalesced,
+            // Clear attachments/references — already resolved in original text
+            referencedText: undefined,
+            attachments: undefined,
+            imageBase64: undefined,
+            imageMimeType: undefined,
+          };
+          // Queue the coalesced prompt (don't await to avoid deadlock on the queue)
+          this.handleInbound(syntheticEnvelope).catch(() => {});
+        }
       }
     });
     this.sessionQueues.set(

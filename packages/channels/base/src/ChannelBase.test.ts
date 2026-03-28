@@ -9,6 +9,13 @@ import type { ChannelBaseOptions } from './ChannelBase.js';
 class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   connected = false;
+  promptStarts: Array<{
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+  }> = [];
+  promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
+    [];
 
   async connect() {
     this.connected = true;
@@ -18,6 +25,22 @@ class TestChannel extends ChannelBase {
   }
   disconnect() {
     this.connected = false;
+  }
+
+  protected override onPromptStart(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.promptStarts.push({ chatId, sessionId, messageId });
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.promptEnds.push({ chatId, sessionId, messageId });
   }
 }
 
@@ -374,6 +397,342 @@ describe('ChannelBase', () => {
       // The channel should use the new bridge for future messages
       // (this mainly ensures no crash)
       expect(() => ch.setBridge(newBridge)).not.toThrow();
+    });
+  });
+
+  describe('dispatch modes', () => {
+    it('collect: buffers messages and coalesces into one followup prompt', async () => {
+      // Make the first prompt "slow" — we control when it resolves
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = createChannel({ dispatchMode: 'collect' });
+
+      // Send first message — starts processing
+      const p1 = ch.handleInbound(envelope({ text: 'first' }));
+
+      // Wait a tick for the prompt to be registered as active
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Send two more messages while first is busy — these should buffer
+      const p2 = ch.handleInbound(envelope({ text: 'second' }));
+      const p3 = ch.handleInbound(envelope({ text: 'third' }));
+
+      // p2 and p3 should resolve immediately (buffered, not queued)
+      await p2;
+      await p3;
+
+      // First prompt is still running, bridge.prompt called only once
+      expect(callCount).toBe(1);
+
+      // Resolve the first prompt
+      resolveFirst('first response');
+      await p1;
+
+      // Wait for the coalesced followup to process
+      await new Promise((r) => setTimeout(r, 50));
+
+      // bridge.prompt should have been called twice: original + coalesced
+      expect(callCount).toBe(2);
+
+      // The second call should contain both buffered messages coalesced
+      const secondCallText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(secondCallText).toContain('second');
+      expect(secondCallText).toContain('third');
+
+      // Both responses should have been sent
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'first response' }),
+          expect.objectContaining({ text: 'coalesced response' }),
+        ]),
+      );
+    });
+
+    it('collect: no followup if no messages buffered', async () => {
+      const ch = createChannel({ dispatchMode: 'collect' });
+      await ch.handleInbound(envelope({ text: 'only message' }));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(ch.sent).toHaveLength(1);
+    });
+
+    it('steer: cancels running prompt and re-prompts with cancellation note', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('steered response');
+      });
+
+      // Add cancelSession mock
+      (bridge as unknown as Record<string, unknown>).cancelSession = vi
+        .fn()
+        .mockImplementation(() => {
+          // Simulate cancellation — resolve the first prompt
+          resolveFirst('cancelled partial');
+          return Promise.resolve();
+        });
+
+      const ch = createChannel({ dispatchMode: 'steer' });
+
+      // Send first message — starts processing
+      const p1 = ch.handleInbound(envelope({ text: 'refactor auth' }));
+
+      // Wait for prompt to register as active
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Send correction while first is busy
+      const p2 = ch.handleInbound(
+        envelope({ text: 'actually refactor billing' }),
+      );
+
+      // Both should resolve
+      await p1;
+      await p2;
+
+      // cancelSession should have been called
+      expect(
+        (bridge as unknown as Record<string, () => unknown>).cancelSession,
+      ).toHaveBeenCalledTimes(1);
+
+      // First prompt's response should NOT have been sent (it was cancelled)
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'cancelled partial' }),
+        ]),
+      );
+
+      // Second prompt should include the cancellation note
+      const secondCallText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1][1] as string;
+      expect(secondCallText).toContain('previous request has been cancelled');
+      expect(secondCallText).toContain('actually refactor billing');
+
+      // Steered response should have been sent
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'steered response' }),
+        ]),
+      );
+    });
+
+    it('followup: queues messages sequentially', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+
+      const ch = createChannel({ dispatchMode: 'followup' });
+
+      // Send first message
+      const p1 = ch.handleInbound(envelope({ text: 'task one' }));
+
+      // Wait for prompt to start
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Send second message — should queue (not buffer)
+      const p2 = ch.handleInbound(envelope({ text: 'task two' }));
+
+      // Only first prompt should be running
+      expect(callCount).toBe(1);
+
+      // Resolve first
+      resolveFirst('response-1');
+      await p1;
+      await p2;
+
+      // Both prompts ran sequentially
+      expect(callCount).toBe(2);
+
+      // Both got their own response
+      expect(ch.sent).toEqual([
+        expect.objectContaining({ text: 'response-1' }),
+        expect.objectContaining({ text: 'response-2' }),
+      ]);
+    });
+
+    it('steer is the default mode when dispatchMode not set', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('steered response');
+      });
+
+      // Add cancelSession mock
+      (bridge as unknown as Record<string, unknown>).cancelSession = vi
+        .fn()
+        .mockImplementation(() => {
+          resolveFirst('cancelled');
+          return Promise.resolve();
+        });
+
+      // No dispatchMode set — should default to steer
+      const ch = createChannel();
+
+      const p1 = ch.handleInbound(envelope({ text: 'first' }));
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Second message should cancel the first (steer behavior)
+      const p2 = ch.handleInbound(envelope({ text: 'second' }));
+
+      await p1;
+      await p2;
+
+      // cancelSession should have been called (steer behavior)
+      expect(
+        (bridge as unknown as Record<string, () => unknown>).cancelSession,
+      ).toHaveBeenCalledTimes(1);
+
+      // Both prompts ran
+      expect(callCount).toBe(2);
+    });
+
+    it('per-group dispatchMode overrides channel-level', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve(`response-${callCount}`);
+      });
+
+      // Channel default is collect, but group overrides to followup
+      const ch = createChannel({
+        dispatchMode: 'collect',
+        groupPolicy: 'open',
+        groups: { 'group-1': { dispatchMode: 'followup' } },
+      });
+
+      const groupEnv = envelope({
+        isGroup: true,
+        isMentioned: true,
+        chatId: 'group-1',
+      });
+
+      const p1 = ch.handleInbound({ ...groupEnv, text: 'first' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // In followup mode, second message queues (doesn't buffer and return)
+      const p2Promise = ch.handleInbound({ ...groupEnv, text: 'second' });
+
+      expect(callCount).toBe(1);
+
+      resolveFirst('response-1');
+      await p1;
+      await p2Promise;
+
+      // Both ran sequentially — followup behavior
+      expect(callCount).toBe(2);
+      expect(ch.sent).toEqual([
+        expect.objectContaining({ text: 'response-1' }),
+        expect.objectContaining({ text: 'response-2' }),
+      ]);
+    });
+  });
+
+  describe('prompt lifecycle hooks', () => {
+    it('calls onPromptStart and onPromptEnd for each prompt', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      expect(ch.promptStarts).toHaveLength(1);
+      expect(ch.promptStarts[0]!.chatId).toBe('chat1');
+      expect(ch.promptEnds).toHaveLength(1);
+      expect(ch.promptEnds[0]!.chatId).toBe('chat1');
+    });
+
+    it('passes messageId to hooks', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: 'hello', messageId: 'msg-42' }));
+
+      expect(ch.promptStarts[0]!.messageId).toBe('msg-42');
+      expect(ch.promptEnds[0]!.messageId).toBe('msg-42');
+    });
+
+    it('does not call hooks for gated messages', async () => {
+      const ch = createChannel({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['admin'],
+      });
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      expect(ch.promptStarts).toHaveLength(0);
+      expect(ch.promptEnds).toHaveLength(0);
+    });
+
+    it('does not call hooks for buffered messages in collect mode', async () => {
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((r) => {
+        resolveFirst = r;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('ok');
+      });
+
+      const ch = createChannel({ dispatchMode: 'collect' });
+
+      const p1 = ch.handleInbound(
+        envelope({ text: 'first', messageId: 'msg-1' }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      // This message gets buffered — should NOT trigger hooks
+      await ch.handleInbound(envelope({ text: 'second', messageId: 'msg-2' }));
+
+      // Only one prompt start so far (for the first message)
+      expect(ch.promptStarts).toHaveLength(1);
+      expect(ch.promptStarts[0]!.messageId).toBe('msg-1');
+
+      resolveFirst('done');
+      await p1;
+      await new Promise((r) => setTimeout(r, 50));
+
+      // After coalesced prompt runs, we should have 2 start/end pairs
+      expect(ch.promptStarts).toHaveLength(2);
+      expect(ch.promptEnds).toHaveLength(2);
+    });
+
+    it('calls onPromptEnd even when prompt throws', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('agent error'),
+      );
+
+      const ch = createChannel();
+      // handleInbound catches the error internally
+      await ch.handleInbound(envelope({ text: 'hello' })).catch(() => {});
+
+      expect(ch.promptStarts).toHaveLength(1);
+      expect(ch.promptEnds).toHaveLength(1);
     });
   });
 

@@ -161,31 +161,25 @@ export class TelegramChannel extends ChannelBase {
     process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
   }
 
-  override async handleInbound(envelope: Envelope): Promise<void> {
-    // Check group gate before showing "Working..." indicator
-    const groupResult = this.groupGate.check(envelope);
-    if (!groupResult.allowed) {
-      return;
-    }
+  /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
+  private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
-    // Skip "Working..." for local slash commands — they respond instantly
-    const isLocalCommand =
-      envelope.text.startsWith('/') && this.isLocalCommand(envelope.text);
+  protected override onPromptStart(chatId: string): void {
+    // Clear any stale interval (shouldn't happen, but safe)
+    const existing = this.typingIntervals.get(chatId);
+    if (existing) clearInterval(existing);
 
-    const workingMsg = isLocalCommand
-      ? null
-      : await this.bot.telegram
-          .sendMessage(envelope.chatId, 'Working...')
-          .catch(() => null);
+    const sendTyping = () =>
+      this.bot.telegram.sendChatAction(chatId, 'typing').catch(() => {});
+    sendTyping();
+    this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
+  }
 
-    try {
-      await super.handleInbound(envelope);
-    } finally {
-      if (workingMsg) {
-        this.bot.telegram
-          .deleteMessage(envelope.chatId, workingMsg.message_id)
-          .catch(() => {});
-      }
+  protected override onPromptEnd(chatId: string): void {
+    const interval = this.typingIntervals.get(chatId);
+    if (interval) {
+      clearInterval(interval);
+      this.typingIntervals.delete(chatId);
     }
   }
 

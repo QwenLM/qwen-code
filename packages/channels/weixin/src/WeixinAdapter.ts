@@ -93,68 +93,63 @@ export class WeixinChannel extends ChannelBase {
     );
   }
 
+  protected override onPromptStart(chatId: string): void {
+    this.setTyping(chatId, true).catch(() => {});
+  }
+
+  protected override onPromptEnd(chatId: string): void {
+    this.setTyping(chatId, false).catch(() => {});
+  }
+
   private async handleInboundWithMedia(
     envelope: Envelope,
     image?: CdnRef,
     file?: FileCdnRef,
   ): Promise<void> {
-    // Check group gate before showing typing
-    const groupResult = this.groupGate.check(envelope);
-    if (!groupResult.allowed) {
-      return;
+    // Download image from CDN
+    if (image) {
+      try {
+        const imageData = await downloadAndDecrypt(
+          image.encryptQueryParam,
+          image.aesKey,
+        );
+        envelope.imageBase64 = imageData.toString('base64');
+        envelope.imageMimeType = detectImageMime(imageData);
+      } catch (err) {
+        process.stderr.write(
+          `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
+        );
+      }
     }
 
-    // Show typing indicator immediately — before CDN download
-    await this.setTyping(envelope.chatId, true);
-
-    try {
-      // Download image from CDN (after typing has started)
-      if (image) {
-        try {
-          const imageData = await downloadAndDecrypt(
-            image.encryptQueryParam,
-            image.aesKey,
-          );
-          envelope.imageBase64 = imageData.toString('base64');
-          envelope.imageMimeType = detectImageMime(imageData);
-        } catch (err) {
-          process.stderr.write(
-            `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
-          );
-        }
+    // Download file from CDN, save to temp dir
+    if (file) {
+      try {
+        const fileData = await downloadAndDecrypt(
+          file.encryptQueryParam,
+          file.aesKey,
+        );
+        const dir = join(tmpdir(), 'channel-files');
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        const filePath = join(dir, file.fileName);
+        writeFileSync(filePath, fileData);
+        envelope.attachments = [
+          {
+            type: 'file',
+            filePath,
+            mimeType: 'application/octet-stream',
+            fileName: file.fileName,
+          },
+        ];
+      } catch (err) {
+        process.stderr.write(
+          `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
+        );
+        envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
       }
-
-      // Download file from CDN, save to temp dir
-      if (file) {
-        try {
-          const fileData = await downloadAndDecrypt(
-            file.encryptQueryParam,
-            file.aesKey,
-          );
-          const dir = join(tmpdir(), 'channel-files');
-          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-          const filePath = join(dir, file.fileName);
-          writeFileSync(filePath, fileData);
-          envelope.attachments = [
-            {
-              type: 'file',
-              filePath,
-              mimeType: 'application/octet-stream',
-              fileName: file.fileName,
-            },
-          ];
-        } catch (err) {
-          process.stderr.write(
-            `[Weixin:${this.name}] Failed to download file: ${err instanceof Error ? err.message : err}\n`,
-          );
-          envelope.text = `(User sent a file "${file.fileName}" but download failed)`;
-        }
-      }
-
-      await super.handleInbound(envelope);
-    } finally {
-      await this.setTyping(envelope.chatId, false);
     }
+
+    await super.handleInbound(envelope);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

@@ -5,9 +5,11 @@ export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type DispatchMode = 'collect' | 'steer' | 'followup';
 
 export interface GroupConfig {
   requireMention?: boolean; // default: true
+  dispatchMode?: DispatchMode;
 }
 
 export interface BlockStreamingChunkConfig {
@@ -36,6 +38,9 @@ export interface ChannelConfig {
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
+
+  /** Dispatch mode for concurrent messages. Default: 'collect'. */
+  dispatchMode?: DispatchMode;
 
   /** Enable block streaming — emit completed blocks as separate messages. */
   blockStreaming?: 'on' | 'off';

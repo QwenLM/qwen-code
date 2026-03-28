@@ -22,6 +22,7 @@ export type {
   ChannelConfig,
   ChannelPlugin,
   ChannelType,
+  DispatchMode,
   Envelope,
   GroupConfig,
   GroupPolicy,

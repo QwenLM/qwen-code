@@ -174,6 +174,11 @@ export class AcpBridge extends EventEmitter {
     return chunks.join('');
   }
 
+  async cancelSession(sessionId: string): Promise<void> {
+    const conn = this.ensureConnection();
+    await conn.cancel({ sessionId });
+  }
+
   stop(): void {
     if (this.child) {
       this.child.kill();

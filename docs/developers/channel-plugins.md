@@ -152,13 +152,15 @@ this.registerCommand('mycommand', async (envelope, args) => {
 });
 ```
 
-**Working indicators** — override `handleInbound()` to show platform-specific typing indicators:
+**Working indicators** — override `onPromptStart()` and `onPromptEnd()` to show platform-specific typing indicators. These hooks fire only when a prompt actually begins processing — not for buffered messages (collect mode) or gated/blocked messages:
 
 ```typescript
-override async handleInbound(envelope: Envelope): Promise<void> {
-  await this.platformClient.sendTyping(envelope.chatId); // your platform API
-  try { await super.handleInbound(envelope); }
-  finally { await this.platformClient.stopTyping(envelope.chatId); }
+protected override onPromptStart(chatId: string, sessionId: string, messageId?: string): void {
+  this.platformClient.sendTyping(chatId); // your platform API
+}
+
+protected override onPromptEnd(chatId: string, sessionId: string, messageId?: string): void {
+  this.platformClient.stopTyping(chatId);
 }
 ```
 
