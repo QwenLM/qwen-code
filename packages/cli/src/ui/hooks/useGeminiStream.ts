@@ -1638,6 +1638,32 @@ export const useGeminiStream = (
     storage,
   ]);
 
+  // ─── Cron scheduler integration ─────────────────────────
+  const cronQueueRef = useRef<string[]>([]);
+
+  // Start the scheduler on mount, stop on unmount
+  useEffect(() => {
+    if (config.isCronDisabled()) return;
+    const scheduler = config.getCronScheduler();
+    scheduler.start((job: { prompt: string }) => {
+      cronQueueRef.current.push(job.prompt);
+    });
+    return () => {
+      scheduler.stop();
+    };
+  }, [config]);
+
+  // When idle, drain the cron queue one prompt at a time
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      cronQueueRef.current.length > 0
+    ) {
+      const prompt = cronQueueRef.current.shift()!;
+      submitQuery(prompt, SendMessageType.UserQuery);
+    }
+  }, [streamingState, submitQuery]);
+
   return {
     streamingState,
     submitQuery,
