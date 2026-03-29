@@ -51,12 +51,12 @@ class CronCreateInvocation extends BaseToolInvocation<
       if (recurring) {
         llmContent =
           `Scheduled recurring job ${job.id} (${job.cronExpr}). ` +
-          'Session-only (not written to disk, dies when Claude exits). ' +
+          'Session-only (not written to disk, dies when Qwen Code exits). ' +
           'Auto-expires after 7 days. Use CronDelete to cancel sooner.';
       } else {
         llmContent =
           `Scheduled one-shot task ${job.id} (${job.cronExpr}). ` +
-          'Session-only (not written to disk, dies when Claude exits). ' +
+          'Session-only (not written to disk, dies when Qwen Code exits). ' +
           'It will fire once then auto-delete.';
       }
 
@@ -99,7 +99,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
         '  "in an hour or so, remind me to..." → pick whatever minute you land on, don\'t round\n\n' +
         'Only use minute 0 or 30 when the user names that exact time and clearly means it ("at 9:00 sharp", "at half past", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n' +
         '## Session-only\n\n' +
-        'Jobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits.\n\n' +
+        'Jobs live only in this Qwen Code session — nothing is written to disk, and the job is gone when Qwen Code exits.\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
         'Recurring tasks auto-expire after 3 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 3-day limit when scheduling recurring jobs.\n\n' +
