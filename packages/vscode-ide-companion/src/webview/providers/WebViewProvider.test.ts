@@ -174,6 +174,57 @@ import {
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
 
+type WebViewMessageHandler = (message: {
+  type: string;
+  data?: unknown;
+}) => Promise<void>;
+
+/**
+ * Create a mock webview + provider and attach them.
+ * If `captureMessageHandler` is true, the `onDidReceiveMessage` handler is
+ * captured and returned so the test can simulate messages from the webview.
+ */
+async function setupAttachedProvider(options?: {
+  captureMessageHandler?: boolean;
+}) {
+  let messageHandler: WebViewMessageHandler | undefined;
+
+  const postMessage = vi.fn();
+  const webview = {
+    options: undefined as unknown,
+    html: '',
+    postMessage,
+    asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+      toString: () => `webview:${uri.fsPath}`,
+    })),
+    onDidReceiveMessage: vi.fn((handler: WebViewMessageHandler) => {
+      if (options?.captureMessageHandler) {
+        messageHandler = handler;
+      } else {
+        void handler;
+      }
+      return { dispose: vi.fn() };
+    }),
+  };
+
+  const provider = new WebViewProvider(
+    { subscriptions: [] } as never,
+    { fsPath: '/extension-root' } as never,
+  );
+
+  await provider.attachToView(
+    {
+      webview,
+      visible: true,
+      onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+    } as never,
+    'qwen-code.chatView.sidebar',
+  );
+
+  return { webview, postMessage, provider, messageHandler };
+}
+
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -271,38 +322,7 @@ describe('WebViewProvider.attachToView', () => {
   });
 
   it('streams slash-command notifications into the attached webview', async () => {
-    const postMessage = vi.fn();
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage,
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(
-        (
-          handler: (message: { type: string; data?: unknown }) => Promise<void>,
-        ) => {
-          void handler;
-          return { dispose: vi.fn() };
-        },
-      ),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
+    const { postMessage } = await setupAttachedProvider();
 
     slashCommandNotificationCallbackRef.current?.({
       sessionId: 'session-1',
@@ -320,38 +340,7 @@ describe('WebViewProvider.attachToView', () => {
   });
 
   it('does not special-case plain insight slash notifications in the provider', async () => {
-    const postMessage = vi.fn();
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage,
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(
-        (
-          handler: (message: { type: string; data?: unknown }) => Promise<void>,
-        ) => {
-          void handler;
-          return { dispose: vi.fn() };
-        },
-      ),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
+    const { postMessage } = await setupAttachedProvider();
 
     slashCommandNotificationCallbackRef.current?.({
       sessionId: 'session-1',
@@ -369,38 +358,7 @@ describe('WebViewProvider.attachToView', () => {
   });
 
   it('routes structured insight progress markers into the attached webview', async () => {
-    const postMessage = vi.fn();
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage,
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(
-        (
-          handler: (message: { type: string; data?: unknown }) => Promise<void>,
-        ) => {
-          void handler;
-          return { dispose: vi.fn() };
-        },
-      ),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
+    const { postMessage } = await setupAttachedProvider();
 
     slashCommandNotificationCallbackRef.current?.({
       sessionId: 'session-1',
@@ -421,37 +379,7 @@ describe('WebViewProvider.attachToView', () => {
   });
 
   it('exposes a persistent insight report entry from slash-command ready markers without auto-opening it', async () => {
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage: vi.fn(),
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(
-        (
-          handler: (message: { type: string; data?: unknown }) => Promise<void>,
-        ) => {
-          void handler;
-          return { dispose: vi.fn() };
-        },
-      ),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
+    const { webview } = await setupAttachedProvider();
 
     slashCommandNotificationCallbackRef.current?.({
       sessionId: 'session-1',
@@ -474,41 +402,9 @@ describe('WebViewProvider.attachToView', () => {
   });
 
   it('reopens the latest insight report when requested from the webview', async () => {
-    let messageHandler:
-      | ((message: { type: string; data?: unknown }) => Promise<void>)
-      | undefined;
-
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage: vi.fn(),
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(
-        (
-          handler: (message: { type: string; data?: unknown }) => Promise<void>,
-        ) => {
-          messageHandler = handler;
-          return { dispose: vi.fn() };
-        },
-      ),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
 
     await messageHandler?.({
       type: 'openInsightReport',
