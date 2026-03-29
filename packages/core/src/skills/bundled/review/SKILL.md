@@ -17,7 +17,7 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 2.
 
-First, check if `--comment` flag is present in the arguments. If so, note that findings should be posted as PR inline comments in Step 4. Remove `--comment` from the arguments before proceeding. If `--comment` is used but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
+First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
 Based on the remaining arguments:
 
@@ -40,13 +40,7 @@ Launch **four parallel review agents** to analyze the changes from different ang
 
 **IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it 4x. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, and its review focus. Each agent can read files and search the codebase on its own.
 
-**Do NOT flag:**
-- Pre-existing issues in unchanged code (focus on the diff only)
-- Style, formatting, or naming that matches surrounding codebase conventions
-- Pedantic nitpicks that a senior engineer would not flag
-- Issues that a linter or type checker would catch automatically
-- Subjective "consider doing X" suggestions that aren't real problems
-- If you're unsure whether something is a problem, do NOT report it
+Apply the **Exclusion Criteria** (defined at the end of this document) — do NOT flag anything that matches those criteria.
 
 Each agent must return findings in this structured format (one per issue):
 
@@ -112,22 +106,19 @@ Before verification, merge findings that refer to the same issue (same file, sam
 
 ### Independent verification
 
-For each **unique** finding, launch an **independent verification agent** (run all verification agents in parallel).
+For each **unique** finding, launch an **independent verification agent**. Run verification agents in parallel, but if there are more than 10 unique findings, batch them in groups of 10 to avoid resource exhaustion.
 
 Each verification agent receives:
+
 - The finding description (what's wrong, file, line)
 - The command to obtain the diff (as determined in Step 1)
 - Access to read files and search the codebase
 
 Each verification agent must **independently** (without seeing other agents' findings):
+
 1. Read the actual code at the referenced file and line
 2. Check surrounding context — callers, type definitions, tests, related modules
-3. Verify the issue is not a false positive — reject if it falls under any of these:
-   - Pre-existing issue in unchanged code
-   - Style/naming that matches surrounding conventions
-   - Pedantic nitpick a senior engineer would not flag
-   - Issue a linter or type checker would catch automatically
-   - Subjective suggestion that isn't a real problem
+3. Verify the issue is not a false positive — reject if it matches any item in the **Exclusion Criteria**
 4. Return a verdict:
    - **confirmed** — with severity: Critical, Suggestion, or Nice to have
    - **rejected** — with a one-line reason why it's not a real issue
@@ -171,21 +162,31 @@ One of:
 
 Skip this step if `--comment` was not specified or the review target is not a PR.
 
-First, get the repository owner/repo and the latest commit SHA on the PR branch:
+First, get the repository owner/repo and the PR's HEAD commit SHA:
 
 ```bash
 gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
-git rev-parse HEAD
+gh pr view {pr_number} --json headRefOid --jq '.headRefOid'
 ```
+
+**Important:** Use `gh pr view --json headRefOid` instead of `git rev-parse HEAD` — the local branch may be behind the remote, and the GitHub API requires the exact remote HEAD SHA. If either command fails, inform the user and skip Step 4.
 
 Then, for each confirmed finding, post an **inline comment** on the specific file and line using `gh api`:
 
+Construct the comment body as a shell variable first, then pass it to `gh api`:
+
 ```bash
+# Build comment body (use actual newlines, not \n):
+BODY=$(cat <<COMMENT_EOF
+**[{severity}]** {issue description}
+
+{suggested fix if not "N/A"}
+COMMENT_EOF
+)
+
 # Single-line finding:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="**[{severity}]** {issue description}
-
-{suggested fix}" \
+  -f body="$BODY" \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F line={line_number} \
@@ -193,9 +194,7 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 
 # Multi-line finding (e.g., line range 42-50):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="**[{severity}]** {issue description}
-
-{suggested fix}" \
+  -f body="$BODY" \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F start_line={start_line} \
@@ -206,6 +205,7 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 If posting an inline comment fails (e.g., line not part of the diff, auth error), include the finding in the overall review summary comment instead.
 
 **Important rules:**
+
 - Only post **ONE comment per unique issue** — do not duplicate across lines
 - Keep each comment concise and actionable
 - Include the severity tag (Critical/Suggestion/Nice to have) at the start of each comment
@@ -228,6 +228,17 @@ gh pr review {pr_number} --comment --body "No issues found. LGTM! ✅"
 If you checked out a PR branch in Step 1, restore the original state now: check out the original branch, `git stash pop` if changes were stashed, and remove the temp file.
 
 This step runs **after** Step 4 to ensure the PR branch is still checked out when posting inline comments (Step 4 needs the correct commit SHA from the PR branch).
+
+## Exclusion Criteria
+
+These criteria apply to both Step 2 (review agents) and Step 2.5 (verification agents). Do NOT flag or confirm any finding that matches:
+
+- Pre-existing issues in unchanged code (focus on the diff only)
+- Style, formatting, or naming that matches surrounding codebase conventions
+- Pedantic nitpicks that a senior engineer would not flag
+- Issues that a linter or type checker would catch automatically
+- Subjective "consider doing X" suggestions that aren't real problems
+- If you're unsure whether something is a problem, do NOT report it
 
 ## Guidelines
 
