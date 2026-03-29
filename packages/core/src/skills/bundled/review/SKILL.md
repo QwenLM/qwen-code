@@ -6,6 +6,7 @@ allowedTools:
   - run_shell_command
   - grep_search
   - read_file
+  - write_file
   - glob
 ---
 
@@ -173,16 +174,16 @@ gh pr view {pr_number} --json headRefOid --jq '.headRefOid'
 
 Then, for each confirmed finding, post an **inline comment** on the specific file and line using `gh api`:
 
-**Shell safety:** Review content may contain double quotes, `$VAR`, backticks, or other shell-sensitive characters. Do NOT interpolate review text directly into shell arguments. Instead, use a **two-step process**: write the body to a temp file using a quoted heredoc (which prevents all shell expansion), then reference the file with `-F body=@file`.
+**Shell safety:** Review content may contain double quotes, `$VAR`, backticks, or other shell-sensitive characters. Do NOT interpolate review text directly into shell arguments. Instead, use a **two-step process**: write the body to a temp file using the `write_file` tool (which bypasses shell interpretation entirely), then reference the file with `-F body=@file` in the shell command.
 
-```bash
-# Step A: Write comment body to temp file (quoted heredoc — no shell expansion):
-cat > /tmp/pr-comment.txt <<'BODYEOF'
+```
+# Step A: Use write_file tool to create /tmp/pr-comment.txt with content:
 **[{severity}]** {issue description}
 
 {suggested fix}
-BODYEOF
+```
 
+```bash
 # Step B: Post single-line comment referencing the file:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   -F body=@/tmp/pr-comment.txt \
@@ -213,14 +214,9 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 - Include the severity tag (Critical/Suggestion/Nice to have) at the start of each comment
 - Include the suggested fix in the comment body when available
 
-After posting all inline comments, write the review summary to a temp file and submit it using the action that matches the verdict from Step 3:
+After posting all inline comments, use `write_file` to create `/tmp/pr-review-summary.txt` with the summary text, then submit the review using the action that matches the verdict from Step 3:
 
 ```bash
-# Write summary to temp file:
-cat > /tmp/pr-review-summary.txt <<'SUMMARYEOF'
-{summary + verdict text}
-SUMMARYEOF
-
 # Submit review with the matching action:
 # If verdict is "Approve":
 gh pr review {pr_number} --approve --body-file /tmp/pr-review-summary.txt
