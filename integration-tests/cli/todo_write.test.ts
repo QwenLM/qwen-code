@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 
 describe('todo_write', () => {
   it('should be able to create and manage a todo list', async () => {

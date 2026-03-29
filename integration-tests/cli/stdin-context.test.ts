@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 
 describe.skip('stdin context', () => {
   it('should be able to use stdin as context for a prompt', async () => {

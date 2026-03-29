@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 
 describe('save_memory', () => {
   // Skipped due to flaky model behavior - the model sometimes answers the question

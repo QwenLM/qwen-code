@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 

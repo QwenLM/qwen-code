@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { TestRig } from '../test-helper.js';
 
 describe('Ctrl+C exit', () => {
   // (#9782) Temporarily disabling on windows because it is failing on main and every

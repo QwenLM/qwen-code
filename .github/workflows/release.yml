@@ -134,7 +134,9 @@ jobs:
         run: |
           npm run preflight
           npm run test:integration:cli:sandbox:none
+          npm run test:integration:interactive:sandbox:none
           npm run test:integration:cli:sandbox:docker
+          npm run test:integration:interactive:sandbox:docker
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'

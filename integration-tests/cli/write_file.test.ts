@@ -10,7 +10,7 @@ import {
   createToolCallErrorMessage,
   printDebugInfo,
   validateModelOutput,
-} from './test-helper.js';
+} from '../test-helper.js';
 
 describe('write_file', () => {
   it('should be able to write a file', async () => {

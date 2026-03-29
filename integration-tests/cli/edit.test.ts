@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 
 describe('edit', () => {
   it('should be able to edit content in a file', async () => {
