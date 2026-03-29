@@ -13,14 +13,15 @@ import { resolve } from 'path';
  * Vite configuration for @qwen-code/webui library
  *
  * Build outputs:
- * - ESM: dist/index.js, dist/followup.js
- * - CJS: dist/index.cjs, dist/followup.cjs
- * - TypeScript declarations: dist/index.d.ts, dist/followup.d.ts
+ * - ESM: dist/index.js (primary format)
+ * - CJS: dist/index.cjs (compatibility)
+ * - UMD: dist/index.umd.js (for CDN usage)
+ * - TypeScript declarations: dist/index.d.ts
  * - CSS: dist/styles.css (optional styles)
  *
- * The followup entry is a separate subpath (@qwen-code/webui/followup)
- * so that consumers who don't need follow-up suggestions are not forced
- * to install @qwen-code/qwen-code-core.
+ * The followup subpath (@qwen-code/webui/followup) is built separately
+ * via vite.config.followup.ts so that the root entry stays free of
+ * @qwen-code/qwen-code-core dependencies.
  */
 export default defineConfig({
   plugins: [
@@ -28,26 +29,30 @@ export default defineConfig({
     dts({
       include: ['src'],
       outDir: 'dist',
-      rollupTypes: false,
+      rollupTypes: true,
       insertTypesEntry: true,
     }),
   ],
   build: {
     lib: {
-      entry: {
-        index: resolve(__dirname, 'src/index.ts'),
-        followup: resolve(__dirname, 'src/followup.ts'),
+      entry: resolve(__dirname, 'src/index.ts'),
+      name: 'QwenCodeWebUI',
+      formats: ['es', 'cjs', 'umd'],
+      fileName: (format) => {
+        if (format === 'es') return 'index.js';
+        if (format === 'cjs') return 'index.cjs';
+        if (format === 'umd') return 'index.umd.js';
+        return 'index.js';
       },
-      formats: ['es', 'cjs'],
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react-dom',
-        'react/jsx-runtime',
-        '@qwen-code/qwen-code-core',
-      ],
+      external: ['react', 'react-dom', 'react/jsx-runtime'],
       output: {
+        globals: {
+          react: 'React',
+          'react-dom': 'ReactDOM',
+          'react/jsx-runtime': 'ReactJSXRuntime',
+        },
         assetFileNames: 'styles.[ext]',
       },
     },

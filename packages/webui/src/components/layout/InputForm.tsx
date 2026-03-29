@@ -22,7 +22,22 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
-import type { FollowupState } from '../../hooks/useFollowupSuggestions.js';
+/**
+ * Minimal follow-up state shape used by InputForm.
+ * Defined locally to avoid pulling @qwen-code/qwen-code-core into the
+ * root entry's type declarations. The full FollowupState lives in
+ * '@qwen-code/webui/followup'.
+ */
+interface InputFormFollowupState {
+  /** Current suggestion text */
+  suggestion: string | null;
+  /** All available suggestions */
+  suggestions: { length: number };
+  /** Whether to show suggestion */
+  isVisible: boolean;
+  /** Index of current suggestion */
+  currentIndex: number;
+}
 
 /**
  * Edit mode display information
@@ -127,7 +142,7 @@ export interface InputFormProps {
   /** Whether the current draft is eligible to submit */
   canSubmit?: boolean;
   /** Follow-up suggestion state */
-  followupState?: FollowupState;
+  followupState?: InputFormFollowupState;
   /** Callback to accept follow-up suggestion */
   onAcceptFollowup?: () => void;
   /** Callback to dismiss follow-up suggestion */
