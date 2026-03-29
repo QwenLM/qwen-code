@@ -39,23 +39,28 @@ export interface ShellConfiguration {
   shell: ShellType;
 }
 
+let cachedBashPath: string | undefined;
+
 /**
  * Attempts to find the Git Bash executable path on Windows.
  * Checks common installation locations and PATH.
  * @returns The path to bash.exe if found, or 'bash' as fallback.
  */
 function findGitBashPath(): string {
-  // First, check if bash is already in PATH
+  // Return cached result if available
+  if (cachedBashPath) {
+    return cachedBashPath;
+  }
+
+  // Search in PATH directories
   const pathEnv = process.env['PATH'] || '';
-  const pathSep = ';';
-  for (const dir of pathEnv.split(pathSep)) {
-    if (!dir) continue;
-    const bashPath =
-      dir.endsWith('\\') || dir.endsWith('/')
-        ? `${dir}bash.exe`
-        : `${dir}\\bash.exe`;
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    const bashPath = path.join(dir, 'bash.exe');
     try {
       accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
       return bashPath;
     } catch {
       // Continue searching
@@ -64,18 +69,19 @@ function findGitBashPath(): string {
 
   // Check common Git Bash installation locations
   const commonPaths = [
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-    'C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe',
+    path.join('C:', 'Program Files', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'usr', 'bin', 'bash.exe'),
     path.join(
-      process.env['ProgramFiles'] || 'C:\\Program Files',
+      process.env['ProgramFiles'] || path.join('C:', 'Program Files'),
       'Git',
       'bin',
       'bash.exe',
     ),
     path.join(
-      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+      process.env['ProgramFiles(x86)'] ||
+        path.join('C:', 'Program Files (x86)'),
       'Git',
       'bin',
       'bash.exe',
@@ -85,6 +91,7 @@ function findGitBashPath(): string {
   for (const bashPath of commonPaths) {
     try {
       accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
       return bashPath;
     } catch {
       // Continue searching
@@ -92,6 +99,7 @@ function findGitBashPath(): string {
   }
 
   // Fallback to 'bash' and let the system handle it
+  cachedBashPath = 'bash';
   return 'bash';
 }
 
