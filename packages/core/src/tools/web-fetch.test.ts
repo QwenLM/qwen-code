@@ -37,6 +37,7 @@ describe('WebFetchTool', () => {
       getProxy: vi.fn(),
       getGeminiClient: mockGetGeminiClient,
       getSessionId: vi.fn(() => 'test-session-id'),
+      getModel: vi.fn(() => 'qwen-coder'),
     } as unknown as Config;
   });
 
@@ -66,6 +67,7 @@ describe('WebFetchTool', () => {
       vi.spyOn(fetchUtils, 'isPrivateIp').mockReturnValue(false);
       vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
         ok: true,
+        headers: new Headers({ 'content-type': 'text/html' }),
         text: () => Promise.resolve('<html><body>Test content</body></html>'),
       } as Response);
       mockGenerateContent.mockRejectedValue(new Error('API error'));
@@ -74,6 +76,169 @@ describe('WebFetchTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+    });
+  });
+
+  describe('format parameter', () => {
+    it('should default to auto format when not specified', async () => {
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithTimeout')
+        .mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'text/html' }),
+          text: () => Promise.resolve('<html><body>Test content</body></html>'),
+        } as Response);
+
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = { url: 'https://example.com', prompt: 'summarize' };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.any(Number),
+        { Accept: 'text/markdown, text/html' },
+      );
+    });
+
+    it('should request only markdown when format is markdown', async () => {
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithTimeout')
+        .mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'text/markdown' }),
+          text: () => Promise.resolve('# Test Content'),
+        } as Response);
+
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://example.com',
+        prompt: 'summarize',
+        format: 'markdown' as const,
+      };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.any(Number),
+        { Accept: 'text/markdown' },
+      );
+    });
+
+    it('should request only HTML when format is html', async () => {
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithTimeout')
+        .mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'text/html' }),
+          text: () => Promise.resolve('<html><body>Test content</body></html>'),
+        } as Response);
+
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://example.com',
+        prompt: 'summarize',
+        format: 'html' as const,
+      };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.any(Number),
+        { Accept: 'text/html' },
+      );
+    });
+
+    it('should request plain text when format is text', async () => {
+      const fetchSpy = vi
+        .spyOn(fetchUtils, 'fetchWithTimeout')
+        .mockResolvedValue({
+          ok: true,
+          headers: new Headers({ 'content-type': 'text/plain' }),
+          text: () => Promise.resolve('Plain text content'),
+        } as Response);
+
+      mockGenerateContent.mockResolvedValue({
+        response: { text: () => 'Summary' },
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://example.com',
+        prompt: 'summarize',
+        format: 'text' as const,
+      };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.any(Number),
+        { Accept: 'text/plain' },
+      );
+    });
+
+    it('should include markdown content in prompt when server returns markdown', async () => {
+      let receivedContent = '';
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        headers: new Headers({
+          'content-type': 'text/markdown; charset=utf-8',
+        }),
+        text: () =>
+          Promise.resolve('# Hello World\n\nThis is markdown content.'),
+      } as Response);
+
+      mockGenerateContent.mockImplementation((messages) => {
+        receivedContent = messages[0].parts[0].text;
+        return Promise.resolve({ response: { text: () => 'Processed' } });
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = { url: 'https://example.com', prompt: 'summarize' };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(receivedContent).toContain('# Hello World');
+    });
+
+    it('should include plain text content in prompt when server returns plain text', async () => {
+      let receivedContent = '';
+      vi.spyOn(fetchUtils, 'fetchWithTimeout').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        text: () => Promise.resolve('Plain text content here'),
+      } as Response);
+
+      mockGenerateContent.mockImplementation((messages) => {
+        receivedContent = messages[0].parts[0].text;
+        return Promise.resolve({ response: { text: () => 'Processed' } });
+      });
+
+      const tool = new WebFetchTool(mockConfig);
+      const params = {
+        url: 'https://example.com',
+        prompt: 'summarize',
+        format: 'text' as const,
+      };
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(receivedContent).toContain('Plain text content here');
     });
   });
 

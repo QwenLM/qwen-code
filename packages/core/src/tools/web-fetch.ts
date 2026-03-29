@@ -37,6 +37,14 @@ export interface WebFetchToolParams {
    * The prompt to run on the fetched content
    */
   prompt: string;
+  /**
+   * Preferred content format
+   * - auto: Try markdown first, fall back to HTML (default)
+   * - markdown: Request markdown format only
+   * - html: Request HTML format only
+   * - text: Request plain text format
+   */
+  format?: 'auto' | 'markdown' | 'html' | 'text';
 }
 
 /**
@@ -56,6 +64,21 @@ class WebFetchToolInvocation extends BaseToolInvocation<
     this.debugLogger = createDebugLogger('WEB_FETCH');
   }
 
+  private getAcceptHeader(): string {
+    const format = this.params.format ?? 'auto';
+    switch (format) {
+      case 'markdown':
+        return 'text/markdown';
+      case 'html':
+        return 'text/html';
+      case 'text':
+        return 'text/plain';
+      case 'auto':
+      default:
+        return 'text/markdown, text/html';
+    }
+  }
+
   private async executeDirectFetch(signal: AbortSignal): Promise<ToolResult> {
     let url = this.params.url;
 
@@ -69,9 +92,16 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       );
     }
 
+    const acceptHeader = this.getAcceptHeader();
+    this.debugLogger.debug(
+      `[WebFetchTool] Using Accept header: ${acceptHeader}`,
+    );
+
     try {
       this.debugLogger.debug(`[WebFetchTool] Fetching content from: ${url}`);
-      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
+      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS, {
+        Accept: acceptHeader,
+      });
 
       if (!response.ok) {
         const errorMessage = `Request failed with status code ${response.status} ${response.statusText}`;
@@ -82,17 +112,31 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       this.debugLogger.debug(
         `[WebFetchTool] Successfully fetched content from ${url}`,
       );
-      const html = await response.text();
-      const textContent = convert(html, {
-        wordwrap: false,
-        selectors: [
-          { selector: 'a', options: { ignoreHref: true } },
-          { selector: 'img', format: 'skip' },
-        ],
-      }).substring(0, MAX_CONTENT_LENGTH);
+
+      const contentType = response.headers.get('content-type') || '';
+      const responseText = await response.text();
+
+      let textContent: string;
+
+      if (contentType.includes('text/markdown')) {
+        this.debugLogger.debug('[WebFetchTool] Received markdown content');
+        textContent = responseText.substring(0, MAX_CONTENT_LENGTH);
+      } else if (contentType.includes('text/plain')) {
+        this.debugLogger.debug('[WebFetchTool] Received plain text content');
+        textContent = responseText.substring(0, MAX_CONTENT_LENGTH);
+      } else {
+        this.debugLogger.debug('[WebFetchTool] Converting HTML to text');
+        textContent = convert(responseText, {
+          wordwrap: false,
+          selectors: [
+            { selector: 'a', options: { ignoreHref: true } },
+            { selector: 'img', format: 'skip' },
+          ],
+        }).substring(0, MAX_CONTENT_LENGTH);
+      }
 
       this.debugLogger.debug(
-        `[WebFetchTool] Converted HTML to text (${textContent.length} characters)`,
+        `[WebFetchTool] Content length: ${textContent.length} characters`,
       );
 
       const geminiClient = this.config.getGeminiClient();
@@ -221,7 +265,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
-      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
+      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Supports content negotiation for markdown (reduces tokens by ~80%)\n- Fetches the URL content, converts HTML to text if needed\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - format parameter (optional): "auto" (default), "markdown", "html", or "text"\n  - "auto": Requests markdown first, falls back to HTML (RECOMMENDED for most cases)\n  - "markdown": Requests markdown format only (use when user explicitly asks for markdown)\n  - "html": Requests HTML format only (use when you need full HTML structure)\n  - "text": Requests plain text only (use only when user explicitly asks for plain text)\n  - DEFAULT: If user doesn\'t specify a format, use "auto" to get the most efficient format\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
       Kind.Fetch,
       {
         properties: {
@@ -232,6 +276,12 @@ export class WebFetchTool extends BaseDeclarativeTool<
           prompt: {
             description: 'The prompt to run on the fetched content',
             type: 'string',
+          },
+          format: {
+            description:
+              'Preferred content format: auto (default, prefers markdown), markdown, html, or text',
+            type: 'string',
+            enum: ['auto', 'markdown', 'html', 'text'],
           },
         },
         required: ['url', 'prompt'],
