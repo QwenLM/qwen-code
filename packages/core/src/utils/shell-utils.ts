@@ -7,6 +7,7 @@
 import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
+import path from 'node:path';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -39,6 +40,62 @@ export interface ShellConfiguration {
 }
 
 /**
+ * Attempts to find the Git Bash executable path on Windows.
+ * Checks common installation locations and PATH.
+ * @returns The path to bash.exe if found, or 'bash' as fallback.
+ */
+function findGitBashPath(): string {
+  // First, check if bash is already in PATH
+  const pathEnv = process.env['PATH'] || '';
+  const pathSep = ';';
+  for (const dir of pathEnv.split(pathSep)) {
+    if (!dir) continue;
+    const bashPath =
+      dir.endsWith('\\') || dir.endsWith('/')
+        ? `${dir}bash.exe`
+        : `${dir}\\bash.exe`;
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Check common Git Bash installation locations
+  const commonPaths = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe',
+    path.join(
+      process.env['ProgramFiles'] || 'C:\\Program Files',
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+    path.join(
+      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+  ];
+
+  for (const bashPath of commonPaths) {
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Fallback to 'bash' and let the system handle it
+  return 'bash';
+}
+
+/**
  * Determines the appropriate shell configuration for the current platform.
  *
  * This ensures we can execute command strings predictably and securely across platforms
@@ -60,7 +117,7 @@ export function getShellConfiguration(): ShellConfiguration {
 
     if (isGitBash) {
       return {
-        executable: 'bash',
+        executable: findGitBashPath(),
         argsPrefix: ['-c'],
         shell: 'bash',
       };
