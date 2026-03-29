@@ -27,7 +27,7 @@ describe('CronCreateTool', () => {
 
   it('creates a recurring job by default', async () => {
     const invocation = tool.build({
-      cron_expression: '*/5 * * * *',
+      cron: '*/5 * * * *',
       prompt: 'check status',
     });
     const result = await invocation.execute(new AbortController().signal);
@@ -39,7 +39,7 @@ describe('CronCreateTool', () => {
 
   it('creates a one-shot job when recurring=false', async () => {
     const invocation = tool.build({
-      cron_expression: '*/1 * * * *',
+      cron: '*/1 * * * *',
       prompt: 'once',
       recurring: false,
     });
@@ -53,7 +53,7 @@ describe('CronCreateTool', () => {
 
   it('returns error for invalid cron expression', async () => {
     const invocation = tool.build({
-      cron_expression: 'bad cron',
+      cron: 'bad cron',
       prompt: 'fail',
     });
     const result = await invocation.execute(new AbortController().signal);
@@ -61,9 +61,7 @@ describe('CronCreateTool', () => {
   });
 
   it('validates required params', () => {
-    expect(() =>
-      tool.build({ cron_expression: '*/1 * * * *' } as never),
-    ).toThrow();
+    expect(() => tool.build({ cron: '*/1 * * * *' } as never)).toThrow();
     expect(() => tool.build({ prompt: 'test' } as never)).toThrow();
   });
 });

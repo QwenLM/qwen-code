@@ -54,17 +54,18 @@ export class CronDeleteTool extends BaseDeclarativeTool<
     super(
       CronDeleteTool.Name,
       ToolDisplayNames.CRON_DELETE,
-      'Delete an active in-session cron job by its ID. Use cron_list to find job IDs.',
+      'Cancel a cron job previously scheduled with CronCreate. Removes it from the in-memory session store.',
       Kind.Other,
       {
         type: 'object',
         properties: {
           id: {
             type: 'string',
-            description: 'The 8-character ID of the cron job to delete.',
+            description: 'Job ID returned by CronCreate.',
           },
         },
         required: ['id'],
+        additionalProperties: false,
       },
     );
   }

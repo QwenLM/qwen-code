@@ -65,7 +65,7 @@ describe('cron-tools', () => {
     });
 
     const result = await rig.run(
-      'Call cron_create with cron_expression "*/5 * * * *", prompt "test ping", recurring true. Then call cron_list. Then delete that job using cron_delete. Then call cron_list again. How many jobs remain? Reply with just the number.',
+      'Call cron_create with cron "*/5 * * * *", prompt "test ping", recurring true. Then call cron_list. Then delete that job using cron_delete. Then call cron_list again. How many jobs remain? Reply with just the number.',
     );
 
     const foundCreate = await rig.waitForToolCall('cron_create');
@@ -94,7 +94,7 @@ describe('cron-tools', () => {
     });
 
     const result = await rig.run(
-      'Do these steps: (1) Call cron_create with cron_expression "*/5 * * * *", prompt "one-shot test", recurring false. (2) Call cron_list. Is the job marked as recurring or one-shot? Remember the answer. (3) Delete all cron jobs. Reply with just "recurring" or "one-shot".',
+      'Do these steps: (1) Call cron_create with cron "*/5 * * * *", prompt "one-shot test", recurring false. (2) Call cron_list. Is the job marked as recurring or one-shot? Remember the answer. (3) Delete all cron jobs. Reply with just "recurring" or "one-shot".',
     );
 
     const foundCreate = await rig.waitForToolCall('cron_create');

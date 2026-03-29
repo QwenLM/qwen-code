@@ -68,11 +68,12 @@ export class CronListTool extends BaseDeclarativeTool<
     super(
       CronListTool.Name,
       ToolDisplayNames.CRON_LIST,
-      'List all active in-session cron jobs, including their IDs, schedules, and next fire times.',
+      'List all cron jobs scheduled via CronCreate in this session.',
       Kind.Other,
       {
         type: 'object',
         properties: {},
+        additionalProperties: false,
       },
     );
   }

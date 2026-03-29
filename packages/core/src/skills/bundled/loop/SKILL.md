@@ -29,7 +29,7 @@ You are setting up a recurring in-session loop. Parse the user's input to extrac
 2. Convert the interval to a cron expression
 3. Append to the prompt: `\n\nBe concise. If nothing has changed, reply with a single short sentence.`
 4. Call `cron_create` with:
-   - `cron_expression`: the computed cron expression
+   - `cron`: the computed cron expression
    - `prompt`: the extracted prompt with the conciseness instruction appended
    - `recurring`: true
 5. Confirm to the user: "Loop created — I'll [description] every [interval]."
