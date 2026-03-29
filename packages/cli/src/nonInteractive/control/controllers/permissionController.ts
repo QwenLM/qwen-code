@@ -36,8 +36,107 @@ import { BaseController } from './baseController.js';
 // Import ToolCallConfirmationDetails types for type alignment
 type ToolConfirmationType = 'edit' | 'exec' | 'mcp' | 'info' | 'plan';
 
+/**
+ * Configuration for loop detection
+ */
+interface LoopDetectionConfig {
+  /** Maximum consecutive denials before triggering protection */
+  maxConsecutiveDenials: number;
+  /** Time window in ms to reset the counter (5 minutes) */
+  resetWindowMs: number;
+  /** Tools to exclude from loop detection (always allowed to retry) */
+  excludedTools: Set<string>;
+}
+
+const DEFAULT_LOOP_DETECTION_CONFIG: LoopDetectionConfig = {
+  maxConsecutiveDenials: 5,
+  resetWindowMs: 5 * 60 * 1000, // 5 minutes
+  excludedTools: new Set(['exit_plan_mode']),
+};
+
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
+
+  // Loop detection state
+  private consecutiveDenials = 0;
+  private lastDenialTime = 0;
+  private loopDetectionConfig: LoopDetectionConfig;
+
+  constructor(
+    context: import('../ControlContext.js').IControlContext,
+    registry: import('./baseController.js').IPendingRequestRegistry,
+    controllerName: string = 'PermissionController',
+  ) {
+    super(context, registry, controllerName);
+    this.loopDetectionConfig = { ...DEFAULT_LOOP_DETECTION_CONFIG };
+  }
+
+  /**
+   * Check if we're in a potential infinite loop of tool denials
+   * Returns a message if loop detected, null otherwise
+   */
+  private checkLoopDetection(toolName: string): string | null {
+    const now = Date.now();
+
+    // Reset counter if outside the time window
+    if (now - this.lastDenialTime > this.loopDetectionConfig.resetWindowMs) {
+      this.consecutiveDenials = 0;
+    }
+
+    // Skip loop detection for excluded tools
+    if (this.loopDetectionConfig.excludedTools.has(toolName)) {
+      return null;
+    }
+
+    // Check if we've exceeded the threshold
+    if (
+      this.consecutiveDenials >= this.loopDetectionConfig.maxConsecutiveDenials
+    ) {
+      this.consecutiveDenials = 0; // Reset after triggering
+      return this.buildLoopDetectedMessage();
+    }
+
+    return null;
+  }
+
+  /**
+   * Record a tool denial for loop detection
+   */
+  private recordDenial(): void {
+    this.consecutiveDenials++;
+    this.lastDenialTime = Date.now();
+  }
+
+  /**
+   * Reset the denial counter (e.g., when a tool is approved)
+   */
+  private resetDenialCounter(): void {
+    this.consecutiveDenials = 0;
+  }
+
+  /**
+   * Build a message to break the AI out of a thinking loop
+   */
+  private buildLoopDetectedMessage(): string {
+    return `[SYSTEM: Loop Detection Triggered]
+
+The system has detected that you are in a potential infinite loop of tool permission denials. This usually happens when:
+
+1. The user is not responding to permission prompts
+2. There's a communication issue between the frontend and backend
+3. The permission system is not functioning correctly
+
+**IMPORTANT: Stop retrying the same action.**
+
+Instead, please:
+1. Explain to the user what you were trying to do
+2. Ask the user if they want to:
+   - Try a different approach
+   - Change the permission mode (e.g., to 'yolo' mode for auto-approval)
+   - Check if there's a technical issue with the permission dialog
+
+Do not attempt to call the same tool again without user confirmation.`;
+  }
 
   /**
    * Handle permission control requests
@@ -397,6 +496,20 @@ export class PermissionController extends BaseController {
         return;
       }
 
+      // Check for potential infinite loop before proceeding
+      const loopMessage = this.checkLoopDetection(toolCall.request.name);
+      if (loopMessage) {
+        this.debugLogger.warn(
+          '[PermissionController] Loop detected, sending interrupt message',
+        );
+        // Cancel with the loop detection message to break the AI out of the loop
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          { cancelMessage: loopMessage },
+        );
+        return;
+      }
+
       const inputFormat = this.context.config.getInputFormat?.();
       const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
 
@@ -407,6 +520,12 @@ export class PermissionController extends BaseController {
           ? ToolConfirmationOutcome.ProceedOnce
           : ToolConfirmationOutcome.Cancel;
 
+        if (!modeCheck.allowed) {
+          this.recordDenial();
+        } else {
+          this.resetDenialCounter();
+        }
+
         await toolCall.confirmationDetails.onConfirm(outcome);
         return;
       }
@@ -415,6 +534,11 @@ export class PermissionController extends BaseController {
       const permissionSuggestions = this.buildPermissionSuggestions(
         toolCall.confirmationDetails,
       );
+
+      // Use a very long timeout for permission requests (100 years in milliseconds)
+      // This ensures the CLI waits indefinitely for user response from the SDK/WebUI
+      // The actual timeout is controlled by the SDK's canUseTool timeout setting
+      const PERMISSION_REQUEST_TIMEOUT = 3153600000000; // 100 years
 
       const response = await this.sendControlRequest(
         {
@@ -425,11 +549,12 @@ export class PermissionController extends BaseController {
           permission_suggestions: permissionSuggestions,
           blocked_path: null,
         } as CLIControlPermissionRequest,
-        undefined, // use default timeout
+        PERMISSION_REQUEST_TIMEOUT,
         this.context.abortSignal,
       );
 
       if (response.subtype !== 'success') {
+        this.recordDenial();
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
         );
@@ -440,6 +565,8 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
+        // Reset denial counter on successful approval
+        this.resetDenialCounter();
         // Handle updated input if provided
         const updatedInput = payload['updatedInput'];
         if (updatedInput && typeof updatedInput === 'object') {
@@ -449,6 +576,8 @@ export class PermissionController extends BaseController {
           ToolConfirmationOutcome.ProceedOnce,
         );
       } else {
+        // Record denial for loop detection
+        this.recordDenial();
         // Extract cancel message from response if available
         const cancelMessage =
           typeof payload['message'] === 'string'
@@ -465,6 +594,9 @@ export class PermissionController extends BaseController {
         '[PermissionController] Outgoing permission failed:',
         error,
       );
+
+      // Record denial on error (timeout, network error, etc.)
+      this.recordDenial();
 
       // Extract error message
       const errorMessage =
