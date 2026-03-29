@@ -289,6 +289,46 @@ describe('createFollowupController', () => {
     ctrl.cleanup();
   });
 
+  it('accept recovers when onAccept callback throws', async () => {
+    const onStateChange = vi.fn();
+    let callCount = 0;
+    const onAccept = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error('callback error');
+      }
+    });
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+    });
+
+    // Set suggestions and advance timer
+    ctrl.setSuggestions([{ text: 'commit this', priority: 100 }]);
+    vi.advanceTimersByTime(300);
+
+    // First accept — callback throws, but lock should still be released
+    ctrl.accept();
+    // Flush the microtask that fires the callback
+    await Promise.resolve();
+    // Advance past debounce timer to release the accepting lock
+    vi.advanceTimersByTime(100);
+
+    // Set suggestions again for second accept
+    ctrl.setSuggestions([{ text: 'run tests', priority: 90 }]);
+    vi.advanceTimersByTime(300);
+
+    // Second accept — should NOT be blocked
+    ctrl.accept();
+    await Promise.resolve();
+
+    expect(onAccept).toHaveBeenCalledTimes(2);
+    expect(onAccept).toHaveBeenNthCalledWith(1, 'commit this');
+    expect(onAccept).toHaveBeenNthCalledWith(2, 'run tests');
+
+    ctrl.cleanup();
+  });
+
   it('cleanup prevents pending timers from firing', () => {
     const onStateChange = vi.fn();
     const ctrl = createFollowupController({ onStateChange });

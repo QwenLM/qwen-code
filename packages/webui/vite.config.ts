@@ -53,6 +53,7 @@ export default defineConfig({
           react: 'React',
           'react-dom': 'ReactDOM',
           'react/jsx-runtime': 'ReactJSXRuntime',
+          '@qwen-code/qwen-code-core': 'QwenCodeCore',
         },
         assetFileNames: 'styles.[ext]',
       },

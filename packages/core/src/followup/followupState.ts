@@ -220,16 +220,22 @@ export function createFollowupController(
 
     applyState(followupReducers.clear());
 
-    // Fire the callback asynchronously to avoid side-effects in state updates
+    // Fire the callback asynchronously to avoid side-effects in state updates.
+    // Catch callback errors to prevent uncaught exceptions from crashing the
+    // process, and use finally to guarantee the debounce lock is always released.
     queueMicrotask(() => {
-      getOnAccept?.()?.(text);
-
-      if (acceptTimeoutId) {
-        clearTimeout(acceptTimeoutId);
+      try {
+        getOnAccept?.()?.(text);
+      } catch {
+        // Swallow callback errors — they should not affect suggestion state
+      } finally {
+        if (acceptTimeoutId) {
+          clearTimeout(acceptTimeoutId);
+        }
+        acceptTimeoutId = setTimeout(() => {
+          accepting = false;
+        }, ACCEPT_DEBOUNCE_MS);
       }
-      acceptTimeoutId = setTimeout(() => {
-        accepting = false;
-      }, ACCEPT_DEBOUNCE_MS);
     });
   };
 
