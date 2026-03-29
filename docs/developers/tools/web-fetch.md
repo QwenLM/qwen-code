@@ -4,25 +4,41 @@ This document describes the `web_fetch` tool for Qwen Code.
 
 ## Description
 
-Use `web_fetch` to fetch content from a specified URL and process it using an AI model. The tool takes a URL and a prompt as input, fetches the URL content, converts HTML to markdown, and processes the content with the prompt using a small, fast model.
+Use `web_fetch` to fetch content from a specified URL and process it using an AI model. The tool takes a URL and a prompt as input, fetches the URL content, and processes the content with the prompt using a small, fast model.
 
 ### Arguments
 
-`web_fetch` takes two arguments:
+`web_fetch` takes three arguments:
 
 - `url` (string, required): The URL to fetch content from. Must be a fully-formed valid URL starting with `http://` or `https://`.
 - `prompt` (string, required): The prompt describing what information you want to extract from the page content.
+- `format` (string, optional): The preferred content format. Defaults to `"auto"` if not specified.
+  - `"auto"` (default): Requests markdown first, falls back to HTML if the server doesn't support markdown. **Recommended for most use cases** as it can reduce token usage by up to 80% for servers that support markdown.
+  - `"markdown"`: Requests markdown format only. Use when you explicitly need markdown content.
+  - `"html"`: Requests HTML format only. Use when you need the full HTML structure.
+  - `"text"`: Requests plain text only. Use when you specifically need plain text content.
 
 ## How to use `web_fetch` with Qwen Code
 
 To use `web_fetch` with Qwen Code, provide a URL and a prompt describing what you want to extract from that URL. The tool will ask for confirmation before fetching the URL. Once confirmed, the tool will fetch the content directly and process it using an AI model.
 
-The tool automatically converts HTML to text, handles GitHub blob URLs (converting them to raw URLs), and upgrades HTTP URLs to HTTPS for security.
+The tool automatically:
+
+- Converts HTML to text when necessary
+- Handles GitHub blob URLs (converting them to raw URLs)
+- Upgrades HTTP URLs to HTTPS for security
+- Supports content negotiation for markdown (reduces token usage significantly)
 
 Usage:
 
 ```
 web_fetch(url="https://example.com", prompt="Summarize the main points of this article")
+```
+
+With format specification:
+
+```
+web_fetch(url="https://example.com", prompt="Get the raw content", format="markdown")
 ```
 
 ## `web_fetch` examples
@@ -45,10 +61,40 @@ Analyze GitHub documentation:
 web_fetch(url="https://github.com/QwenLM/Qwen/blob/main/README.md", prompt="What are the installation steps and main features?")
 ```
 
+Get markdown content (for servers supporting Markdown for Agents):
+
+```
+web_fetch(url="https://developers.cloudflare.com/fundamentals/reference/markdown-for-agents/", prompt="Extract the key information", format="markdown")
+```
+
 ## Important notes
 
 - **Single URL processing:** `web_fetch` processes one URL at a time. To analyze multiple URLs, make separate calls to the tool.
 - **URL format:** The tool automatically upgrades HTTP URLs to HTTPS and converts GitHub blob URLs to raw format for better content access.
-- **Content processing:** The tool fetches content directly and processes it using an AI model, converting HTML to readable text format.
+- **Content negotiation:** The tool supports "Markdown for Agents" content negotiation. When using `format="auto"` (default), it sends `Accept: text/markdown, text/html` headers, allowing servers that support markdown to return it directly instead of HTML. This can reduce token usage by up to 80%.
+- **Content processing:** The tool fetches content directly and processes it using an AI model. When the server returns HTML, it converts it to readable text format. When the server returns markdown or plain text, it uses the content as-is.
 - **Output quality:** The quality of the output will depend on the clarity of the instructions in the prompt.
 - **MCP tools:** If an MCP-provided web fetch tool is available (starting with "mcp\_\_"), prefer using that tool as it may have fewer restrictions.
+
+## Markdown for Agents Support
+
+Qwen Code's `web_fetch` tool implements support for [Cloudflare's Markdown for Agents](https://blog.cloudflare.com/markdown-for-agents/) specification. This feature allows websites to serve markdown content directly to AI agents, significantly reducing token usage compared to parsing HTML.
+
+### How it works
+
+1. When `format="auto"` (default), the tool sends `Accept: text/markdown, text/html` headers
+2. If the server supports markdown, it returns `Content-Type: text/markdown`
+3. The tool uses the markdown content directly without HTML conversion
+4. If the server doesn't support markdown, it returns HTML as usual
+
+### Benefits
+
+- **Token efficiency:** Markdown content typically uses 80% fewer tokens than equivalent HTML
+- **Better structure:** Markdown preserves semantic structure (headings, lists, etc.)
+- **Backward compatible:** Works with all websites, enhanced experience for supporting servers
+
+### Example servers supporting markdown
+
+- Cloudflare Developer Documentation
+- Cloudflare Blog
+- Any website using Cloudflare's "Markdown for Agents" feature
