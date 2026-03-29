@@ -195,6 +195,7 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   -f path="{file_path}" \
   -F start_line={start_line} \
   -F line={end_line} \
+  -f start_side="RIGHT" \
   -f side="RIGHT"
 ```
 
