@@ -5,7 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { TestRig } from '../test-helper.js';
 
 describe('JSON output', () => {
   let rig: TestRig;

@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TestRig } from './test-helper.js';
+import { TestRig } from '../test-helper.js';
 
 // Windows skip (Option A: avoid infra scope)
 const d = process.platform === 'win32' ? describe.skip : describe;

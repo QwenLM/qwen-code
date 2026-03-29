@@ -5,26 +5,15 @@
  */
 
 /**
- * This test verifies we can provide MCP tools with recursive input schemas
- * (in JSON, using the $ref keyword) and both the GenAI SDK and the Gemini
- * API calls succeed. Note that prior to
- * https://github.com/googleapis/js-genai/commit/36f6350705ecafc47eaea3f3eecbcc69512edab7#diff-fdde9372aec859322b7c5a5efe467e0ad25a57210c7229724586ee90ea4f5a30
- * the Gemini API call would fail for such tools because the schema was
- * passed not as a JSON string but using the Gemini API's tool parameter
- * schema object which has stricter typing and recursion restrictions.
- * If this test fails, it's likely because either the GenAI SDK or Gemini API
- * has become more restrictive about the type of tool parameter schemas that
- * are accepted. If this occurs: Qwen Code previously attempted to detect
- * such tools and proactively remove them from the set of tools provided in
- * the Gemini API call (as FunctionDeclaration objects). It may be appropriate
- * to resurrect that behavior but note that it's difficult to keep the
- * GCLI filters in sync with the Gemini API restrictions and behavior.
+ * This test verifies MCP (Model Context Protocol) server integration.
+ * It uses a minimal MCP server implementation that doesn't require
+ * external dependencies, making it compatible with Docker sandbox mode.
  */
 
-import { writeFileSync } from 'node:fs';
+import { describe, it, beforeAll, expect } from 'vitest';
+import { TestRig, validateModelOutput } from '../test-helper.js';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { writeFileSync } from 'node:fs';
 
 // Create a minimal MCP server that doesn't require external dependencies
 // This implements the MCP protocol directly using Node.js built-ins
@@ -57,7 +46,7 @@ class SimpleJSONRPC {
       output: process.stdout,
       terminal: false
     });
-
+    
     this.rl.on('line', (line) => {
       debug(\`Received line: \${line}\`);
       try {
@@ -69,13 +58,13 @@ class SimpleJSONRPC {
       }
     });
   }
-
+  
   send(message) {
     const msgStr = JSON.stringify(message);
     debug(\`Sending message: \${msgStr}\`);
     process.stdout.write(msgStr + '\\n');
   }
-
+  
   async handleMessage(message) {
     if (message.method && this.handlers.has(message.method)) {
       try {
@@ -110,7 +99,7 @@ class SimpleJSONRPC {
       });
     }
   }
-
+  
   on(method, handler) {
     this.handlers.set(method, handler);
   }
@@ -128,7 +117,7 @@ rpc.on('initialize', async (params) => {
       tools: {}
     },
     serverInfo: {
-      name: 'cyclic-schema-server',
+      name: 'addition-server',
       version: '1.0.0'
     }
   };
@@ -139,23 +128,33 @@ rpc.on('tools/list', async () => {
   debug('Handling tools/list request');
   return {
     tools: [{
-      name: 'tool_with_cyclic_schema',
+      name: 'add',
+      description: 'Add two numbers',
       inputSchema: {
         type: 'object',
         properties: {
-          data: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                child: { $ref: '#/properties/data/items' },
-              },
-            },
-          },
+          a: { type: 'number', description: 'First number' },
+          b: { type: 'number', description: 'Second number' }
         },
+        required: ['a', 'b']
       }
     }]
   };
+});
+
+// Handle tools/call
+rpc.on('tools/call', async (params) => {
+  debug(\`Handling tools/call request for tool: \${params.name}\`);
+  if (params.name === 'add') {
+    const { a, b } = params.arguments;
+    return {
+      content: [{
+        type: 'text',
+        text: String(a + b)
+      }]
+    };
+  }
+  throw new Error('Unknown tool: ' + params.name);
 });
 
 // Send initialization notification
@@ -165,15 +164,15 @@ rpc.send({
 });
 `;
 
-describe('mcp server with cyclic tool schema is detected', () => {
+describe('simple-mcp-server', () => {
   const rig = new TestRig();
 
   beforeAll(async () => {
     // Setup test directory with MCP server configuration
-    await rig.setup('cyclic-schema-mcp-server', {
+    await rig.setup('simple-mcp-server', {
       settings: {
         mcpServers: {
-          'cyclic-schema-server': {
+          'addition-server': {
             command: 'node',
             args: ['mcp-server.cjs'],
           },
@@ -190,18 +189,43 @@ describe('mcp server with cyclic tool schema is detected', () => {
       const { chmodSync } = await import('node:fs');
       chmodSync(testServerPath, 0o755);
     }
+
+    // Poll for script for up to 5s
+    const { accessSync, constants } = await import('node:fs');
+    const isReady = await rig.poll(
+      () => {
+        try {
+          accessSync(testServerPath, constants.F_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      5000, // Max wait 5 seconds
+      100, // Poll every 100ms
+    );
+
+    if (!isReady) {
+      throw new Error('MCP server script was not ready in time.');
+    }
   });
 
-  it('mcp tool with cyclic schema should be accessible', async () => {
-    const mcp_list_output = await rig.runCommand(['mcp', 'list']);
+  it('should add two numbers', async () => {
+    // Test directory is already set up in before hook
+    // Just run the command - MCP server config is in settings.json
+    const output = await rig.run('add 5 and 10, use tool if you can.');
 
-    // Verify the cyclic schema server is configured
-    expect(mcp_list_output).toContain('cyclic-schema-server');
-  });
+    const foundToolCall = await rig.waitForToolCall(
+      'mcp__addition-server__add',
+    );
 
-  it('gemini api call should be successful with cyclic mcp tool schema', async () => {
-    // Run any command and verify that we get a non-error response from
-    // the Gemini API.
-    await rig.run('hello');
+    expect(foundToolCall, 'Expected to find an add tool call').toBeTruthy();
+
+    // Validate model output - will throw if no output, fail if missing expected content
+    validateModelOutput(output, '15', 'MCP server test');
+    expect(
+      output.includes('15'),
+      'Expected output to contain the sum (15)',
+    ).toBeTruthy();
   });
 });

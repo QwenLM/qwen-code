@@ -5,7 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig, type, printDebugInfo } from './test-helper.js';
+import { TestRig, type, printDebugInfo } from '../test-helper.js';
 
 describe('Interactive file system', () => {
   let rig: TestRig;

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  validateModelOutput,
+} from '../test-helper.js';
 
 describe('cron-tools', () => {
   let rig: TestRig;

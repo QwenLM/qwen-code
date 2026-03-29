@@ -5,12 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { TestRig } from '../test-helper.js';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Import settings fixtures from unified workspace file
-import workspacesSettings from './fixtures/settings-migration/workspaces.json' with { type: 'json' };
+import workspacesSettings from '../fixtures/settings-migration/workspaces.json' with { type: 'json' };
 
 const {
   v1Settings,

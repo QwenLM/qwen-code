@@ -5,7 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
-import { TestRig, type } from './test-helper.js';
+import { TestRig, type } from '../test-helper.js';
 
 describe('Interactive Mode', () => {
   let rig: TestRig;

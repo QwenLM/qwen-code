@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { TestRig } from '../test-helper.js';
 
 describe('/hooks command', () => {
   let rig: TestRig;
