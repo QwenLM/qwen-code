@@ -88,9 +88,10 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('30 10 * * *', 'match', true);
+      // Use every-minute cron so jitter is tiny (max ~6s for 1-min period)
+      scheduler.create('*/1 * * * *', 'match', true);
 
-      // Tick at 10:30:59 — past any jitter (max 55s)
+      // Tick at 10:30:59 — past any jitter for a 1-min period job
       const date = new Date(2025, 0, 15, 10, 30, 59);
       scheduler.tick(date);
 
@@ -113,9 +114,9 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('30 10 * * *', 'once per minute', true);
+      scheduler.create('*/1 * * * *', 'once per minute', true);
 
-      // Both ticks in second 59 — past jitter
+      // Both ticks in second 59 — past jitter for a 1-min period job
       const date1 = new Date(2025, 0, 15, 10, 30, 59);
       const date2 = new Date(2025, 0, 15, 10, 30, 59, 500);
       scheduler.tick(date1);
@@ -140,9 +141,9 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('30 10 * * *', 'recurring', true);
+      scheduler.create('*/1 * * * *', 'recurring', true);
 
-      // Tick at second 59 — past any jitter
+      // Tick at second 59 — past any jitter for a 1-min period job
       scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
       expect(fired).toHaveLength(1);
       expect(scheduler.list()).toHaveLength(1);

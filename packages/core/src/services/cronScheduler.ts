@@ -7,9 +7,10 @@ import { matches, nextFireTime } from '../utils/cronParser.js';
 
 const MAX_JOBS = 50;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-// Jitter must stay within the matching minute (< 60s).
-// Cap at 55s to avoid edge cases near the minute boundary.
-const MAX_JITTER_MS = 55 * 1000;
+// Recurring: up to 10% of period, capped at 15 minutes.
+const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
+// One-shot: up to 90s early for jobs landing on :00 or :30.
+const MAX_ONESHOT_JITTER_MS = 90 * 1000;
 
 export interface CronJob {
   id: string;
@@ -23,35 +24,58 @@ export interface CronJob {
 }
 
 /**
+ * Deterministic hash from a string ID, returned as a positive integer.
+ */
+function hashId(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+/**
  * Derives a deterministic jitter offset from a job ID and its cron period.
- * Recurring jobs get up to 10% of period (capped at 15 min).
- * One-shot jobs get 0 jitter.
+ * Recurring jobs: up to 10% of period, capped at 15 minutes (added after fire time).
+ * One-shot jobs landing on :00 or :30: up to 90s early (subtracted before fire time).
+ * Other one-shot jobs: 0 jitter.
  */
 function computeJitter(
   id: string,
   cronExpr: string,
   recurring: boolean,
 ): number {
-  if (!recurring) return 0;
+  const hash = hashId(id);
 
-  // Estimate period by computing two consecutive fire times
-  const now = new Date();
-  try {
-    const first = nextFireTime(cronExpr, now);
-    const second = nextFireTime(cronExpr, first);
-    const periodMs = second.getTime() - first.getTime();
-    const tenPercent = periodMs * 0.1;
-    const maxJitter = Math.min(tenPercent, MAX_JITTER_MS);
-
-    // Deterministic hash from ID
-    let hash = 0;
-    for (let i = 0; i < id.length; i++) {
-      hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  if (recurring) {
+    // Estimate period by computing two consecutive fire times
+    const now = new Date();
+    try {
+      const first = nextFireTime(cronExpr, now);
+      const second = nextFireTime(cronExpr, first);
+      const periodMs = second.getTime() - first.getTime();
+      const tenPercent = periodMs * 0.1;
+      const maxJitter = Math.min(tenPercent, MAX_RECURRING_JITTER_MS);
+      return hash % Math.max(1, Math.floor(maxJitter));
+    } catch {
+      return 0;
     }
-    return Math.abs(hash) % Math.max(1, Math.floor(maxJitter));
-  } catch {
-    return 0;
   }
+
+  // One-shot: apply up to 90s early jitter only when minute is :00 or :30
+  try {
+    const fields = cronExpr.trim().split(/\s+/);
+    const minuteField = fields[0] ?? '';
+    const minuteVal = parseInt(minuteField, 10);
+    if (!isNaN(minuteVal) && (minuteVal === 0 || minuteVal === 30)) {
+      // Negative jitter = fire early
+      return -(hash % MAX_ONESHOT_JITTER_MS);
+    }
+  } catch {
+    // fall through
+  }
+
+  return 0;
 }
 
 function generateId(): string {
@@ -89,7 +113,7 @@ export class CronScheduler {
       prompt,
       recurring,
       createdAt: now,
-      expiresAt: recurring ? now + THREE_DAYS_MS : now + THREE_DAYS_MS,
+      expiresAt: recurring ? now + THREE_DAYS_MS : Infinity,
       jitterMs,
     };
 
@@ -169,8 +193,7 @@ export class CronScheduler {
         continue;
       }
 
-      // Apply jitter: the job fires at :00 + jitterMs of the matching minute.
-      // We check if we're within the jitter window.
+      // Apply jitter: positive jitter delays after :00, negative fires early.
       const minuteStart = new Date(currentDate);
       minuteStart.setSeconds(0, 0);
       const fireTimeMs = minuteStart.getTime() + job.jitterMs;
