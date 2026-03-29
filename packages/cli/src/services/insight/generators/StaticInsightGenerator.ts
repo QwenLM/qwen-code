@@ -63,6 +63,7 @@ export class StaticInsightGenerator {
   async generateStaticInsight(
     baseDir: string,
     onProgress?: InsightProgressCallback,
+    language?: string,
   ): Promise<string> {
     // Ensure output directory exists
     const outputDir = await this.ensureOutputDirectory();
@@ -74,10 +75,14 @@ export class StaticInsightGenerator {
       baseDir,
       facetsDir,
       onProgress,
+      language,
     );
 
     // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      language,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

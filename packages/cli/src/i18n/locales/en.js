@@ -797,6 +797,8 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     'generate personalized programming insights from your chat history',
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
 
   // ============================================================================
   // Commands - Session History

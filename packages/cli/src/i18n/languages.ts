@@ -96,3 +96,21 @@ export function getLanguageSettingsOptions(): Array<{
 export function getSupportedLanguageIds(separator = '|'): string {
   return SUPPORTED_LANGUAGES.map((l) => l.id).join(separator);
 }
+
+/**
+ * Maps an English language name (e.g., "Chinese", "Russian") back to its locale code.
+ * Returns 'en' for unknown languages.
+ */
+export function getLanguageCodeFromName(name: string): SupportedLanguage {
+  const lowered = name.toLowerCase().trim();
+  for (const lang of SUPPORTED_LANGUAGES) {
+    if (
+      lang.fullName.toLowerCase() === lowered ||
+      lang.nativeName?.toLowerCase() === lowered ||
+      lang.id.toLowerCase() === lowered
+    ) {
+      return lang.code;
+    }
+  }
+  return 'en';
+}

@@ -731,6 +731,8 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     'Gerar insights personalizados de programação a partir do seu histórico de chat',
+  'Generating insights in {{language}}...':
+    'Gerando insights em {{language}}...',
 
   // ============================================================================
   // Commands - Session History

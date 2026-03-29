@@ -61,6 +61,7 @@ describe('insightCommand', () => {
     expect(mockGenerateStaticInsight).toHaveBeenCalledWith(
       path.join(Storage.getRuntimeBaseDir(), 'projects'),
       expect.any(Function),
+      expect.any(String), // language parameter
     );
   });
 });

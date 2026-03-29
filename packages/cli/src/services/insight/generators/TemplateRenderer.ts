@@ -7,11 +7,45 @@
 import { INSIGHT_JS, INSIGHT_CSS } from '@qwen-code/web-templates';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
+// Map language name to HTML lang attribute
+function languageToHtmlLang(language?: string): string {
+  if (!language) return 'en';
+  const lowered = language.toLowerCase();
+  const langMap: Record<string, string> = {
+    chinese: 'zh-CN',
+    zh: 'zh-CN',
+    'zh-cn': 'zh-CN',
+    russian: 'ru-RU',
+    ru: 'ru-RU',
+    'ru-ru': 'ru-RU',
+    german: 'de-DE',
+    de: 'de-DE',
+    'de-de': 'de-DE',
+    japanese: 'ja-JP',
+    ja: 'ja-JP',
+    'ja-jp': 'ja-JP',
+    portuguese: 'pt-BR',
+    pt: 'pt-BR',
+    'pt-br': 'pt-BR',
+    english: 'en',
+    en: 'en',
+    'en-us': 'en',
+  };
+  return langMap[lowered] || 'en';
+}
+
 export class TemplateRenderer {
   // Render the complete HTML file
-  async renderInsightHTML(insights: InsightData): Promise<string> {
+  async renderInsightHTML(
+    insights: InsightData,
+    language?: string,
+  ): Promise<string> {
+    const htmlLang = languageToHtmlLang(language);
+    // Include language in the insight data for the React app
+    const insightDataWithLang = { ...insights, language };
+
     const html = `<!doctype html>
-<html lang="en">
+<html lang="${htmlLang}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -37,7 +71,7 @@ export class TemplateRenderer {
 
     <!-- Application Data -->
     <script>
-      window.INSIGHT_DATA = ${JSON.stringify(insights)};
+      window.INSIGHT_DATA = ${JSON.stringify(insightDataWithLang)};
     </script>
 
     <!-- App Script -->

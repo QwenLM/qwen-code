@@ -1,4 +1,5 @@
 import type { InsightData } from './types';
+import { t } from './i18n';
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
@@ -36,25 +37,25 @@ export function ActiveHoursChart({
 }) {
   const phases = [
     {
-      label: 'Morning',
+      label: t('Morning'),
       time: '06:00 - 12:00',
       hours: [6, 7, 8, 9, 10, 11],
       color: '#fbbf24', // amber-400
     },
     {
-      label: 'Afternoon',
+      label: t('Afternoon'),
       time: '12:00 - 18:00',
       hours: [12, 13, 14, 15, 16, 17],
       color: '#0ea5e9', // sky-500
     },
     {
-      label: 'Evening',
+      label: t('Evening'),
       time: '18:00 - 22:00',
       hours: [18, 19, 20, 21],
       color: '#6366f1', // indigo-500
     },
     {
-      label: 'Night',
+      label: t('Night'),
       time: '22:00 - 06:00',
       hours: [22, 23, 0, 1, 2, 3, 4, 5],
       color: '#475569', // slate-600
@@ -74,7 +75,7 @@ export function ActiveHoursChart({
   return (
     <div className={`${cardClass} h-full flex flex-col min-h-[320px]`}>
       <div className="flex items-center justify-between mb-4">
-        <h3 className={sectionTitleClass}>Active Hours</h3>
+        <h3 className={sectionTitleClass}>{t('Active Hours')}</h3>
       </div>
       <div className="flex-1 flex flex-col justify-center gap-4">
         {data.map((item) => (
@@ -128,8 +129,10 @@ export function HeatmapSection({
   return (
     <div className={`${cardClass} mt-4 md:mt-6`}>
       <div className="mb-3">
-        <h3 className={sectionTitleClass}>Activity Heatmap</h3>
-        <p className="text-xs text-slate-500">Showing past year of activity</p>
+        <h3 className={sectionTitleClass}>{t('Activity Heatmap')}</h3>
+        <p className="text-xs text-slate-500">
+          {t('Showing past year of activity')}
+        </p>
       </div>
       <div className="heatmap-container">
         <div className="min-w-[720px] rounded-xl bg-white/70">
@@ -282,7 +285,7 @@ function HeatmapLegend() {
 
   return (
     <div className="flex items-center gap-2 mt-4">
-      <span className="text-xs text-slate-500">Less</span>
+      <span className="text-xs text-slate-500">{t('Less')}</span>
       {colors.map((color, index) => (
         <span
           key={index}
@@ -294,7 +297,7 @@ function HeatmapLegend() {
           }}
         />
       ))}
-      <span className="text-xs text-slate-500">More</span>
+      <span className="text-xs text-slate-500">{t('More')}</span>
     </div>
   );
 }

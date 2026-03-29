@@ -79,13 +79,42 @@ describe('StaticInsightGenerator', () => {
       projectsDir,
       facetsDir,
       undefined,
+      undefined,
     );
-    expect(renderInsightHTML).toHaveBeenCalledWith({});
+    expect(renderInsightHTML).toHaveBeenCalledWith({}, undefined);
     expect(mockedFs.writeFile).toHaveBeenCalledWith(
       expectedOutputPath,
       '<html>ok</html>',
       'utf-8',
     );
     expect(outputPath).toBe(expectedOutputPath);
+  });
+
+  it('passes language parameter through pipeline', async () => {
+    const generator = new StaticInsightGenerator(mockConfig);
+    const generateInsights = vi.fn().mockResolvedValue({});
+    const renderInsightHTML = vi.fn().mockResolvedValue('<html>ok</html>');
+
+    (
+      generator as unknown as {
+        dataProcessor: { generateInsights: typeof generateInsights };
+      }
+    ).dataProcessor = { generateInsights };
+    (
+      generator as unknown as {
+        templateRenderer: { renderInsightHTML: typeof renderInsightHTML };
+      }
+    ).templateRenderer = { renderInsightHTML };
+
+    const projectsDir = path.resolve('workspace', 'project-a');
+    await generator.generateStaticInsight(projectsDir, undefined, 'Chinese');
+
+    expect(generateInsights).toHaveBeenCalledWith(
+      projectsDir,
+      expect.any(String),
+      undefined,
+      'Chinese',
+    );
+    expect(renderInsightHTML).toHaveBeenCalledWith({}, 'Chinese');
   });
 });

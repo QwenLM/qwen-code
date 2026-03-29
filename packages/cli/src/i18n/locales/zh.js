@@ -757,6 +757,7 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     '根据你的聊天记录生成个性化编程洞察',
+  'Generating insights in {{language}}...': '正在生成{{language}}语言的洞察...',
 
   // ============================================================================
   // Commands - Session History

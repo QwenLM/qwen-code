@@ -136,7 +136,7 @@ function parseOutputLanguageFromContent(content: string): string | null {
  * Reads the current output language from the rule file.
  * Returns null if the file doesn't exist or can't be parsed.
  */
-function readOutputLanguageFromFile(): string | null {
+export function readOutputLanguageFromFile(): string | null {
   const filePath = getOutputLanguageFilePath();
   if (!fs.existsSync(filePath)) {
     return null;
@@ -147,6 +147,14 @@ function readOutputLanguageFromFile(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Public getter for the current output language setting.
+ * Reads from the rule file, falls back to null if not found.
+ */
+export function getOutputLanguageSetting(): string | null {
+  return readOutputLanguageFromFile();
 }
 
 /**

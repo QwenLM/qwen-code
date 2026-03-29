@@ -283,6 +283,7 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language?: string,
   ): Promise<InsightData> {
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
@@ -295,10 +296,15 @@ export class DataProcessor {
       allChatFiles,
       facetsOutputDir,
       onProgress,
+      language,
     );
 
     if (onProgress) onProgress('Generating personalized insights...', 80);
-    const qualitative = await this.generateQualitativeInsights(metrics, facets);
+    const qualitative = await this.generateQualitativeInsights(
+      metrics,
+      facets,
+      language,
+    );
 
     // Aggregate satisfaction, friction, success and outcome data from facets
     const {
@@ -319,6 +325,7 @@ export class DataProcessor {
       primarySuccess: primarySuccessAgg,
       outcomes: outcomesAgg,
       topGoals: goalsAgg,
+      language,
     };
   }
 
@@ -376,6 +383,7 @@ export class DataProcessor {
   private async generateQualitativeInsights(
     metrics: Omit<InsightData, 'facets' | 'qualitative'>,
     facets: SessionFacets[],
+    language?: string,
   ): Promise<QualitativeInsights | undefined> {
     if (facets.length === 0) {
       return undefined;
@@ -385,11 +393,16 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
+    // Build language instruction prefix
+    const languagePrefix = language
+      ? `LANGUAGE REQUIREMENT: You MUST respond entirely in ${language} language. All text, descriptions, titles, and content must be in ${language}. `
+      : '';
+
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T | undefined> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${languagePrefix}${promptTemplate}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),
@@ -1001,6 +1014,7 @@ None captured`;
     allFiles: Array<{ path: string; mtime: number }>,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    _language?: string,
   ): Promise<SessionFacets[]> {
     const MAX_ELIGIBLE_SESSIONS = 50;
 

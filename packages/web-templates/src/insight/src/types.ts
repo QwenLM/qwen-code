@@ -1,6 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { InsightData } from '../../../src/services/insight/types/StaticInsightTypes';
+import type { InsightData as CoreInsightData } from '../../../src/services/insight/types/StaticInsightTypes';
 import type { QualitativeInsights as QualitativeData } from '../../../src/services/insight/types/QualitativeInsightTypes';
+
+// Extend the core InsightData type to ensure language is included
+export interface InsightData extends Omit<CoreInsightData, 'language'> {
+  language?: string;
+}
 
 declare global {
   interface Window {
@@ -12,4 +17,4 @@ declare global {
   }
 }
 
-export type { InsightData, QualitativeData };
+export type { QualitativeData };

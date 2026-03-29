@@ -510,6 +510,8 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     'チャット履歴からパーソナライズされたプログラミングインサイトを生成する',
+  'Generating insights in {{language}}...':
+    '{{language}}でインサイトを生成しています...',
 
   // ============================================================================
   // Commands - Session History
