@@ -7,16 +7,15 @@
 /**
  * In-session cron/loop interactive E2E tests.
  *
- * These drive the full interactive TUI via TerminalCapture (node-pty + xterm.js
- * + Playwright) and read the rendered terminal screen. Ported from the
- * standalone script at terminal-capture/test-cron-interactive-e2e.ts.
+ * These drive the full interactive TUI via InteractiveSession (node-pty +
+ * @xterm/headless) and read the rendered terminal screen. No browser needed.
+ *
+ * Ported from the standalone script at
+ * terminal-capture/test-cron-interactive-e2e.ts.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { TerminalCapture } from '../terminal-capture/terminal-capture.js';
-
-const MODEL_TIMEOUT = 120_000;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+import { InteractiveSession } from './interactive-session.js';
 
 function makeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -30,66 +29,8 @@ function makeEnv(): NodeJS.ProcessEnv {
   };
 }
 
-class Session {
-  private constructor(private t: TerminalCapture) {}
-
-  static async start(): Promise<Session> {
-    const t = await TerminalCapture.create({
-      cols: 100,
-      rows: 40,
-      chrome: false,
-      cwd: process.cwd(),
-      env: makeEnv(),
-    });
-    await t.spawn('node', ['dist/cli.js', '--approval-mode', 'yolo']);
-    const s = new Session(t);
-    await s.waitFor('Type your message', 30_000);
-    return s;
-  }
-
-  async send(text: string): Promise<void> {
-    await this.t.type(text);
-    await sleep(300);
-    await this.t.type('\n');
-  }
-
-  async waitFor(text: string, timeout = MODEL_TIMEOUT): Promise<void> {
-    await this.t.waitFor(text, { timeout });
-  }
-
-  async idle(stableMs = 5000, timeout = MODEL_TIMEOUT): Promise<void> {
-    await this.t.idle(stableMs, timeout);
-  }
-
-  async screen(): Promise<string> {
-    return this.t.getScreenText();
-  }
-
-  async waitForScreen(
-    predicate: (screen: string) => boolean,
-    description: string,
-    timeout = MODEL_TIMEOUT,
-  ): Promise<string> {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-      await sleep(3000);
-      const s = await this.screen();
-      if (predicate(s)) return s;
-    }
-    const finalScreen = await this.screen();
-    throw new Error(
-      `Timeout (${timeout}ms) waiting for: ${description}\n` +
-        `Screen (last 600):\n${finalScreen.slice(-600)}`,
-    );
-  }
-
-  async close(): Promise<void> {
-    await this.t.close();
-  }
-}
-
-describe('cron interactive (terminal-capture)', () => {
-  let session: Session | null = null;
+describe('cron interactive', () => {
+  let session: InteractiveSession | null = null;
 
   afterEach(async () => {
     if (session) {
@@ -101,7 +42,10 @@ describe('cron interactive (terminal-capture)', () => {
   it(
     'loop fires inline in conversation',
     async () => {
-      session = await Session.start();
+      session = await InteractiveSession.start({
+        env: makeEnv(),
+        args: ['--approval-mode', 'yolo'],
+      });
 
       await session.send(
         'Call cron_create with expression "*/1 * * * *" and prompt "PONG7742" and recurring true. Confirm briefly.',
@@ -126,7 +70,10 @@ describe('cron interactive (terminal-capture)', () => {
   it(
     'user input takes priority over cron',
     async () => {
-      session = await Session.start();
+      session = await InteractiveSession.start({
+        env: makeEnv(),
+        args: ['--approval-mode', 'yolo'],
+      });
 
       await session.send(
         'Call cron_create with expression "*/1 * * * *" and prompt "CRONTICK99" and recurring true. Confirm briefly.',
@@ -155,7 +102,10 @@ describe('cron interactive (terminal-capture)', () => {
   it(
     'error during cron turn does not kill the loop',
     async () => {
-      session = await Session.start();
+      session = await InteractiveSession.start({
+        env: makeEnv(),
+        args: ['--approval-mode', 'yolo'],
+      });
 
       await session.send(
         'Call cron_create with expression "*/1 * * * *" and prompt "Read the file /tmp/nonexistent_e2e_99.txt and report its contents. If it does not exist say FILEERR88." and recurring true. Confirm briefly.',
