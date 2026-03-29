@@ -1643,7 +1643,7 @@ export const useGeminiStream = (
 
   // Start the scheduler on mount, stop on unmount
   useEffect(() => {
-    if (config.isCronDisabled()) return;
+    if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
     scheduler.start((job: { prompt: string }) => {
       cronQueueRef.current.push(job.prompt);

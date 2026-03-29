@@ -1445,9 +1445,15 @@
       }
     },
     "experimental": {
-      "description": "Setting to enable experimental features",
+      "description": "Settings to enable experimental features.",
       "type": "object",
-      "properties": {}
+      "properties": {
+        "cron": {
+          "description": "Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        }
+      }
     },
     "$version": {
       "type": "number",

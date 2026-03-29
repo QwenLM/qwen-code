@@ -372,7 +372,7 @@ export async function runNonInteractive(
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
           // No more tool calls — check if cron jobs are keeping us alive
-          const scheduler = config.isCronDisabled()
+          const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
           if (scheduler && scheduler.size > 0) {

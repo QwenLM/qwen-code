@@ -370,6 +370,7 @@ export interface ConfigParameters {
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  cronEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -557,6 +558,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly cronEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -680,6 +682,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.cronEnabled = params.cronEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -1687,8 +1690,10 @@ export class Config {
     return this.cronScheduler;
   }
 
-  isCronDisabled(): boolean {
-    return process.env['QWEN_CODE_DISABLE_CRON'] === '1';
+  isCronEnabled(): boolean {
+    // Cron is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    return this.cronEnabled;
   }
 
   getEnableRecursiveFileSearch(): boolean {
@@ -2211,7 +2216,7 @@ export class Config {
     }
 
     // Register cron tools unless disabled
-    if (!this.isCronDisabled()) {
+    if (this.isCronEnabled()) {
       await registerCoreTool(CronCreateTool, this);
       await registerCoreTool(CronListTool, this);
       await registerCoreTool(CronDeleteTool, this);
