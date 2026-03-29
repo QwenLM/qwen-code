@@ -31,7 +31,7 @@ describe('CronDeleteTool', () => {
     const invocation = tool.build({ id: job.id });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('deleted');
+    expect(result.llmContent).toContain('Cancelled job');
     expect(config._scheduler.list()).toHaveLength(0);
   });
 

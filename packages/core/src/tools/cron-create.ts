@@ -6,7 +6,7 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
-import { nextFireTime } from '../utils/cronParser.js';
+import { parseCron } from '../utils/cronParser.js';
 
 export interface CronCreateParams {
   cron: string;
@@ -36,20 +36,27 @@ class CronCreateInvocation extends BaseToolInvocation<
     const recurring = this.params.recurring !== false;
 
     try {
+      // Validate cron expression before creating the job
+      parseCron(this.params.cron);
+
       const job = scheduler.create(
         this.params.cron,
         this.params.prompt,
         recurring,
       );
 
-      const next = nextFireTime(this.params.cron, new Date());
-      const result = [
-        `Created ${recurring ? 'recurring' : 'one-shot'} cron job.`,
-        `  ID: ${job.id}`,
-        `  Expression: ${job.cronExpr}`,
-        `  Prompt: ${job.prompt}`,
-        `  Next fire: ${next.toISOString()}`,
-      ].join('\n');
+      let result: string;
+      if (recurring) {
+        result =
+          `Scheduled recurring job ${job.id} (${job.cronExpr}). ` +
+          'Session-only (not written to disk, dies when Claude exits). ' +
+          'Auto-expires after 7 days. Use CronDelete to cancel sooner.';
+      } else {
+        result =
+          `Scheduled one-shot task ${job.id} (${job.cronExpr}). ` +
+          'Session-only (not written to disk, dies when Claude exits). ' +
+          'It will fire once then auto-delete.';
+      }
 
       return {
         llmContent: result,

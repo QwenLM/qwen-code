@@ -39,10 +39,11 @@ describe('CronListTool', () => {
     const invocation = tool.build({});
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('check build');
-    expect(result.llmContent).toContain('ping');
-    expect(result.llmContent).toContain('recurring');
-    expect(result.llmContent).toContain('one-shot');
-    expect(result.llmContent).toContain('Active cron jobs (2)');
+    expect(result.llmContent).toContain(
+      '(recurring) [session-only]: check build',
+    );
+    expect(result.llmContent).toContain('(one-shot) [session-only]: ping');
+    // Two lines, one per job
+    expect(String(result.llmContent).split('\n')).toHaveLength(2);
   });
 });

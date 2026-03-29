@@ -6,7 +6,6 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
-import { nextFireTime } from '../utils/cronParser.js';
 
 export type CronListParams = Record<string, never>;
 
@@ -34,26 +33,12 @@ class CronListInvocation extends BaseToolInvocation<
       return { llmContent: result, returnDisplay: result };
     }
 
-    const now = new Date();
     const lines = jobs.map((job) => {
-      let nextFire: string;
-      try {
-        nextFire = nextFireTime(job.cronExpr, now).toISOString();
-      } catch {
-        nextFire = 'unknown';
-      }
       const type = job.recurring ? 'recurring' : 'one-shot';
-      const created = new Date(job.createdAt).toISOString();
-      return [
-        `- [${job.id}] ${type}`,
-        `  Expression: ${job.cronExpr}`,
-        `  Prompt: ${job.prompt}`,
-        `  Created: ${created}`,
-        `  Next fire: ${nextFire}`,
-      ].join('\n');
+      return `${job.id} — ${job.cronExpr} (${type}) [session-only]: ${job.prompt}`;
     });
 
-    const result = `Active cron jobs (${jobs.length}):\n${lines.join('\n')}`;
+    const result = lines.join('\n');
     return { llmContent: result, returnDisplay: result };
   }
 }

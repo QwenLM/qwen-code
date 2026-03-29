@@ -32,8 +32,8 @@ describe('CronCreateTool', () => {
     });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('recurring');
-    expect(result.llmContent).toContain('ID:');
+    expect(result.llmContent).toContain('Scheduled recurring job');
+    expect(result.llmContent).toContain('Auto-expires after 7 days');
     expect(config._scheduler.list()).toHaveLength(1);
   });
 
@@ -45,7 +45,8 @@ describe('CronCreateTool', () => {
     });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('one-shot');
+    expect(result.llmContent).toContain('Scheduled one-shot task');
+    expect(result.llmContent).toContain('fire once then auto-delete');
     const jobs = config._scheduler.list();
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.recurring).toBe(false);

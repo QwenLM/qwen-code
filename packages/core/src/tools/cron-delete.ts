@@ -31,10 +31,10 @@ class CronDeleteInvocation extends BaseToolInvocation<
     const deleted = scheduler.delete(this.params.id);
 
     if (deleted) {
-      const result = `Cron job ${this.params.id} deleted.`;
+      const result = `Cancelled job ${this.params.id}.`;
       return { llmContent: result, returnDisplay: result };
     } else {
-      const result = `Cron job ${this.params.id} not found.`;
+      const result = `Job ${this.params.id} not found.`;
       return {
         llmContent: result,
         returnDisplay: result,
