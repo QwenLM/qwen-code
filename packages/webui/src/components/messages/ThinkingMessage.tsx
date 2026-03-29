@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
-import { useState } from 'react';
+import { memo, useState, type FC } from 'react';
 import { MessageContent } from './MessageContent.js';
 import { ChevronIcon } from '../icons/index.js';
 import './ThinkingMessage.css';
@@ -35,7 +34,7 @@ export interface ThinkingMessageProps {
  * - Expanded: solid dot + "Thinking" + up arrow + thinking content
  * - Aligned with other message items, with status icon and connector line
  */
-export const ThinkingMessage: FC<ThinkingMessageProps> = ({
+const ThinkingMessageBase: FC<ThinkingMessageProps> = ({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -81,3 +80,6 @@ export const ThinkingMessage: FC<ThinkingMessageProps> = ({
     </div>
   );
 };
+
+export const ThinkingMessage = memo(ThinkingMessageBase);
+ThinkingMessage.displayName = 'ThinkingMessage';

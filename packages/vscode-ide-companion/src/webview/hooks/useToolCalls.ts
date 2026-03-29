@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import type { ToolCallData } from '../components/messages/toolcalls/ToolCall.js';
 import type { ToolCallUpdate } from '../../types/chatTypes.js';
 
@@ -246,19 +246,27 @@ export const useToolCalls = () => {
   }, []);
 
   /**
-   * Get in-progress tool calls
+   * Get in-progress tool calls (memoized to keep a stable reference when toolCalls Map hasn't changed)
    */
-  const inProgressToolCalls = Array.from(toolCalls.values()).filter(
-    (toolCall) =>
-      toolCall.status === 'pending' || toolCall.status === 'in_progress',
+  const inProgressToolCalls = useMemo(
+    () =>
+      Array.from(toolCalls.values()).filter(
+        (toolCall) =>
+          toolCall.status === 'pending' || toolCall.status === 'in_progress',
+      ),
+    [toolCalls],
   );
 
   /**
-   * Get completed tool calls
+   * Get completed tool calls (memoized to keep a stable reference when toolCalls Map hasn't changed)
    */
-  const completedToolCalls = Array.from(toolCalls.values()).filter(
-    (toolCall) =>
-      toolCall.status === 'completed' || toolCall.status === 'failed',
+  const completedToolCalls = useMemo(
+    () =>
+      Array.from(toolCalls.values()).filter(
+        (toolCall) =>
+          toolCall.status === 'completed' || toolCall.status === 'failed',
+      ),
+    [toolCalls],
   );
 
   return {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
+import { memo, type FC } from 'react';
 import { CollapsibleFileContent } from './CollapsibleFileContent.js';
 
 export interface FileContext {
@@ -21,7 +21,7 @@ export interface UserMessageProps {
   fileContext?: FileContext;
 }
 
-export const UserMessage: FC<UserMessageProps> = ({
+const UserMessageBase: FC<UserMessageProps> = ({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -89,3 +89,6 @@ export const UserMessage: FC<UserMessageProps> = ({
     </div>
   );
 };
+
+export const UserMessage = memo(UserMessageBase);
+UserMessage.displayName = 'UserMessage';
