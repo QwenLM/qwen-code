@@ -221,13 +221,15 @@ export function createFollowupController(
     applyState(followupReducers.clear());
 
     // Fire the callback asynchronously to avoid side-effects in state updates.
-    // Catch callback errors to prevent uncaught exceptions from crashing the
-    // process, and use finally to guarantee the debounce lock is always released.
+    // Use finally to guarantee the debounce lock is always released even if the
+    // callback throws. Errors are logged rather than swallowed so bugs in
+    // onAccept remain visible during development.
     queueMicrotask(() => {
       try {
         getOnAccept?.()?.(text);
-      } catch {
-        // Swallow callback errors — they should not affect suggestion state
+      } catch (error: unknown) {
+        // eslint-disable-next-line no-console
+        console.error('[followup] onAccept callback threw:', error);
       } finally {
         if (acceptTimeoutId) {
           clearTimeout(acceptTimeoutId);

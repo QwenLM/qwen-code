@@ -291,6 +291,10 @@ describe('createFollowupController', () => {
 
   it('accept recovers when onAccept callback throws', async () => {
     const onStateChange = vi.fn();
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
     let callCount = 0;
     const onAccept = vi.fn().mockImplementation(() => {
       callCount++;
@@ -311,6 +315,13 @@ describe('createFollowupController', () => {
     ctrl.accept();
     // Flush the microtask that fires the callback
     await Promise.resolve();
+
+    // Error should be logged, not swallowed silently
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '[followup] onAccept callback threw:',
+      expect.any(Error),
+    );
+
     // Advance past debounce timer to release the accepting lock
     vi.advanceTimersByTime(100);
 
@@ -327,6 +338,7 @@ describe('createFollowupController', () => {
     expect(onAccept).toHaveBeenNthCalledWith(2, 'run tests');
 
     ctrl.cleanup();
+    consoleErrorSpy.mockRestore();
   });
 
   it('cleanup prevents pending timers from firing', () => {
