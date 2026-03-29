@@ -1640,6 +1640,7 @@ export const useGeminiStream = (
 
   // ─── Cron scheduler integration ─────────────────────────
   const cronQueueRef = useRef<string[]>([]);
+  const [cronTrigger, setCronTrigger] = useState(0);
 
   // Start the scheduler on mount, stop on unmount
   useEffect(() => {
@@ -1647,6 +1648,7 @@ export const useGeminiStream = (
     const scheduler = config.getCronScheduler();
     scheduler.start((job: { prompt: string }) => {
       cronQueueRef.current.push(job.prompt);
+      setCronTrigger((n) => n + 1);
     });
     return () => {
       scheduler.stop();
@@ -1662,7 +1664,7 @@ export const useGeminiStream = (
       const prompt = cronQueueRef.current.shift()!;
       submitQuery(prompt, SendMessageType.UserQuery);
     }
-  }, [streamingState, submitQuery]);
+  }, [streamingState, submitQuery, cronTrigger]);
 
   return {
     streamingState,
