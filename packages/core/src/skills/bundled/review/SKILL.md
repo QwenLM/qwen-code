@@ -173,20 +173,14 @@ gh pr view {pr_number} --json headRefOid --jq '.headRefOid'
 
 Then, for each confirmed finding, post an **inline comment** on the specific file and line using `gh api`:
 
-Construct the comment body as a shell variable first, then pass it to `gh api`:
+**Note:** Do NOT use `$()` command substitution — it is blocked by `run_shell_command` security policy. Pass the body directly as a multi-line string in the `-f body=` argument:
 
 ```bash
-# Build comment body (use actual newlines, not \n):
-BODY=$(cat <<COMMENT_EOF
-**[{severity}]** {issue description}
-
-{suggested fix if not "N/A"}
-COMMENT_EOF
-)
-
 # Single-line finding:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="$BODY" \
+  -f body="**[{severity}]** {issue description}
+
+{suggested fix}" \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F line={line_number} \
@@ -194,7 +188,9 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 
 # Multi-line finding (e.g., line range 42-50):
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="$BODY" \
+  -f body="**[{severity}]** {issue description}
+
+{suggested fix}" \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F start_line={start_line} \
@@ -211,16 +207,23 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 - Include the severity tag (Critical/Suggestion/Nice to have) at the start of each comment
 - Include the suggested fix in the comment body when available
 
-After posting all inline comments, submit an overall review summary using:
+After posting all inline comments, submit an overall review using the action that matches the verdict from Step 3:
 
 ```bash
-gh pr review {pr_number} --comment --body "{summary + verdict}"
+# If verdict is "Approve":
+gh pr review {pr_number} --approve --body "{summary}"
+
+# If verdict is "Request changes":
+gh pr review {pr_number} --request-changes --body "{summary}"
+
+# If verdict is "Comment":
+gh pr review {pr_number} --comment --body "{summary}"
 ```
 
-If there are **no confirmed findings**, post a single comment:
+If there are **no confirmed findings**:
 
 ```bash
-gh pr review {pr_number} --comment --body "No issues found. LGTM! ✅"
+gh pr review {pr_number} --approve --body "No issues found. LGTM! ✅"
 ```
 
 ## Step 5: Restore environment
