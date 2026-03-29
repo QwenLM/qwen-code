@@ -59,16 +59,11 @@ import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
-
-const SKILL_ITEM_ID_PREFIX = 'skill:';
-
-function isSkillsSecondaryQuery(query: string): boolean {
-  return /^skills\s+/i.test(query);
-}
-
-function shouldOpenSkillsSecondaryPicker(item: CompletionItem): boolean {
-  return item.type === 'command' && item.id === 'skills';
-}
+import {
+  SKILL_ITEM_ID_PREFIX,
+  isSkillsSecondaryQuery,
+  shouldOpenSkillsSecondaryPicker,
+} from './utils/completionUtils.js';
 
 /**
  * Memoized message list that only re-renders when messages or callbacks change,

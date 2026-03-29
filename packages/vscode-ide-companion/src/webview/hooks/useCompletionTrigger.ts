@@ -7,6 +7,7 @@
 import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
+import { isSkillsSecondaryQuery } from '../utils/completionUtils.js';
 
 interface CompletionTriggerState {
   isOpen: boolean;
@@ -27,8 +28,6 @@ export function useCompletionTrigger(
     query: string,
   ) => Promise<CompletionItem[]>,
 ) {
-  const isSkillsSecondaryQuery = (query: string) => /^skills\s+/i.test(query);
-
   // Show immediate loading and provide a timeout fallback for slow sources
   const LOADING_ITEM = useMemo<CompletionItem>(
     () => ({
