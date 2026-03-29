@@ -1,13 +1,22 @@
 ---
 name: loop
-description: Create a recurring loop that runs a prompt on a schedule. Usage - /loop 5m check the build, /loop check the PR every 30m, /loop run tests (defaults to 10m).
+description: Create a recurring loop that runs a prompt on a schedule. Usage - /loop 5m check the build, /loop check the PR every 30m, /loop run tests (defaults to 10m). /loop list to show jobs, /loop clear to cancel all.
 allowedTools:
   - cron_create
+  - cron_list
+  - cron_delete
 ---
 
 # /loop — schedule a recurring prompt
 
-Parse the input below into `[interval] <prompt…>` and schedule it with CronCreate.
+## Subcommands
+
+If the input (after stripping the `/loop` prefix) is exactly one of these keywords, run the subcommand instead of scheduling:
+
+- **`list`** — call CronList and display the results. Done.
+- **`clear`** — call CronList, then call CronDelete for every job returned. Confirm how many were cancelled. Done.
+
+Otherwise, parse the input below into `[interval] <prompt…>` and schedule it with CronCreate.
 
 ## Parsing (in priority order)
 

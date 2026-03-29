@@ -23,7 +23,7 @@ class CronDeleteInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Delete cron job ${this.params.id}`;
+    return this.params.id;
   }
 
   async execute(): Promise<ToolResult> {
@@ -31,8 +31,9 @@ class CronDeleteInvocation extends BaseToolInvocation<
     const deleted = scheduler.delete(this.params.id);
 
     if (deleted) {
-      const result = `Cancelled job ${this.params.id}.`;
-      return { llmContent: result, returnDisplay: result };
+      const llmContent = `Cancelled job ${this.params.id}.`;
+      const returnDisplay = `Cancelled ${this.params.id}`;
+      return { llmContent, returnDisplay };
     } else {
       const result = `Job ${this.params.id} not found.`;
       return {

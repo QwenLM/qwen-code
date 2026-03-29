@@ -7,6 +7,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { parseCron } from '../utils/cronParser.js';
+import { humanReadableCron } from '../utils/cronDisplay.js';
 
 export interface CronCreateParams {
   cron: string;
@@ -26,9 +27,7 @@ class CronCreateInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    const recurrence =
-      this.params.recurring !== false ? 'recurring' : 'one-shot';
-    return `Create ${recurrence} cron job: ${this.params.cron}`;
+    return `${this.params.cron}: ${this.params.prompt}`;
   }
 
   async execute(): Promise<ToolResult> {
@@ -45,23 +44,23 @@ class CronCreateInvocation extends BaseToolInvocation<
         recurring,
       );
 
-      let result: string;
+      const display = humanReadableCron(job.cronExpr);
+      const returnDisplay = `Scheduled ${job.id} (${display})`;
+
+      let llmContent: string;
       if (recurring) {
-        result =
+        llmContent =
           `Scheduled recurring job ${job.id} (${job.cronExpr}). ` +
           'Session-only (not written to disk, dies when Claude exits). ' +
           'Auto-expires after 7 days. Use CronDelete to cancel sooner.';
       } else {
-        result =
+        llmContent =
           `Scheduled one-shot task ${job.id} (${job.cronExpr}). ` +
           'Session-only (not written to disk, dies when Claude exits). ' +
           'It will fire once then auto-delete.';
       }
 
-      return {
-        llmContent: result,
-        returnDisplay: result,
-      };
+      return { llmContent, returnDisplay };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
