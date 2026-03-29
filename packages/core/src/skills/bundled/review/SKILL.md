@@ -173,24 +173,27 @@ gh pr view {pr_number} --json headRefOid --jq '.headRefOid'
 
 Then, for each confirmed finding, post an **inline comment** on the specific file and line using `gh api`:
 
-**Note:** Do NOT use `$()` command substitution — it is blocked by `run_shell_command` security policy. Pass the body directly as a multi-line string in the `-f body=` argument:
+**Shell safety:** Review content may contain double quotes, `$VAR`, backticks, or other shell-sensitive characters. Do NOT interpolate review text directly into shell arguments. Instead, use a **two-step process**: write the body to a temp file using a quoted heredoc (which prevents all shell expansion), then reference the file with `-F body=@file`.
 
 ```bash
-# Single-line finding:
-gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="**[{severity}]** {issue description}
+# Step A: Write comment body to temp file (quoted heredoc — no shell expansion):
+cat > /tmp/pr-comment.txt <<'BODYEOF'
+**[{severity}]** {issue description}
 
-{suggested fix}" \
+{suggested fix}
+BODYEOF
+
+# Step B: Post single-line comment referencing the file:
+gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
+  -F body=@/tmp/pr-comment.txt \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F line={line_number} \
   -f side="RIGHT"
 
-# Multi-line finding (e.g., line range 42-50):
+# For multi-line findings (e.g., line range 42-50), add start_line and start_side:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -f body="**[{severity}]** {issue description}
-
-{suggested fix}" \
+  -F body=@/tmp/pr-comment.txt \
   -f commit_id="{commit_sha}" \
   -f path="{file_path}" \
   -F start_line={start_line} \
@@ -198,6 +201,8 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   -f start_side="RIGHT" \
   -f side="RIGHT"
 ```
+
+Repeat Steps A-B for each finding, overwriting the temp file each time. Clean up the temp file in Step 5.
 
 If posting an inline comment fails (e.g., line not part of the diff, auth error), include the finding in the overall review summary comment instead.
 
@@ -208,17 +213,23 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 - Include the severity tag (Critical/Suggestion/Nice to have) at the start of each comment
 - Include the suggested fix in the comment body when available
 
-After posting all inline comments, submit an overall review using the action that matches the verdict from Step 3:
+After posting all inline comments, write the review summary to a temp file and submit it using the action that matches the verdict from Step 3:
 
 ```bash
+# Write summary to temp file:
+cat > /tmp/pr-review-summary.txt <<'SUMMARYEOF'
+{summary + verdict text}
+SUMMARYEOF
+
+# Submit review with the matching action:
 # If verdict is "Approve":
-gh pr review {pr_number} --approve --body "{summary}"
+gh pr review {pr_number} --approve --body-file /tmp/pr-review-summary.txt
 
 # If verdict is "Request changes":
-gh pr review {pr_number} --request-changes --body "{summary}"
+gh pr review {pr_number} --request-changes --body-file /tmp/pr-review-summary.txt
 
 # If verdict is "Comment":
-gh pr review {pr_number} --comment --body "{summary}"
+gh pr review {pr_number} --comment --body-file /tmp/pr-review-summary.txt
 ```
 
 If there are **no confirmed findings**:
@@ -229,7 +240,7 @@ gh pr review {pr_number} --approve --body "No issues found. LGTM! ✅"
 
 ## Step 5: Restore environment
 
-If you checked out a PR branch in Step 1, restore the original state now: check out the original branch, `git stash pop` if changes were stashed, and remove the temp file.
+If you checked out a PR branch in Step 1, restore the original state now: check out the original branch, `git stash pop` if changes were stashed, and remove all temp files (`/tmp/pr-review-context.md`, `/tmp/pr-comment.txt`, `/tmp/pr-review-summary.txt`).
 
 This step runs **after** Step 4 to ensure the PR branch is still checked out when posting inline comments (Step 4 needs the correct commit SHA from the PR branch).
 
