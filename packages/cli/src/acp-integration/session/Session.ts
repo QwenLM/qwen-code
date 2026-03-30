@@ -239,7 +239,10 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
+      this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
+      // Drain any cron prompts that queued while the prompt was active
+      void this.#drainCronQueue();
       return result;
     } finally {
       resolveCompletion();
@@ -447,6 +450,9 @@ export class Session implements SessionContext {
    */
   async #drainCronQueue(): Promise<void> {
     if (this.cronProcessing) return;
+    // Don't process cron while a user prompt is active — the queue will be
+    // drained after the prompt completes (see end of prompt()).
+    if (this.pendingPrompt) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;

@@ -52,7 +52,7 @@ class CronCreateInvocation extends BaseToolInvocation<
         llmContent =
           `Scheduled recurring job ${job.id} (${job.cronExpr}). ` +
           'Session-only (not written to disk, dies when Qwen Code exits). ' +
-          'Auto-expires after 7 days. Use CronDelete to cancel sooner.';
+          'Auto-expires after 3 days. Use CronDelete to cancel sooner.';
       } else {
         llmContent =
           `Scheduled one-shot task ${job.id} (${job.cronExpr}). ` +

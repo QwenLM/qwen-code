@@ -33,7 +33,7 @@ describe('CronCreateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Scheduled recurring job');
-    expect(result.llmContent).toContain('Auto-expires after 7 days');
+    expect(result.llmContent).toContain('Auto-expires after 3 days');
     expect(config._scheduler.list()).toHaveLength(1);
   });
 

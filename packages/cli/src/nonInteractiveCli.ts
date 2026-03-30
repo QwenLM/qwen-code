@@ -379,20 +379,25 @@ export async function runNonInteractive(
             // Start the scheduler and wait for all jobs to complete or be deleted.
             // Each fired prompt is processed as a new turn through the same loop.
             await new Promise<void>((resolve) => {
+              const cronQueue: string[] = [];
+              let processing = false;
+
               const checkDone = () => {
-                if (scheduler.size === 0) {
+                if (scheduler.size === 0 && !processing) {
                   scheduler.stop();
                   resolve();
                 }
               };
 
-              scheduler.start((job: { prompt: string }) => {
-                // Process fired prompt as a new turn
-                (async () => {
-                  try {
+              const drainQueue = async () => {
+                if (processing) return;
+                processing = true;
+                try {
+                  while (cronQueue.length > 0) {
+                    const cronPrompt = cronQueue.shift()!;
                     turnCount++;
                     let cronMessages: Content[] = [
-                      { role: 'user', parts: [{ text: job.prompt }] },
+                      { role: 'user', parts: [{ text: cronPrompt }] },
                     ];
                     let cronIsFirstTurn = true;
 
@@ -476,16 +481,21 @@ export async function runNonInteractive(
                           { role: 'user', parts: cronToolResponseParts },
                         ];
                       } else {
-                        // Cron turn done — check if we should exit
-                        checkDone();
                         break;
                       }
                     }
-                  } catch (error) {
-                    debugLogger.error('Error processing cron prompt:', error);
-                    checkDone();
                   }
-                })();
+                } catch (error) {
+                  debugLogger.error('Error processing cron prompt:', error);
+                } finally {
+                  processing = false;
+                  checkDone();
+                }
+              };
+
+              scheduler.start((job: { prompt: string }) => {
+                cronQueue.push(job.prompt);
+                void drainQueue();
               });
 
               // Also check immediately in case jobs were already deleted
