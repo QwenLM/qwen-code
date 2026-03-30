@@ -16,6 +16,7 @@ import type {
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { VerboseModeProvider } from '../contexts/VerboseModeContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -283,5 +284,41 @@ describe('<HistoryItemDisplay />', () => {
     );
 
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  describe('verbose mode — thought rendering', () => {
+    const thoughtItem: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'thinking-text-xyz',
+    };
+
+    it('hides gemini_thought in compact mode', () => {
+      const { lastFrame } = renderWithProviders(
+        <VerboseModeProvider value={{ verboseMode: false }}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            isPending={false}
+            availableTerminalHeight={24}
+            terminalWidth={80}
+          />
+        </VerboseModeProvider>,
+      );
+      expect(lastFrame()).not.toContain('thinking-text-xyz');
+    });
+
+    it('shows gemini_thought in verbose mode', () => {
+      const { lastFrame } = renderWithProviders(
+        <VerboseModeProvider value={{ verboseMode: true }}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            isPending={false}
+            availableTerminalHeight={24}
+            terminalWidth={80}
+          />
+        </VerboseModeProvider>,
+      );
+      expect(lastFrame()).toContain('thinking-text-xyz');
+    });
   });
 });

@@ -7,6 +7,7 @@
 import type React from 'react';
 import { useMemo } from 'react';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 import type { HistoryItem } from '../types.js';
 import {
   UserMessage,
@@ -77,6 +78,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+  const { verboseMode } = useVerboseMode();
 
   return (
     <Box
@@ -113,7 +115,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought' && (
+      {verboseMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -123,7 +125,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought_content' && (
+      {verboseMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
