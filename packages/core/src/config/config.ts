@@ -1771,6 +1771,15 @@ export class Config {
   }
 
   /**
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  }
+
+  /**
    * Check if hooks are enabled.
    */
   getEnableHooks(): boolean {
