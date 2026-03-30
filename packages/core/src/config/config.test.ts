@@ -1582,4 +1582,37 @@ describe('Model Switching and Config Updates', () => {
     const updatedConfig = config.getContentGeneratorConfig();
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
   });
+
+  describe('hasHooksForEvent', () => {
+    it('should return false when hookSystem is not initialized', () => {
+      const config = new Config(baseParams);
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+    });
+
+    it('should delegate to hookSystem.hasHooksForEvent when hookSystem exists', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(true);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+    });
+
+    it('should return false when hookSystem has no hooks for the event', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(false);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
+  });
 });

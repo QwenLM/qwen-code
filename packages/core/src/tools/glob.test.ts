@@ -491,6 +491,44 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, b.notignored.txt
       expect(result.llmContent).not.toContain('a.qwenignored.txt');
     });
+
+    it('should respect .gitignore when searching a subdirectory (path option)', async () => {
+      // This tests the regression fix: relativePaths must be computed relative
+      // to projectRoot, not to searchDir, so that gitignore rules rooted at
+      // projectRoot are evaluated against the correct paths.
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.secret');
+      await fs.writeFile(path.join(tempRootDir, 'sub', 'visible.txt'), 'ok');
+      await fs.writeFile(
+        path.join(tempRootDir, 'sub', 'hidden.secret'),
+        'should be ignored',
+      );
+
+      const subDirTool = new GlobTool(mockConfig);
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = subDirTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('visible.txt');
+      expect(result.llmContent).not.toContain('hidden.secret');
+    });
+
+    it('should respect .qwenignore when searching a subdirectory (path option)', async () => {
+      await fs.writeFile(path.join(tempRootDir, '.qwenignore'), '*.secret');
+      await fs.writeFile(path.join(tempRootDir, 'sub', 'visible.txt'), 'ok');
+      await fs.writeFile(
+        path.join(tempRootDir, 'sub', 'hidden.secret'),
+        'should be ignored',
+      );
+
+      // Recreate to pick up .qwenignore
+      const subDirTool = new GlobTool(mockConfig);
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = subDirTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('visible.txt');
+      expect(result.llmContent).not.toContain('hidden.secret');
+    });
   });
 
   describe('file count truncation', () => {

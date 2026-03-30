@@ -106,7 +106,27 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Split into lines and count total matches
-      const allLines = rawOutput.split('\n').filter((line) => line.trim());
+      let allLines = rawOutput.split('\n').filter((line) => line.trim());
+
+      // Deduplicate lines from potentially overlapping workspace directories.
+      // ripgrep reports the same file twice when given paths like /a and /a/sub.
+      if (searchPaths.length > 1) {
+        const seen = new Set<string>();
+        allLines = allLines.filter((line) => {
+          // ripgrep output format: filepath:linenum:content
+          const firstColon = line.indexOf(':');
+          if (firstColon !== -1) {
+            const secondColon = line.indexOf(':', firstColon + 1);
+            if (secondColon !== -1) {
+              const key = line.substring(0, secondColon);
+              if (seen.has(key)) return false;
+              seen.add(key);
+            }
+          }
+          return true;
+        });
+      }
+
       const totalMatches = allLines.length;
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
