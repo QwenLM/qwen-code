@@ -189,31 +189,57 @@ export class CronScheduler {
         continue;
       }
 
-      // Check if this minute matches
-      if (!matches(job.cronExpr, currentDate)) {
-        continue;
-      }
+      // Find the cron minute whose jittered fire time we might be in.
+      // For positive jitter (recurring) the fire time is *after* the matching
+      // minute, so we look backwards.  For negative jitter (one-shot :00/:30)
+      // the fire time is *before* the matching minute, so we look at the
+      // current minute.
+      //
+      // We scan a window of minutes around `now` equal to the absolute jitter
+      // so that a +6 min jitter on an hourly job still finds the :00 match.
+      const absJitter = Math.abs(job.jitterMs);
+      const windowMinutes = Math.ceil(absJitter / 60_000);
 
-      // Apply jitter: positive jitter delays after :00, negative fires early.
-      const minuteStart = new Date(currentDate);
-      minuteStart.setSeconds(0, 0);
-      const fireTimeMs = minuteStart.getTime() + job.jitterMs;
+      // Build the candidate minute-start at the beginning of the current minute
+      const nowMinuteStart = new Date(currentDate);
+      nowMinuteStart.setSeconds(0, 0);
+      const nowMinuteMs = nowMinuteStart.getTime();
 
-      if (currentMs < fireTimeMs) {
-        continue; // Not yet time (jitter hasn't elapsed)
-      }
+      let matchedMinuteMs: number | null = null;
 
-      // Prevent double-firing within the same minute
-      if (job.lastFiredAt) {
-        const lastFiredMinute = new Date(job.lastFiredAt);
-        lastFiredMinute.setSeconds(0, 0);
-        if (lastFiredMinute.getTime() === minuteStart.getTime()) {
-          continue; // Already fired this minute
+      // Scan from (now - windowMinutes) to (now) for positive jitter,
+      // or (now) to (now + windowMinutes) for negative jitter.
+      // In practice we scan both directions to keep the code simple.
+      for (let offset = -windowMinutes; offset <= windowMinutes; offset++) {
+        const candidateMs = nowMinuteMs + offset * 60_000;
+        const candidateDate = new Date(candidateMs);
+        if (!matches(job.cronExpr, candidateDate)) continue;
+
+        const fireTimeMs = candidateMs + job.jitterMs;
+        if (currentMs >= fireTimeMs) {
+          // This candidate's jittered fire time has passed — it's a match.
+          // Pick the latest matching minute to avoid re-triggering old ones.
+          if (matchedMinuteMs === null || candidateMs > matchedMinuteMs) {
+            matchedMinuteMs = candidateMs;
+          }
         }
       }
 
-      // Fire!
-      job.lastFiredAt = currentMs;
+      if (matchedMinuteMs === null) {
+        continue; // No matching minute whose jittered time has arrived
+      }
+
+      // Prevent double-firing: compare against the cron minute we last fired for
+      if (
+        job.lastFiredAt !== undefined &&
+        job.lastFiredAt === matchedMinuteMs
+      ) {
+        continue; // Already fired for this cron minute
+      }
+
+      // Fire! Record the matched cron minute (not wall-clock time) so the
+      // double-fire guard works when jitter pushes the fire into a later minute.
+      job.lastFiredAt = matchedMinuteMs;
 
       if (!job.recurring) {
         this.jobs.delete(job.id);

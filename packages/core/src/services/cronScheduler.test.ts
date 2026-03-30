@@ -174,6 +174,36 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(2025, 0, 15, 10, 31, 59));
       expect(fired).toHaveLength(2);
     });
+
+    it('fires recurring jobs after the matching minute when positive jitter delays them', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      const job = scheduler.create('0 * * * *', 'hourly delayed', true);
+      job.jitterMs = 6 * 60 * 1000;
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 5, 59));
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 6, 0));
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('hourly delayed');
+    });
+
+    it('fires one-shot jobs before the matching minute when negative jitter advances them', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      const job = scheduler.create('30 10 * * *', 'oneshot early', false);
+      job.jitterMs = -30 * 1000;
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 29, 29));
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(2025, 0, 15, 10, 29, 30));
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('oneshot early');
+    });
   });
 
   describe('start/stop', () => {
