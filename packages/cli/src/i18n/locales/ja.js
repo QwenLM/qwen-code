@@ -1441,4 +1441,11 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Verbose mode on — showing full tool output and thinking',
+  'Compact mode on — showing tool names and final responses only':
+    'Compact mode on — showing tool names and final responses only',
+  verbose: 'verbose',
+  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
+    'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
 };

@@ -1945,4 +1945,11 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Verbose mode on — showing full tool output and thinking',
+  'Compact mode on — showing tool names and final responses only':
+    'Compact mode on — showing tool names and final responses only',
+  verbose: 'verbose',
+  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
+    'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
 };
