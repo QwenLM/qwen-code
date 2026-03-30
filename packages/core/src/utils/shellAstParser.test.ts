@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   initParser,
   isShellCommandReadOnlyAST,
   extractCommandRules,
   _resetParser,
+  _resolveWasmPathForTesting,
 } from './shellAstParser.js';
 
 beforeAll(async () => {
@@ -18,6 +20,44 @@ beforeAll(async () => {
 
 afterAll(() => {
   _resetParser();
+});
+
+describe('WASM path resolution', () => {
+  it('resolves bundled WASM relative to the real CLI path when launched via symlink', () => {
+    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
+    const realCliPath = path.join(
+      '/opt',
+      'homebrew',
+      'lib',
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+      'dist',
+      'cli.js',
+    );
+
+    const result = _resolveWasmPathForTesting(
+      'tree-sitter.wasm',
+      symlinkedCliPath,
+      () => realCliPath,
+    );
+
+    expect(result).toBe(
+      path.join(
+        '/opt',
+        'homebrew',
+        'lib',
+        'node_modules',
+        '@qwen-code',
+        'qwen-code',
+        'dist',
+        'vendor',
+        'tree-sitter',
+        'tree-sitter.wasm',
+      ),
+    );
+    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
+  });
 });
 
 // =========================================================================
