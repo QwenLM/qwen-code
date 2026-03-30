@@ -501,6 +501,16 @@ const SETTINGS_SCHEMA = {
           'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
       },
+      verboseMode: {
+        type: 'boolean',
+        label: 'Verbose Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',

@@ -54,6 +54,7 @@ describe('keyMatchers', () => {
       (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
+    [Command.TOGGLE_VERBOSE_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
       key.ctrl && key.name === 'g',
     [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
@@ -232,6 +233,11 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_TOOL_DESCRIPTIONS,
       positive: [createKey('t', { ctrl: true })],
       negative: [createKey('t'), createKey('s', { ctrl: true })],
+    },
+    {
+      command: Command.TOGGLE_VERBOSE_MODE,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('t', { ctrl: true })],
     },
     {
       command: Command.TOGGLE_IDE_CONTEXT_DETAIL,
