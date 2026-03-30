@@ -150,6 +150,59 @@ If every permission request is denied/cancelled and none are approved, `acpx` ex
 4. Use `--format json` for automation and script integration
 5. Use `--cwd` to manage context across multiple projects
 
+## QwenCode Reference
+
+### CLI Commands
+
+| Command     | Description                     |
+| ----------- | ------------------------------- |
+| `/help`     | Show available commands         |
+| `/clear`    | Clear conversation history      |
+| `/compress` | Compress history to save tokens |
+| `/stats`    | Show session info               |
+| `/auth`     | Configure authentication        |
+| `/exit`     | Exit Qwen Code                  |
+
+Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/commands.md
+
+### Configuration
+
+Config files (highest priority first): CLI args > env vars > system > project (`.qwen/settings.json`) > user (`~/.qwen/settings.json`) > defaults. Format: JSONC with env var interpolation.
+
+Key settings:
+
+| Setting                      | Description                               |
+| ---------------------------- | ----------------------------------------- |
+| `model.name`                 | Model to use (e.g. `qwen-max`)            |
+| `tools.approvalMode`         | `plan` / `default` / `auto_edit` / `yolo` |
+| `permissions.allow/ask/deny` | Tool permission rules                     |
+| `mcpServers.*`               | MCP server configurations                 |
+
+Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/settings.md
+
+### Authentication
+
+Supports Qwen OAuth (browser-based, 1000 free requests/day) and OpenAI-compatible API keys.
+
+Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/auth.md
+
+### Model Providers
+
+Configure custom model providers via `modelProviders` in settings or environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`).
+
+Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/model-providers.md
+
+### Key Features
+
+| Feature       | Description                               | Docs                                                                                                    |
+| ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Approval Mode | Control tool execution permissions        | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/approval-mode.md |
+| MCP           | Model Context Protocol server integration | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/mcp.md           |
+| Skills        | Reusable skill system via `/skill`        | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/skills.md        |
+| Sub-agents    | Delegate tasks to specialized agents      | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/sub-agents.md    |
+| Sandbox       | Secure code execution environment         | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/sandbox.md       |
+| Headless      | Non-interactive / CI mode                 | https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/features/headless.md      |
+
 ## ACPX Reference
 
 ### Built-in Agent Registry
