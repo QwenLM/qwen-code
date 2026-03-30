@@ -102,6 +102,7 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -963,6 +964,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
+  const [verboseMode, setVerboseMode] = useState<boolean>(
+    settings.merged.ui?.verboseMode ?? false,
+  );
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1332,6 +1337,21 @@ export const AppContainer = (props: AppContainerProps) => {
         if (Object.keys(mcpServers || {}).length > 0) {
           handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
         }
+      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
+        const newValue = !verboseMode;
+        setVerboseMode(newValue);
+        settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text: newValue
+              ? t('Verbose mode on — showing full tool output and thinking')
+              : t(
+                  'Compact mode on — showing tool names and final responses only',
+                ),
+          },
+          Date.now(),
+        );
       } else if (
         keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
         config.getIdeMode() &&
@@ -1354,6 +1374,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setConstrainHeight,
       showToolDescriptions,
       setShowToolDescriptions,
+      verboseMode,
+      setVerboseMode,
       config,
       ideContextState,
       handleExit,
@@ -1375,8 +1397,9 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
+      historyManager,
+      settings,
     ],
   );
 
@@ -1807,9 +1830,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <VerboseModeProvider value={{ verboseMode }}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </VerboseModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>
