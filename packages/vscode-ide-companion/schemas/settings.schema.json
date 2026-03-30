@@ -175,6 +175,11 @@
           "type": "boolean",
           "default": true
         },
+        "verboseMode": {
+          "description": "Show full tool output and thinking in verbose mode (toggle with ctrl+o).",
+          "type": "boolean",
+          "default": false
+        },
         "accessibility": {
           "description": "Accessibility settings.",
           "type": "object",
