@@ -12,6 +12,7 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { VerboseModeProvider } from '../../contexts/VerboseModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
@@ -105,14 +106,17 @@ const mockSettings: LoadedSettings = {
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
+  verboseMode = true, // default true: preserves existing test expectations
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <SettingsContext.Provider value={mockSettings}>
-      <StreamingContext.Provider value={contextValue}>
-        {ui}
-      </StreamingContext.Provider>
-    </SettingsContext.Provider>,
+    <VerboseModeProvider value={{ verboseMode }}>
+      <SettingsContext.Provider value={mockSettings}>
+        <StreamingContext.Provider value={contextValue}>
+          {ui}
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>
+    </VerboseModeProvider>,
   );
 };
 
@@ -350,5 +354,25 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:# My Plan');
     expect(output).toContain('- Step 1');
     expect(output).toContain('- Step 2');
+  });
+
+  describe('verbose mode', () => {
+    it('hides resultDisplay in compact mode (verboseMode=false)', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage {...baseProps} resultDisplay="unique-tool-output-xyz" />,
+        StreamingState.Idle,
+        false,
+      );
+      expect(lastFrame()).not.toContain('unique-tool-output-xyz');
+    });
+
+    it('shows resultDisplay in verbose mode (verboseMode=true)', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage {...baseProps} resultDisplay="unique-tool-output-xyz" />,
+        StreamingState.Idle,
+        true,
+      );
+      expect(lastFrame()).toContain('MockMarkdown:unique-tool-output-xyz');
+    });
   });
 });

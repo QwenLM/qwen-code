@@ -32,6 +32,7 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 const STATIC_HEIGHT = 1;
@@ -324,6 +325,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
+  const { verboseMode } = useVerboseMode();
+  const effectiveDisplayRenderer = verboseMode
+    ? displayRenderer
+    : { type: 'none' as const };
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -344,7 +349,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         )}
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {displayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">
             {displayRenderer.type === 'todo' && (
