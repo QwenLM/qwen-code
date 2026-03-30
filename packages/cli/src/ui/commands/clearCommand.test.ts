@@ -140,6 +140,71 @@ describe('clearCommand', () => {
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
   });
 
+  it('should clear UI before resetChat for immediate responsiveness', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    const callOrder: string[] = [];
+    (mockContext.ui.clear as ReturnType<typeof vi.fn>).mockImplementation(
+      () => {
+        callOrder.push('ui.clear');
+      },
+    );
+    mockResetChat.mockImplementation(async () => {
+      callOrder.push('resetChat');
+    });
+
+    await clearCommand.action(mockContext, '');
+
+    // ui.clear should be called before resetChat for immediate UI feedback
+    const clearIndex = callOrder.indexOf('ui.clear');
+    const resetIndex = callOrder.indexOf('resetChat');
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(resetIndex).toBeGreaterThanOrEqual(0);
+    expect(clearIndex).toBeLessThan(resetIndex);
+  });
+
+  it('should not await hook events (fire-and-forget)', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    // Make hooks take a long time - they should not block
+    let sessionEndResolved = false;
+    let sessionStartResolved = false;
+    mockFireSessionEndEvent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            sessionEndResolved = true;
+            resolve(undefined);
+          }, 5000);
+        }),
+    );
+    mockFireSessionStartEvent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            sessionStartResolved = true;
+            resolve(undefined);
+          }, 5000);
+        }),
+    );
+
+    await clearCommand.action(mockContext, '');
+
+    // The action should complete immediately without waiting for hooks
+    expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    expect(mockResetChat).toHaveBeenCalledTimes(1);
+    // Hooks should have been called but not necessarily resolved
+    expect(mockFireSessionEndEvent).toHaveBeenCalled();
+    expect(mockFireSessionStartEvent).toHaveBeenCalled();
+    // Hooks should NOT have resolved yet since they have 5s timeouts
+    expect(sessionEndResolved).toBe(false);
+    expect(sessionStartResolved).toBe(false);
+  });
+
   it('should not attempt to reset chat if config service is not available', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
