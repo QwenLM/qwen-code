@@ -247,13 +247,17 @@ describe('SubagentValidator', () => {
       expect(result.errors).toContain('Model must be a non-empty string');
     });
 
-    it('should reject invalid authType prefixes', () => {
+    it('should accept model IDs containing colons with unknown prefix', () => {
       const result = validator.validateModel('invalid:glm-5');
-      expect(result.isValid).toBe(false);
-      expect(result.errors[0]).toContain('Invalid authType prefix');
+      expect(result.isValid).toBe(true);
     });
 
-    it('should reject missing model IDs after authType prefixes', () => {
+    it('should accept model IDs with colons (e.g. gpt-4o:online)', () => {
+      const result = validator.validateModel('gpt-4o:online');
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should reject missing model IDs after valid authType prefixes', () => {
       const result = validator.validateModel('openai:');
       expect(result.isValid).toBe(false);
       expect(result.errors).toContain(

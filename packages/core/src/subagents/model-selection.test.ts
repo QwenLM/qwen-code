@@ -36,9 +36,17 @@ describe('parseSubagentModelSelection', () => {
     });
   });
 
-  it('rejects invalid authType prefixes', () => {
-    expect(() => parseSubagentModelSelection('invalid:glm-5')).toThrow(
-      /Invalid authType prefix/,
-    );
+  it('treats unknown prefix as bare model ID (colon in model ID)', () => {
+    expect(parseSubagentModelSelection('invalid:glm-5')).toEqual({
+      modelId: 'invalid:glm-5',
+      inherits: false,
+    });
+  });
+
+  it('treats model IDs with colons as bare model IDs', () => {
+    expect(parseSubagentModelSelection('gpt-4o:online')).toEqual({
+      modelId: 'gpt-4o:online',
+      inherits: false,
+    });
   });
 });

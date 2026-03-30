@@ -38,10 +38,10 @@ export function parseSubagentModelSelection(
   const maybeAuthType = trimmed.slice(0, colonIndex).trim();
   const modelId = trimmed.slice(colonIndex + 1).trim();
 
+  // If the prefix isn't a known AuthType, treat the whole string as a bare
+  // model ID. Model IDs can legitimately contain colons (e.g. gpt-4o:online).
   if (!AUTH_TYPES.has(maybeAuthType as AuthType)) {
-    throw new Error(
-      `Invalid authType prefix "${maybeAuthType}". Expected one of: ${Object.values(AuthType).join(', ')}`,
-    );
+    return { modelId: trimmed, inherits: false };
   }
 
   if (!modelId) {
