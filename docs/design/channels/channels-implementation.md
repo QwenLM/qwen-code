@@ -27,7 +27,7 @@ The adapter supports plain text messaging, slash commands, a working indicator (
 ```
 
 ```bash
-source /home/andy/projects/telegram/.env
+source /path/to/telegram/.env
 npm run bundle && node dist/cli.js channel start my-telegram
 ```
 

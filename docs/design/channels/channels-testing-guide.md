@@ -6,8 +6,8 @@ How to test channel integrations end-to-end.
 
 - Telegram bot: `@qwencod_test_1_bot` (远弟)
 - Bot token env var: `TELEGRAM_BOT_TOKEN`
-- Bot token file: `/home/andy/projects/telegram/.env`
-- Andy's Telegram user ID: `8513463076`
+- Bot token file: `/path/to/telegram/.env`
+- Telegram user ID: `<your-user-id>`
 - WeChat credentials: `~/.qwen/channels/weixin/account.json`
 
 ## Before testing
@@ -31,19 +31,19 @@ rm -f ~/.qwen/channels/service.pid ~/.qwen/channels/sessions.json
 
 ```bash
 # Source the token
-export TELEGRAM_BOT_TOKEN=$(grep TELEGRAM_BOT_TOKEN /home/andy/projects/telegram/.env | cut -d= -f2)
+export TELEGRAM_BOT_TOKEN=$(grep TELEGRAM_BOT_TOKEN /path/to/telegram/.env | cut -d= -f2)
 
-# Send a message to Andy
+# Send a message (replace YOUR_CHAT_ID with your Telegram user ID)
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
-  -d '{"chat_id": "8513463076", "text": "Hello from the bot!"}'
+  -d '{"chat_id": "YOUR_CHAT_ID", "text": "Hello from the bot!"}'
 ```
 
 ## Starting channels
 
 ```bash
-export TELEGRAM_BOT_TOKEN=$(grep TELEGRAM_BOT_TOKEN /home/andy/projects/telegram/.env | cut -d= -f2)
-cd /home/andy/projects/qwen-code
+export TELEGRAM_BOT_TOKEN=$(grep TELEGRAM_BOT_TOKEN /path/to/telegram/.env | cut -d= -f2)
+cd /path/to/qwen-code
 npm run bundle
 
 # Single channel
@@ -84,9 +84,9 @@ Start the service, then send on Telegram or WeChat:
 
 ### 3. Multi-turn conversation
 
-1. Send "my name is Andy"
+1. Send "my name is Alice"
 2. Send "what is my name?"
-3. Agent should remember "Andy" from same session
+3. Agent should remember "Alice" from same session
 
 ### 4. Session clear
 
@@ -97,7 +97,7 @@ Start the service, then send on Telegram or WeChat:
 
 ### 5. Tool calls (internal)
 
-1. Send "list the files in /home/andy/projects/qwen-code"
+1. Send "list the files in /path/to/project"
 2. Agent should use shell/ls internally and return file listing
 3. Verify response contains actual file names
 

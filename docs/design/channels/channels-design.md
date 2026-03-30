@@ -35,8 +35,8 @@ A **channel** connects an external messaging platform to a Qwen Code agent. Conf
                                                      ▼
                                     ┌─────────────────────────────────────┐
                                     │        qwen-code --acp              │
-                                    │   Session A (user andy, id: "abc")  │
-                                    │   Session B (user bob,  id: "def")  │
+                                    │   Session A (user alice, id: "abc") │
+                                    │   Session B (user bob,   id: "def") │
                                     └─────────────────────────────────────┘
 ```
 
