@@ -27,7 +27,10 @@ const __filename_ = resolveModuleFilePath(fileURLToPath(import.meta.url));
 
 function resolveModuleFilePath(moduleFilePath: string): string {
   try {
-    return fs.realpathSync(moduleFilePath);
+    const resolved = fs.realpathSync(moduleFilePath);
+    // Guard against test environments where `fs` is mocked and realpathSync
+    // returns undefined rather than throwing.
+    return typeof resolved === 'string' ? resolved : moduleFilePath;
   } catch {
     return moduleFilePath;
   }
