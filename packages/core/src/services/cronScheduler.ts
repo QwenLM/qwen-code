@@ -4,6 +4,7 @@
  */
 
 import { matches, nextFireTime } from '../utils/cronParser.js';
+import { humanReadableCron } from '../utils/cronDisplay.js';
 
 const MAX_JOBS = 50;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
@@ -222,6 +223,27 @@ export class CronScheduler {
         this.onFire(job);
       }
     }
+  }
+
+  /**
+   * Returns a human-readable summary of active jobs for display on session
+   * exit. Returns null if there are no active jobs.
+   */
+  getExitSummary(): string | null {
+    if (this.jobs.size === 0) return null;
+
+    const count = this.jobs.size;
+    const lines = [
+      `Session ending. ${count} active loop${count === 1 ? '' : 's'} cancelled:`,
+    ];
+    for (const job of this.jobs.values()) {
+      const schedule = humanReadableCron(job.cronExpr);
+      // Truncate long prompts
+      const prompt =
+        job.prompt.length > 60 ? job.prompt.slice(0, 57) + '...' : job.prompt;
+      lines.push(`  - [${job.id}] ${schedule}: ${prompt}`);
+    }
+    return lines.join('\n');
   }
 
   /**

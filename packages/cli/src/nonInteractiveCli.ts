@@ -405,7 +405,7 @@ export async function runNonInteractive(
                         prompt_id,
                         {
                           type: cronIsFirstTurn
-                            ? SendMessageType.UserQuery
+                            ? SendMessageType.Cron
                             : SendMessageType.ToolResult,
                         },
                       );
@@ -415,7 +415,11 @@ export async function runNonInteractive(
 
                       for await (const event of cronStream) {
                         if (abortController.signal.aborted) {
+                          const summary = scheduler.getExitSummary();
                           scheduler.stop();
+                          if (summary) {
+                            process.stderr.write(summary + '\n');
+                          }
                           resolve();
                           return;
                         }

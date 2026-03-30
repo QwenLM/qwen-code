@@ -1176,7 +1176,10 @@ export const useGeminiStream = (
         }
 
         // Check image format support for non-continuations
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
             addItem(
@@ -1193,7 +1196,10 @@ export const useGeminiStream = (
         lastPromptRef.current = finalQueryToSend;
         lastPromptErroredRef.current = false;
 
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
 
@@ -1651,7 +1657,11 @@ export const useGeminiStream = (
       setCronTrigger((n) => n + 1);
     });
     return () => {
+      const summary = scheduler.getExitSummary();
       scheduler.stop();
+      if (summary) {
+        process.stderr.write(summary + '\n');
+      }
     };
   }, [config]);
 
@@ -1662,7 +1672,7 @@ export const useGeminiStream = (
       cronQueueRef.current.length > 0
     ) {
       const prompt = cronQueueRef.current.shift()!;
-      submitQuery(prompt, SendMessageType.UserQuery);
+      submitQuery(prompt, SendMessageType.Cron);
     }
   }, [streamingState, submitQuery, cronTrigger]);
 

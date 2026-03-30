@@ -203,6 +203,44 @@ describe('CronScheduler', () => {
     });
   });
 
+  describe('getExitSummary', () => {
+    it('returns null when no jobs', () => {
+      expect(scheduler.getExitSummary()).toBeNull();
+    });
+
+    it('returns summary with single job', () => {
+      scheduler.create('*/5 * * * *', 'check the build', true);
+      const summary = scheduler.getExitSummary()!;
+      expect(summary).toContain('1 active loop cancelled:');
+      expect(summary).toContain('Every 5 minutes');
+      expect(summary).toContain('check the build');
+    });
+
+    it('returns summary with multiple jobs', () => {
+      scheduler.create('*/5 * * * *', 'check the build', true);
+      scheduler.create('*/30 * * * *', 'check PR reviews', true);
+      const summary = scheduler.getExitSummary()!;
+      expect(summary).toContain('2 active loops cancelled:');
+      expect(summary).toContain('check the build');
+      expect(summary).toContain('check PR reviews');
+    });
+
+    it('truncates long prompts', () => {
+      const longPrompt = 'a'.repeat(100);
+      scheduler.create('*/1 * * * *', longPrompt, true);
+      const summary = scheduler.getExitSummary()!;
+      expect(summary).toContain('...');
+      // Should not contain the full 100-char prompt
+      expect(summary).not.toContain(longPrompt);
+    });
+
+    it('returns null after all jobs are deleted', () => {
+      const job = scheduler.create('*/1 * * * *', 'temp', true);
+      scheduler.delete(job.id);
+      expect(scheduler.getExitSummary()).toBeNull();
+    });
+  });
+
   describe('destroy', () => {
     it('stops and clears all jobs', () => {
       scheduler.create('*/1 * * * *', 'a', true);
