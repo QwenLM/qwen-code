@@ -194,7 +194,12 @@ function fetchNpmJson<T>(url: string, authToken?: string): Promise<T> {
       .get(url, { headers }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
-            fetchNpmJson<T>(res.headers.location, authToken)
+            // Strip auth token when redirected to a different host
+            const originalHost = new URL(url).host;
+            const redirectHost = new URL(res.headers.location).host;
+            const redirectToken =
+              redirectHost === originalHost ? authToken : undefined;
+            fetchNpmJson<T>(res.headers.location, redirectToken)
               .then(resolve)
               .catch(reject);
             return;
@@ -241,7 +246,12 @@ function downloadNpmFile(
       .get(url, { headers }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           if (res.headers.location) {
-            downloadNpmFile(res.headers.location, dest, authToken)
+            // Strip auth token when redirected to a different host
+            const originalHost = new URL(url).host;
+            const redirectHost = new URL(res.headers.location).host;
+            const redirectToken =
+              redirectHost === originalHost ? authToken : undefined;
+            downloadNpmFile(res.headers.location, dest, redirectToken)
               .then(resolve)
               .catch(reject);
             return;
@@ -282,7 +292,7 @@ export async function downloadFromNpmRegistry(
   const authToken = getNpmAuthToken(registryUrl);
 
   // Fetch package metadata
-  const encodedName = name.replace('/', '%2f');
+  const encodedName = name.replaceAll('/', '%2f');
   const metadataUrl = `${registryUrl}/${encodedName}`;
   debugLogger.debug(`Fetching npm package metadata from ${metadataUrl}`);
 
@@ -322,9 +332,16 @@ export async function downloadFromNpmRegistry(
     `Downloading ${name}@${resolvedVersion} from ${tarballUrl}`,
   );
 
+  // Only send auth token if the tarball is hosted on the same registry host.
+  // Private registries often point dist.tarball at a CDN on a different domain;
+  // forwarding the registry token there would leak credentials.
+  const registryHost = new URL(registryUrl).host;
+  const tarballHost = new URL(tarballUrl).host;
+  const tarballAuthToken = tarballHost === registryHost ? authToken : undefined;
+
   // Download tarball
   const tarballPath = path.join(destination, 'package.tgz');
-  await downloadNpmFile(tarballUrl, tarballPath, authToken);
+  await downloadNpmFile(tarballUrl, tarballPath, tarballAuthToken);
 
   // Extract tarball
   await tar.x({
@@ -371,7 +388,7 @@ export async function checkNpmUpdate(
       installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
     const authToken = getNpmAuthToken(registryUrl);
 
-    const encodedName = name.replace('/', '%2f');
+    const encodedName = name.replaceAll('/', '%2f');
     const metadataUrl = `${registryUrl}/${encodedName}`;
     const metadata = await fetchNpmJson<NpmPackageMetadata>(
       metadataUrl,
