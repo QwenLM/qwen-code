@@ -226,22 +226,18 @@ describe('SubagentValidator', () => {
 
   describe('validateModel', () => {
     it('should accept valid model selectors', () => {
-      const validModels = ['inherit', 'glm-5', 'claude-sonnet-4-6'];
+      const validModels = [
+        'inherit',
+        'glm-5',
+        'claude-sonnet-4-6',
+        'openai:glm-5',
+        'anthropic:sonnet',
+      ];
 
       for (const model of validModels) {
         const result = validator.validateModel(model);
         expect(result.isValid).toBe(true);
         expect(result.errors).toHaveLength(0);
-      }
-    });
-
-    it('should reject cross-provider authType-prefixed selectors', () => {
-      const crossProviderModels = ['openai:glm-5', 'anthropic:sonnet'];
-
-      for (const model of crossProviderModels) {
-        const result = validator.validateModel(model);
-        expect(result.isValid).toBe(false);
-        expect(result.errors[0]).toContain('Cross-provider model selectors');
       }
     });
 

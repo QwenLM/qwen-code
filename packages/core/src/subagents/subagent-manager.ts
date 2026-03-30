@@ -34,6 +34,13 @@ import type {
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
+import {
+  type AuthType,
+  type ContentGenerator,
+  type ContentGeneratorConfig,
+  createContentGenerator,
+} from '../core/contentGenerator.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { parseSubagentModelSelection } from './model-selection.js';
@@ -609,9 +616,17 @@ export class SubagentManager {
     try {
       const runtimeConfig = this.convertToRuntimeConfig(config);
 
+      // When the model selector specifies a different provider, build a
+      // per-agent Config with a dedicated ContentGenerator so the subagent
+      // talks to the right API without affecting the parent process.
+      const agentContext = await this.maybeOverrideContentGenerator(
+        config,
+        runtimeContext,
+      );
+
       return await AgentHeadless.create(
         config.name,
-        runtimeContext,
+        agentContext,
         runtimeConfig.promptConfig,
         runtimeConfig.modelConfig,
         runtimeConfig.runConfig,
@@ -632,6 +647,52 @@ export class SubagentManager {
   }
 
   /**
+   * When a subagent's model selector includes a cross-provider authType
+   * prefix (e.g. "openai:gpt-4o"), build a Config override with a
+   * dedicated ContentGenerator. Returns the original context unchanged
+   * for same-provider or inherit selectors.
+   */
+  private async maybeOverrideContentGenerator(
+    config: SubagentConfig,
+    base: Config,
+  ): Promise<Config> {
+    const selection = parseSubagentModelSelection(config.model);
+    if (!selection.authType) {
+      return base;
+    }
+
+    const authOverrides = {
+      authType: selection.authType,
+    };
+
+    const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+      base,
+      selection.modelId,
+      authOverrides,
+    );
+
+    const agentGenerator = await createContentGenerator(
+      agentGeneratorConfig,
+      base,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const override = Object.create(base) as any;
+    override.getContentGenerator = (): ContentGenerator => agentGenerator;
+    override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
+      agentGeneratorConfig;
+    override.getAuthType = (): AuthType | undefined =>
+      agentGeneratorConfig.authType;
+    override.getModel = (): string => agentGeneratorConfig.model;
+
+    debugLogger.info(
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${selection.authType}, model=${agentGeneratorConfig.model}`,
+    );
+
+    return override as Config;
+  }
+
+  /**
    * Converts a file-based SubagentConfig to runtime configuration
    * compatible with AgentHeadless.create().
    *
@@ -644,13 +705,6 @@ export class SubagentManager {
     };
 
     const selection = parseSubagentModelSelection(config.model);
-    if (selection.authType) {
-      throw new SubagentError(
-        `Cross-provider model selectors (e.g. "${config.model}") are not supported for subagents. Use a bare model ID instead, or use Arena for cross-provider agents.`,
-        SubagentErrorCode.INVALID_CONFIG,
-        config.name,
-      );
-    }
     const modelConfig: ModelConfig = {
       ...(selection.modelId ? { model: selection.modelId } : {}),
     };

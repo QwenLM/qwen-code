@@ -260,12 +260,7 @@ export class SubagentValidator {
     }
 
     try {
-      const selection = parseSubagentModelSelection(model);
-      if (selection.authType) {
-        errors.push(
-          `Cross-provider model selectors (e.g. "${model}") are not yet supported for subagents. Use a bare model ID instead.`,
-        );
-      }
+      parseSubagentModelSelection(model);
     } catch (error) {
       errors.push(error instanceof Error ? error.message : 'Invalid model');
     }

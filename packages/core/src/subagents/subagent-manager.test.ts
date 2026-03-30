@@ -1130,15 +1130,16 @@ System prompt 3`);
         expect(runtimeConfig.runConfig.max_time_minutes).toBe(5);
       });
 
-      it('should reject cross-provider model selectors', () => {
+      it('should accept cross-provider model selectors', () => {
         const configWithCrossProvider: SubagentConfig = {
           ...validConfig,
           model: 'openai:gpt-4',
         };
 
-        expect(() =>
-          manager.convertToRuntimeConfig(configWithCrossProvider),
-        ).toThrow(/Cross-provider model selectors/);
+        const runtimeConfig = manager.convertToRuntimeConfig(
+          configWithCrossProvider,
+        );
+        expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
     });
 
