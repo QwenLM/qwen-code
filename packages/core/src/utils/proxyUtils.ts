@@ -27,7 +27,8 @@ export function normalizeProxyUrl(
   }
 
   // Check if the URL already has a protocol prefix
-  if (/^https?:\/\//i.test(trimmed)) {
+  // Support http, https, socks, socks4, socks5 protocols
+  if (/^(https?|socks[45]?):\/\//i.test(trimmed)) {
     return trimmed;
   }
 

@@ -77,4 +77,28 @@ describe('normalizeProxyUrl', () => {
   it('should handle IPv6 addresses with http:// prefix', () => {
     expect(normalizeProxyUrl('http://[::1]:8080')).toBe('http://[::1]:8080');
   });
+
+  it('should not modify URL that already has socks:// prefix', () => {
+    expect(normalizeProxyUrl('socks://proxy.example.com:1080')).toBe(
+      'socks://proxy.example.com:1080',
+    );
+  });
+
+  it('should not modify URL that already has socks4:// prefix', () => {
+    expect(normalizeProxyUrl('socks4://proxy.example.com:1080')).toBe(
+      'socks4://proxy.example.com:1080',
+    );
+  });
+
+  it('should not modify URL that already has socks5:// prefix', () => {
+    expect(normalizeProxyUrl('socks5://proxy.example.com:1080')).toBe(
+      'socks5://proxy.example.com:1080',
+    );
+  });
+
+  it('should handle SOCKS:// prefix (case insensitive)', () => {
+    expect(normalizeProxyUrl('SOCKS5://proxy.example.com:1080')).toBe(
+      'SOCKS5://proxy.example.com:1080',
+    );
+  });
 });
