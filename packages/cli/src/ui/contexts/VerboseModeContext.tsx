@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext } from 'react';
+import { createContext, useContext } from 'react';
 
 interface VerboseModeContextType {
   verboseMode: boolean;
