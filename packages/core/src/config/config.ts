@@ -748,9 +748,9 @@ export class Config {
       initializeTelemetry(this);
     }
 
-    const normalizedProxy = normalizeProxyUrl(this.getProxy());
-    if (normalizedProxy) {
-      setGlobalDispatcher(new ProxyAgent(normalizedProxy));
+    const proxyUrl = this.getProxy();
+    if (proxyUrl) {
+      setGlobalDispatcher(new ProxyAgent(proxyUrl));
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -1719,7 +1719,7 @@ export class Config {
   }
 
   getProxy(): string | undefined {
-    return this.proxy;
+    return normalizeProxyUrl(this.proxy);
   }
 
   getWorkingDir(): string {

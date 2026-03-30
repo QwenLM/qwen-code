@@ -78,27 +78,28 @@ describe('normalizeProxyUrl', () => {
     expect(normalizeProxyUrl('http://[::1]:8080')).toBe('http://[::1]:8080');
   });
 
-  it('should not modify URL that already has socks:// prefix', () => {
-    expect(normalizeProxyUrl('socks://proxy.example.com:1080')).toBe(
-      'socks://proxy.example.com:1080',
+  // SOCKS proxy tests - should throw error since undici doesn't support SOCKS
+  it('should throw error for socks:// proxy URL', () => {
+    expect(() => normalizeProxyUrl('socks://proxy.example.com:1080')).toThrow(
+      'SOCKS proxy is not supported',
     );
   });
 
-  it('should not modify URL that already has socks4:// prefix', () => {
-    expect(normalizeProxyUrl('socks4://proxy.example.com:1080')).toBe(
-      'socks4://proxy.example.com:1080',
+  it('should throw error for socks4:// proxy URL', () => {
+    expect(() => normalizeProxyUrl('socks4://proxy.example.com:1080')).toThrow(
+      'SOCKS proxy is not supported',
     );
   });
 
-  it('should not modify URL that already has socks5:// prefix', () => {
-    expect(normalizeProxyUrl('socks5://proxy.example.com:1080')).toBe(
-      'socks5://proxy.example.com:1080',
+  it('should throw error for socks5:// proxy URL', () => {
+    expect(() => normalizeProxyUrl('socks5://proxy.example.com:1080')).toThrow(
+      'SOCKS proxy is not supported',
     );
   });
 
-  it('should handle SOCKS:// prefix (case insensitive)', () => {
-    expect(normalizeProxyUrl('SOCKS5://proxy.example.com:1080')).toBe(
-      'SOCKS5://proxy.example.com:1080',
+  it('should throw error for SOCKS5:// proxy URL (case insensitive)', () => {
+    expect(() => normalizeProxyUrl('SOCKS5://proxy.example.com:1080')).toThrow(
+      'SOCKS proxy is not supported',
     );
   });
 });
