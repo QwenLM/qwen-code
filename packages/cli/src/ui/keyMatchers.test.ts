@@ -372,4 +372,22 @@ describe('keyMatchers', () => {
       );
     });
   });
+
+  describe('TOGGLE_VERBOSE_MODE binding', () => {
+    it('matches Ctrl+O', () => {
+      expect(
+        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
+          createKey('o', { ctrl: true }),
+        ),
+      ).toBe(true);
+    });
+
+    it('does not match plain O', () => {
+      expect(
+        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
+          createKey('o', { ctrl: false }),
+        ),
+      ).toBe(false);
+    });
+  });
 });
