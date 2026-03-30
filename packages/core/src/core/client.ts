@@ -465,7 +465,12 @@ export class GeminiClient {
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
     const hooksEnabled = this.config.getEnableHooks();
     const messageBus = this.config.getMessageBus();
-    if (messageType !== SendMessageType.Retry && hooksEnabled && messageBus) {
+    if (
+      messageType !== SendMessageType.Retry &&
+      hooksEnabled &&
+      messageBus &&
+      this.config.hasHooksForEvent('UserPromptSubmit')
+    ) {
       const promptText = partToString(request);
       const response = await messageBus.request<
         HookExecutionRequest,
@@ -675,14 +680,15 @@ export class GeminiClient {
         return turn;
       }
     }
-    // Fire Stop hook through MessageBus (only if hooks are enabled)
+    // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
     // This must be done before any early returns to ensure hooks are always triggered
     if (
       hooksEnabled &&
       messageBus &&
       !turn.pendingToolCalls.length &&
       signal &&
-      !signal.aborted
+      !signal.aborted &&
+      this.config.hasHooksForEvent('Stop')
     ) {
       // Get response text from the chat history
       const history = this.getHistory();

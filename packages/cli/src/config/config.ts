@@ -33,8 +33,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
-import type { Settings, LoadedSettings } from './settings.js';
-import { SettingScope } from './settings.js';
+import type { Settings } from './settings.js';
+import { loadSettings, SettingScope } from './settings.js';
 import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
@@ -704,7 +704,6 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
-  loadedSettings?: LoadedSettings,
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -1042,20 +1041,19 @@ export async function loadCliConfig(
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
     },
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: loadedSettings
-      ? async (scope, ruleType, rule) => {
-          const settingScope =
-            scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-          const key = `permissions.${ruleType}`;
-          const currentRules: string[] =
-            loadedSettings.forScope(settingScope).settings.permissions?.[
-              ruleType
-            ] ?? [];
-          if (!currentRules.includes(rule)) {
-            loadedSettings.setValue(settingScope, key, [...currentRules, rule]);
-          }
-        }
-      : undefined,
+    onPersistPermissionRule: async (scope, ruleType, rule) => {
+      const currentSettings = loadSettings(cwd);
+      const settingScope =
+        scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+      const key = `permissions.${ruleType}`;
+      const currentRules: string[] =
+        currentSettings.forScope(settingScope).settings.permissions?.[
+          ruleType
+        ] ?? [];
+      if (!currentRules.includes(rule)) {
+        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      }
+    },
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,
     mcpServerCommand: settings.mcp?.serverCommand,

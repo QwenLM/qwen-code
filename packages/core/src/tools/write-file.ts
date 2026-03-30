@@ -25,7 +25,12 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -138,9 +143,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       DEFAULT_DIFF_OPTIONS,
     );
 
+    const approvalMode = this.config.getApprovalMode();
     const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
+      this.config.getIdeMode() &&
+      ideClient.isDiffingEnabled() &&
+      approvalMode !== ApprovalMode.AUTO_EDIT &&
+      approvalMode !== ApprovalMode.YOLO
         ? ideClient.openDiff(this.params.file_path, this.params.content)
         : undefined;
 
@@ -177,6 +186,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let originalContent = '';
     let useBOM = false;
     let detectedEncoding: string | undefined;
+    let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
     if (fileExists) {
       try {
@@ -191,6 +201,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        detectedLineEnding = detectLineEnding(fileInfo.content);
         originalContent = fileInfo.content;
         fileExists = true; // File exists and was read
       } catch (err) {
@@ -239,6 +250,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
+          lineEnding: detectedLineEnding,
         },
       });
 

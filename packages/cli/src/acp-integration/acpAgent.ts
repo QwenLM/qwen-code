@@ -57,7 +57,7 @@ import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
-import { SettingScope } from '../config/settings.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -223,30 +223,18 @@ class QwenAgent implements Agent {
         return sessionService.sessionExists(params.sessionId);
       },
     );
-    if (!exists) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Session not found for id: ${params.sessionId}`,
-      );
-    }
 
     const config = await this.newSessionConfig(
       params.cwd,
       params.mcpServers,
       params.sessionId,
+      exists,
     );
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    if (!sessionData) {
-      throw RequestError.internalError(
-        undefined,
-        `Failed to load session data for id: ${params.sessionId}`,
-      );
-    }
-
-    await this.createAndStoreSession(config, sessionData.conversation);
+    await this.createAndStoreSession(config, sessionData?.conversation);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -380,7 +368,9 @@ class QwenAgent implements Agent {
     cwd: string,
     mcpServers: McpServer[],
     sessionId?: string,
+    resume?: boolean,
   ): Promise<Config> {
+    this.settings = loadSettings(cwd);
     const mergedMcpServers = { ...this.settings.merged.mcpServers };
 
     for (const server of mcpServers) {
@@ -402,11 +392,11 @@ class QwenAgent implements Agent {
     const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };
     const argvForSession = {
       ...this.argv,
-      resume: sessionId,
+      ...(resume ? { resume: sessionId } : { sessionId }),
       continue: false,
     };
 
-    const config = await loadCliConfig(settings, argvForSession, cwd);
+    const config = await loadCliConfig(settings, argvForSession, cwd, []);
     await config.initialize();
     return config;
   }

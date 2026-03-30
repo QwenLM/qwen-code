@@ -1770,6 +1770,15 @@ export class Config {
   }
 
   /**
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  }
+
+  /**
    * Check if hooks are enabled.
    */
   getEnableHooks(): boolean {
@@ -2111,7 +2120,7 @@ export class Config {
 
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
+    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
       const toolName = ToolClass?.Name as ToolName | undefined;
       const className = ToolClass?.name ?? 'UnknownTool';
 
@@ -2127,7 +2136,7 @@ export class Config {
       // PermissionManager handles both the coreTools allowlist (registry-level)
       // and deny rules (runtime-level) in a single check.
       const pmEnabled = this.permissionManager
-        ? this.permissionManager.isToolEnabled(toolName)
+        ? await this.permissionManager.isToolEnabled(toolName)
         : true; // Should never reach here after initialize(), but safe default.
 
       if (pmEnabled) {
@@ -2143,10 +2152,10 @@ export class Config {
       }
     };
 
-    registerCoreTool(AgentTool, this);
-    registerCoreTool(SkillTool, this);
-    registerCoreTool(LSTool, this);
-    registerCoreTool(ReadFileTool, this);
+    await registerCoreTool(AgentTool, this);
+    await registerCoreTool(SkillTool, this);
+    await registerCoreTool(LSTool, this);
+    await registerCoreTool(ReadFileTool, this);
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
@@ -2157,7 +2166,7 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        registerCoreTool(RipGrepTool, this);
+        await registerCoreTool(RipGrepTool, this);
       } else {
         // Log for telemetry
         logRipgrepFallback(
@@ -2168,30 +2177,30 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        registerCoreTool(GrepTool, this);
+        await registerCoreTool(GrepTool, this);
       }
     } else {
-      registerCoreTool(GrepTool, this);
+      await registerCoreTool(GrepTool, this);
     }
 
-    registerCoreTool(GlobTool, this);
-    registerCoreTool(EditTool, this);
-    registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ShellTool, this);
-    registerCoreTool(MemoryTool);
-    registerCoreTool(TodoWriteTool, this);
-    registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    await registerCoreTool(GlobTool, this);
+    await registerCoreTool(EditTool, this);
+    await registerCoreTool(WriteFileTool, this);
+    await registerCoreTool(ShellTool, this);
+    await registerCoreTool(MemoryTool);
+    await registerCoreTool(TodoWriteTool, this);
+    await registerCoreTool(AskUserQuestionTool, this);
+    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
+    await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      registerCoreTool(WebSearchTool, this);
+      await registerCoreTool(WebSearchTool, this);
     }
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
-      registerCoreTool(LspTool, this);
+      await registerCoreTool(LspTool, this);
     }
 
     if (!options?.skipDiscovery) {

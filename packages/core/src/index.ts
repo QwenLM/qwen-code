@@ -55,6 +55,7 @@ export * from './output/types.js';
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
 export * from './core/coreToolScheduler.js';
+export * from './core/permission-helpers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/logger.js';
@@ -127,7 +128,6 @@ export * from './ide/types.js';
 export * from './lsp/constants.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
-export * from './lsp/LspLanguageDetector.js';
 export * from './lsp/LspResponseNormalizer.js';
 export * from './lsp/LspServerManager.js';
 export * from './lsp/NativeLspClient.js';
@@ -260,5 +260,6 @@ export type { HookRegistryEntry } from './hooks/index.js';
 // Export hook triggers for notification hooks
 export {
   fireNotificationHook,
+  firePermissionRequestHook,
   type NotificationHookResult,
 } from './core/toolHookTriggers.js';

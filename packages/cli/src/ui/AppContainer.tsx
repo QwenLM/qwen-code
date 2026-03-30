@@ -110,6 +110,7 @@ import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
+import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import {
   requestConsentInteractive,
@@ -456,6 +457,7 @@ export const AppContainer = (props: AppContainerProps) => {
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
+    handleAlibabaStandardSubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -552,6 +554,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeExtensionsManagerDialog,
   } = useExtensionsManagerDialog();
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
+  const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
+    useHooksDialog();
 
   const slashCommandActions = useMemo(
     () => ({
@@ -578,6 +582,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAgentsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
+      openHooksDialog,
       openResumeDialog,
     }),
     [
@@ -597,6 +602,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAgentsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
+      openHooksDialog,
       openResumeDialog,
     ],
   );
@@ -1439,6 +1445,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
     isMcpDialogOpen ||
+    isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isExtensionsManagerDialogOpen;
@@ -1561,6 +1568,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isExtensionsManagerDialogOpen,
       // MCP dialog
       isMcpDialogOpen,
+      // Hooks dialog
+      isHooksDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -1662,6 +1671,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isExtensionsManagerDialogOpen,
       // MCP dialog
       isMcpDialogOpen,
+      // Hooks dialog
+      isHooksDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -1681,6 +1692,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1713,6 +1725,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Hooks dialog
+      openHooksDialog,
+      // Hooks dialog
+      closeHooksDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1734,6 +1750,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1764,6 +1781,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Hooks dialog
+      openHooksDialog,
+      // Hooks dialog
+      closeHooksDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,

@@ -190,6 +190,8 @@ describe('AppContainer State Management', () => {
       isAuthDialogOpen: false,
       isAuthenticating: false,
       handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
