@@ -30,6 +30,13 @@ export const COMPRESSION_TOKEN_THRESHOLD = 0.7;
 export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
 
 /**
+ * Minimum fraction of history (by character count) that must be compressible
+ * to proceed with a compression API call. Prevents futile calls where the
+ * model receives almost no context and generates a useless summary.
+ */
+export const MIN_COMPRESSION_FRACTION = 0.05;
+
+/**
  * Returns the index of the oldest item to keep when compressing. May return
  * contents.length which indicates that everything should be compressed.
  *
@@ -48,11 +55,6 @@ export function findCompressSplitPoint(
   const targetCharCount = totalCharCount * fraction;
 
   let lastSplitPoint = 0; // 0 is always valid (compress nothing)
-  // In tool-heavy conversations, non-functionResponse user messages are rare.
-  // Track positions after tool call completions (functionResponse) as fallback
-  // split points, ensuring all function calls in the compressed portion have
-  // matching responses.
-  let lastToolCompletionSplitPoint = 0;
   let cumulativeCharCount = 0;
   for (let i = 0; i < contents.length; i++) {
     const content = contents[i];
@@ -64,14 +66,6 @@ export function findCompressSplitPoint(
         return i;
       }
       lastSplitPoint = i;
-    }
-    // After a functionResponse, all preceding function calls are properly
-    // paired, making the next position (i+1) a safe place to split.
-    if (
-      content.role === 'user' &&
-      content.parts?.some((part) => !!part.functionResponse)
-    ) {
-      lastToolCompletionSplitPoint = i + 1;
     }
     cumulativeCharCount += charCounts[i];
   }
@@ -94,11 +88,7 @@ export function findCompressSplitPoint(
     return contents.length;
   }
 
-  // Use the split point that provides the most content to compress.
-  // In tool-heavy conversations with few user queries, lastSplitPoint may be
-  // near the beginning of the history while lastToolCompletionSplitPoint
-  // provides much better coverage.
-  return Math.max(lastSplitPoint, lastToolCompletionSplitPoint);
+  return lastSplitPoint;
 }
 
 export class ChatCompressionService {
@@ -162,13 +152,31 @@ export class ChatCompressionService {
       }
     }
 
+    // For manual /compress (force=true), if the last message is an orphaned model
+    // funcCall (agent interrupted/crashed before the response arrived), strip it
+    // before computing the split point. After stripping, the history ends cleanly
+    // (typically with a user funcResponse) and findCompressSplitPoint handles it
+    // through its normal logic — no special-casing needed.
+    //
+    // auto-compress (force=false) must NOT strip: it fires inside
+    // sendMessageStream() before the matching funcResponse is pushed onto the
+    // history, so the trailing funcCall is still active, not orphaned.
+    const lastMessage = curatedHistory[curatedHistory.length - 1];
+    const hasOrphanedFuncCall =
+      force &&
+      lastMessage?.role === 'model' &&
+      lastMessage.parts?.some((p) => !!p.functionCall);
+    const historyForSplit = hasOrphanedFuncCall
+      ? curatedHistory.slice(0, -1)
+      : curatedHistory;
+
     const splitPoint = findCompressSplitPoint(
-      curatedHistory,
+      historyForSplit,
       1 - COMPRESSION_PRESERVE_THRESHOLD,
     );
 
-    const historyToCompress = curatedHistory.slice(0, splitPoint);
-    const historyToKeep = curatedHistory.slice(splitPoint);
+    const historyToCompress = historyForSplit.slice(0, splitPoint);
+    const historyToKeep = historyForSplit.slice(splitPoint);
 
     if (historyToCompress.length === 0) {
       return {
@@ -184,15 +192,22 @@ export class ChatCompressionService {
     // Guard: if historyToCompress is too small relative to the total history,
     // skip compression. This prevents futile API calls where the model receives
     // almost no context and generates a useless "summary" that inflates tokens.
+    //
+    // Note: findCompressSplitPoint already computes charCounts internally but
+    // returns only the split index. We intentionally recompute here to keep
+    // the function signature simple; this is a minor, acceptable duplication.
     const compressCharCount = historyToCompress.reduce(
       (sum, c) => sum + JSON.stringify(c).length,
       0,
     );
-    const totalCharCount = curatedHistory.reduce(
+    const totalCharCount = historyForSplit.reduce(
       (sum, c) => sum + JSON.stringify(c).length,
       0,
     );
-    if (totalCharCount > 0 && compressCharCount / totalCharCount < 0.05) {
+    if (
+      totalCharCount > 0 &&
+      compressCharCount / totalCharCount < MIN_COMPRESSION_FRACTION
+    ) {
       return {
         newHistory: null,
         info: {
