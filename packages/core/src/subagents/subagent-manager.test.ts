@@ -13,6 +13,7 @@ import { type SubagentConfig, SubagentError } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -39,6 +40,24 @@ vi.mock('./validation.js', () => ({
 }));
 
 vi.mock('./subagent.js');
+
+// Mock AgentHeadless for createAgentHeadless tests
+const mockAgentHeadlessCreate = vi.hoisted(() => vi.fn());
+vi.mock('../agents/runtime/agent-headless.js', () => ({
+  AgentHeadless: { create: mockAgentHeadlessCreate },
+  ContextState: class {},
+}));
+
+// Mock createContentGenerator for model override tests
+const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
+vi.mock('../core/contentGenerator.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../core/contentGenerator.js')>();
+  return {
+    ...original,
+    createContentGenerator: mockCreateContentGenerator,
+  };
+});
 
 describe('SubagentManager', () => {
   let manager: SubagentManager;
@@ -1174,6 +1193,90 @@ System prompt 3`);
         expect(merged.model).toBe('updated-model');
         expect(merged.runConfig!.max_time_minutes).toBe(5); // Should update
         expect(merged.runConfig!.max_turns).toBe(20); // Should keep original
+      });
+    });
+
+    describe('createAgentHeadless model override', () => {
+      const agentConfig: SubagentConfig = {
+        name: 'model-test-agent',
+        description: 'Test agent',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+        mockCreateContentGenerator.mockResolvedValue({
+          generateContentStream: vi.fn(),
+        });
+
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
+          getResolvedModel: vi.fn().mockReturnValue(undefined),
+        } as unknown as ReturnType<Config['getModelsConfig']>);
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+        mockCreateContentGenerator.mockReset();
+      });
+
+      it('should create a new ContentGenerator for bare model IDs', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({ model: 'custom-model' }),
+          expect.anything(),
+        );
+      });
+
+      it('should create a new ContentGenerator for cross-provider selectors', async () => {
+        const config = { ...agentConfig, model: 'anthropic:claude-sonnet' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'claude-sonnet',
+            authType: 'anthropic',
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should NOT create a new ContentGenerator for inherit', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should NOT create a new ContentGenerator when model is omitted', async () => {
+        await manager.createAgentHeadless(agentConfig, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should pass the overridden Config to AgentHeadless.create', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+        const fakeGenerator = { generateContentStream: vi.fn() };
+        mockCreateContentGenerator.mockResolvedValue(fakeGenerator);
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        const passedConfig = mockAgentHeadlessCreate.mock.calls[0][1];
+        expect(passedConfig.getContentGenerator()).toBe(fakeGenerator);
+        expect(passedConfig.getModel()).toBe('custom-model');
       });
     });
   });

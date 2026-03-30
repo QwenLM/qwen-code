@@ -647,22 +647,24 @@ export class SubagentManager {
   }
 
   /**
-   * When a subagent's model selector includes a cross-provider authType
-   * prefix (e.g. "openai:gpt-4o"), build a Config override with a
-   * dedicated ContentGenerator. Returns the original context unchanged
-   * for same-provider or inherit selectors.
+   * When a subagent's model selector specifies a model (bare ID or
+   * authType-prefixed), build a Config override with a dedicated
+   * ContentGenerator so the model actually reaches the API.
+   * Returns the original context unchanged for inherit selectors.
    */
   private async maybeOverrideContentGenerator(
     config: SubagentConfig,
     base: Config,
   ): Promise<Config> {
     const selection = parseSubagentModelSelection(config.model);
-    if (!selection.authType) {
+    if (selection.inherits) {
       return base;
     }
 
+    const authType =
+      selection.authType ?? base.getContentGeneratorConfig().authType;
     const authOverrides = {
-      authType: selection.authType,
+      authType: authType as string,
     };
 
     const agentGeneratorConfig = buildAgentContentGeneratorConfig(
@@ -686,7 +688,7 @@ export class SubagentManager {
     override.getModel = (): string => agentGeneratorConfig.model;
 
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${selection.authType}, model=${agentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
     );
 
     return override as Config;

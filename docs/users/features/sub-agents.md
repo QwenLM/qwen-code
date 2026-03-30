@@ -116,7 +116,7 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - `inherit`: Use the same model as the main conversation
 - Omit the field: Same as `inherit`
 - `glm-5`: Use that model ID with the main conversation's auth type
-- `sonnet`, `opus`, `haiku`: Alias-style values are also accepted as model strings
+- `openai:gpt-4o`: Use a different provider (resolves credentials from env vars)
 
 #### Example Usage
 
