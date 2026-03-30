@@ -19,6 +19,7 @@ import {
   afterEach,
   type Mocked,
   type Mock,
+  type MockedFunction,
 } from 'vitest';
 import * as fs from 'node:fs';
 import stripJsonComments from 'strip-json-comments';
@@ -69,7 +70,7 @@ describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
   let mockStripJsonComments: Mocked<typeof stripJsonComments>;
   let mockFsWriteFileSync: Mocked<typeof fs.writeFileSync>;
-  let mockFsRealpathSync: Mocked<typeof fs.realpathSync>;
+  let mockFsRealpathSync: MockedFunction<typeof fs.realpathSync>;
 
   beforeEach(() => {
     resetTrustedFoldersForTesting();
@@ -84,7 +85,7 @@ describe('Trusted Folders Loading', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
-    (mockFsRealpathSync as Mock).mockImplementation((p: string) => p);
+    mockFsRealpathSync.mockImplementation((p: string) => p);
     vi.mocked(normalizePathForComparison).mockImplementation((p: string) => p);
   });
 
