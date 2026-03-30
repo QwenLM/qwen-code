@@ -15,6 +15,7 @@
  */
 
 import Parser from 'web-tree-sitter';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,8 +23,15 @@ import { fileURLToPath } from 'node:url';
 // Constants
 // ---------------------------------------------------------------------------
 
-const __filename_ = fileURLToPath(import.meta.url);
-const __dirname_ = path.dirname(__filename_);
+const __filename_ = resolveModuleFilePath(fileURLToPath(import.meta.url));
+
+function resolveModuleFilePath(moduleFilePath: string): string {
+  try {
+    return fs.realpathSync(moduleFilePath);
+  } catch {
+    return moduleFilePath;
+  }
+}
 
 /**
  * Root commands considered read-only by default (no sub-command analysis needed
@@ -569,10 +577,24 @@ let initPromise: Promise<void> | null = null;
  *   - Bundle (dist/cli.js): vendor at same level (0 levels)
  */
 function resolveWasmPath(filename: string): string {
-  const inSrcUtils = __filename_.includes(path.join('src', 'utils'));
-  const levelsUp = !inSrcUtils ? 0 : __filename_.endsWith('.ts') ? 2 : 3;
+  return resolveWasmPathForModule(filename, __filename_);
+}
+
+function resolveWasmPathForModule(
+  filename: string,
+  moduleFilePath: string,
+  resolvePath: (moduleFilePath: string) => string = resolveModuleFilePath,
+): string {
+  const resolvedModuleFilePath = resolvePath(moduleFilePath);
+  const moduleDir = path.dirname(resolvedModuleFilePath);
+  const inSrcUtils = resolvedModuleFilePath.includes(path.join('src', 'utils'));
+  const levelsUp = !inSrcUtils
+    ? 0
+    : resolvedModuleFilePath.endsWith('.ts')
+      ? 2
+      : 3;
   return path.join(
-    __dirname_,
+    moduleDir,
     ...Array<string>(levelsUp).fill('..'),
     'vendor',
     'tree-sitter',
@@ -1083,4 +1105,16 @@ export function _resetParser(): void {
   }
   bashLanguage = null;
   initPromise = null;
+}
+
+/**
+ * Internal helper exposed for tests.
+ * @internal
+ */
+export function _resolveWasmPathForTesting(
+  filename: string,
+  moduleFilePath: string,
+  resolvePath?: (moduleFilePath: string) => string,
+): string {
+  return resolveWasmPathForModule(filename, moduleFilePath, resolvePath);
 }
