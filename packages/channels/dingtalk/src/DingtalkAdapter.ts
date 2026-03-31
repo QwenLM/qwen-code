@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
@@ -455,9 +456,10 @@ export class DingtalkChannel extends ChannelBase {
       ];
     } else {
       // Save non-image files to temp dir so the agent can read them
-      const dir = join(tmpdir(), 'channel-files');
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const safeName = fileName || `dingtalk_${mediaType}_${Date.now()}`;
+      const dir = join(tmpdir(), 'channel-files', randomUUID());
+      mkdirSync(dir, { recursive: true });
+      const safeName =
+        basename(fileName || '') || `dingtalk_${mediaType}_${Date.now()}`;
       const filePath = join(dir, safeName);
       writeFileSync(filePath, media.buffer);
 
@@ -520,9 +522,9 @@ export class DingtalkChannel extends ChannelBase {
       const content = this.extractContent(data);
       let cleanText = content.text;
 
-      // Strip @bot mention from text
+      // Strip first @mention (the bot) from text, keep other @mentions intact
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/g, '').trim();
+        cleanText = cleanText.replace(/@\S+/, '').trim();
       }
 
       // Extract quoted message context

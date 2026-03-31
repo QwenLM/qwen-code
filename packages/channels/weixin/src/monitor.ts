@@ -94,11 +94,6 @@ export async function startPollLoop(params: {
 
       consecutiveErrors = 0;
 
-      if (resp.get_updates_buf) {
-        cursor = resp.get_updates_buf;
-        saveCursor(cursor);
-      }
-
       // Respect server-suggested poll timeout
       if (resp.longpolling_timeout_ms && resp.longpolling_timeout_ms > 0) {
         pollTimeoutMs = resp.longpolling_timeout_ms + 5000; // add buffer for network
@@ -108,6 +103,12 @@ export async function startPollLoop(params: {
         for (const msg of resp.msgs) {
           await processMessage(msg, onMessage);
         }
+      }
+
+      // Persist cursor after messages are processed to avoid losing messages on crash
+      if (resp.get_updates_buf) {
+        cursor = resp.get_updates_buf;
+        saveCursor(cursor);
       }
     } catch (err: unknown) {
       if (abortSignal.aborted) break;

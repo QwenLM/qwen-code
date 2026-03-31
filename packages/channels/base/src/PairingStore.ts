@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -134,7 +135,7 @@ export class PairingStore {
 function generateCode(): string {
   let code = '';
   for (let i = 0; i < CODE_LENGTH; i++) {
-    code += SAFE_ALPHABET[Math.floor(Math.random() * SAFE_ALPHABET.length)];
+    code += SAFE_ALPHABET[crypto.randomInt(SAFE_ALPHABET.length)];
   }
   return code;
 }

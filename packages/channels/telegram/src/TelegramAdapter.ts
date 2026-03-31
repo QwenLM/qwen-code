@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Telegraf } from 'telegraf';
 import {
@@ -13,9 +14,6 @@ import type {
   Envelope,
   AcpBridge,
 } from '@qwen-code/channel-base';
-
-// Commands handled by Telegraf directly (before handleInbound)
-const TELEGRAF_COMMANDS = new Set<string>();
 
 export class TelegramChannel extends ChannelBase {
   private bot: Telegraf;
@@ -41,14 +39,6 @@ export class TelegramChannel extends ChannelBase {
     this.bot.on('text', async (ctx) => {
       const msg = ctx.message;
       const text = msg.text;
-
-      // Skip Telegraf-handled commands
-      if (text.startsWith('/')) {
-        const command = text.slice(1).split(/[\s@]/)[0]?.toLowerCase();
-        if (command && TELEGRAF_COMMANDS.has(command)) {
-          return;
-        }
-      }
 
       const envelope = this.buildEnvelope(msg, text, msg.entities);
 
@@ -118,9 +108,9 @@ export class TelegramChannel extends ChannelBase {
         const buf = Buffer.from(await resp.arrayBuffer());
 
         // Save to temp dir so the agent can read it via read-file tool
-        const dir = join(tmpdir(), 'channel-files');
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        const filePath = join(dir, fileName);
+        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true });
+        const filePath = join(dir, basename(fileName) || `file_${Date.now()}`);
         writeFileSync(filePath, buf);
 
         envelope.text = msg.caption || '';

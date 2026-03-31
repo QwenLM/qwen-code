@@ -15,7 +15,8 @@ export class SessionRouter {
 
   private bridge: AcpBridge;
   private defaultCwd: string;
-  private scope: SessionScope;
+  private defaultScope: SessionScope;
+  private channelScopes: Map<string, SessionScope> = new Map();
   private persistPath: string | undefined;
 
   constructor(
@@ -26,7 +27,7 @@ export class SessionRouter {
   ) {
     this.bridge = bridge;
     this.defaultCwd = defaultCwd;
-    this.scope = scope;
+    this.defaultScope = scope;
     this.persistPath = persistPath;
   }
 
@@ -35,13 +36,19 @@ export class SessionRouter {
     this.bridge = bridge;
   }
 
+  /** Set scope override for a specific channel. */
+  setChannelScope(channelName: string, scope: SessionScope): void {
+    this.channelScopes.set(channelName, scope);
+  }
+
   private routingKey(
     channelName: string,
     senderId: string,
     chatId: string,
     threadId?: string,
   ): string {
-    switch (this.scope) {
+    const scope = this.channelScopes.get(channelName) || this.defaultScope;
+    switch (scope) {
       case 'thread':
         return `${channelName}:${threadId || chatId}`;
       case 'single':
@@ -90,35 +97,40 @@ export class SessionRouter {
     return false;
   }
 
+  /**
+   * Remove session(s) for the given sender. Returns the removed session IDs.
+   */
   removeSession(
     channelName: string,
     senderId: string,
     chatId?: string,
-  ): boolean {
+  ): string[] {
+    const removedIds: string[] = [];
     if (chatId) {
       const key = this.routingKey(channelName, senderId, chatId);
-      return this.deleteByKey(key);
-    }
-    // No chatId: remove all sessions for this sender on this channel
-    let removed = false;
-    const prefix = `${channelName}:${senderId}`;
-    for (const k of [...this.toSession.keys()]) {
-      if (k.startsWith(prefix)) {
-        this.deleteByKey(k);
-        removed = true;
+      const sessionId = this.deleteByKey(key);
+      if (sessionId) removedIds.push(sessionId);
+    } else {
+      // No chatId: remove all sessions for this sender on this channel
+      const prefix = `${channelName}:${senderId}`;
+      for (const k of [...this.toSession.keys()]) {
+        if (k.startsWith(prefix)) {
+          const sessionId = this.deleteByKey(k);
+          if (sessionId) removedIds.push(sessionId);
+        }
       }
     }
-    if (removed) this.persist();
-    return removed;
+    if (removedIds.length > 0) this.persist();
+    return removedIds;
   }
 
-  private deleteByKey(key: string): boolean {
+  private deleteByKey(key: string): string | null {
     const sessionId = this.toSession.get(key);
-    if (!sessionId) return false;
+    if (!sessionId) return null;
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
-    return true;
+    return sessionId;
   }
 
   /** Get all session entries for crash recovery. */

@@ -19,6 +19,7 @@ import {
 import { getExtensionManager } from '../extensions/utils.js';
 
 const MAX_CRASH_RESTARTS = 3;
+const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
 
 function sessionsPath(): string {
@@ -165,13 +166,18 @@ async function startSingle(name: string): Promise<void> {
 
   const cliEntryPath = findCliEntryPath();
   let shuttingDown = false;
-  let crashCount = 0;
+  const crashTimestamps: number[] = [];
 
   const bridgeOpts = { cliEntryPath, cwd: config.cwd, model: config.model };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();
 
-  const router = new SessionRouter(bridge, config.cwd, 'user', sessionsPath());
+  const router = new SessionRouter(
+    bridge,
+    config.cwd,
+    config.sessionScope,
+    sessionsPath(),
+  );
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = createChannel(name, config, bridge, { router });
@@ -185,18 +191,25 @@ async function startSingle(name: string): Promise<void> {
   bridge.on('disconnected', async () => {
     if (shuttingDown) return;
 
-    crashCount++;
-    if (crashCount > MAX_CRASH_RESTARTS) {
+    const now = Date.now();
+    crashTimestamps.push(now);
+    // Only count crashes within the recent window
+    const recentCrashes = crashTimestamps.filter(
+      (ts) => now - ts < CRASH_WINDOW_MS,
+    );
+
+    if (recentCrashes.length > MAX_CRASH_RESTARTS) {
       writeStderrLine(
-        `[Channel] Bridge crashed ${crashCount} times. Giving up.`,
+        `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
       );
+      channel.disconnect();
       router.clearAll();
       removeServiceInfo();
       process.exit(1);
     }
 
     writeStderrLine(
-      `[Channel] Bridge crashed (${crashCount}/${MAX_CRASH_RESTARTS}). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
+      `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
     );
     await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
@@ -211,7 +224,6 @@ async function startSingle(name: string): Promise<void> {
       writeStdoutLine(
         `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
       );
-      crashCount = 0;
     } catch (err) {
       writeStderrLine(
         `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
@@ -270,7 +282,7 @@ async function startAll(): Promise<void> {
   const cliEntryPath = findCliEntryPath();
   const defaultCwd = process.cwd();
   let shuttingDown = false;
-  let crashCount = 0;
+  const crashTimestamps: number[] = [];
 
   // All channels share one bridge process. Use the first channel's model.
   const models = [
@@ -291,6 +303,10 @@ async function startAll(): Promise<void> {
   await bridge.start();
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
+  // Register per-channel scope overrides so each channel uses its own sessionScope
+  for (const { name, config } of parsed) {
+    router.setChannelScope(name, config.sessionScope);
+  }
   const channels: Map<string, ChannelBase> = new Map();
 
   writeStdoutLine(
@@ -330,18 +346,30 @@ async function startAll(): Promise<void> {
   bridge.on('disconnected', async () => {
     if (shuttingDown) return;
 
-    crashCount++;
-    if (crashCount > MAX_CRASH_RESTARTS) {
+    const now = Date.now();
+    crashTimestamps.push(now);
+    const recentCrashes = crashTimestamps.filter(
+      (ts) => now - ts < CRASH_WINDOW_MS,
+    );
+
+    if (recentCrashes.length > MAX_CRASH_RESTARTS) {
       writeStderrLine(
-        `[Channel] Bridge crashed ${crashCount} times. Giving up.`,
+        `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
       );
+      for (const channel of channels.values()) {
+        try {
+          channel.disconnect();
+        } catch {
+          // best-effort
+        }
+      }
       router.clearAll();
       removeServiceInfo();
       process.exit(1);
     }
 
     writeStderrLine(
-      `[Channel] Bridge crashed (${crashCount}/${MAX_CRASH_RESTARTS}). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
+      `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
     );
     await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
@@ -358,7 +386,6 @@ async function startAll(): Promise<void> {
       writeStdoutLine(
         `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
       );
-      crashCount = 0;
     } catch (err) {
       writeStderrLine(
         `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,

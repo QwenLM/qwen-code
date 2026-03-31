@@ -67,6 +67,43 @@ describe('SessionRouter', () => {
       const s2 = await router.resolve('ch2', 'alice', 'chat1');
       expect(s1).not.toBe(s2);
     });
+
+    it('per-channel scope overrides default scope', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'user');
+      router.setChannelScope('telegram', 'single');
+
+      // 'telegram' uses single scope: same session for different users
+      const t1 = await router.resolve('telegram', 'alice', 'chat1');
+      const t2 = await router.resolve('telegram', 'bob', 'chat2');
+      expect(t1).toBe(t2);
+
+      // other channel still uses default 'user' scope
+      const d1 = await router.resolve('dingtalk', 'alice', 'chat1');
+      const d2 = await router.resolve('dingtalk', 'bob', 'chat1');
+      expect(d1).not.toBe(d2);
+    });
+
+    it('mixed per-channel scopes work independently', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelScope('ch-thread', 'thread');
+      router.setChannelScope('ch-single', 'single');
+      router.setChannelScope('ch-user', 'user');
+
+      // thread scope: same thread = same session
+      const t1 = await router.resolve('ch-thread', 'alice', 'c1', 'thread1');
+      const t2 = await router.resolve('ch-thread', 'bob', 'c1', 'thread1');
+      expect(t1).toBe(t2);
+
+      // single scope: one session for all
+      const s1 = await router.resolve('ch-single', 'alice', 'c1');
+      const s2 = await router.resolve('ch-single', 'bob', 'c2');
+      expect(s1).toBe(s2);
+
+      // user scope: per-sender-per-chat
+      const u1 = await router.resolve('ch-user', 'alice', 'c1');
+      const u2 = await router.resolve('ch-user', 'alice', 'c2');
+      expect(u1).not.toBe(u2);
+    });
   });
 
   describe('resolve', () => {
@@ -123,23 +160,25 @@ describe('SessionRouter', () => {
   });
 
   describe('removeSession', () => {
-    it('removes session by key and returns true', async () => {
+    it('removes session by key and returns session IDs', async () => {
       const router = new SessionRouter(bridge, '/tmp');
-      await router.resolve('ch', 'alice', 'chat1');
-      expect(router.removeSession('ch', 'alice', 'chat1')).toBe(true);
+      const sid = await router.resolve('ch', 'alice', 'chat1');
+      const removed = router.removeSession('ch', 'alice', 'chat1');
+      expect(removed).toEqual([sid]);
       expect(router.hasSession('ch', 'alice', 'chat1')).toBe(false);
     });
 
-    it('returns false when nothing to remove', () => {
+    it('returns empty array when nothing to remove', () => {
       const router = new SessionRouter(bridge, '/tmp');
-      expect(router.removeSession('ch', 'alice', 'chat1')).toBe(false);
+      expect(router.removeSession('ch', 'alice', 'chat1')).toEqual([]);
     });
 
     it('removes all sender sessions when chatId omitted', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       await router.resolve('ch', 'alice', 'chat1');
       await router.resolve('ch', 'alice', 'chat2');
-      expect(router.removeSession('ch', 'alice')).toBe(true);
+      const removed = router.removeSession('ch', 'alice');
+      expect(removed).toHaveLength(2);
       expect(router.hasSession('ch', 'alice')).toBe(false);
     });
 

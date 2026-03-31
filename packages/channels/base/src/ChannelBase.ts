@@ -141,13 +141,15 @@ export abstract class ChannelBase {
   /** Register shared slash commands. Called from constructor. */
   private registerSharedCommands(): void {
     const clearHandler: CommandHandler = async (envelope) => {
-      const removed = this.router.removeSession(
+      const removedIds = this.router.removeSession(
         this.name,
         envelope.senderId,
         envelope.chatId,
       );
-      if (removed) {
-        this.instructedSessions.clear();
+      if (removedIds.length > 0) {
+        for (const id of removedIds) {
+          this.instructedSessions.delete(id);
+        }
         await this.sendMessage(
           envelope.chatId,
           'Session cleared. Your next message will start a fresh conversation.',
