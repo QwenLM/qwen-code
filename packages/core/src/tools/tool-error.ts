@@ -16,6 +16,8 @@ export enum ToolErrorType {
   EXECUTION_FAILED = 'execution_failed',
   // Try to execute a tool that is excluded due to the approval mode
   EXECUTION_DENIED = 'execution_denied',
+  // Tool execution was interrupted by user
+  INTERRUPTED = 'interrupted',
 
   // File System Errors
   FILE_NOT_FOUND = 'file_not_found',

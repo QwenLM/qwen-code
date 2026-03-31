@@ -1008,10 +1008,11 @@ export abstract class BaseJsonOutputAdapter {
     // Determine if this is an error response
     const hasError = Boolean(response.error) || Boolean(responsePartsError);
 
-    // Track permission denials (execution denied errors)
+    // Track permission denials (execution denied or interrupted errors)
     if (
       response.error &&
-      response.errorType === ToolErrorType.EXECUTION_DENIED
+      (response.errorType === ToolErrorType.EXECUTION_DENIED ||
+        response.errorType === ToolErrorType.INTERRUPTED)
     ) {
       const denial: CLIPermissionDenial = {
         tool_name: request.name,

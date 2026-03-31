@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -20,6 +24,7 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -306,6 +311,10 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+          const toolResponses: Array<{
+            request: ToolCallRequestInfo;
+            response: ToolCallResponseInfo;
+          }> = [];
 
           for (const requestInfo of toolCallRequests) {
             const finalRequestInfo = requestInfo;
@@ -365,11 +374,53 @@ export async function runNonInteractive(
 
             adapter.emitToolResult(finalRequestInfo, toolResponse);
 
+            // Track response for interrupt detection
+            toolResponses.push({
+              request: finalRequestInfo,
+              response: toolResponse,
+            });
+
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
+
+          // Check for interrupt - any tool with INTERRUPTED error type
+          const hasInterrupt = toolResponses.some(
+            ({ response }) => response.errorType === ToolErrorType.INTERRUPTED,
+          );
+
+          if (hasInterrupt) {
+            // Add tool responses to history before interrupting
+            // This ensures tool call request/response pairs are preserved
+            await geminiClient.addHistory(currentMessages[0]);
+
+            // Emit user message indicating interrupt
+            adapter.emitUserMessage(
+              [{ text: '[Request interrupted by user for tool use]' }],
+              null,
+            );
+
+            // Emit error_during_execution result and break the loop
+            const metrics = uiTelemetryService.getMetrics();
+            const usage = computeUsageFromMetrics(metrics);
+            const stats =
+              outputFormat === OutputFormat.JSON
+                ? uiTelemetryService.getMetrics()
+                : undefined;
+            adapter.emitResult({
+              isError: true,
+              subtype: 'error_during_execution',
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              errorMessage: 'Request interrupted by user for tool use',
+              usage,
+              stats,
+            });
+            return;
+          }
         } else {
           // No more tool calls — check if cron jobs are keeping us alive
           const scheduler = !config.isCronEnabled()

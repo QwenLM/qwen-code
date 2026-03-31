@@ -449,15 +449,26 @@ export class PermissionController extends BaseController {
           ToolConfirmationOutcome.ProceedOnce,
         );
       } else {
-        // Extract cancel message from response if available
+        // Extract cancel message and interrupt flag from response if available
         const cancelMessage =
           typeof payload['message'] === 'string'
             ? payload['message']
             : undefined;
+        const interrupt = payload['interrupt'] === true;
+
+        // Build payload with cancelMessage and interrupt flag
+        const confirmPayload: { cancelMessage?: string; interrupt?: boolean } =
+          {};
+        if (cancelMessage) {
+          confirmPayload.cancelMessage = cancelMessage;
+        }
+        if (interrupt) {
+          confirmPayload.interrupt = true;
+        }
 
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
-          cancelMessage ? { cancelMessage } : undefined,
+          Object.keys(confirmPayload).length > 0 ? confirmPayload : undefined,
         );
       }
     } catch (error) {

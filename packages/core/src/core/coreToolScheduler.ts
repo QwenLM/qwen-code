@@ -1157,7 +1157,32 @@ export class CoreToolScheduler {
       // Use custom cancel message from payload if provided, otherwise use default
       const cancelMessage =
         payload?.cancelMessage || 'User did not allow tool call';
-      this.setStatusInternal(callId, 'cancelled', cancelMessage);
+
+      // Determine if this is a permission denial from canUseTool (has cancelMessage from SDK)
+      // or a regular UI cancellation
+      const isPermissionDenial = payload && 'cancelMessage' in payload;
+
+      if (isPermissionDenial) {
+        // Permission denial from canUseTool - use error status
+        const errorType = payload?.interrupt
+          ? ToolErrorType.INTERRUPTED
+          : ToolErrorType.EXECUTION_DENIED;
+
+        const errorResponse = createErrorResponse(
+          toolCall.request,
+          new Error(cancelMessage),
+          errorType,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+
+        // If interrupt is true, cancel all pending tools
+        if (payload?.interrupt) {
+          await this.cancelPendingTools(signal, callId);
+        }
+      } else {
+        // Regular UI cancellation - use cancelled status
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+      }
     } else if (outcome === ToolConfirmationOutcome.ModifyWithEditor) {
       const waitingToolCall = toolCall as WaitingToolCall;
       if (isModifiableDeclarativeTool(waitingToolCall.tool)) {
@@ -1747,6 +1772,35 @@ export class CoreToolScheduler {
           error,
         );
       }
+    }
+  }
+
+  /**
+   * Cancel all pending tools (awaiting_approval or scheduled) when an interrupt is triggered.
+   * Cascade-cancelled tools are marked with INTERRUPTED error type.
+   */
+  private async cancelPendingTools(
+    signal: AbortSignal,
+    triggeringCallId: string,
+  ): Promise<void> {
+    const pendingTools = this.toolCalls.filter(
+      (call) =>
+        (call.status === 'awaiting_approval' || call.status === 'scheduled') &&
+        call.request.callId !== triggeringCallId,
+    );
+
+    for (const pendingTool of pendingTools) {
+      // Cascade-cancelled tools use INTERRUPTED type with a unified message
+      const errorResponse = createErrorResponse(
+        pendingTool.request,
+        new Error("The user doesn't want to take this action right now."),
+        ToolErrorType.INTERRUPTED,
+      );
+      this.setStatusInternal(
+        pendingTool.request.callId,
+        'error',
+        errorResponse,
+      );
     }
   }
 }

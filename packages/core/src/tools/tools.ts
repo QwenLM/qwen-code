@@ -605,6 +605,8 @@ export interface ToolConfirmationPayload {
   permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // used to indicate that the user wants to interrupt the session when denying a tool
+  interrupt?: boolean;
 }
 
 export interface ToolExecuteConfirmationDetails {
