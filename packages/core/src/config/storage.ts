@@ -11,9 +11,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
 export const QWEN_DIR = '.qwen';
+export const CLAUDE_DIR = '.claude';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 export const OAUTH_FILE = 'oauth_creds.json';
-export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents'];
+export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents', '.claude'];
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
@@ -145,6 +146,14 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), 'commands');
   }
 
+  static getUserCommandsDirs(): string[] {
+    const homeDir = os.homedir();
+    return [
+      path.join(homeDir, QWEN_DIR, 'commands'),
+      path.join(homeDir, CLAUDE_DIR, 'commands'),
+    ];
+  }
+
   static getGlobalMemoryFilePath(): string {
     return path.join(Storage.getGlobalQwenDir(), 'memory.md');
   }
@@ -218,6 +227,13 @@ export class Storage {
 
   getProjectCommandsDir(): string {
     return path.join(this.getQwenDir(), 'commands');
+  }
+
+  getProjectCommandsDirs(): string[] {
+    return [
+      path.join(this.targetDir, QWEN_DIR, 'commands'),
+      path.join(this.targetDir, CLAUDE_DIR, 'commands'),
+    ];
   }
 
   getProjectTempCheckpointsDir(): string {

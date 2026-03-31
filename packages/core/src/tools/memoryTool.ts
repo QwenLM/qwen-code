@@ -86,6 +86,7 @@ export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
 let currentGeminiMdFilename: string | string[] = [
   DEFAULT_CONTEXT_FILENAME,
   AGENT_CONTEXT_FILENAME,
+  'CLAUDE.md',
 ];
 
 export function setGeminiMdFilename(newFilename: string | string[]): void {

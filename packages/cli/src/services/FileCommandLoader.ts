@@ -156,11 +156,15 @@ export class FileCommandLoader implements ICommandLoader {
 
     const storage = this.config?.storage ?? new Storage(this.projectRoot);
 
-    // 1. User commands
-    dirs.push({ path: Storage.getUserCommandsDir() });
+    // 1. User commands (.qwen/commands + .claude/commands)
+    for (const dir of Storage.getUserCommandsDirs()) {
+      dirs.push({ path: dir });
+    }
 
-    // 2. Project commands (override user commands)
-    dirs.push({ path: storage.getProjectCommandsDir() });
+    // 2. Project commands (.qwen/commands + .claude/commands)
+    for (const dir of storage.getProjectCommandsDirs()) {
+      dirs.push({ path: dir });
+    }
 
     // 3. Extension commands (processed last to detect all conflicts)
     if (this.config) {

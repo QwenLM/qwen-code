@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
-import { QWEN_DIR } from './paths.js';
+import { QWEN_DIR, CLAUDE_DIR } from './paths.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
@@ -123,11 +123,18 @@ async function getGeminiMdFilePathsInternalForEachDir(
   const allPaths = new Set<string>();
   const geminiMdFilenames = getAllGeminiMdFilenames();
 
+  // Map each context filename to the global ~/.{dir}/ it belongs in.
+  // CLAUDE.md lives in ~/.claude/; everything else defaults to ~/.qwen/.
+  const GLOBAL_DIR_FOR_FILENAME: Record<string, string> = {
+    'CLAUDE.md': CLAUDE_DIR,
+  };
+
   for (const geminiMdFilename of geminiMdFilenames) {
     const resolvedHome = path.resolve(userHomePath);
+    const globalDir = GLOBAL_DIR_FOR_FILENAME[geminiMdFilename] ?? QWEN_DIR;
     const globalMemoryPath = path.join(
       resolvedHome,
-      QWEN_DIR,
+      globalDir,
       geminiMdFilename,
     );
 
