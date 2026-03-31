@@ -1939,10 +1939,10 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
   'Verbose mode on — showing full tool output and thinking':
-    'Verbose mode on — showing full tool output and thinking',
+    'Modo detalhado ativado — exibindo saída completa da ferramenta e raciocínio',
   'Compact mode on — showing tool names and final responses only':
-    'Compact mode on — showing tool names and final responses only',
-  verbose: 'verbose',
+    'Modo compacto ativado — exibindo apenas nomes de ferramentas e respostas finais',
+  verbose: 'detalhado',
   'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com ctrl+o).',
 };

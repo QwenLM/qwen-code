@@ -1442,10 +1442,10 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
   'Verbose mode on — showing full tool output and thinking':
-    'Verbose mode on — showing full tool output and thinking',
+    '詳細モードオン — 完全なツール出力と思考を表示しています',
   'Compact mode on — showing tool names and final responses only':
-    'Compact mode on — showing tool names and final responses only',
-  verbose: 'verbose',
+    'コンパクトモードオン — ツール名と最終応答のみ表示しています',
+  verbose: '詳細',
   'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+    '詳細モードで完全なツール出力と思考を表示します（ctrl+o で切り替え）。',
 };
