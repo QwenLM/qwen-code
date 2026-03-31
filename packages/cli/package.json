@@ -1,10 +1,10 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.0.3",
+  "version": "0.13.2",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QwenLM/qwen-code.git"
+    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -33,7 +33,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.13.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.13.2"
   },
   "publishConfig": {
     "registry": "https://registry.anpm.alibaba-inc.com"
@@ -43,8 +43,8 @@
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@^0.0.1",
-    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@^0.0.1",
+    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@^0.13.2",
+    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@^0.13.2",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
     "command-exists": "^1.2.9",
