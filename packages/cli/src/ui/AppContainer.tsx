@@ -102,6 +102,7 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -845,6 +846,14 @@ export const AppContainer = (props: AppContainerProps) => {
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding);
 
+  // Auto-clear frozen snapshot when streaming ends so the live view
+  // is restored without requiring a second Ctrl+O press.
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
+
   const [controlsHeight, setControlsHeight] = useState(0);
 
   useLayoutEffect(() => {
@@ -962,6 +971,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
+
+  const [verboseMode, setVerboseMode] = useState<boolean>(
+    settings.merged.ui?.verboseMode ?? false,
+  );
+
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
 
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -1225,6 +1242,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
+
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
       // Debug log keystrokes if enabled
@@ -1332,6 +1354,21 @@ export const AppContainer = (props: AppContainerProps) => {
         if (Object.keys(mcpServers || {}).length > 0) {
           handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
         }
+      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
+        const newValue = !verboseMode;
+        setVerboseMode(newValue);
+        settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+
+        // Gap 1: retroactive toggle — force <Static> to remount with new verboseMode
+        refreshStatic();
+
+        // Gap 2: viewport freeze — entering verbose mode during streaming captures
+        // a snapshot of pending items so the user can read without jitter.
+        if (newValue && streamingState !== StreamingState.Idle) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       } else if (
         keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
         config.getIdeMode() &&
@@ -1354,6 +1391,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setConstrainHeight,
       showToolDescriptions,
       setShowToolDescriptions,
+      verboseMode,
+      setVerboseMode,
       config,
       ideContextState,
       handleExit,
@@ -1375,8 +1414,11 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
+      settings,
+      refreshStatic,
+      pendingHistoryItems,
+      setFrozenSnapshot,
     ],
   );
 
@@ -1464,11 +1506,6 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
-
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
-  );
 
   const uiState: UIState = useMemo(
     () => ({
@@ -1807,9 +1844,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <VerboseModeProvider value={{ verboseMode, frozenSnapshot }}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </VerboseModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

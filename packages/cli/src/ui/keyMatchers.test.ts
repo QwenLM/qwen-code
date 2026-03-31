@@ -54,6 +54,7 @@ describe('keyMatchers', () => {
       (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
+    [Command.TOGGLE_VERBOSE_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
       key.ctrl && key.name === 'g',
     [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
@@ -234,6 +235,11 @@ describe('keyMatchers', () => {
       negative: [createKey('t'), createKey('s', { ctrl: true })],
     },
     {
+      command: Command.TOGGLE_VERBOSE_MODE,
+      positive: [createKey('o', { ctrl: true })],
+      negative: [createKey('o'), createKey('t', { ctrl: true })],
+    },
+    {
       command: Command.TOGGLE_IDE_CONTEXT_DETAIL,
       positive: [createKey('g', { ctrl: true })],
       negative: [createKey('g'), createKey('t', { ctrl: true })],
@@ -370,6 +376,24 @@ describe('keyMatchers', () => {
       expect(matchers[Command.HOME](createKey('a', { ctrl: true }))).toBe(
         false,
       );
+    });
+  });
+
+  describe('TOGGLE_VERBOSE_MODE binding', () => {
+    it('matches Ctrl+O', () => {
+      expect(
+        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
+          createKey('o', { ctrl: true }),
+        ),
+      ).toBe(true);
+    });
+
+    it('does not match plain O', () => {
+      expect(
+        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
+          createKey('o', { ctrl: false }),
+        ),
+      ).toBe(false);
     });
   });
 });

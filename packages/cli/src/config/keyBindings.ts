@@ -46,6 +46,7 @@ export enum Command {
 
   // App level bindings
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
+  TOGGLE_VERBOSE_MODE = 'toggleVerboseMode',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
   EXIT = 'exit',
@@ -167,6 +168,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
+  [Command.TOGGLE_VERBOSE_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
