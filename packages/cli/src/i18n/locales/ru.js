@@ -1950,6 +1950,6 @@ export default {
   'Compact mode on — showing tool names and final responses only':
     'Компактный режим включён — отображаются только имена инструментов и окончательные ответы',
   verbose: 'подробный',
-  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью ctrl+o).',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
 };

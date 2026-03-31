@@ -508,7 +508,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+          'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
         showInDialog: false,
       },
       accessibility: {

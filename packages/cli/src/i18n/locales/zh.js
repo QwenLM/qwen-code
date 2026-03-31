@@ -1800,6 +1800,6 @@ export default {
   'Compact mode on — showing tool names and final responses only':
     '已切换到精简模式 — 仅显示工具名称和最终回答',
   verbose: '详细',
-  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    '详细模式下显示完整工具输出和思考过程（ctrl+o 切换）。',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
 };

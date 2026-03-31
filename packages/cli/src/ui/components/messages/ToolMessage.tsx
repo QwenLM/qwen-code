@@ -352,41 +352,41 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       {effectiveDisplayRenderer.type !== 'none' && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">
-            {displayRenderer.type === 'todo' && (
-              <TodoResultRenderer data={displayRenderer.data} />
+            {effectiveDisplayRenderer.type === 'todo' && (
+              <TodoResultRenderer data={effectiveDisplayRenderer.data} />
             )}
-            {displayRenderer.type === 'plan' && (
+            {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
               />
             )}
-            {displayRenderer.type === 'task' && config && (
+            {effectiveDisplayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 config={config}
               />
             )}
-            {displayRenderer.type === 'diff' && (
+            {effectiveDisplayRenderer.type === 'diff' && (
               <DiffResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 settings={settings}
               />
             )}
-            {displayRenderer.type === 'ansi' && (
+            {effectiveDisplayRenderer.type === 'ansi' && (
               <AnsiOutputText
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableTerminalHeight={availableHeight}
               />
             )}
-            {displayRenderer.type === 'string' && (
+            {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}

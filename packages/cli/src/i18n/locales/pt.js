@@ -1943,6 +1943,6 @@ export default {
   'Compact mode on — showing tool names and final responses only':
     'Modo compacto ativado — exibindo apenas nomes de ferramentas e respostas finais',
   verbose: 'detalhado',
-  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com ctrl+o).',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
 };

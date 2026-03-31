@@ -1994,6 +1994,6 @@ export default {
   'Compact mode on — showing tool names and final responses only':
     'Compact mode on — showing tool names and final responses only',
   verbose: 'verbose',
-  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
 };

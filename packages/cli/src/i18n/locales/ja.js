@@ -1446,6 +1446,6 @@ export default {
   'Compact mode on — showing tool names and final responses only':
     'コンパクトモードオン — ツール名と最終応答のみ表示しています',
   verbose: '詳細',
-  'Show full tool output and thinking in verbose mode (toggle with ctrl+o).':
-    '詳細モードで完全なツール出力と思考を表示します（ctrl+o で切り替え）。',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
 };
