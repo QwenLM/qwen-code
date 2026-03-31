@@ -272,6 +272,14 @@ describe('Gemini Client (client.ts)', () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
+    // getCoreSystemPrompt now returns StructuredSystemPrompt; mock a minimal valid object
+    // so that getMainSessionSystemInstruction() can access .full without throwing.
+    vi.mocked(getCoreSystemPrompt).mockReturnValue({
+      staticPrefix: 'mock system prompt',
+      dynamicSuffix: '',
+      full: 'mock system prompt',
+    });
+
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
     });
@@ -2504,7 +2512,7 @@ Other open files:
           model: DEFAULT_QWEN_FLASH_MODEL,
           config: expect.objectContaining({
             abortSignal,
-            systemInstruction: getCoreSystemPrompt(''),
+            systemInstruction: getCoreSystemPrompt('').full,
             temperature: 0.5,
           }),
           contents,

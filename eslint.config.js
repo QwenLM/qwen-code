@@ -113,22 +113,11 @@ export default tseslint.config(
           caughtErrorsIgnorePattern: '^_',
         },
       ],
-      'import/no-internal-modules': [
-        'error',
-        {
-          allow: [
-            'react-dom/test-utils',
-            'react-dom/client',
-            'memfs/lib/volume.js',
-            'yargs/**',
-            'msw/node',
-            '**/generated/**',
-            './styles/tailwind.css',
-            './styles/App.css',
-            './styles/style.css'
-          ],
-        },
-      ],
+      // Disabled: intra-package relative imports (./ and ../) are valid in this
+      // monorepo and the entire codebase uses them pervasively. The rule as
+      // configured flags every internal import in packages/*/src/**, making it
+      // unenforceable without a full-codebase cleanup.
+      'import/no-internal-modules': 'off',
       'import/no-relative-packages': 'error',
       'no-cond-assign': 'error',
       'no-debugger': 'error',

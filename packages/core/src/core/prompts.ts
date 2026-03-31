@@ -16,6 +16,26 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
+/**
+ * A system prompt split into cacheable (static) and per-session (dynamic) sections.
+ * Providers that support prompt caching (Anthropic, DashScope) can cache the static
+ * prefix independently from the dynamic suffix, reducing costs on subsequent turns.
+ */
+export interface StructuredSystemPrompt {
+  /** Stable content that does not change between sessions (instructions, guidelines, workflows). */
+  staticPrefix: string;
+  /** Per-session content (sandbox detection, git repo state, model-specific examples, user memory). */
+  dynamicSuffix: string;
+  /** The concatenation of staticPrefix + dynamicSuffix for callers that need a plain string. */
+  full: string;
+}
+
+/**
+ * Sentinel marker embedded between static and dynamic portions of the system prompt.
+ * Providers split on this marker to apply cache_control only to the static prefix.
+ */
+export const CACHE_BOUNDARY_SENTINEL = '\n__CACHE_BOUNDARY__\n';
+
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
   value: string | null;
@@ -116,7 +136,7 @@ export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
   appendInstruction?: string,
-): string {
+): StructuredSystemPrompt {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
   let systemMdEnabled = false;
@@ -140,9 +160,17 @@ export function getCoreSystemPrompt(
     }
   }
 
-  const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
-    : `
+  // When using a custom system.md override, treat the entire content as static
+  if (systemMdEnabled) {
+    const customPrompt = fs.readFileSync(systemMdPath, 'utf8');
+    const memorySuffix = buildSystemPromptSuffix(userMemory);
+    const appendSuffix = buildSystemPromptSuffix(appendInstruction);
+    const full = `${customPrompt}${memorySuffix}${appendSuffix}`;
+    return { staticPrefix: full, dynamicSuffix: '', full };
+  }
+
+  // --- Static prefix: stable content that does not change between sessions ---
+  const staticPrefix = `
 You are Qwen Code, an interactive CLI agent developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
 
 # Core Mandates
@@ -159,50 +187,53 @@ You are Qwen Code, an interactive CLI agent developed by Alibaba Group, speciali
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
 
 # Task Management
-You have access to the ${ToolNames.TODO_WRITE} tool to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
-These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
 
-It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
+Use ${ToolNames.TASK_CREATE} to break complex work into trackable tasks. Use ${ToolNames.TASK_UPDATE} to mark progress. Always create tasks before starting multi-step work.
+
+- Create a task for each discrete unit of work
+- Set tasks to in_progress before starting, completed when done
+- Use parentTaskId for subtask hierarchies
+- Use ${ToolNames.TASK_OUTPUT} to record results
+- Only one task should be in_progress at a time
 
 Examples:
 
 <example>
 user: Run the build and fix any type errors
-assistant: I'm going to use the ${ToolNames.TODO_WRITE} tool to write the following items to the todo list: 
-- Run the build
-- Fix any type errors
+assistant: I'll create tasks to track this work.
+*Uses ${ToolNames.TASK_CREATE} to create: "Run the build"*
+*Uses ${ToolNames.TASK_CREATE} to create: "Fix type errors"*
 
-I'm now going to run the build using Bash.
+*Uses ${ToolNames.TASK_UPDATE} to mark "Run the build" as in_progress*
+Running the build now...
 
-Looks like I found 10 type errors. I'm going to use the ${ToolNames.TODO_WRITE} tool to write 10 items to the todo list.
+Found 10 type errors. Let me create subtasks for each.
+*Uses ${ToolNames.TASK_CREATE} with parentTaskId to create subtasks for each error*
 
-marking the first todo as in_progress
+*Uses ${ToolNames.TASK_UPDATE} to mark the first error fix as in_progress*
+Working on the first error...
 
-Let me start working on the first item...
-
-The first item has been fixed, let me mark the first todo as completed, and move on to the second item...
-..
+*Uses ${ToolNames.TASK_UPDATE} to mark the first error as completed, moves to the next*
 ..
 </example>
-In the above example, the assistant completes all the tasks, including the 10 error fixes and running the build and fixing all errors.
 
 <example>
 user: Help me write a new feature that allows users to track their usage metrics and export them to various formats
 
-A: I'll help you implement a usage metrics tracking and export feature. Let me first use the ${ToolNames.TODO_WRITE} tool to plan this task.
-Adding the following todos to the todo list:
+A: I'll plan this implementation.
+*Uses ${ToolNames.TASK_CREATE} for each step:*
 1. Research existing metrics tracking in the codebase
 2. Design the metrics collection system
 3. Implement core metrics tracking functionality
 4. Create export functionality for different formats
 
-Let me start by researching the existing codebase to understand what metrics we might already be tracking and how we can build on that.
+*Uses ${ToolNames.TASK_UPDATE} to mark research as in_progress*
+Searching for existing metrics or telemetry code...
 
-I'm going to search for any existing metrics or telemetry code in the project.
+*Uses ${ToolNames.TASK_OUTPUT} to record research findings*
+*Uses ${ToolNames.TASK_UPDATE} to mark research as completed, design as in_progress*
 
-I've found some existing telemetry code. Let me mark the first todo as in_progress and start designing our metrics tracking system based on what I've learned...
-
-[Assistant continues implementing the feature step by step, marking todos as in_progress and completed as they go]
+[Continues implementing step by step, updating task status as work progresses]
 </example>
 
 # Asking questions as you work
@@ -213,9 +244,9 @@ You have access to the ${ToolNames.ASK_USER_QUESTION} tool to ask the user quest
 
 ## Software Engineering Tasks
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
-- **Plan:** After understanding the user's request, create an initial plan based on your existing knowledge and any immediately obvious context. Use the '${ToolNames.TODO_WRITE}' tool to capture this rough plan for complex or multi-step work. Don't wait for complete understanding - start with what you know.
+- **Plan:** After understanding the user's request, create an initial plan based on your existing knowledge and any immediately obvious context. Use '${ToolNames.TASK_CREATE}' to capture this rough plan for complex or multi-step work. Don't wait for complete understanding - start with what you know.
 - **Implement:** Begin implementing the plan while gathering additional context as needed. Use '${ToolNames.GREP}', '${ToolNames.GLOB}', and '${ToolNames.READ_FILE}' tools strategically when you encounter specific unknowns during implementation. Use the available tools (e.g., '${ToolNames.EDIT}', '${ToolNames.WRITE_FILE}' '${ToolNames.SHELL}' ...) to act on the plan, strictly adhering to the project's established conventions (detailed under 'Core Mandates').
-- **Adapt:** As you discover new information or encounter obstacles, update your plan and todos accordingly. Mark todos as in_progress when starting and completed when finishing each task. Add new todos if the scope expands. Refine your approach based on what you learn.
+- **Adapt:** As you discover new information or encounter obstacles, update your plan and tasks accordingly. Use ${ToolNames.TASK_UPDATE} to mark tasks as in_progress when starting and completed when finishing. Use ${ToolNames.TASK_CREATE} to add new tasks if the scope expands. Refine your approach based on what you learn.
 - **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands.
 - **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. If unsure about these commands, you can ask the user if they'd like you to run them and if so how to.
 
@@ -223,7 +254,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 
 - Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
 
-IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks throughout the conversation.
+IMPORTANT: Always use the task management tools (${ToolNames.TASK_CREATE}, ${ToolNames.TASK_UPDATE}, ${ToolNames.TASK_LIST}) to plan and track tasks throughout the conversation.
 
 ## New Applications
 
@@ -240,7 +271,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
   - **3d Games:** HTML/CSS/JavaScript with Three.js.
   - **2d Games:** HTML/CSS/JavaScript.
 3. **User Approval:** Obtain user approval for the proposed plan.
-4. **Implementation:** Use the '${ToolNames.TODO_WRITE}' tool to convert the approved plan into a structured todo list with specific, actionable tasks, then autonomously implement each task utilizing all available tools. When starting ensure you scaffold the application using '${ToolNames.SHELL}' for commands like 'npm init', 'npx create-react-app'. Aim for full scope completion. Proactively create or source necessary placeholder assets (e.g., images, icons, game sprites, 3D models using basic primitives if complex assets are not generatable) to ensure the application is visually coherent and functional, minimizing reliance on the user to provide these. If the model can generate simple assets (e.g., a uniformly colored square sprite, a simple 3D cube), it should do so. Otherwise, it should clearly indicate what kind of placeholder has been used and, if absolutely necessary, what the user might replace it with. Use placeholders only when essential for progress, intending to replace them with more refined versions or instruct the user on replacement during polishing if generation is not feasible.
+4. **Implementation:** Use '${ToolNames.TASK_CREATE}' to convert the approved plan into structured tasks with specific, actionable items, then autonomously implement each task utilizing all available tools. When starting ensure you scaffold the application using '${ToolNames.SHELL}' for commands like 'npm init', 'npx create-react-app'. Aim for full scope completion. Proactively create or source necessary placeholder assets (e.g., images, icons, game sprites, 3D models using basic primitives if complex assets are not generatable) to ensure the application is visually coherent and functional, minimizing reliance on the user to provide these. If the model can generate simple assets (e.g., a uniformly colored square sprite, a simple 3D cube), it should do so. Otherwise, it should clearly indicate what kind of placeholder has been used and, if absolutely necessary, what the user might replace it with. Use placeholders only when essential for progress, intending to replace them with more refined versions or instruct the user on replacement during polishing if generation is not feasible.
 5. **Verify:** Review work against the original request, the approved plan. Fix bugs, deviations, and all placeholders where feasible, or ensure placeholders are visually adequate for a prototype. Ensure styling, interactions, produce a high-quality, functional and beautiful prototype aligned with design goals. Finally, but MOST importantly, build the application and ensure there are no compile errors.
 6. **Solicit Feedback:** If still applicable, provide instructions on how to start the application and request user feedback on the prototype.
 
@@ -265,15 +296,17 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **Command Execution:** Use the '${ToolNames.SHELL}' tool for running shell commands, remembering the safety rule to explain modifying commands first.
 - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
-- **Task Management:** Use the '${ToolNames.TODO_WRITE}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
+- **Task Management:** Use the task management tools ('${ToolNames.TASK_CREATE}', '${ToolNames.TASK_UPDATE}', '${ToolNames.TASK_LIST}') proactively for complex, multi-step tasks to track progress and provide visibility to users. These tools help organize work systematically and ensure no requirements are missed.
 - **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.AGENT}' tool in order to reduce context usage. You should proactively use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${ToolNames.MEMORY}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
 
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
-- **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Feedback:** To report a bug or provide feedback, please use the /bug command.`.trim();
 
+  // --- Dynamic suffix: per-session content that varies by environment and model ---
+  const dynamicSuffix = `
 ${(function () {
   // Determine sandbox status based on environment variables
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
@@ -325,6 +358,8 @@ ${getToolCallExamples(model || '')}
 Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 `.trim();
 
+  const basePrompt = staticPrefix + '\n\n' + dynamicSuffix;
+
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
     process.env['QWEN_WRITE_SYSTEM_MD'],
@@ -347,7 +382,41 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
       : '';
   const appendSuffix = buildSystemPromptSuffix(appendInstruction);
 
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+  const full = `${basePrompt}${memorySuffix}${appendSuffix}`;
+
+  // Include memory/append in the dynamic suffix for the structured result
+  const fullDynamicSuffix = `${dynamicSuffix}${memorySuffix}${appendSuffix}`;
+
+  return { staticPrefix, dynamicSuffix: fullDynamicSuffix, full };
+}
+
+/**
+ * Provides the system prompt for incremental chunk compression.
+ * Unlike the full compression prompt, this operates on a CHUNK of conversation
+ * (not the full history) and produces a dense summary preserving critical info.
+ */
+export function getIncrementalCompressionPrompt(): string {
+  return `
+You are a context compression engine. You will receive a CHUNK of conversation history (not the full conversation). Your task is to compress this chunk into a dense summary that preserves all critical information.
+
+PRESERVE in your summary:
+- File paths mentioned and their state (created, modified, deleted)
+- Commands executed and their outcomes (success/failure)
+- Decisions made and their reasoning
+- Errors encountered and how they were resolved
+- Current task progress and remaining work
+
+OUTPUT FORMAT:
+[COMPRESSED_CONTEXT]
+<chunk_summary>
+  <files_touched>List of files and what happened to each</files_touched>
+  <commands_run>Key commands and outcomes</commands_run>
+  <decisions>Important decisions with reasoning</decisions>
+  <progress>What was accomplished in this chunk</progress>
+  <errors>Any errors and resolutions</errors>
+</chunk_summary>
+
+Be extremely concise. Every token counts. Omit pleasantries, explanations of your process, and meta-commentary.`.trim();
 }
 
 /**

@@ -15,6 +15,13 @@ export { HookAggregator } from './hookAggregator.js';
 export { HookPlanner } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
 
+// Export completion checker
+export { CompletionChecker } from './completion-checker.js';
+export type {
+  ToolCallRecord,
+  CompletionCheckResult,
+} from './completion-checker.js';
+
 // Export interfaces and enums
 export type { HookRegistryEntry } from './hookRegistry.js';
 export { HooksConfigSource as ConfigSource } from './types.js';

@@ -25,6 +25,7 @@ import type {
   RuleWithSource,
   RuleScope,
 } from './types.js';
+import type { AutoApproveClassifier } from './auto-approve-classifier.js';
 
 /**
  * Numeric priority for each PermissionDecision.
@@ -117,7 +118,24 @@ export class PermissionManager {
    */
   private coreToolsAllowList: Set<string> | null = null;
 
+  /**
+   * Optional auto-approve classifier for `auto-edit` mode.
+   * When set, ambiguous decisions ('default' / 'ask') are delegated to the
+   * classifier instead of prompting the user.
+   */
+  private classifier: AutoApproveClassifier | null = null;
+
   constructor(private readonly config: PermissionManagerConfig) {}
+
+  /**
+   * Set the auto-approve classifier.
+   * When set and the approval mode is `auto-edit`, ambiguous permission
+   * decisions are delegated to the classifier for pattern-based or
+   * model-assisted resolution.
+   */
+  setClassifier(classifier: AutoApproveClassifier): void {
+    this.classifier = classifier;
+  }
 
   /**
    * Initialise from the config's permission parameters.
@@ -164,7 +182,11 @@ export class PermissionManager {
     if (command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
-        return this.evaluateCompoundCommand(ctx, subCommands);
+        const compoundResult = await this.evaluateCompoundCommand(
+          ctx,
+          subCommands,
+        );
+        return this.maybeClassify(compoundResult, ctx);
       }
     }
 
@@ -173,15 +195,18 @@ export class PermissionManager {
     // For shell commands, resolve 'default' to actual permission using AST analysis
     // This ensures 'default' is never returned for shell commands - they always get
     // a concrete permission (deny/ask/allow) based on the command's readonly status.
+    let resolvedDecision: PermissionDecision;
     if (
       decision === 'default' &&
       toolName === 'run_shell_command' &&
       command !== undefined
     ) {
-      return this.resolveDefaultPermission(command);
+      resolvedDecision = await this.resolveDefaultPermission(command);
+    } else {
+      resolvedDecision = decision;
     }
 
-    return decision;
+    return this.maybeClassify(resolvedDecision, ctx);
   }
 
   /**
@@ -390,6 +415,48 @@ export class PermissionManager {
     }
 
     return 'ask';
+  }
+
+  /**
+   * Delegate ambiguous decisions to the auto-approve classifier when active.
+   *
+   * Only fires when:
+   *   - A classifier is set
+   *   - The approval mode is `auto-edit`
+   *   - The rule-based decision is `default` or `ask` (but NOT an explicit
+   *     ask rule — those cannot be overridden by the classifier)
+   *   - The decision is not `deny` or `allow` (already resolved)
+   *
+   * If the classifier returns `allow`, the decision is upgraded to `allow`.
+   * If `deny`, upgraded to `deny`. Otherwise falls through as `ask`.
+   */
+  private async maybeClassify(
+    decision: PermissionDecision,
+    ctx: PermissionCheckContext,
+  ): Promise<PermissionDecision> {
+    if (!this.classifier) return decision;
+    if (this.getDefaultMode() !== 'auto-edit') return decision;
+    if (decision === 'allow' || decision === 'deny') return decision;
+
+    // Do not override explicit ask rules — they exist for a reason.
+    if (decision === 'ask' && this.hasMatchingAskRule(ctx)) return decision;
+
+    // Build toolInput from the context for the classifier
+    const toolInput: Record<string, unknown> = {};
+    if (ctx.command !== undefined) toolInput['command'] = ctx.command;
+    if (ctx.filePath !== undefined) toolInput['file_path'] = ctx.filePath;
+    if (ctx.domain !== undefined) toolInput['domain'] = ctx.domain;
+    if (ctx.specifier !== undefined) toolInput['specifier'] = ctx.specifier;
+
+    try {
+      const result = await this.classifier.classify(ctx.toolName, toolInput, {
+        recentActions: [],
+      });
+      return result.decision;
+    } catch {
+      // Classifier failure must never block the agent loop
+      return decision;
+    }
   }
 
   // ---------------------------------------------------------------------------

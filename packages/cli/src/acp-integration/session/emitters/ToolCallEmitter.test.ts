@@ -13,7 +13,7 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
-import { Kind, TodoWriteTool } from '@qwen-code/qwen-code-core';
+import { Kind } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 
 // Helper to create mock message parts for tests
@@ -105,15 +105,21 @@ describe('ToolCallEmitter', () => {
       });
     });
 
-    it('should skip emit for TodoWriteTool and return false', async () => {
+    it('should emit tool_call for task management tools (no special routing)', async () => {
       const result = await emitter.emitStart({
-        toolName: TodoWriteTool.Name,
-        callId: 'call-todo',
-        args: { todos: [] },
+        toolName: 'task_list',
+        callId: 'call-task',
+        args: { status: 'in_progress' },
       });
 
-      expect(result).toBe(false);
-      expect(sendUpdateSpy).not.toHaveBeenCalled();
+      expect(result).toBe(true);
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-task',
+          _meta: { toolName: 'task_list' },
+        }),
+      );
     });
 
     it('should handle empty args', async () => {
@@ -276,74 +282,23 @@ describe('ToolCallEmitter', () => {
       });
     });
 
-    describe('TodoWriteTool handling', () => {
-      it('should emit plan update instead of tool_call_update for TodoWriteTool', async () => {
+    describe('task tool handling', () => {
+      it('should emit regular tool_call_update for task_create', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo',
+          toolName: 'task_create',
+          callId: 'call-task',
           success: true,
-          message: [],
-          resultDisplay: {
-            type: 'todo_list',
-            todos: [
-              { id: '1', content: 'Task 1', status: 'pending' },
-              { id: '2', content: 'Task 2', status: 'in_progress' },
-            ],
-          },
+          message: createMockMessage('Task created: id=task-1'),
+          resultDisplay: 'Task created: id=task-1',
         });
 
-        expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Task 1', priority: 'medium', status: 'pending' },
-            { content: 'Task 2', priority: 'medium', status: 'in_progress' },
-          ],
-        });
-      });
-
-      it('should use args as fallback for TodoWriteTool todos', async () => {
-        await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo',
-          success: true,
-          message: [],
-          resultDisplay: null,
-          args: {
-            todos: [{ id: '1', content: 'From args', status: 'completed' }],
-          },
-        });
-
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'From args', priority: 'medium', status: 'completed' },
-          ],
-        });
-      });
-
-      it('should not emit anything for TodoWriteTool with empty todos', async () => {
-        await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo',
-          success: true,
-          message: [],
-          resultDisplay: { type: 'todo_list', todos: [] },
-        });
-
-        expect(sendUpdateSpy).not.toHaveBeenCalled();
-      });
-
-      it('should not emit anything for TodoWriteTool with no extractable todos', async () => {
-        await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo',
-          success: true,
-          message: [],
-          resultDisplay: 'Some string result',
-        });
-
-        expect(sendUpdateSpy).not.toHaveBeenCalled();
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-task',
+            status: 'completed',
+          }),
+        );
       });
     });
   });
@@ -370,13 +325,10 @@ describe('ToolCallEmitter', () => {
   });
 
   describe('isTodoWriteTool', () => {
-    it('should return true for TodoWriteTool.Name', () => {
-      expect(emitter.isTodoWriteTool(TodoWriteTool.Name)).toBe(true);
-    });
-
-    it('should return false for other tool names', () => {
+    it('should always return false (TodoWriteTool removed, task tools use regular tool_call events)', () => {
+      expect(emitter.isTodoWriteTool('task_list')).toBe(false);
+      expect(emitter.isTodoWriteTool('task_create')).toBe(false);
       expect(emitter.isTodoWriteTool('read_file')).toBe(false);
-      expect(emitter.isTodoWriteTool('edit_file')).toBe(false);
       expect(emitter.isTodoWriteTool('')).toBe(false);
     });
   });
@@ -575,45 +527,23 @@ describe('ToolCallEmitter', () => {
       });
     });
 
-    describe('Fix 6: Empty plan emission when args has todos', () => {
-      it('should emit empty plan when args had todos but result has none', async () => {
+    describe('Fix 6: task tool result emission', () => {
+      it('should emit tool_call_update for task_update result', async () => {
         await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo-empty',
+          toolName: 'task_update',
+          callId: 'call-task-update',
           success: true,
-          message: [],
-          resultDisplay: null, // No result display
-          args: {
-            todos: [], // Empty array in args
-          },
+          message: createMockMessage('Task updated'),
+          args: { taskId: 'task-1', status: 'completed' },
         });
 
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [],
-        });
-      });
-
-      it('should emit empty plan when result todos is empty but args had todos', async () => {
-        await emitter.emitResult({
-          toolName: TodoWriteTool.Name,
-          callId: 'call-todo-cleared',
-          success: true,
-          message: [],
-          resultDisplay: {
-            type: 'todo_list',
-            todos: [], // Empty result
-          },
-          args: {
-            todos: [{ id: '1', content: 'Was here', status: 'pending' }],
-          },
-        });
-
-        // Should still emit empty plan (result takes precedence but we emit empty)
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [],
-        });
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-task-update',
+            status: 'completed',
+          }),
+        );
       });
     });
 

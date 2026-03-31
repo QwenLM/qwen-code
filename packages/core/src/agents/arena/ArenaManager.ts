@@ -1052,7 +1052,7 @@ export class ArenaManager {
             systemPrompt: getCoreSystemPrompt(
               this.config.getUserMemory(),
               model.modelId,
-            ),
+            ).full,
           },
           modelConfig: { model: model.modelId },
           runConfig: {

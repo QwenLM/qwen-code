@@ -861,6 +861,58 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      memoryConsolidation: {
+        type: 'object',
+        label: 'Memory Consolidation',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Automatic consolidation of QWEN.md memory files on session end. Three gates (time, session count, lock) prevent unnecessary work.',
+        showInDialog: false,
+        properties: {
+          minSessionsBetween: {
+            type: 'number',
+            label: 'Minimum Sessions Between Consolidations',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5,
+            description:
+              'Minimum number of sessions that must pass before consolidation runs.',
+            showInDialog: false,
+          },
+          minHoursBetween: {
+            type: 'number',
+            label: 'Minimum Hours Between Consolidations',
+            category: 'Context',
+            requiresRestart: false,
+            default: 24,
+            description:
+              'Minimum hours that must pass since the last consolidation.',
+            showInDialog: false,
+          },
+          maxMemoryLines: {
+            type: 'number',
+            label: 'Maximum Memory File Lines',
+            category: 'Context',
+            requiresRestart: false,
+            default: 200,
+            description:
+              'Maximum number of lines a memory file can have before triggering consolidation.',
+            showInDialog: false,
+          },
+          scope: {
+            type: 'string',
+            label: 'Consolidation Scope',
+            category: 'Context',
+            requiresRestart: false,
+            default: 'both' as string,
+            description:
+              'Which memory files to consolidate: "global", "project", or "both".',
+            showInDialog: false,
+          },
+        },
+      },
     },
   },
 

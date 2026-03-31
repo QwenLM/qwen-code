@@ -5,7 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
-import { ExitPlanModeTool, ToolNames } from '@qwen-code/qwen-code-core';
+import { ExitPlanModeTool } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
@@ -127,12 +127,6 @@ function buildToolCallMessageFromResult(
   const toolCallResult = record.toolCallResult;
   const toolName = extractToolNameFromRecord(record);
 
-  // Skip todo_write tool - it's already handled by plan update in collect.ts
-  // This prevents duplicate todo messages in the export
-  if (toolName === ToolNames.TODO_WRITE) {
-    return null;
-  }
-
   const toolCallId = toolCallResult?.callId ?? record.uuid;
   const functionCallArgs = extractFunctionCallArgs(record);
   const { kind, title, locations } = resolveToolMetadata(
@@ -246,10 +240,6 @@ function resolveToolMetadata(
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
   if (toolName && toolName === ExitPlanModeTool.Name) {
     return 'switch_mode';
-  }
-
-  if (toolName && toolName === ToolNames.TODO_WRITE) {
-    return 'todowrite';
   }
 
   const allowedKinds = new Set<string>([

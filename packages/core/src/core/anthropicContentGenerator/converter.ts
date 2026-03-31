@@ -24,6 +24,7 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import type { StructuredSystemPrompt } from '../prompts.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 type AnthropicToolParam = Anthropic.Tool & {
@@ -527,14 +528,35 @@ export class AnthropicContentConverter {
   /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
+   * When given a StructuredSystemPrompt, emits 2 blocks: cached static + uncached dynamic.
    */
   private buildSystemWithCacheControl(
-    systemText: string,
+    systemText: string | StructuredSystemPrompt,
   ): Anthropic.TextBlockParam[] | string {
     if (!systemText) {
-      return systemText;
+      return typeof systemText === 'string' ? systemText : '';
     }
 
+    // Structured prompt: cache only the static prefix
+    if (typeof systemText === 'object' && 'staticPrefix' in systemText) {
+      const blocks: Anthropic.TextBlockParam[] = [];
+      if (systemText.staticPrefix) {
+        blocks.push({
+          type: 'text',
+          text: systemText.staticPrefix,
+          cache_control: { type: 'ephemeral' },
+        });
+      }
+      if (systemText.dynamicSuffix) {
+        blocks.push({
+          type: 'text',
+          text: systemText.dynamicSuffix,
+        });
+      }
+      return blocks.length > 0 ? blocks : '';
+    }
+
+    // Legacy string path
     return [
       {
         type: 'text',

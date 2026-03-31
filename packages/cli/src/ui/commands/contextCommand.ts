@@ -126,7 +126,7 @@ export const contextCommand: SlashCommand = {
     const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
     // 1. System prompt tokens (without memory, as memory is counted separately)
-    const systemPromptText = getCoreSystemPrompt(undefined, modelName);
+    const systemPromptText = getCoreSystemPrompt(undefined, modelName).full;
     const systemPromptTokens = estimateTokens(systemPromptText);
 
     // 2. Tool declarations tokens (includes ALL tools: built-in, MCP, skill tool)

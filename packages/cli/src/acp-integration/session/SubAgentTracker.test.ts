@@ -21,7 +21,6 @@ import type {
 import {
   AgentEventType,
   ToolConfirmationOutcome,
-  TodoWriteTool,
 } from '@qwen-code/qwen-code-core';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { EventEmitter } from 'node:events';
@@ -249,21 +248,25 @@ describe('SubAgentTracker', () => {
       );
     });
 
-    it('should skip tool_call for TodoWriteTool', async () => {
+    it('should emit tool_call for task management tools (no special routing)', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       const event = createToolCallEvent({
-        name: TodoWriteTool.Name,
-        callId: 'call-todo',
-        args: { todos: [] },
+        name: 'task_list',
+        callId: 'call-task',
+        args: { status: 'in_progress' },
       });
 
       eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
-      // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(sendUpdateSpy).not.toHaveBeenCalled();
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-task',
+        }),
+      );
     });
 
     it('should not emit when aborted', async () => {
@@ -351,41 +354,35 @@ describe('SubAgentTracker', () => {
       });
     });
 
-    it('should emit plan update for TodoWriteTool results', async () => {
+    it('should emit regular tool_call_update for task tool results', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
-      // Store args via tool call
       eventEmitter.emit(
         AgentEventType.TOOL_CALL,
         createToolCallEvent({
-          name: TodoWriteTool.Name,
-          callId: 'call-todo',
-          args: {
-            todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
-          },
+          name: 'task_create',
+          callId: 'call-task',
+          args: { title: 'My task' },
         }),
       );
 
-      // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
-        name: TodoWriteTool.Name,
-        callId: 'call-todo',
+        name: 'task_create',
+        callId: 'call-task',
         success: true,
-        resultDisplay: JSON.stringify({
-          type: 'todo_list',
-          todos: [{ id: '1', content: 'Task 1', status: 'completed' }],
-        }),
+        resultDisplay: 'Task created: id=task-1',
       });
 
       eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Task 1', priority: 'medium', status: 'completed' },
-          ],
-        });
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-task',
+            status: 'completed',
+          }),
+        );
       });
     });
 

@@ -10,7 +10,10 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
-import { getCompressionPrompt } from '../core/prompts.js';
+import {
+  getCompressionPrompt,
+  getIncrementalCompressionPrompt,
+} from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -28,6 +31,48 @@ export const COMPRESSION_TOKEN_THRESHOLD = 0.7;
  * means that only the last 30% of the chat history will be kept after compression.
  */
 export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
+
+/**
+ * Number of most-recent messages that are protected from compression.
+ * These tail messages are never compressed, preserving immediate context.
+ */
+export const INCREMENTAL_PROTECTED_TAIL = 10;
+
+/**
+ * Maximum number of messages to compress in a single incremental chunk.
+ */
+export const INCREMENTAL_MAX_CHUNK_SIZE = 20;
+
+/**
+ * Prefix that marks a message as already compressed.
+ * Messages starting with this prefix are skipped during incremental compression.
+ */
+export const COMPRESSED_CONTEXT_PREFIX = '[COMPRESSED_CONTEXT]';
+
+/**
+ * Extracts the text content from a Content object.
+ * Returns the concatenated text of all text parts, or null if none exist.
+ */
+export function extractContentText(content: Content): string | null {
+  if (!content.parts || content.parts.length === 0) {
+    return null;
+  }
+  const texts = content.parts
+    .filter((part) => part.text !== undefined)
+    .map((part) => part.text);
+  if (texts.length === 0) {
+    return null;
+  }
+  return texts.join('');
+}
+
+/**
+ * Returns true if a Content message is an already-compressed summary.
+ */
+export function isCompressedMessage(content: Content): boolean {
+  const text = extractContentText(content);
+  return text !== null && text.startsWith(COMPRESSED_CONTEXT_PREFIX);
+}
 
 /**
  * Returns the index of the oldest item to keep when compressing. May return
@@ -138,6 +183,170 @@ export class ChatCompressionService {
       }
     }
 
+    // Try incremental compression first
+    const incrementalResult = await this.compressIncremental(
+      curatedHistory,
+      model,
+      config,
+      promptId,
+      signal,
+    );
+
+    if (incrementalResult.compressed) {
+      // Incremental compression succeeded — use the new history
+      return this.finalizeCompression(
+        incrementalResult.newHistory,
+        originalTokenCount,
+        incrementalResult.compressionInputTokenCount,
+        incrementalResult.compressionOutputTokenCount,
+        model,
+        config,
+        signal,
+      );
+    }
+
+    // Fallback: not enough messages for incremental compression,
+    // use the original full-history compression approach.
+    return this.compressFull(
+      curatedHistory,
+      originalTokenCount,
+      model,
+      config,
+      promptId,
+      signal,
+    );
+  }
+
+  /**
+   * Incremental compression: protects the most recent messages and compresses
+   * the oldest uncompressed chunk. Each call compresses one chunk, making the
+   * operation idempotent and safe to call repeatedly.
+   */
+  private async compressIncremental(
+    history: Content[],
+    model: string,
+    config: Config,
+    promptId: string,
+    _signal?: AbortSignal,
+  ): Promise<{
+    newHistory: Content[];
+    compressed: boolean;
+    compressionInputTokenCount?: number;
+    compressionOutputTokenCount?: number;
+  }> {
+    const protectedTailMessages = INCREMENTAL_PROTECTED_TAIL;
+    const maxChunkSize = INCREMENTAL_MAX_CHUNK_SIZE;
+
+    // Not enough messages to use incremental compression —
+    // need at least protected tail + 2 compressible messages.
+    if (history.length <= protectedTailMessages + 2) {
+      return { newHistory: history, compressed: false };
+    }
+
+    // Find the boundary: everything before this index is a candidate for compression
+    const compressibleEnd = history.length - protectedTailMessages;
+
+    // Skip already-compressed messages at the start
+    let chunkStart = 0;
+    while (chunkStart < compressibleEnd) {
+      if (isCompressedMessage(history[chunkStart])) {
+        chunkStart++;
+      } else {
+        break;
+      }
+    }
+
+    // Nothing left to compress in the compressible region
+    if (chunkStart >= compressibleEnd) {
+      return { newHistory: history, compressed: false };
+    }
+
+    const chunkEnd = Math.min(chunkStart + maxChunkSize, compressibleEnd);
+    const chunk = history.slice(chunkStart, chunkEnd);
+
+    // Compress the chunk via model
+    const summaryResponse = await config.getContentGenerator().generateContent(
+      {
+        model,
+        contents: [
+          ...chunk,
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Compress the conversation chunk above into a dense summary following the output format.',
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: getIncrementalCompressionPrompt(),
+        },
+      },
+      promptId,
+    );
+
+    const summary = getResponseText(summaryResponse) ?? '';
+    if (!summary || summary.trim().length === 0) {
+      return { newHistory: history, compressed: false };
+    }
+
+    // Ensure the summary has the compressed context prefix
+    const prefixedSummary = summary.startsWith(COMPRESSED_CONTEXT_PREFIX)
+      ? summary
+      : `${COMPRESSED_CONTEXT_PREFIX}\n${summary}`;
+
+    const usageMetadata = summaryResponse.usageMetadata;
+    const inputTokenCount = usageMetadata?.promptTokenCount;
+    let outputTokenCount = usageMetadata?.candidatesTokenCount;
+    if (
+      outputTokenCount === undefined &&
+      typeof usageMetadata?.totalTokenCount === 'number' &&
+      typeof inputTokenCount === 'number'
+    ) {
+      outputTokenCount = Math.max(
+        0,
+        usageMetadata.totalTokenCount - inputTokenCount,
+      );
+    }
+
+    // Rebuild history: [already compressed] + [new summary] + [remaining uncompressed] + [protected tail]
+    const summaryMessage: Content = {
+      role: 'user',
+      parts: [{ text: prefixedSummary }],
+    };
+    const summaryAck: Content = {
+      role: 'model',
+      parts: [{ text: 'Understood. Incremental context loaded.' }],
+    };
+
+    const newHistory: Content[] = [
+      ...history.slice(0, chunkStart),
+      summaryMessage,
+      summaryAck,
+      ...history.slice(chunkEnd),
+    ];
+
+    return {
+      newHistory,
+      compressed: true,
+      compressionInputTokenCount: inputTokenCount,
+      compressionOutputTokenCount: outputTokenCount,
+    };
+  }
+
+  /**
+   * Original full-history compression using getCompressionPrompt().
+   * Used as a fallback when history is too short for incremental compression.
+   */
+  private async compressFull(
+    curatedHistory: Content[],
+    originalTokenCount: number,
+    model: string,
+    config: Config,
+    promptId: string,
+    signal?: AbortSignal,
+  ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const splitPoint = findCompressSplitPoint(
       curatedHistory,
       1 - COMPRESSION_PRESERVE_THRESHOLD,
@@ -177,8 +386,17 @@ export class ChatCompressionService {
       },
       promptId,
     );
+
     const summary = getResponseText(summaryResponse) ?? '';
-    const isSummaryEmpty = !summary || summary.trim().length === 0;
+
+    // Prefix full compression summaries so they are also recognized as compressed
+    const prefixedSummary =
+      summary && summary.trim().length > 0
+        ? summary.startsWith(COMPRESSED_CONTEXT_PREFIX)
+          ? summary
+          : `${COMPRESSED_CONTEXT_PREFIX}\n${summary}`
+        : summary;
+
     const compressionUsageMetadata = summaryResponse.usageMetadata;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
@@ -195,15 +413,15 @@ export class ChatCompressionService {
       );
     }
 
-    let newTokenCount = originalTokenCount;
-    let extraHistory: Content[] = [];
-    let canCalculateNewTokenCount = false;
+    const isSummaryEmpty =
+      !prefixedSummary || prefixedSummary.trim().length === 0;
 
+    let extraHistory: Content[] = [];
     if (!isSummaryEmpty) {
       extraHistory = [
         {
           role: 'user',
-          parts: [{ text: summary }],
+          parts: [{ text: prefixedSummary }],
         },
         {
           role: 'model',
@@ -211,11 +429,42 @@ export class ChatCompressionService {
         },
         ...historyToKeep,
       ];
+    }
 
+    return this.finalizeCompression(
+      isSummaryEmpty ? null : extraHistory,
+      originalTokenCount,
+      compressionInputTokenCount,
+      compressionOutputTokenCount,
+      model,
+      config,
+      signal,
+      isSummaryEmpty,
+    );
+  }
+
+  /**
+   * Shared finalization logic for both incremental and full compression.
+   * Handles token math, telemetry, hook firing, and status determination.
+   */
+  private async finalizeCompression(
+    newHistory: Content[] | null,
+    originalTokenCount: number,
+    compressionInputTokenCount: number | undefined,
+    compressionOutputTokenCount: number | undefined,
+    model: string,
+    config: Config,
+    signal?: AbortSignal,
+    isSummaryEmpty: boolean = false,
+  ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
+    let newTokenCount = originalTokenCount;
+    let canCalculateNewTokenCount = false;
+
+    if (!isSummaryEmpty && newHistory) {
       // Best-effort token math using *only* model-reported token counts.
       //
       // Note: compressionInputTokenCount includes the compression prompt and
-      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
+      // the extra instruction (approx. 1000 tokens), and
       // compressionOutputTokenCount may include non-persisted tokens (thoughts).
       // We accept these inaccuracies to avoid local token estimation.
       if (
@@ -295,7 +544,7 @@ export class ChatCompressionService {
       }
 
       return {
-        newHistory: extraHistory,
+        newHistory,
         info: {
           originalTokenCount,
           newTokenCount,
