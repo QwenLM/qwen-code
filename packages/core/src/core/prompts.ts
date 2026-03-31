@@ -7,6 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
@@ -353,6 +354,29 @@ ${(function () {
 })()}
 
 ${getToolCallExamples(model || '')}
+
+${(function () {
+  try {
+    const skillPath = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..',
+      'skills',
+      'bundled',
+      'superpowers',
+      'using-superpowers',
+      'SKILL.md',
+    );
+    if (fs.existsSync(skillPath)) {
+      const raw = fs.readFileSync(skillPath, 'utf-8');
+      // Strip YAML frontmatter (---...---) before injecting
+      const body = raw.replace(/^---[\s\S]*?---\s*/m, '').trim();
+      return `<EXTREMELY_IMPORTANT>\n${body}\n</EXTREMELY_IMPORTANT>`;
+    }
+  } catch {
+    // Silently skip if bundled skill is unavailable (e.g. dev environment without build)
+  }
+  return '';
+})()}
 
 # Final Reminder
 Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
