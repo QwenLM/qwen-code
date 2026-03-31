@@ -33,6 +33,7 @@ import {
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -324,6 +325,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
+  const { verboseMode } = useVerboseMode();
+  const effectiveDisplayRenderer = verboseMode
+    ? displayRenderer
+    : { type: 'none' as const };
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -344,44 +349,44 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         )}
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {displayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">
-            {displayRenderer.type === 'todo' && (
-              <TodoResultRenderer data={displayRenderer.data} />
+            {effectiveDisplayRenderer.type === 'todo' && (
+              <TodoResultRenderer data={effectiveDisplayRenderer.data} />
             )}
-            {displayRenderer.type === 'plan' && (
+            {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
               />
             )}
-            {displayRenderer.type === 'task' && config && (
+            {effectiveDisplayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 config={config}
               />
             )}
-            {displayRenderer.type === 'diff' && (
+            {effectiveDisplayRenderer.type === 'diff' && (
               <DiffResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 settings={settings}
               />
             )}
-            {displayRenderer.type === 'ansi' && (
+            {effectiveDisplayRenderer.type === 'ansi' && (
               <AnsiOutputText
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableTerminalHeight={availableHeight}
               />
             )}
-            {displayRenderer.type === 'string' && (
+            {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
