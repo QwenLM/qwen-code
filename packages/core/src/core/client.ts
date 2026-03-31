@@ -84,6 +84,12 @@ import { createHookOutput } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  CompletionChecker,
+  type ToolCallRecord,
+} from '../hooks/completion-checker.js';
+import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
+import { ContextState } from '../agents/runtime/agent-headless.js';
 
 const MAX_TURNS = 100;
 
@@ -112,6 +118,13 @@ export class GeminiClient {
    * being forced and did it fail?
    */
   private hasFailedCompressionAttempt = false;
+
+  /**
+   * Tracks how many times the verification agent has been invoked
+   * during this session to prevent infinite verification loops.
+   */
+  private verificationAttempts = 0;
+  private static readonly MAX_VERIFICATION_ATTEMPTS = 3;
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
@@ -221,7 +234,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
-    );
+    ).full;
   }
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
@@ -758,6 +771,134 @@ export class GeminiClient {
       }
     }
 
+    // Run heuristic completion checker before the verification agent.
+    // This is a cheap, zero-model-call check that catches obvious signs of
+    // incomplete work (unresolved errors, missing tests, uncommitted changes).
+    // Only runs when the main agent has finished and this is not a hook continuation.
+    if (
+      !turn.pendingToolCalls.length &&
+      signal &&
+      !signal.aborted &&
+      messageType !== SendMessageType.Hook
+    ) {
+      const completionHistory = this.getHistory();
+      const toolCallHistory = this.extractToolCallHistory(completionHistory);
+
+      // Get the last assistant message
+      const lastModel = completionHistory
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const lastAssistantMessage =
+        lastModel?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '';
+
+      const checker = new CompletionChecker();
+      const checkResult = checker.check({
+        toolCallHistory,
+        lastAssistantMessage,
+      });
+
+      if (!checkResult.passed) {
+        const issueText = checkResult.issues.map((i) => `- ${i}`).join('\n');
+        const continueReason = `Completion check found unresolved issues:\n${issueText}\n\nPlease address these issues before finishing.`;
+        const continueRequest = [{ text: continueReason }];
+        return yield* this.sendMessageStream(
+          continueRequest,
+          signal,
+          prompt_id,
+          { type: SendMessageType.Hook },
+          boundedTurns - 1,
+        );
+      }
+    }
+
+    // Run verification agent before the session concludes.
+    // Only runs when the main agent has finished (no pending tool calls),
+    // is not a recursive hook continuation, and hasn't exceeded max attempts.
+    if (
+      !turn.pendingToolCalls.length &&
+      signal &&
+      !signal.aborted &&
+      messageType !== SendMessageType.Hook &&
+      this.verificationAttempts < GeminiClient.MAX_VERIFICATION_ATTEMPTS
+    ) {
+      const verifyConfig = BuiltinAgentRegistry.getBuiltinAgent('verify');
+      if (verifyConfig) {
+        this.verificationAttempts++;
+        try {
+          const subagentManager = this.config.getSubagentManager();
+          const verifyAgent = await subagentManager.createAgentHeadless(
+            verifyConfig,
+            this.config,
+          );
+
+          // Build a summary of the session for the verification agent
+          const history = this.getHistory();
+          const lastModelMessage = history
+            .filter((msg) => msg.role === 'model')
+            .pop();
+          const responseText =
+            lastModelMessage?.parts
+              ?.filter((p): p is { text: string } => 'text' in p)
+              .map((p) => p.text)
+              .join('') || '[no response text]';
+
+          const verifyPrompt = `Review the following assistant response for completeness and correctness. Check that all requested work was done, there are no obvious errors, and no files were left in a broken state.\n\nAssistant's final response:\n${responseText}`;
+
+          const verifyContext = new ContextState();
+          verifyContext.set('task_prompt', verifyPrompt);
+          await verifyAgent.execute(verifyContext, signal);
+
+          if (!signal.aborted) {
+            const verifyResult = verifyAgent.getFinalText();
+
+            // Parse the verification result JSON
+            try {
+              const jsonMatch = verifyResult.match(
+                /\{[\s\S]*"passed"\s*:\s*(true|false)[\s\S]*\}/,
+              );
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]) as {
+                  passed: boolean;
+                  issues?: string[];
+                  summary?: string;
+                };
+
+                if (
+                  !parsed.passed &&
+                  parsed.issues &&
+                  parsed.issues.length > 0
+                ) {
+                  const issueList = parsed.issues
+                    .map((issue: string) => `- ${issue}`)
+                    .join('\n');
+                  const continueReason = `Verification agent found issues that must be addressed before completing:\n${issueList}\n\nPlease fix these issues now.`;
+                  const continueRequest = [{ text: continueReason }];
+                  return yield* this.sendMessageStream(
+                    continueRequest,
+                    signal,
+                    prompt_id,
+                    { type: SendMessageType.Hook },
+                    boundedTurns - 1,
+                  );
+                }
+              }
+            } catch {
+              debugLogger.warn(
+                '[Verification] Failed to parse verification agent output, allowing completion',
+              );
+            }
+          }
+        } catch (verifyError) {
+          debugLogger.warn(
+            `[Verification] Verification agent failed, allowing completion: ${verifyError}`,
+          );
+        }
+      }
+    }
+
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
         // Report completed before returning — agent has no more work to do
@@ -909,6 +1050,62 @@ export class GeminiClient {
     }
 
     return info;
+  }
+
+  /**
+   * Extracts a flat list of tool call records from the conversation history.
+   *
+   * Walks through the history pairing functionCall parts (model role) with
+   * their corresponding functionResponse parts (user role) to build
+   * ToolCallRecord entries with name, success status, and input args.
+   */
+  private extractToolCallHistory(history: Content[]): ToolCallRecord[] {
+    const records: ToolCallRecord[] = [];
+
+    // Build a map of function responses keyed by call id or name for correlation
+    const responseMap = new Map<
+      string,
+      { success: boolean; response?: Record<string, unknown> }
+    >();
+    for (const entry of history) {
+      if (entry.role !== 'user' || !entry.parts) continue;
+      for (const part of entry.parts) {
+        if (!part.functionResponse) continue;
+        const fr = part.functionResponse;
+        // Use id if available, fall back to name
+        const key = fr.id ?? fr.name ?? '';
+        if (!key) continue;
+        const resp = fr.response as Record<string, unknown> | undefined;
+        const hasError =
+          resp !== undefined && ('error' in resp || 'is_error' in resp);
+        responseMap.set(key, {
+          success: !hasError,
+          response: resp,
+        });
+      }
+    }
+
+    // Walk function calls and match them to responses
+    for (const entry of history) {
+      if (entry.role !== 'model' || !entry.parts) continue;
+      for (const part of entry.parts) {
+        if (!part.functionCall) continue;
+        const fc = part.functionCall;
+        const name = fc.name ?? '';
+        if (!name) continue;
+
+        const key = fc.id ?? name;
+        const matched = responseMap.get(key);
+
+        records.push({
+          name,
+          success: matched?.success ?? true,
+          input: (fc.args as Record<string, unknown>) ?? undefined,
+        });
+      }
+    }
+
+    return records;
   }
 }
 

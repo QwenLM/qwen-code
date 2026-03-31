@@ -57,7 +57,12 @@ import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
 import { SkillTool } from '../tools/skill.js';
 import { AgentTool } from '../tools/agent.js';
-import { TodoWriteTool } from '../tools/todoWrite.js';
+import { TaskCreateTool } from '../tools/task-create.js';
+import { TaskGetTool } from '../tools/task-get.js';
+import { TaskListTool } from '../tools/task-list.js';
+import { TaskUpdateTool } from '../tools/task-update.js';
+import { TaskStopTool } from '../tools/task-stop.js';
+import { TaskOutputTool } from '../tools/task-output.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
@@ -71,6 +76,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { AutoApproveClassifier } from '../permissions/auto-approve-classifier.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import {
@@ -117,7 +123,13 @@ import {
 } from './constants.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
+import { TaskStore } from '../services/task-store.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  MemoryConsolidationService,
+  type ConsolidationConfig,
+  type ConsolidationResult,
+} from '../services/memory-consolidation.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -139,7 +151,13 @@ import {
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
-export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
+export type {
+  AnyToolInvocation,
+  FileFilteringOptions,
+  MCPOAuthConfig,
+  ConsolidationConfig,
+  ConsolidationResult,
+};
 export {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
@@ -440,6 +458,8 @@ export interface ConfigParameters {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  /** Memory consolidation settings for dream-phase consolidation on session end */
+  memoryConsolidation?: Partial<ConsolidationConfig>;
 }
 
 function normalizeConfigOutputFormat(
@@ -586,6 +606,9 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private taskStore?: TaskStore;
+  private memoryConsolidationService?: MemoryConsolidationService;
+  private readonly memoryConsolidationConfig?: Partial<ConsolidationConfig>;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
@@ -696,6 +719,7 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+    this.memoryConsolidationConfig = params.memoryConsolidation;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -951,6 +975,11 @@ export class Config {
 
     this.permissionManager = new PermissionManager(this);
     this.permissionManager.initialize();
+    const classifier = new AutoApproveClassifier(
+      () => this.contentGenerator ?? null,
+      () => this.getModel(),
+    );
+    this.permissionManager.setClassifier(classifier);
     this.debugLogger.debug('Permission manager initialized');
 
     // Load session subagents if they were provided before initialization
@@ -1108,6 +1137,16 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  getTaskStore(): TaskStore {
+    if (!this.taskStore) {
+      this.taskStore = new TaskStore(
+        Storage.getRuntimeBaseDir(),
+        this.getSessionId(),
+      );
+    }
+    return this.taskStore;
   }
 
   /**
@@ -1353,6 +1392,59 @@ export class Config {
   }
 
   /**
+   * Lazily creates and returns the MemoryConsolidationService.
+   * Uses the runtime base dir for state persistence and the project dir
+   * for project-scoped memory files.
+   */
+  getMemoryConsolidationService(): MemoryConsolidationService {
+    if (!this.memoryConsolidationService) {
+      this.memoryConsolidationService = new MemoryConsolidationService(
+        Storage.getRuntimeBaseDir(),
+        this.getTargetDir(),
+        () => {
+          try {
+            return this.getContentGenerator();
+          } catch {
+            return null;
+          }
+        },
+        () => this.getContentGeneratorConfig()?.model ?? '',
+        this.memoryConsolidationConfig,
+      );
+    }
+    return this.memoryConsolidationService;
+  }
+
+  /**
+   * Called on session end to trigger background maintenance tasks.
+   * Currently runs memory consolidation (gated by time, session count, and lock).
+   * Non-blocking: failures are logged but do not propagate.
+   */
+  async onSessionEnd(): Promise<ConsolidationResult | null> {
+    try {
+      const service = this.getMemoryConsolidationService();
+      const result = await service.maybeConsolidate();
+      if (result.consolidated) {
+        this.debugLogger.info(
+          'Memory consolidation completed on session end',
+          result,
+        );
+      } else {
+        this.debugLogger.debug(
+          `Memory consolidation skipped: ${result.reason}`,
+        );
+      }
+      return result;
+    } catch (error) {
+      this.debugLogger.error(
+        'Memory consolidation failed (non-blocking):',
+        error,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Shuts down the Config and releases all resources.
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
@@ -1363,6 +1455,9 @@ export class Config {
       return;
     }
     try {
+      // Run memory consolidation before cleanup (non-blocking)
+      await this.onSessionEnd();
+
       this.skillManager?.stopWatching();
 
       if (this.toolRegistry) {
@@ -2188,7 +2283,12 @@ export class Config {
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
     await registerCoreTool(MemoryTool);
-    await registerCoreTool(TodoWriteTool, this);
+    await registerCoreTool(TaskCreateTool, this);
+    await registerCoreTool(TaskGetTool, this);
+    await registerCoreTool(TaskListTool, this);
+    await registerCoreTool(TaskUpdateTool, this);
+    await registerCoreTool(TaskStopTool, this);
+    await registerCoreTool(TaskOutputTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
     await registerCoreTool(WebFetchTool, this);

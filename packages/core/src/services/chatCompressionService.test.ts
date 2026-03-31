@@ -8,6 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
   findCompressSplitPoint,
+  extractContentText,
+  isCompressedMessage,
+  COMPRESSED_CONTEXT_PREFIX,
+  INCREMENTAL_PROTECTED_TAIL,
+  INCREMENTAL_MAX_CHUNK_SIZE,
 } from './chatCompressionService.js';
 import type { Content, GenerateContentResponse } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -285,7 +290,9 @@ describe('ChatCompressionService', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.newTokenCount).toBe(250); // 800 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
-    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+    expect(result.newHistory![0].parts![0].text).toBe(
+      '[COMPRESSED_CONTEXT]\nSummary',
+    );
     expect(mockGenerateContent).toHaveBeenCalled();
     expect(mockGetHookSystem).toHaveBeenCalled();
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
@@ -933,5 +940,471 @@ describe('ChatCompressionService', () => {
       // mockFirePreCompactEvent should not be called since hookSystem is null
       expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('extractContentText', () => {
+  it('should return text from a Content with text parts', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text: 'hello' }, { text: ' world' }],
+    };
+    expect(extractContentText(content)).toBe('hello world');
+  });
+
+  it('should return null for Content with no parts', () => {
+    const content: Content = { role: 'user', parts: [] };
+    expect(extractContentText(content)).toBeNull();
+  });
+
+  it('should return null for Content with undefined parts', () => {
+    const content: Content = { role: 'user' };
+    expect(extractContentText(content)).toBeNull();
+  });
+
+  it('should return null for Content with only non-text parts', () => {
+    const content: Content = {
+      role: 'model',
+      parts: [{ functionCall: { name: 'foo', args: {} } }],
+    };
+    expect(extractContentText(content)).toBeNull();
+  });
+
+  it('should concatenate only text parts, ignoring non-text parts', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [
+        { text: 'first' },
+        { functionCall: { name: 'foo', args: {} } },
+        { text: 'second' },
+      ],
+    };
+    expect(extractContentText(content)).toBe('firstsecond');
+  });
+});
+
+describe('isCompressedMessage', () => {
+  it('should return true for messages starting with COMPRESSED_CONTEXT_PREFIX', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: `${COMPRESSED_CONTEXT_PREFIX}\n<chunk_summary>...</chunk_summary>`,
+        },
+      ],
+    };
+    expect(isCompressedMessage(content)).toBe(true);
+  });
+
+  it('should return false for normal messages', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text: 'Hello, please help me with something.' }],
+    };
+    expect(isCompressedMessage(content)).toBe(false);
+  });
+
+  it('should return false for messages with no text', () => {
+    const content: Content = {
+      role: 'model',
+      parts: [{ functionCall: { name: 'foo', args: {} } }],
+    };
+    expect(isCompressedMessage(content)).toBe(false);
+  });
+
+  it('should return false for empty content', () => {
+    const content: Content = { role: 'user', parts: [] };
+    expect(isCompressedMessage(content)).toBe(false);
+  });
+});
+
+describe('Incremental Compression', () => {
+  let service: ChatCompressionService;
+  let mockChat: GeminiChat;
+  let mockConfig: Config;
+  const mockModel = 'gemini-pro';
+  const mockPromptId = 'test-prompt-id';
+  let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
+  let mockGetHookSystem: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    service = new ChatCompressionService();
+    mockChat = {
+      getHistory: vi.fn(),
+    } as unknown as GeminiChat;
+    mockFireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    mockGetHookSystem = vi.fn().mockReturnValue({
+      fireSessionStartEvent: mockFireSessionStartEvent,
+      firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+    });
+    mockConfig = {
+      getChatCompression: vi.fn(),
+      getContentGenerator: vi.fn(),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getHookSystem: mockGetHookSystem,
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+      }),
+    } as unknown as Config;
+
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Build a history array with alternating user/model messages.
+   */
+  function buildHistory(count: number): Content[] {
+    const history: Content[] = [];
+    for (let i = 0; i < count; i++) {
+      history.push({
+        role: i % 2 === 0 ? 'user' : 'model',
+        parts: [{ text: `Message ${i + 1}` }],
+      });
+    }
+    return history;
+  }
+
+  it('should use incremental compression when history exceeds protected tail + 2', async () => {
+    // Need > INCREMENTAL_PROTECTED_TAIL + 2 messages for incremental path
+    const historySize = INCREMENTAL_PROTECTED_TAIL + 10;
+    const history = buildHistory(historySize);
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: `${COMPRESSED_CONTEXT_PREFIX}\n<chunk_summary>Compressed</chunk_summary>`,
+              },
+            ],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+
+    // The first message should be the compressed summary
+    expect(result.newHistory![0].parts![0].text).toContain(
+      COMPRESSED_CONTEXT_PREFIX,
+    );
+    // The second message should be the model acknowledgment
+    expect(result.newHistory![1].parts![0].text).toBe(
+      'Understood. Incremental context loaded.',
+    );
+
+    // Protected tail messages should still be intact at the end
+    const tail = result.newHistory!.slice(-INCREMENTAL_PROTECTED_TAIL);
+    expect(tail.length).toBe(INCREMENTAL_PROTECTED_TAIL);
+    // The last message in the tail should be the last message from original history
+    expect(tail[tail.length - 1].parts![0].text).toBe(`Message ${historySize}`);
+  });
+
+  it('should fall back to full compression for short histories', async () => {
+    // Only 4 messages — below the incremental threshold
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Full compression summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    // Full compression adds COMPRESSED_CONTEXT_PREFIX
+    expect(result.newHistory![0].parts![0].text).toContain(
+      COMPRESSED_CONTEXT_PREFIX,
+    );
+    // Full compression uses "Got it" ack
+    expect(result.newHistory![1].parts![0].text).toBe(
+      'Got it. Thanks for the additional context!',
+    );
+  });
+
+  it('should skip already-compressed messages at the start', async () => {
+    const historySize = INCREMENTAL_PROTECTED_TAIL + 10;
+    // First two messages are already compressed
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: `${COMPRESSED_CONTEXT_PREFIX}\nPrevious summary` }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Understood. Incremental context loaded.' }],
+      },
+      ...buildHistory(historySize - 2),
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: `${COMPRESSED_CONTEXT_PREFIX}\nNew chunk summary` },
+            ],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1200,
+        candidatesTokenCount: 40,
+        totalTokenCount: 1240,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+
+    // The first message should still be the original compressed summary
+    expect(result.newHistory![0].parts![0].text).toContain('Previous summary');
+    // The model ack for the first compressed message should be preserved
+    // (it's not compressed, so it gets included in the chunk to compress)
+    // Actually, index 1 (the model ack) is not a compressed message, so it starts the chunk.
+    // But the chunk starts at index 1 (after the compressed user message at index 0).
+    // Wait -- isCompressedMessage checks the first message. The model ack at index 1
+    // does NOT start with [COMPRESSED_CONTEXT], so chunkStart=1.
+    // The new summary replaces messages starting at index 1.
+    // So: [original compressed user msg] + [new summary] + [new ack] + [remaining + tail]
+    expect(result.newHistory![1].parts![0].text).toContain('New chunk summary');
+  });
+
+  it('should handle incremental compression returning empty summary gracefully', async () => {
+    const historySize = INCREMENTAL_PROTECTED_TAIL + 10;
+    const history = buildHistory(historySize);
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    // First call (incremental) returns empty, second call (full fallback) returns content
+    const mockGenerateContent = vi
+      .fn()
+      .mockResolvedValueOnce({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: '' }], // Empty summary for incremental
+            },
+          },
+        ],
+      } as unknown as GenerateContentResponse)
+      .mockResolvedValueOnce({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Full fallback summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    // Should fall back to full compression after incremental fails
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].parts![0].text).toContain(
+      'Full fallback summary',
+    );
+  });
+
+  it('should limit chunk size to INCREMENTAL_MAX_CHUNK_SIZE', async () => {
+    // Create a very large history
+    const historySize =
+      INCREMENTAL_PROTECTED_TAIL + INCREMENTAL_MAX_CHUNK_SIZE + 20;
+    const history = buildHistory(historySize);
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: `${COMPRESSED_CONTEXT_PREFIX}\nChunk summary` }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+
+    // Verify the model was called with only INCREMENTAL_MAX_CHUNK_SIZE messages
+    // (plus the instruction message appended)
+    const callArgs = mockGenerateContent.mock.calls[0][0];
+    // The contents should be chunk messages + 1 instruction message
+    expect(callArgs.contents.length).toBe(INCREMENTAL_MAX_CHUNK_SIZE + 1);
+
+    // Verify the result still has uncompressed messages after the summary
+    // New history: [summary] + [ack] + [remaining uncompressed] + [protected tail]
+    const expectedRemaining = historySize - INCREMENTAL_MAX_CHUNK_SIZE;
+    // +2 for summary + ack
+    expect(result.newHistory!.length).toBe(expectedRemaining + 2);
+  });
+
+  it('should add prefix when model does not include it', async () => {
+    const historySize = INCREMENTAL_PROTECTED_TAIL + 10;
+    const history = buildHistory(historySize);
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    // Model returns summary WITHOUT the prefix
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: '<chunk_summary>No prefix</chunk_summary>' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    // The prefix should be prepended
+    const summaryText = result.newHistory![0].parts![0].text!;
+    expect(summaryText.startsWith(COMPRESSED_CONTEXT_PREFIX)).toBe(true);
+    expect(summaryText).toContain('No prefix');
   });
 });

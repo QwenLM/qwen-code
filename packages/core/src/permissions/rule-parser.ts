@@ -84,10 +84,30 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   SaveMemory: 'save_memory',
   SaveMemoryTool: 'save_memory',
 
-  // TodoWrite tool
-  todo_write: 'todo_write',
-  TodoWrite: 'todo_write',
-  TodoWriteTool: 'todo_write',
+  // Task management tools
+  task_create: 'task_create',
+  TaskCreate: 'task_create',
+  TaskCreateTool: 'task_create',
+  task_get: 'task_get',
+  TaskGet: 'task_get',
+  TaskGetTool: 'task_get',
+  task_list: 'task_list',
+  TaskList: 'task_list',
+  TaskListTool: 'task_list',
+  task_update: 'task_update',
+  TaskUpdate: 'task_update',
+  TaskUpdateTool: 'task_update',
+  task_stop: 'task_stop',
+  TaskStop: 'task_stop',
+  TaskStopTool: 'task_stop',
+  task_output: 'task_output',
+  TaskOutput: 'task_output',
+  TaskOutputTool: 'task_output',
+
+  // Legacy TodoWrite aliases
+  todo_write: 'task_list',
+  TodoWrite: 'task_list',
+  TodoWriteTool: 'task_list',
 
   // WebFetch tool
   web_fetch: 'web_fetch',
@@ -306,7 +326,12 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  task_create: 'TaskCreate',
+  task_get: 'TaskGet',
+  task_list: 'TaskList',
+  task_update: 'TaskUpdate',
+  task_stop: 'TaskStop',
+  task_output: 'TaskOutput',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
 };
@@ -418,7 +443,12 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TaskCreate: 'create tasks',
+  TaskGet: 'get tasks',
+  TaskList: 'list tasks',
+  TaskUpdate: 'update tasks',
+  TaskStop: 'stop tasks',
+  TaskOutput: 'record task output',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
 };

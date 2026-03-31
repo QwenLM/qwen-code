@@ -1146,6 +1146,19 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
+    memoryConsolidation: settings.context?.memoryConsolidation
+      ? {
+          minSessionsBetween:
+            settings.context.memoryConsolidation.minSessionsBetween,
+          minHoursBetween: settings.context.memoryConsolidation.minHoursBetween,
+          maxMemoryLines: settings.context.memoryConsolidation.maxMemoryLines,
+          scope: settings.context.memoryConsolidation.scope as
+            | 'global'
+            | 'project'
+            | 'both'
+            | undefined,
+        }
+      : undefined,
   });
 
   if (lspEnabled) {

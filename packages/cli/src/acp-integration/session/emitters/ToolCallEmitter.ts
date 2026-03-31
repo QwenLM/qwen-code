@@ -19,11 +19,7 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
-import {
-  TodoWriteTool,
-  Kind,
-  ExitPlanModeTool,
-} from '@qwen-code/qwen-code-core';
+import { Kind, ExitPlanModeTool } from '@qwen-code/qwen-code-core';
 
 /**
  * Unified tool call event emitter.
@@ -34,7 +30,7 @@ import {
  * - SubAgent tool tracking in SubAgentTracker
  *
  * This ensures consistent behavior across all tool event sources,
- * including special handling for tools like TodoWriteTool.
+ * including special handling for task management tools.
  */
 export class ToolCallEmitter extends BaseEmitter {
   private readonly planEmitter: PlanEmitter;
@@ -184,8 +180,10 @@ export class ToolCallEmitter extends BaseEmitter {
    * Checks if a tool name is the TodoWriteTool.
    * Exposed for external use in components that need to check this.
    */
-  isTodoWriteTool(toolName: string): boolean {
-    return toolName === TodoWriteTool.Name;
+  isTodoWriteTool(_toolName: string): boolean {
+    // TodoWriteTool has been replaced by task management tools.
+    // Task tools emit as regular tool_call events — no plan routing.
+    return false;
   }
 
   /**

@@ -31,7 +31,6 @@ import {
   getErrorStatus,
   AgentTool,
   UserPromptEvent,
-  TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
   Storage,
@@ -560,9 +559,7 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
     ) => {
-      if (toolName !== TodoWriteTool.Name) {
-        await this.toolCallEmitter.emitError(callId, toolName, error);
-      }
+      await this.toolCallEmitter.emitError(callId, toolName, error);
 
       const errorParts = errorResponse(error);
       this.config.getChatRecordingService()?.recordToolResult(errorParts, {
@@ -599,8 +596,8 @@ export class Session implements SessionContext {
       );
     }
 
-    // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === TodoWriteTool.Name;
+    // TodoWriteTool replaced by task management tools; task tools emit as regular tool_call events.
+    const isTodoWriteTool = false;
     const isAgentTool = tool.name === AgentTool.Name;
     const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
 

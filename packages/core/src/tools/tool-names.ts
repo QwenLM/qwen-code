@@ -16,7 +16,12 @@ export const ToolNames = {
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
-  TODO_WRITE: 'todo_write',
+  TASK_CREATE: 'task_create',
+  TASK_GET: 'task_get',
+  TASK_LIST: 'task_list',
+  TASK_UPDATE: 'task_update',
+  TASK_STOP: 'task_stop',
+  TASK_OUTPUT: 'task_output',
   MEMORY: 'save_memory',
   AGENT: 'agent',
   SKILL: 'skill',
@@ -40,7 +45,12 @@ export const ToolDisplayNames = {
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
-  TODO_WRITE: 'TodoWrite',
+  TASK_CREATE: 'TaskCreate',
+  TASK_GET: 'TaskGet',
+  TASK_LIST: 'TaskList',
+  TASK_UPDATE: 'TaskUpdate',
+  TASK_STOP: 'TaskStop',
+  TASK_OUTPUT: 'TaskOutput',
   MEMORY: 'SaveMemory',
   AGENT: 'Agent',
   SKILL: 'Skill',
@@ -59,6 +69,7 @@ export const ToolNamesMigration = {
   search_file_content: ToolNames.GREP, // Legacy name from grep tool
   replace: ToolNames.EDIT, // Legacy name from edit tool
   task: ToolNames.AGENT, // Legacy name from agent tool (renamed from task)
+  todo_write: ToolNames.TASK_LIST, // Legacy name from todo_write tool (replaced by task management tools)
 } as const;
 
 // Migration from old tool display names to new tool display names
@@ -68,4 +79,5 @@ export const ToolDisplayNamesMigration = {
   FindFiles: ToolDisplayNames.GLOB, // Old display name for Glob
   ReadFolder: ToolDisplayNames.LS, // Old display name for ListFiles
   Task: ToolDisplayNames.AGENT, // Old display name for Agent (renamed from Task)
+  TodoWrite: ToolDisplayNames.TASK_LIST, // Old display name for TodoWrite (replaced by task management tools)
 } as const;
