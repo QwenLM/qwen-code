@@ -110,7 +110,7 @@ const renderWithContext = (
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <VerboseModeProvider value={{ verboseMode }}>
+    <VerboseModeProvider value={{ verboseMode, frozenSnapshot: null }}>
       <SettingsContext.Provider value={mockSettings}>
         <StreamingContext.Provider value={contextValue}>
           {ui}

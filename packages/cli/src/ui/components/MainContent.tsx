@@ -13,6 +13,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
+import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -30,6 +31,14 @@ export const MainContent = () => {
     staticAreaMaxItemHeight,
     availableTerminalHeight,
   } = uiState;
+
+  const { frozenSnapshot } = useVerboseMode();
+
+  // When a frozen snapshot exists (user pressed Ctrl+O during streaming),
+  // display it instead of the live pending items so the user can read
+  // without jitter. The snapshot captures the moment Ctrl+O was pressed.
+  const displayItems = frozenSnapshot ?? pendingHistoryItems;
+  const isFrozen = frozenSnapshot !== null;
 
   return (
     <>
@@ -57,7 +66,7 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItems.map((item, i) => (
+          {displayItems.map((item, i) => (
             <HistoryItemDisplay
               key={i}
               availableTerminalHeight={
@@ -67,9 +76,11 @@ export const MainContent = () => {
               mainAreaWidth={mainAreaWidth}
               item={{ ...item, id: 0 }}
               isPending={true}
-              isFocused={!uiState.isEditorDialogOpen}
-              activeShellPtyId={uiState.activePtyId}
-              embeddedShellFocused={uiState.embeddedShellFocused}
+              isFocused={isFrozen ? false : !uiState.isEditorDialogOpen}
+              activeShellPtyId={isFrozen ? undefined : uiState.activePtyId}
+              embeddedShellFocused={
+                isFrozen ? false : uiState.embeddedShellFocused
+              }
             />
           ))}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />

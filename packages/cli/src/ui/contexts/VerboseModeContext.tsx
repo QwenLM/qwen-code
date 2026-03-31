@@ -5,13 +5,16 @@
  */
 
 import { createContext, useContext } from 'react';
+import type { HistoryItemWithoutId } from '../types.js';
 
 interface VerboseModeContextType {
   verboseMode: boolean;
+  frozenSnapshot: HistoryItemWithoutId[] | null;
 }
 
 const VerboseModeContext = createContext<VerboseModeContextType>({
   verboseMode: false, // default: compact mode
+  frozenSnapshot: null,
 });
 
 export const useVerboseMode = (): VerboseModeContextType =>

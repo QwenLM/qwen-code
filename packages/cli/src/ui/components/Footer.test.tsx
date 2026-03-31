@@ -101,7 +101,9 @@ describe('<Footer />', () => {
     it('shows verbose label when verboseMode=true', () => {
       useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
       const { lastFrame } = render(
-        <VerboseModeProvider value={{ verboseMode: true }}>
+        <VerboseModeProvider
+          value={{ verboseMode: true, frozenSnapshot: null }}
+        >
           <ConfigContext.Provider value={createMockConfig() as never}>
             <VimModeProvider settings={createMockSettings()}>
               <UIStateContext.Provider value={createMockUIState()}>
@@ -117,7 +119,9 @@ describe('<Footer />', () => {
     it('hides verbose label when verboseMode=false', () => {
       useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
       const { lastFrame } = render(
-        <VerboseModeProvider value={{ verboseMode: false }}>
+        <VerboseModeProvider
+          value={{ verboseMode: false, frozenSnapshot: null }}
+        >
           <ConfigContext.Provider value={createMockConfig() as never}>
             <VimModeProvider settings={createMockSettings()}>
               <UIStateContext.Provider value={createMockUIState()}>
