@@ -28,6 +28,9 @@ export default defineConfig({
         ['json-summary', { outputFile: 'coverage-summary.json' }],
       ],
     },
+    // Exclude compiled .js outputs — TypeScript sources (.ts) are canonical.
+    // Build artifacts land alongside sources and would otherwise run every test twice.
+    exclude: ['**/*.test.js', '**/*.spec.js', '**/node_modules/**'],
     poolOptions: {
       threads: {
         minThreads: 8,

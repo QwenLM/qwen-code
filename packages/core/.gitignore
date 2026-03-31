@@ -1,0 +1,8 @@
+# TypeScript compiled outputs co-located with sources
+# (tsc --outDir src/ or tsc --declaration emit alongside .ts files)
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+!src/**/*.d.ts.map
+coverage/
+junit.xml
