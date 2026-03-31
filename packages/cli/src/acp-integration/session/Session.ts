@@ -674,22 +674,6 @@ export class Session implements SessionContext {
       const approvalMode = this.config.getApprovalMode();
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
-      // PLAN mode: block non-read-only tools
-      if (
-        isPlanMode &&
-        !isExitPlanModeTool &&
-        !isAskUserQuestionTool &&
-        needsConfirmation
-      ) {
-        return earlyErrorResponse(
-          new Error(
-            `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
-              'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
-          ),
-          fc.name,
-        );
-      }
-
       if (finalPermission === 'deny') {
         return earlyErrorResponse(
           new Error(
@@ -702,13 +686,29 @@ export class Session implements SessionContext {
       }
 
       let didRequestPermission = false;
+      let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
       if (needsConfirmation) {
-        const confirmationDetails =
+        confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
 
         // Centralised rule injection (for display and persistence)
         injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+        if (
+          isPlanMode &&
+          !isExitPlanModeTool &&
+          !isAskUserQuestionTool &&
+          confirmationDetails.type !== 'info'
+        ) {
+          return earlyErrorResponse(
+            new Error(
+              `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
+                'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+            ),
+            fc.name,
+          );
+        }
 
         const messageBus = this.config.getMessageBus?.();
         const hooksEnabled = this.config.getEnableHooks?.() ?? false;
