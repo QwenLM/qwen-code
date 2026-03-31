@@ -171,6 +171,27 @@ export default tseslint.config(
       ],
     },
   },
+  // Compiled .test.js files (TypeScript output co-located with source) need Node globals
+  {
+    files: ['packages/*/src/**/*.test.js'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-undef': 'off', // Node globals (process, console, etc.) are valid in test files
+      'no-console': 'off',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+    },
+  },
   // extra settings for scripts that we run directly with node
   {
     files: ['./scripts/**/*.js', 'esbuild.config.js', 'packages/*/scripts/**/*.js'],
