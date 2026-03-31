@@ -314,7 +314,9 @@ describe('HistoryReplayer', () => {
       );
     });
 
-    it('should emit plan update for TodoWriteTool results', async () => {
+    it('should emit tool_call_update for legacy todo_write results (TodoWriteTool removed)', async () => {
+      // TodoWriteTool has been replaced by task management tools.
+      // Legacy todo_write results are now treated as regular tool calls.
       const todoDisplay: TodoResultDisplay = {
         type: 'todo_list',
         todos: [
@@ -323,7 +325,6 @@ describe('HistoryReplayer', () => {
         ],
       };
       const record = createToolResultRecord('todo_write', todoDisplay);
-      // Override the function response name
       record.message = {
         role: 'user',
         parts: [
@@ -338,13 +339,9 @@ describe('HistoryReplayer', () => {
 
       await replayer.replay([record]);
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'plan',
-        entries: [
-          { content: 'Task 1', priority: 'medium', status: 'pending' },
-          { content: 'Task 2', priority: 'medium', status: 'completed' },
-        ],
-      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionUpdate: 'tool_call_update' }),
+      );
     });
 
     it('should use record uuid as callId when toolCallResult.callId is missing', async () => {

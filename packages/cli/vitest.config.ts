@@ -15,8 +15,15 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
+    include: ['**/*.{test,spec}.?(c|m)ts?(x)', 'config.test.ts'],
+    // Exclude compiled .js outputs — .ts sources are canonical
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/cypress/**',
+      '**/*.test.js',
+      '**/*.spec.js',
+    ],
     environment: 'jsdom',
     globals: true,
     reporters: ['default', 'junit'],
