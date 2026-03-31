@@ -85,7 +85,7 @@ describe('Trusted Folders Loading', () => {
     );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
-    mockFsRealpathSync.mockImplementation((p: string) => p);
+    mockFsRealpathSync.mockImplementation((p) => p as string);
     vi.mocked(normalizePathForComparison).mockImplementation((p: string) => p);
   });
 
