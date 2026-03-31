@@ -3323,6 +3323,7 @@ describe('useGeminiStream', () => {
                 'Reason 2: More details needed',
                 'Reason 3: Incomplete response',
               ],
+              stopHookCount: 3,
             },
           };
         })(),
@@ -3365,6 +3366,7 @@ describe('useGeminiStream', () => {
             value: {
               iterationCount: 5,
               reasons: ['Hook reason 1', 'Hook reason 2'],
+              stopHookCount: 2,
             },
           };
         })(),
