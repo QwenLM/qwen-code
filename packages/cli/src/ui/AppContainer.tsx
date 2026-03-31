@@ -1263,11 +1263,6 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
-          return;
-        }
-
         // If input has content, use double-press to clear
         if (buffer.text.length > 0) {
           if (escapePressedOnce) {
@@ -1316,6 +1311,19 @@ export const AppContainer = (props: AppContainerProps) => {
           setBtwItem(null);
           return;
         }
+      }
+
+      // Cancel in-flight btw side-question on Ctrl+C or Ctrl+D,
+      // but only when btw is actually visible (not hidden behind a dialog).
+      if (
+        btwItem &&
+        btwItem.btw.isPending &&
+        !dialogsVisibleRef.current &&
+        key.ctrl &&
+        (key.name === 'c' || key.name === 'd')
+      ) {
+        cancelBtw();
+        return;
       }
 
       let enteringConstrainHeightMode = false;

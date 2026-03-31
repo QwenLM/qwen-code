@@ -39,6 +39,10 @@ async function askBtw(
 ): Promise<string> {
   const history = geminiClient.getHistory();
 
+  // Enhanced system prompt inspired by Claude Code's side question design:
+  // - Emphasizes direct answering without tools
+  // - Clarifies the isolated nature of the side question
+  // - Prevents the model from promising actions it can't take
   const response = await geminiClient.generateContent(
     [
       ...history,
@@ -46,7 +50,23 @@ async function askBtw(
         role: 'user',
         parts: [
           {
-            text: `[Side question - answer briefly and concisely, this is a "by the way" question that doesn't need to be part of our main conversation]\n\n${question}`,
+            text: `[This is a side question - answer directly and concisely.
+
+IMPORTANT:
+- You are a separate, lightweight agent spawned to answer this one question
+- The main conversation continues independently in the background
+- Do NOT reference being interrupted or what you were "previously doing"
+
+CRITICAL CONSTRAINTS:
+- You have NO tools available - you cannot read files, run commands, search, or take any actions
+- This is a one-off response in a single turn
+- You can ONLY provide information based on what you already know from the conversation context
+- NEVER say things like "Let me try...", "I'll now...", "Let me check...", or promise to take any action
+- If you don't know the answer, say so - do not offer to look it up or investigate
+
+Simply answer the question directly with the information you have.]
+
+${question}`,
           },
         ],
       },
