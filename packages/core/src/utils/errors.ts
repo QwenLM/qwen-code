@@ -93,6 +93,9 @@ export function getErrorStatus(error: unknown): number | undefined {
  * For network errors, appends the cause code (e.g. "ECONNREFUSED")
  * when available.
  *
+ * Special handling for Qwen API errors: extracts error code from
+ * the error object structure (e.g. "invalid_request_error", "rate_limit_exceeded").
+ *
  * @returns A string identifying the error type.
  */
 export function getErrorType(error: unknown): string {
@@ -110,9 +113,13 @@ export function getErrorType(error: unknown): string {
   // .type is set by OpenAI SDK (e.g. "invalid_request_error")
   const sdkType = (error as { type?: string }).type;
 
+  // Qwen API error structure: { error: { code: string, message: string } }
+  const qwenErrorCode = (error as { error?: { code?: string } })?.error?.code;
+
   const baseType =
     constructorName ??
     sdkType ??
+    qwenErrorCode ??
     (error instanceof Error ? error.name : 'unknown');
 
   // For network errors, append the cause code (e.g. ECONNREFUSED, ETIMEDOUT)
