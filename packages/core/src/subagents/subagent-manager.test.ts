@@ -914,13 +914,14 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(5); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in), Explore (built-in)
+      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in), Explore (built-in), verify (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
         'Explore',
+        'verify',
       ]);
     });
 
@@ -953,6 +954,7 @@ System prompt 3`);
         'agent3',
         'Explore',
         'general-purpose',
+        'verify',
       ]);
     });
 
@@ -964,10 +966,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'verify',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -979,10 +982,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'verify',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
