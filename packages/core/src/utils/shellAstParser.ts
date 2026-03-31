@@ -18,6 +18,7 @@ import Parser from 'web-tree-sitter';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -571,6 +572,8 @@ const DOCKER_COMPOSE_SUBCOMMANDS = new Set([
 let parserInstance: Parser | null = null;
 let bashLanguage: Parser.Language | null = null;
 let initPromise: Promise<void> | null = null;
+/** Set to true permanently once WASM initialisation fails. */
+let parserInitFailed = false;
 
 /**
  * Resolve the path to a WASM file inside vendor/tree-sitter/.
@@ -695,6 +698,11 @@ function resolveWasmPathForModule(
  */
 export async function initParser(): Promise<void> {
   if (parserInstance) return;
+  // Once init has permanently failed, skip retrying to prevent hangs.
+  if (parserInitFailed)
+    throw new Error(
+      'tree-sitter WASM failed to initialise; using regex-based fallback',
+    );
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
@@ -707,7 +715,13 @@ export async function initParser(): Promise<void> {
       resolveWasmPath('tree-sitter-bash.wasm'),
     );
     parserInstance.setLanguage(bashLanguage);
-  })();
+  })().catch((err: unknown) => {
+    // Mark as permanently failed so callers can use the regex fallback
+    // instead of retrying (which could cause the agent to hang).
+    parserInitFailed = true;
+    initPromise = null;
+    throw err;
+  });
 
   return initPromise;
 }
@@ -1001,22 +1015,35 @@ export async function isShellCommandReadOnlyAST(
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
 
-  const tree = await parseShellCommand(command);
-  const root = tree.rootNode;
-
-  // Empty program
-  if (root.namedChildCount === 0) return false;
-
-  // Evaluate every top-level statement
-  for (const stmt of root.namedChildren) {
-    if (!evaluateStatementReadOnly(stmt)) {
-      tree.delete();
-      return false;
-    }
+  // If the WASM parser is permanently unavailable (e.g. WASM file missing
+  // after a symlinked install), fall back to the regex-based checker so the
+  // agent remains functional instead of hanging or crashing.
+  if (parserInitFailed) {
+    return isShellCommandReadOnly(command);
   }
 
-  tree.delete();
-  return true;
+  try {
+    const tree = await parseShellCommand(command);
+    const root = tree.rootNode;
+
+    // Empty program
+    if (root.namedChildCount === 0) return false;
+
+    // Evaluate every top-level statement
+    for (const stmt of root.namedChildren) {
+      if (!evaluateStatementReadOnly(stmt)) {
+        tree.delete();
+        return false;
+      }
+    }
+
+    tree.delete();
+    return true;
+  } catch {
+    // Unexpected runtime failure (e.g. WASM init error on first call) –
+    // fall back to the regex-based checker rather than propagating the error.
+    return isShellCommandReadOnly(command);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,6 +1219,22 @@ export function _resetParser(): void {
   }
   bashLanguage = null;
   initPromise = null;
+  parserInitFailed = false;
+}
+
+/**
+ * Force the parser into the "init failed" state. Only intended for testing
+ * fallback behaviour without actually breaking WASM loading.
+ * @internal
+ */
+export function _setParserFailedForTesting(): void {
+  parserInitFailed = true;
+  initPromise = null;
+  if (parserInstance) {
+    parserInstance.delete();
+    parserInstance = null;
+  }
+  bashLanguage = null;
 }
 
 /**
