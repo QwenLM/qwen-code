@@ -86,3 +86,76 @@ storybook-static
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
+
+# TypeScript co-located compilation artifacts (no outDir in root tsconfig)
+# Source .ts files are tracked; compiled .js/.d.ts/.js.map output is not.
+docs/**/*.js
+docs/**/*.d.ts
+docs/**/*.js.map
+integration-tests/**/*.js
+integration-tests/**/*.d.ts
+integration-tests/**/*.js.map
+scripts/**/*.js
+scripts/**/*.d.ts
+scripts/**/*.js.map
+
+# Package root-level compiled artifacts
+packages/cli/index.js
+packages/cli/index.d.ts
+packages/cli/index.js.map
+packages/cli/test-setup.js
+packages/cli/test-setup.d.ts
+packages/cli/test-setup.js.map
+packages/core/index.js
+packages/core/index.d.ts
+packages/core/index.js.map
+packages/core/test-setup.js
+packages/core/test-setup.d.ts
+packages/core/test-setup.js.map
+packages/test-utils/index.js
+packages/test-utils/index.d.ts
+packages/test-utils/index.js.map
+
+# Build config compiled artifacts (vite, esbuild, etc.)
+packages/webui/vite.config.js
+packages/webui/vite.config.d.ts
+packages/webui/vite.config.js.map
+
+# Package src/ co-located compiled artifacts
+packages/cli/src/**/*.js
+packages/cli/src/**/*.d.ts
+packages/cli/src/**/*.js.map
+# Re-include source-only locale files (no .ts counterparts)
+!packages/cli/src/i18n/locales/*.js
+packages/webui/src/**/*.js
+packages/webui/src/**/*.d.ts
+packages/webui/src/**/*.js.map
+packages/test-utils/src/**/*.js
+packages/test-utils/src/**/*.d.ts
+packages/test-utils/src/**/*.js.map
+packages/sdk-typescript/src/**/*.js
+packages/sdk-typescript/src/**/*.d.ts
+packages/sdk-typescript/src/**/*.js.map
+packages/sdk-typescript/test/**/*.js
+packages/sdk-typescript/test/**/*.d.ts
+packages/sdk-typescript/test/**/*.js.map
+packages/sdk-java/**/*.js
+packages/sdk-java/**/*.d.ts
+packages/sdk-java/**/*.js.map
+packages/web-templates/src/**/*.js
+packages/web-templates/src/**/*.d.ts
+packages/web-templates/src/**/*.js.map
+
+# vitest/build config compiled artifacts (across all packages)
+packages/*/vitest.config.js
+packages/*/vitest.config.d.ts
+packages/*/vitest.config.js.map
+vitest.config.js
+vitest.config.d.ts
+vitest.config.js.map
+
+# JS test snapshots produced by running compiled output (vs .ts.snap from source)
+packages/*/src/**/__snapshots__/*.js.snap
+
+# protoLabs Studio workspace (local agent state, not source)
+.automaker/

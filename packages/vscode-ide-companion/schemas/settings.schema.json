@@ -358,6 +358,32 @@
               "default": true
             }
           }
+        },
+        "memoryConsolidation": {
+          "description": "Automatic consolidation of QWEN.md memory files on session end. Three gates (time, session count, lock) prevent unnecessary work.",
+          "type": "object",
+          "properties": {
+            "minSessionsBetween": {
+              "description": "Minimum number of sessions that must pass before consolidation runs.",
+              "type": "number",
+              "default": 5
+            },
+            "minHoursBetween": {
+              "description": "Minimum hours that must pass since the last consolidation.",
+              "type": "number",
+              "default": 24
+            },
+            "maxMemoryLines": {
+              "description": "Maximum number of lines a memory file can have before triggering consolidation.",
+              "type": "number",
+              "default": 200
+            },
+            "scope": {
+              "description": "Which memory files to consolidate: \"global\", \"project\", or \"both\".",
+              "type": "string",
+              "default": "both"
+            }
+          }
         }
       }
     },

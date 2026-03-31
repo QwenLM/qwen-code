@@ -30,9 +30,21 @@ vi.mock('./gcp-exporters.js');
 
 describe('Telemetry SDK', () => {
   let mockConfig: Config;
+  // Save and clear Langfuse env vars so host environment doesn't affect assertions
+  const LANGFUSE_VARS = [
+    'LANGFUSE_PUBLIC_KEY',
+    'LANGFUSE_SECRET_KEY',
+    'LANGFUSE_BASE_URL',
+  ] as const;
+  const savedLangfuseEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Clear Langfuse keys to prevent host env from leaking into telemetry tests
+    for (const key of LANGFUSE_VARS) {
+      savedLangfuseEnv[key] = process.env[key];
+      delete process.env[key];
+    }
     mockConfig = {
       getTelemetryEnabled: () => true,
       getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
@@ -47,6 +59,14 @@ describe('Telemetry SDK', () => {
 
   afterEach(async () => {
     await shutdownTelemetry();
+    // Restore Langfuse env vars
+    for (const key of LANGFUSE_VARS) {
+      if (savedLangfuseEnv[key] !== undefined) {
+        process.env[key] = savedLangfuseEnv[key];
+      } else {
+        delete process.env[key];
+      }
+    }
   });
 
   it('should use gRPC exporters when protocol is grpc', () => {

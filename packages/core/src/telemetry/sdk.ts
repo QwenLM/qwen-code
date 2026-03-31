@@ -44,6 +44,27 @@ diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.INFO);
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
 
+function buildLangfuseSpanProcessor(): BatchSpanProcessor | null {
+  const publicKey = process.env['LANGFUSE_PUBLIC_KEY'];
+  const secretKey = process.env['LANGFUSE_SECRET_KEY'];
+  const baseUrl =
+    process.env['LANGFUSE_BASE_URL'] ?? 'https://cloud.langfuse.com';
+
+  if (!publicKey || !secretKey) {
+    return null;
+  }
+
+  const credentials = Buffer.from(`${publicKey}:${secretKey}`).toString(
+    'base64',
+  );
+  const exporter = new OTLPTraceExporterHttp({
+    url: `${baseUrl}/api/public/otel/v1/traces`,
+    headers: { Authorization: `Basic ${credentials}` },
+  });
+
+  return new BatchSpanProcessor(exporter);
+}
+
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
 }
@@ -74,7 +95,11 @@ function parseOtlpEndpoint(
 }
 
 export function initializeTelemetry(config: Config): void {
-  if (telemetryInitialized || !config.getTelemetryEnabled()) {
+  const langfuseProcessor = buildLangfuseSpanProcessor();
+  if (
+    telemetryInitialized ||
+    (!config.getTelemetryEnabled() && !langfuseProcessor)
+  ) {
     return;
   }
 
@@ -151,9 +176,17 @@ export function initializeTelemetry(config: Config): void {
     });
   }
 
+  const spanProcessors: BatchSpanProcessor[] = [
+    new BatchSpanProcessor(spanExporter),
+  ];
+  if (langfuseProcessor) {
+    spanProcessors.push(langfuseProcessor);
+    debugLogger.debug('Langfuse span processor enabled.');
+  }
+
   sdk = new NodeSDK({
     resource,
-    spanProcessors: [new BatchSpanProcessor(spanExporter)],
+    spanProcessors,
     logRecordProcessors: [new BatchLogRecordProcessor(logExporter)],
     metricReader,
     instrumentations: [new HttpInstrumentation()],

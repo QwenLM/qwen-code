@@ -9,11 +9,16 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
+import { trace, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
 import type { ErrorHandler, RequestContext } from './errorHandler.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const tracer = trace.getTracer('qwen-code.openai-pipeline', '1.0.0');
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -140,6 +145,22 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        // Log raw delta for debugging (visible in ~/.qwen/debug/latest)
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta) {
+          debugLogger.debug(
+            'chunk delta:',
+            JSON.stringify({
+              content: delta.content ?? null,
+              reasoning_content:
+                (delta as Record<string, unknown>)['reasoning_content'] ?? null,
+              reasoning:
+                (delta as Record<string, unknown>)['reasoning'] ?? null,
+              finish_reason: chunk.choices?.[0]?.finish_reason ?? null,
+            }),
+          );
+        }
+
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,
@@ -214,6 +235,26 @@ export class ContentGenerationPipeline {
 
       // Stage 2e: Stream completed successfully
       context.duration = Date.now() - context.startTime;
+      // Cast through unknown to avoid TypeScript narrowing-to-never after the
+      // conditional yield above; the variable is still live and mutable at this point.
+       
+      const lastResponse =
+        pendingFinishResponse as unknown as GenerateContentResponse | null;
+      debugLogger.info(
+        'stream completed:',
+        JSON.stringify({
+          model: context.model,
+          duration_ms: context.duration,
+          prompt_tokens: lastResponse?.usageMetadata?.promptTokenCount ?? null,
+          completion_tokens:
+            lastResponse?.usageMetadata?.candidatesTokenCount ?? null,
+          thinking_tokens:
+            lastResponse?.usageMetadata?.thoughtsTokenCount ?? null,
+          total_tokens: lastResponse?.usageMetadata?.totalTokenCount ?? null,
+          cached_tokens:
+            lastResponse?.usageMetadata?.cachedContentTokenCount ?? null,
+        }),
+      );
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
@@ -453,6 +494,17 @@ export class ContentGenerationPipeline {
       effectiveModel,
     );
 
+    const span = tracer.startSpan(`gen_ai chat ${effectiveModel}`, {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        'gen_ai.system': 'openai',
+        'gen_ai.operation.name': 'chat',
+        'gen_ai.request.model': effectiveModel,
+        'llm.streaming': isStreaming,
+        user_prompt_id: userPromptId,
+      },
+    });
+
     try {
       const openaiRequest = await this.buildRequest(
         request,
@@ -464,10 +516,15 @@ export class ContentGenerationPipeline {
       const result = await executor(openaiRequest, context);
 
       context.duration = Date.now() - context.startTime;
+      span.setAttributes({ 'llm.duration_ms': context.duration });
+      span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
       // Use shared error handling logic
       return await this.handleError(error, context, request);
+    } finally {
+      span.end();
     }
   }
 
