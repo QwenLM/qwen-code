@@ -362,7 +362,6 @@ ${(function () {
       '..',
       'skills',
       'bundled',
-      'superpowers',
       'using-superpowers',
       'SKILL.md',
     );
