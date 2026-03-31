@@ -1677,6 +1677,11 @@ export default {
   // Context Usage
   // ============================================================================
   'Context Usage': '上下文使用情况',
+  '% used': '% 已用',
+  '% context used': '% 上下文已用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    '上下文超出限制！请使用 /compress 或 /clear 来减少上下文。',
+  'Use /compress or /clear': '使用 /compress 或 /clear',
   'Context window': '上下文窗口',
   Used: '已用',
   Free: '空闲',

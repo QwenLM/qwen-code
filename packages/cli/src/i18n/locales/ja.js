@@ -1314,6 +1314,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'コンテキスト使用量',
+  '% used': '% 使用',
+  '% context used': '% コンテキスト使用',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
+  'Use /compress or /clear': '/compress または /clear を使用',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
