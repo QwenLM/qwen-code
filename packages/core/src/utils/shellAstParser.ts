@@ -578,9 +578,93 @@ let initPromise: Promise<void> | null = null;
  *   - Source (src/utils/*.ts): 2 levels up to package root
  *   - Transpiled (dist/src/utils/*.js): 3 levels up
  *   - Bundle (dist/cli.js): vendor at same level (0 levels)
+ *
+ * For the bundle scenario the vendor directory must be located next to
+ * the cli.js bundle file.  The challenge is that `import.meta.url` may
+ * point to a symlink (e.g. `/usr/bin/qwen`) rather than the real file
+ * (`/usr/lib/node_modules/@qwen-code/qwen-code/cli.js`), and whether
+ * Node.js automatically resolves symlinks for `import.meta.url` depends
+ * on the version and OS.  We therefore probe several candidate directories
+ * and return the first path where the vendor file actually exists.
  */
 function resolveWasmPath(filename: string): string {
-  return resolveWasmPathForModule(filename, __filename_);
+  const rawPath = fileURLToPath(import.meta.url);
+
+  // Source / transpiled case: vendor is at a fixed relative depth.
+  if (rawPath.includes(path.join('src', 'utils'))) {
+    const levelsUp = rawPath.endsWith('.ts') ? 2 : 3;
+    return path.join(
+      path.dirname(rawPath),
+      ...Array<string>(levelsUp).fill('..'),
+      'vendor',
+      'tree-sitter',
+      filename,
+    );
+  }
+
+  // Bundle case: probe candidate directories so that symlinked installations
+  // and non-standard installs (e.g. direct binary copy) are handled robustly.
+  const candidateDirs = getWasmCandidateDirs(rawPath);
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, 'vendor', 'tree-sitter', filename);
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Fallback: first candidate (caller will receive ENOENT if file is missing).
+  return path.join(
+    candidateDirs[0] ?? path.dirname(rawPath),
+    'vendor',
+    'tree-sitter',
+    filename,
+  );
+}
+
+/**
+ * Return an ordered, deduplicated list of directories where the bundled
+ * vendor directory might live.  We try multiple sources because:
+ *
+ *  1. `import.meta.url` may already be the real path (Node.js 18+ resolves
+ *     symlinks for the entry module on most platforms).
+ *  2. On some Linux configurations the symlink is NOT resolved, so we
+ *     additionally try `fs.realpathSync` on the raw path.
+ *  3. `process.argv[1]` is the path Node.js was actually invoked with and
+ *     can differ from `import.meta.url` in certain execution environments.
+ */
+function getWasmCandidateDirs(rawModulePath: string): string[] {
+  const unique = new Set<string>();
+  const add = (p: string | null | undefined) => {
+    if (p) unique.add(p);
+  };
+
+  // Candidate 1: directory of import.meta.url as-is.
+  add(path.dirname(rawModulePath));
+
+  // Candidate 2: realpath of import.meta.url (resolves symlinks when
+  // Node.js has not already done so).
+  try {
+    const real = fs.realpathSync(rawModulePath);
+    if (typeof real === 'string') add(path.dirname(real));
+  } catch {
+    /* ignore */
+  }
+
+  // Candidate 3 & 4: same two approaches but using process.argv[1], which
+  // may point to the real file even when import.meta.url does not.
+  if (process.argv[1]) {
+    add(path.dirname(process.argv[1]));
+    try {
+      const real = fs.realpathSync(process.argv[1]);
+      if (typeof real === 'string') add(path.dirname(real));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return [...unique];
 }
 
 function resolveWasmPathForModule(
