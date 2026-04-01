@@ -107,7 +107,7 @@ export interface SettingsSchema {
 
 /**
  * Common items schema for hook definitions.
- * Used by both UserPromptSubmit and Stop hooks.
+ * Used by all hook event types in the hooks configuration.
  */
 const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
   type: 'object',
@@ -185,6 +185,18 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, MCPServerConfig>,
     description: 'Configuration for MCP servers.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
+  // Channels configuration (Telegram, Discord, etc.)
+  channels: {
+    type: 'object',
+    label: 'Channels',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, Record<string, unknown>>,
+    description: 'Configuration for messaging channels.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
@@ -1404,38 +1416,15 @@ const SETTINGS_SCHEMA = {
     },
   },
 
-  hooksConfig: {
-    type: 'object',
-    label: 'Hooks Config',
+  disableAllHooks: {
+    type: 'boolean',
+    label: 'Disable All Hooks',
     category: 'Advanced',
-    requiresRestart: false,
-    default: {},
+    requiresRestart: true, // Future enhancement: consider supporting mid-session toggle for better UX
+    default: false,
     description:
-      'Hook configurations for intercepting and customizing agent behavior.',
+      'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
     showInDialog: false,
-    properties: {
-      enabled: {
-        type: 'boolean',
-        label: 'Enable Hooks',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: true,
-        description:
-          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
-        showInDialog: false,
-      },
-      disabled: {
-        type: 'array',
-        label: 'Disabled Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [] as string[],
-        description:
-          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
   },
 
   hooks: {
@@ -1481,6 +1470,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when notifications are sent.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreToolUse: {
         type: 'array',
@@ -1491,6 +1481,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUse: {
         type: 'array',
@@ -1501,6 +1492,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute after successful tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUseFailure: {
         type: 'array',
@@ -1511,6 +1503,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when tool execution fails. ',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionStart: {
         type: 'array',
@@ -1521,6 +1514,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a new session starts or resumes.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionEnd: {
         type: 'array',
@@ -1531,6 +1525,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a session ends.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreCompact: {
         type: 'array',
@@ -1541,6 +1536,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before conversation compaction.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStart: {
         type: 'array',
@@ -1552,6 +1548,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a subagent (Task tool call) is started.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStop: {
         type: 'array',
@@ -1563,6 +1560,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute right before a subagent (Task tool call) concludes its response.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PermissionRequest: {
         type: 'array',
@@ -1574,6 +1572,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a permission dialog is displayed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
     },
   },
@@ -1584,9 +1583,20 @@ const SETTINGS_SCHEMA = {
     category: 'Experimental',
     requiresRestart: true,
     default: {},
-    description: 'Setting to enable experimental features',
+    description: 'Settings to enable experimental features.',
     showInDialog: false,
-    properties: {},
+    properties: {
+      cron: {
+        type: 'boolean',
+        label: 'Enable Cron/Loop Tools',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+    },
   },
 } as const satisfies SettingsSchema;
 

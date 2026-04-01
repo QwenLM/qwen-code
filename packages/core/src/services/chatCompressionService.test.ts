@@ -100,6 +100,173 @@ describe('findCompressSplitPoint', () => {
     ];
     expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
   });
+
+  it('should compress everything when last message is a functionResponse', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix this bug' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'readFile', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'readFile',
+              response: { result: 'file content' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'writeFile', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'writeFile',
+              response: { result: 'ok' },
+            },
+          },
+        ],
+      },
+    ];
+    // Last message is functionResponse -> safe to compress everything
+    expect(findCompressSplitPoint(history, 0.7)).toBe(5);
+  });
+
+  it('should return primary split point when tool completions have no subsequent regular user message', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix this' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read1',
+              response: { result: 'a'.repeat(1000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read2', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read2',
+              response: { result: 'b'.repeat(1000) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'write1', args: {} } }],
+      },
+    ];
+    // Only one non-functionResponse user message (index 0) -> lastSplitPoint=0
+    // Last message has functionCall -> can't compress everything
+    // historyToKeep must start with a regular user message, so split at 0
+    // (compress nothing) is the only valid option.
+    expect(findCompressSplitPoint(history, 0.7)).toBe(0);
+  });
+
+  it('should prefer primary split point when tool completions yield no valid user-starting split', () => {
+    const longContent = 'a'.repeat(10000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Fix bug A' }] },
+      { role: 'model', parts: [{ text: 'OK' }] },
+      { role: 'user', parts: [{ text: 'Fix bug B' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read1',
+              response: { result: longContent },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read2', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read2',
+              response: { result: longContent },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'write1', args: {} } }],
+      },
+    ];
+    // Primary split points at 0 and 2 (regular user messages before the bulky tool outputs)
+    // Last message has functionCall -> can't compress everything
+    // Should return lastSplitPoint=2 (last valid primary split point)
+    expect(findCompressSplitPoint(history, 0.7)).toBe(2);
+  });
+
+  it('should still prefer primary split point when it is better', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'resp1' }] },
+      {
+        role: 'user',
+        parts: [{ text: 'msg2 with some substantial content here' }],
+      },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'tool1', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'tool1',
+              response: { result: 'short' },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'resp3' }] },
+      { role: 'user', parts: [{ text: 'msg4' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'tool2', args: {} } }],
+      },
+    ];
+    // Primary split points: 0, 2, 5, 7
+    // Last message has functionCall -> can't compress everything
+    // At 0.99 fraction, lastSplitPoint should be 7
+    expect(findCompressSplitPoint(history, 0.99)).toBe(7);
+  });
 });
 
 describe('ChatCompressionService', () => {
@@ -126,6 +293,7 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
       }),
@@ -239,6 +407,47 @@ describe('ChatCompressionService', () => {
     expect(tokenLimit).not.toHaveBeenCalled();
   });
 
+  it('should return NOOP when historyToCompress is below MIN_COMPRESSION_FRACTION of total', async () => {
+    // Construct a history where the split point lands on the 2nd regular user
+    // message (index 2), but indices 0-1 are tiny relative to the huge content
+    // at index 2. historyToCompress = [0,1] will be << 5% of totalCharCount.
+    const hugeContent = 'x'.repeat(100000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'hello' }] },
+      { role: 'model', parts: [{ text: 'world' }] },
+      // Huge user message pushes the cumulative well past the split threshold
+      { role: 'user', parts: [{ text: hugeContent }] },
+      // Pending functionCall prevents returning contents.length,
+      // so the fallback split at index 2 is used
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'process', args: {} } }],
+      },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateContent = vi.fn();
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    // force=true bypasses the token threshold gate so we exercise the 5% guard
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      true,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(result.newHistory).toBeNull();
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+  });
+
   it('should compress if over token threshold', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
@@ -290,6 +499,9 @@ describe('ChatCompressionService', () => {
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
       SessionStartSource.Compact,
       mockModel,
+      'default',
+      undefined,
+      undefined,
     );
   });
 
@@ -337,6 +549,9 @@ describe('ChatCompressionService', () => {
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
       SessionStartSource.Compact,
       mockModel,
+      'default',
+      undefined,
+      undefined,
     );
   });
 
@@ -650,6 +865,7 @@ describe('ChatCompressionService', () => {
       expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Manual,
         '',
+        undefined,
       );
     });
 
@@ -699,6 +915,7 @@ describe('ChatCompressionService', () => {
       expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Auto,
         '',
+        undefined,
       );
     });
 
@@ -923,6 +1140,151 @@ describe('ChatCompressionService', () => {
       expect(result.newHistory).not.toBeNull();
       // mockFirePreCompactEvent should not be called since hookSystem is null
       expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('orphaned trailing funcCall handling', () => {
+    it('should compress everything when force=true and last message is an orphaned funcCall', async () => {
+      // Issue #2647: tool-heavy conversation interrupted/crashed while a tool
+      // was still running. The funcCall will never get a response since the agent
+      // is idle. Manual /compress strips the orphaned funcCall, then compresses
+      // the remaining history normally.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Fix all TypeScript errors.' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'glob', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'glob',
+                response: { result: 'files...' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'readFile', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'readFile',
+                response: { result: 'code...' },
+              },
+            },
+          ],
+        },
+        // orphaned funcCall — agent was interrupted before getting a response
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'editFile', args: {} } }],
+        },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          { content: { parts: [{ text: 'Summary of all work done' }] } },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1150,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        true, // force=true (manual /compress)
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Should compress successfully — orphaned funcCall is stripped first, then
+      // normal compression runs on the remaining history, historyToKeep is empty
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.newHistory).not.toBeNull();
+      // Reconstructed history: [User(summary), Model("Got it...")] — valid structure
+      expect(result.newHistory).toHaveLength(2);
+      expect(result.newHistory![0].role).toBe('user');
+      expect(result.newHistory![1].role).toBe('model');
+      // The orphaned funcCall is stripped before compression, so only the first 5
+      // messages are sent, plus the compression instruction (+1) = history.length total.
+      const callArg = mockGenerateContent.mock.calls[0][0];
+      expect(callArg.contents.length).toBe(history.length); // (history.length - 1) messages + 1 instruction
+    });
+
+    it('should NOT compress orphaned funcCall when force=false (auto-compress)', async () => {
+      // Auto-compress fires BEFORE the matching funcResponse is sent back to the
+      // model. Compressing the funcCall away would orphan the upcoming funcResponse
+      // and cause an API error. So force=false must NOT take this path.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Fix all TypeScript errors.' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'glob', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'glob',
+                response: { result: 'files...' },
+              },
+            },
+          ],
+        },
+        // Pending funcCall: tool is currently executing, funcResponse is coming
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'readFile', args: {} } }],
+        },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      // Use a token count above threshold to ensure auto-compress isn't skipped
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn();
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false, // force=false (auto-compress)
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Must return NOOP — compressing would orphan the upcoming funcResponse
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(result.newHistory).toBeNull();
+      expect(mockGenerateContent).not.toHaveBeenCalled();
     });
   });
 });

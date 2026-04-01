@@ -62,6 +62,17 @@ export const isSlashCommand = (query: string): boolean => {
   return true;
 };
 
+const BTW_COMMAND_RE = /^[/?]btw(?:\s|$)/;
+
+/**
+ * Checks if a query is a /btw side-question invocation.
+ * Accepts both "/btw" and "?btw" prefixes.
+ */
+export const isBtwCommand = (query: string): boolean => {
+  const trimmed = query.trim();
+  return trimmed.length > 0 && BTW_COMMAND_RE.test(trimmed);
+};
+
 const debugLogger = createDebugLogger('COMMAND_UTILS');
 
 // Copies a string snippet to the clipboard for different platforms

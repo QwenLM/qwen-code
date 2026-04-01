@@ -76,6 +76,8 @@ export class WebViewProvider {
         this.pendingAskUserQuestionResolve = null;
         this.pendingAskUserQuestionRequest = null;
       }
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
     this.messageHandler = new MessageHandler(
@@ -206,6 +208,25 @@ export class WebViewProvider {
       });
     });
 
+    // Handle auto-reconnect failure: show VS Code notification with retry button
+    this.agentManager.onAutoReconnectFailed = (errorMessage: string) => {
+      vscode.window
+        .showWarningMessage(errorMessage, 'Retry Connection')
+        .then((selection) => {
+          if (selection === 'Retry Connection') {
+            this.doInitializeAgentConnection({ autoAuthenticate: true });
+          }
+        });
+
+      // Notify webview that connection was lost
+      this.sendMessageToWebView({
+        type: 'agentConnectionError',
+        data: {
+          message: errorMessage,
+        },
+      });
+    };
+
     // Setup end-turn handler from ACP stopReason notifications
     this.agentManager.onEndTurn((reason) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere
@@ -258,25 +279,6 @@ export class WebViewProvider {
 
     this.agentManager.onPermissionRequest(
       async (request: RequestPermissionRequest) => {
-        // Auto-approve in auto/yolo mode (no UI, no diff)
-        if (this.isAutoMode()) {
-          const options = request.options || [];
-          const pick = (substr: string) =>
-            options.find((o) =>
-              (o.optionId || '').toLowerCase().includes(substr),
-            )?.optionId;
-          const pickByKind = (k: string) =>
-            options.find((o) => (o.kind || '').toLowerCase().includes(k))
-              ?.optionId;
-          const optionId =
-            pick('allow_once') ||
-            pickByKind('allow') ||
-            pick('proceed') ||
-            options[0]?.optionId ||
-            'allow_once';
-          return optionId;
-        }
-
         // Send permission request to WebView
         this.sendMessageToWebView({
           type: 'permissionRequest',
@@ -599,6 +601,8 @@ export class WebViewProvider {
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
       this.attachedWebview = null;
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
 
@@ -902,9 +906,19 @@ export class WebViewProvider {
       } catch (_error) {
         const errorMsg = getErrorMessage(_error);
         console.error('[WebViewProvider] Agent connection error:', _error);
-        vscode.window.showWarningMessage(
-          `Failed to connect to Qwen CLI: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
-        );
+
+        // Show warning with a "Retry Connection" action button
+        vscode.window
+          .showWarningMessage(
+            `Failed to connect to Qwen CLI: ${errorMsg}`,
+            'Retry Connection',
+          )
+          .then((selection) => {
+            if (selection === 'Retry Connection') {
+              this.doInitializeAgentConnection({ autoAuthenticate: true });
+            }
+          });
+
         // Fallback to empty conversation
         await this.initializeEmptyConversation();
 

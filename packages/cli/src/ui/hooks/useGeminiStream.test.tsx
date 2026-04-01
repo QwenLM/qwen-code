@@ -204,6 +204,8 @@ describe('useGeminiStream', () => {
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
       getArenaAgentClient: vi.fn(() => null),
+      isCronEnabled: vi.fn(() => false),
+      getCronScheduler: vi.fn(() => null),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -834,7 +836,7 @@ describe('useGeminiStream', () => {
 
       // Wait for the first part of the response
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Call cancelOngoingRequest directly
@@ -983,7 +985,7 @@ describe('useGeminiStream', () => {
       });
 
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Cancel the request
@@ -2709,6 +2711,109 @@ describe('useGeminiStream', () => {
   });
 
   describe('Concurrent Execution Prevention', () => {
+    it('should allow /btw slash commands while a main response is in progress', async () => {
+      let resolveFirstCall!: () => void;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      const firstStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'First call content',
+        };
+        await firstCallPromise;
+      })();
+
+      mockSendMessageStream.mockImplementation(() => firstStream);
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/btw quick side question',
+        );
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
+    it('should keep the main request cancellable after submitting /btw in parallel', async () => {
+      let resolveFirstCall!: () => void;
+      let mainAbortSignal: AbortSignal | undefined;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      mockSendMessageStream.mockImplementation((_query, signal) => {
+        mainAbortSignal = signal;
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'First call content',
+          };
+          await firstCallPromise;
+        })();
+      });
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mainAbortSignal).toBeDefined();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        act(() => {
+          result.current.cancelOngoingRequest();
+        });
+
+        expect(mainAbortSignal?.aborted).toBe(true);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
     it('should prevent concurrent submitQuery calls', async () => {
       let resolveFirstCall!: () => void;
       let resolveSecondCall!: () => void;
@@ -3120,6 +3225,289 @@ describe('useGeminiStream', () => {
       // Then verify loop detection confirmation request was set
       await waitFor(() => {
         expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
+      });
+    });
+  });
+
+  describe('UserPromptSubmitBlocked Event', () => {
+    it('should handle UserPromptSubmitBlocked event and add blocked history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Hook blocked due to security policy',
+              originalPrompt: 'This is the original user prompt',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('This is the original user prompt');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Hook blocked due to security policy',
+            originalPrompt: 'This is the original user prompt',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding UserPromptSubmitBlocked event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Partial response before block',
+          };
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Security violation detected',
+              originalPrompt: 'Execute system command',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Execute system command');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Partial response before block',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify blocked event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Security violation detected',
+            originalPrompt: 'Execute system command',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('StopHookLoop Event', () => {
+    it('should handle StopHookLoop event and add stop hook loop history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 3,
+              reasons: [
+                'Reason 1: Continue analysis',
+                'Reason 2: More details needed',
+                'Reason 3: Incomplete response',
+              ],
+              stopHookCount: 3,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with stop hooks');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 3,
+            reasons: [
+              'Reason 1: Continue analysis',
+              'Reason 2: More details needed',
+              'Reason 3: Incomplete response',
+            ],
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Initial response before loop',
+          };
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 5,
+              reasons: ['Hook reason 1', 'Hook reason 2'],
+              stopHookCount: 2,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('query triggering stop hooks');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Initial response before loop',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify stop hook loop event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 5,
+            reasons: ['Hook reason 1', 'Hook reason 2'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should handle single iteration StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 1,
+              reasons: ['Single hook execution'],
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('single iteration query');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 1,
+            reasons: ['Single hook execution'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('HookSystemMessage Event', () => {
+    it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: '🔄 Ralph iteration 3 | No completion promise set',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with hook system message');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: '🔄 Ralph iteration 3 | No completion promise set',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should display HookSystemMessage after content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Here is the response',
+          };
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: 'Stop hook feedback message',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'query with response and hook message',
+        );
+      });
+
+      // Verify content was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Here is the response',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify hook system message was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: 'Stop hook feedback message',
+          }),
+          expect.any(Number),
+        );
       });
     });
   });

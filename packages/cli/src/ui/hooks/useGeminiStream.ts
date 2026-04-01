@@ -49,7 +49,11 @@ import type {
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
-import { isAtCommand, isSlashCommand } from '../utils/commandUtils.js';
+import {
+  isAtCommand,
+  isBtwCommand,
+  isSlashCommand,
+} from '../utils/commandUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
@@ -968,6 +972,53 @@ export const useGeminiStream = (
     });
   }, [handleLoopDetectionConfirmation]);
 
+  const handleUserPromptSubmitBlockedEvent = useCallback(
+    (
+      value: { reason: string; originalPrompt: string },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'user_prompt_submit_blocked',
+          reason: value.reason,
+          originalPrompt: value.originalPrompt,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
+  const handleStopHookLoopEvent = useCallback(
+    (
+      value: {
+        iterationCount: number;
+        reasons: string[];
+        stopHookCount: number;
+      },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: value.iterationCount,
+          reasons: value.reasons,
+          stopHookCount: value.stopHookCount,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
   const processGeminiStreamEvents = useCallback(
     async (
       stream: AsyncIterable<GeminiEvent>,
@@ -1049,13 +1100,23 @@ export const useGeminiStream = (
             }
             break;
           case ServerGeminiEventType.HookSystemMessage:
-            // Display system message from hooks (e.g., Ralph Loop iteration info)
-            // This is handled as a content event to show in the UI
-            geminiMessageBuffer = handleContentEvent(
-              event.value + '\n',
-              geminiMessageBuffer,
+            // Display system message from Stop hooks with "Stop says:" prefix
+            addItem(
+              {
+                type: 'stop_hook_system_message',
+                message: event.value,
+              } as HistoryItemWithoutId,
               userMessageTimestamp,
             );
+            break;
+          case ServerGeminiEventType.UserPromptSubmitBlocked:
+            handleUserPromptSubmitBlockedEvent(
+              event.value,
+              userMessageTimestamp,
+            );
+            break;
+          case ServerGeminiEventType.StopHookLoop:
+            handleStopHookLoopEvent(event.value, userMessageTimestamp);
             break;
           default: {
             // enforces exhaustive switch-case
@@ -1085,6 +1146,9 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
+      handleUserPromptSubmitBlockedEvent,
+      handleStopHookLoopEvent,
+      addItem,
     ],
   );
 
@@ -1094,11 +1158,18 @@ export const useGeminiStream = (
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
     ) => {
+      const allowConcurrentBtwDuringResponse =
+        submitType === SendMessageType.UserQuery &&
+        streamingState === StreamingState.Responding &&
+        typeof query === 'string' &&
+        isBtwCommand(query);
+
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
       if (
         isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult
+        submitType !== SendMessageType.ToolResult &&
+        !allowConcurrentBtwDuringResponse
       ) {
         return;
       }
@@ -1106,7 +1177,8 @@ export const useGeminiStream = (
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult
+        submitType !== SendMessageType.ToolResult &&
+        !allowConcurrentBtwDuringResponse
       )
         return;
 
@@ -1116,7 +1188,10 @@ export const useGeminiStream = (
       const userMessageTimestamp = Date.now();
 
       // Reset quota error flag when starting a new query (not a continuation)
-      if (submitType !== SendMessageType.ToolResult) {
+      if (
+        submitType !== SendMessageType.ToolResult &&
+        !allowConcurrentBtwDuringResponse
+      ) {
         setModelSwitchedFromQuotaError(false);
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
@@ -1130,9 +1205,15 @@ export const useGeminiStream = (
         }
       }
 
-      abortControllerRef.current = new AbortController();
-      const abortSignal = abortControllerRef.current.signal;
-      turnCancelledRef.current = false;
+      const abortController = new AbortController();
+      const abortSignal = abortController.signal;
+
+      // Keep the main stream's cancellation state intact while /btw is handled
+      // in parallel. The side-question can use its own local abort signal.
+      if (!allowConcurrentBtwDuringResponse) {
+        abortControllerRef.current = abortController;
+        turnCancelledRef.current = false;
+      }
 
       if (!prompt_id) {
         prompt_id = config.getSessionId() + '########' + getPromptCount();
@@ -1155,7 +1236,10 @@ export const useGeminiStream = (
         }
 
         // Check image format support for non-continuations
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
             addItem(
@@ -1172,7 +1256,10 @@ export const useGeminiStream = (
         lastPromptRef.current = finalQueryToSend;
         lastPromptErroredRef.current = false;
 
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
 
@@ -1616,6 +1703,38 @@ export const useGeminiStream = (
     geminiClient,
     storage,
   ]);
+
+  // ─── Cron scheduler integration ─────────────────────────
+  const cronQueueRef = useRef<string[]>([]);
+  const [cronTrigger, setCronTrigger] = useState(0);
+
+  // Start the scheduler on mount, stop on unmount
+  useEffect(() => {
+    if (!config.isCronEnabled()) return;
+    const scheduler = config.getCronScheduler();
+    scheduler.start((job: { prompt: string }) => {
+      cronQueueRef.current.push(job.prompt);
+      setCronTrigger((n) => n + 1);
+    });
+    return () => {
+      const summary = scheduler.getExitSummary();
+      scheduler.stop();
+      if (summary) {
+        process.stderr.write(summary + '\n');
+      }
+    };
+  }, [config]);
+
+  // When idle, drain the cron queue one prompt at a time
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      cronQueueRef.current.length > 0
+    ) {
+      const prompt = cronQueueRef.current.shift()!;
+      submitQuery(prompt, SendMessageType.Cron);
+    }
+  }, [streamingState, submitQuery, cronTrigger]);
 
   return {
     streamingState,

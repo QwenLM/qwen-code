@@ -81,6 +81,7 @@ export async function firePreToolUseHook(
   toolInput: Record<string, unknown>,
   toolUseId: string,
   permissionMode: string,
+  signal?: AbortSignal,
 ): Promise<PreToolUseHookResult> {
   if (!messageBus) {
     return { shouldProceed: true };
@@ -100,6 +101,7 @@ export async function firePreToolUseHook(
           tool_input: toolInput,
           tool_use_id: toolUseId,
         },
+        signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
@@ -178,6 +180,7 @@ export async function firePostToolUseHook(
   toolResponse: Record<string, unknown>,
   toolUseId: string,
   permissionMode: string,
+  signal?: AbortSignal,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -198,6 +201,7 @@ export async function firePostToolUseHook(
           tool_response: toolResponse,
           tool_use_id: toolUseId,
         },
+        signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
@@ -255,6 +259,7 @@ export async function firePostToolUseFailureHook(
   errorMessage: string,
   isInterrupt?: boolean,
   permissionMode?: string,
+  signal?: AbortSignal,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -276,6 +281,7 @@ export async function firePostToolUseFailureHook(
           error: errorMessage,
           is_interrupt: isInterrupt,
         },
+        signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
@@ -319,6 +325,7 @@ export async function fireNotificationHook(
   message: string,
   notificationType: NotificationType,
   title?: string,
+  signal?: AbortSignal,
 ): Promise<NotificationHookResult> {
   if (!messageBus) {
     return {};
@@ -337,6 +344,7 @@ export async function fireNotificationHook(
           notification_type: notificationType,
           title,
         },
+        signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );
@@ -390,6 +398,7 @@ export async function firePermissionRequestHook(
   toolInput: Record<string, unknown>,
   permissionMode: string,
   permissionSuggestions?: PermissionSuggestion[],
+  signal?: AbortSignal,
 ): Promise<PermissionRequestHookResult> {
   if (!messageBus) {
     return { hasDecision: false };
@@ -409,6 +418,7 @@ export async function firePermissionRequestHook(
           permission_mode: permissionMode,
           permission_suggestions: permissionSuggestions,
         },
+        signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
     );

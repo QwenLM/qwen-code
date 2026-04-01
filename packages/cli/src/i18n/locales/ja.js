@@ -380,6 +380,131 @@ export default {
   'List all configured hooks': '設定済みのフックをすべて表示する',
   'Enable a disabled hook': '無効なフックを有効にする',
   'Disable an active hook': '有効なフックを無効にする',
+  // Hooks - Dialog
+  Hooks: 'フック',
+  'Loading hooks...': 'フックを読み込んでいます...',
+  'Error loading hooks:': 'フックの読み込みエラー：',
+  'Press Escape to close': 'Escape キーで閉じる',
+  'No hook selected': 'フックが選択されていません',
+  // Hooks - List Step
+  'No hook events found.': 'フックイベントが見つかりません。',
+  '{{count}} hook configured': '{{count}} 件のフックが設定されています',
+  '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
+  // Hooks - Detail Step
+  'Exit codes:': '終了コード：',
+  'Configured hooks:': '設定済みのフック：',
+  'No hooks configured for this event.':
+    'このイベントにはフックが設定されていません。',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'フックを追加するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  'Enter to select · Esc to go back': 'Enter で選択 · Esc で戻る',
+  // Hooks - Config Detail Step
+  'Hook details': 'フック詳細',
+  'Event:': 'イベント：',
+  'Extension:': '拡張機能：',
+  'Desc:': '説明：',
+  'No hook config selected': 'フック設定が選択されていません',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'このフックを変更または削除するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'フック設定 - 無効',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'すべてのフックは現在無効です。{{count}} が実行されていません。',
+  '{{count}} configured hook': '{{count}} 個の設定されたフック',
+  '{{count}} configured hooks': '{{count}} 個の設定されたフック',
+  'When hooks are disabled:': 'フックが無効な場合：',
+  'No hook commands will execute': 'フックコマンドは実行されません',
+  'StatusLine will not be displayed': 'StatusLine は表示されません',
+  'Tool operations will proceed without hook validation':
+    'ツール操作はフック検証なしで続行されます',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'フックを再有効化するには、settings.json から "disableAllHooks" を削除するか、Qwen Code に尋ねてください。',
+  // Hooks - Source
+  Project: 'プロジェクト',
+  User: 'ユーザー',
+  System: 'システム',
+  Extension: '拡張機能',
+  'Local Settings': 'ローカル設定',
+  'User Settings': 'ユーザー設定',
+  'System Settings': 'システム設定',
+  Extensions: '拡張機能',
+  // Hooks - Status
+  '✓ Enabled': '✓ 有効',
+  '✗ Disabled': '✗ 無効',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'ツール実行前',
+  'After tool execution': 'ツール実行後',
+  'After tool execution fails': 'ツール実行失敗時',
+  'When notifications are sent': '通知送信時',
+  'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
+  'When a new session is started': '新しいセッションが開始された時',
+  'Right before Qwen Code concludes its response':
+    'Qwen Code が応答を終了する直前',
+  'When a subagent (Agent tool call) is started':
+    'サブエージェント（Agent ツール呼び出し）が開始された時',
+  'Right before a subagent concludes its response':
+    'サブエージェントが応答を終了する直前',
+  'Before conversation compaction': '会話圧縮前',
+  'When a session is ending': 'セッション終了時',
+  'When a permission dialog is displayed': '権限ダイアログ表示時',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'コマンドへの入力はツール呼び出し引数の JSON です。',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'コマンドへの入力は "inputs"（ツール呼び出し引数）と "response"（ツール呼び出し応答）フィールドを持つ JSON です。',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'コマンドへの入力は tool_name、tool_input、tool_use_id、error、error_type、is_interrupt、is_timeout を持つ JSON です。',
+  'Input to command is JSON with notification message and type.':
+    'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
+  'Input to command is JSON with original user prompt text.':
+    'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with session start source.':
+    'コマンドへの入力はセッション開始ソースを持つ JSON です。',
+  'Input to command is JSON with session end reason.':
+    'コマンドへの入力はセッション終了理由を持つ JSON です。',
+  'Input to command is JSON with agent_id and agent_type.':
+    'コマンドへの入力は agent_id と agent_type を持つ JSON です。',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'コマンドへの入力は agent_id、agent_type、agent_transcript_path を持つ JSON です。',
+  'Input to command is JSON with compaction details.':
+    'コマンドへの入力は圧縮詳細を持つ JSON です。',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'コマンドへの入力は tool_name、tool_input、tool_use_id を持つ JSON です。許可または拒否の決定を含む hookSpecificOutput を持つ JSON を出力します。',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr は表示されません',
+  'show stderr to model and continue conversation':
+    'stderr をモデルに表示し、会話を続ける',
+  'show stderr to user only': 'stderr をユーザーのみに表示',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout はトランスクリプトモードで表示 (ctrl+o)',
+  'show stderr to model immediately': 'stderr をモデルに即座に表示',
+  'show stderr to user only but continue with tool call':
+    'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
+  'block processing, erase original prompt, and show stderr to user only':
+    '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
+  'stdout shown to Qwen': 'stdout をモデルに表示',
+  'show stderr to user only (blocking errors ignored)':
+    'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
+  'command completes successfully': 'コマンドが正常に完了',
+  'stdout shown to subagent': 'stdout をサブエージェントに表示',
+  'show stderr to subagent and continue having it run':
+    'stderr をサブエージェントに表示し、実行を続ける',
+  'stdout appended as custom compact instructions':
+    'stdout をカスタム圧縮指示として追加',
+  'block compaction': '圧縮をブロック',
+  'show stderr to user only but continue with compaction':
+    'stderr をユーザーのみに表示し、圧縮を続ける',
+  'use hook decision if provided': '提供されている場合はフックの決定を使用',
+  // Hooks - Messages
+  'Config not loaded.': '設定が読み込まれていません。',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'フックが有効になっていません。この機能を使用するには設定でフックを有効にしてください。',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'フックが設定されていません。settings.json ファイルにフックを追加してください。',
+  'Configured Hooks ({{count}} total)': '設定済みのフック（合計 {{count}} 件）',
 
   // ============================================================================
   // Commands - Session Export
@@ -480,7 +605,6 @@ export default {
   '(Use Enter to select, Tab to change focus)':
     '(Enter で選択、Tab でフォーカス変更)',
   'Apply To': '適用先',
-  'User Settings': 'ユーザー設定',
   'Workspace Settings': 'ワークスペース設定',
   // Memory
   'Commands for interacting with memory.': 'メモリ操作のコマンド',
@@ -527,7 +651,6 @@ export default {
     '設定済みのMCPサーバーとツールを一覧表示',
   'No MCP servers configured.': 'MCPサーバーが設定されていません',
   'Restarts MCP servers.': 'MCPサーバーを再起動します',
-  'Config not loaded.': '設定が読み込まれていません',
   'Could not retrieve tool registry.': 'ツールレジストリを取得できませんでした',
   'No MCP servers configured with OAuth authentication.':
     'OAuth認証が設定されたMCPサーバーはありません',
@@ -712,7 +835,6 @@ export default {
   'No server selected': 'サーバーが選択されていません',
   '(disabled)': '(無効)',
   'Error:': 'エラー:',
-  Extension: '拡張機能',
   tool: 'ツール',
   tools: 'ツール',
   connected: '接続済み',
@@ -786,7 +908,10 @@ export default {
   "Allow execution of: '{{command}}'?": "'{{command}}' の実行を許可しますか?",
   'Yes, allow always ...': 'はい、常に許可...',
   'Always allow in this project': 'このプロジェクトで常に許可',
+  'Always allow {{action}} in this project':
+    'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
+  'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -1173,8 +1298,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Bailian Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    'ModelStudio Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
   Custom: 'カスタム',
   'More instructions about configuring `modelProviders` manually.':
     '`modelProviders`を手動で設定する方法の詳細はこちら。',

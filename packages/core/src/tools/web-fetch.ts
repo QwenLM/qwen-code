@@ -111,7 +111,11 @@ ${textContent}
 
       const result = await geminiClient.generateContent(
         [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {},
+        {
+          systemInstruction:
+            'Extract and summarize the requested information from the provided web content. ' +
+            'Be concise and accurate. Respond only with the requested information.',
+        },
         signal,
         this.config.getModel() || DEFAULT_QWEN_MODEL,
       );

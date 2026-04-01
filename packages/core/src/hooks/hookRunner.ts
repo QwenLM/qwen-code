@@ -46,13 +46,30 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 export class HookRunner {
   /**
    * Execute a single hook
+   * @param hookConfig Hook configuration
+   * @param eventName Event name
+   * @param input Hook input
+   * @param signal Optional AbortSignal to cancel hook execution
    */
   async executeHook(
     hookConfig: HookConfig,
     eventName: HookEventName,
     input: HookInput,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
+
+    // Check if already aborted before starting
+    if (signal?.aborted) {
+      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: new Error(`Hook execution cancelled (aborted): ${hookId}`),
+        duration: 0,
+      };
+    }
 
     try {
       return await this.executeCommandHook(
@@ -60,6 +77,7 @@ export class HookRunner {
         eventName,
         input,
         startTime,
+        signal,
       );
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -79,6 +97,7 @@ export class HookRunner {
 
   /**
    * Execute multiple hooks in parallel
+   * @param signal Optional AbortSignal to cancel hook execution
    */
   async executeHooksParallel(
     hookConfigs: HookConfig[],
@@ -86,10 +105,11 @@ export class HookRunner {
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input);
+      const result = await this.executeHook(config, eventName, input, signal);
       onHookEnd?.(config, result);
       return result;
     });
@@ -99,6 +119,7 @@ export class HookRunner {
 
   /**
    * Execute multiple hooks sequentially
+   * @param signal Optional AbortSignal to cancel hook execution
    */
   async executeHooksSequential(
     hookConfigs: HookConfig[],
@@ -106,14 +127,24 @@ export class HookRunner {
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult[]> {
     const results: HookExecutionResult[] = [];
     let currentInput = input;
 
     for (let i = 0; i < hookConfigs.length; i++) {
+      // Check if aborted before each hook
+      if (signal?.aborted) {
+        break;
+      }
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(config, eventName, currentInput);
+      const result = await this.executeHook(
+        config,
+        eventName,
+        currentInput,
+        signal,
+      );
       onHookEnd?.(config, result);
       results.push(result);
 
@@ -184,12 +215,18 @@ export class HookRunner {
 
   /**
    * Execute a command hook
+   * @param hookConfig Hook configuration
+   * @param eventName Event name
+   * @param input Hook input
+   * @param startTime Start time for duration calculation
+   * @param signal Optional AbortSignal to cancel hook execution
    */
   private async executeCommandHook(
     hookConfig: HookConfig,
     eventName: HookEventName,
     input: HookInput,
     startTime: number,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
 
@@ -212,6 +249,7 @@ export class HookRunner {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let aborted = false;
 
       const shellConfig = getShellConfiguration();
       const command = this.expandCommand(
@@ -239,18 +277,35 @@ export class HookRunner {
         },
       );
 
+      // Helper to kill child process
+      const killChild = () => {
+        if (!child.killed) {
+          child.kill('SIGTERM');
+          // Force kill after 2 seconds
+          setTimeout(() => {
+            if (!child.killed) {
+              child.kill('SIGKILL');
+            }
+          }, 2000);
+        }
+      };
+
       // Set up timeout
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGTERM');
-
-        // Force kill after 5 seconds
-        setTimeout(() => {
-          if (!child.killed) {
-            child.kill('SIGKILL');
-          }
-        }, 5000);
+        killChild();
       }, timeout);
+
+      // Set up abort handler
+      const abortHandler = () => {
+        aborted = true;
+        clearTimeout(timeoutHandle);
+        killChild();
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
 
       // Send input to stdin
       if (child.stdin) {
@@ -303,7 +358,24 @@ export class HookRunner {
       // Handle process exit
       child.on('close', (exitCode) => {
         clearTimeout(timeoutHandle);
+        // Clean up abort listener
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
         const duration = Date.now() - startTime;
+
+        if (aborted) {
+          resolve({
+            hookConfig,
+            eventName,
+            success: false,
+            error: new Error('Hook execution cancelled (aborted)'),
+            stdout,
+            stderr,
+            duration,
+          });
+          return;
+        }
 
         if (timedOut) {
           resolve({

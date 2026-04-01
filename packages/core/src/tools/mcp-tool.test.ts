@@ -736,7 +736,7 @@ describe('DiscoveredMCPTool', () => {
   });
 
   describe('getDefaultPermission and getConfirmationDetails', () => {
-    it('should return ask even if trust is true and folder is trusted (trust logic moved to PM)', async () => {
+    it('should return allow when trust is true', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -748,7 +748,7 @@ describe('DiscoveredMCPTool', () => {
         { isTrustedFolder: () => true } as any,
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      expect(await invocation.getDefaultPermission()).toBe('ask');
+      expect(await invocation.getDefaultPermission()).toBe('allow');
     });
 
     it('should return ask if not trusted', async () => {
@@ -808,7 +808,7 @@ describe('DiscoveredMCPTool', () => {
       isTrustedFolder: () => isTrusted,
     });
 
-    it('should return ask even if trust is true and folder is trusted (trust logic moved to PM)', async () => {
+    it('should return allow when trust is true and folder is trusted', async () => {
       const trustedTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
@@ -820,7 +820,7 @@ describe('DiscoveredMCPTool', () => {
         mockConfig(true) as any, // isTrustedFolder = true
       );
       const invocation = trustedTool.build({ param: 'mock' });
-      expect(await invocation.getDefaultPermission()).toBe('ask');
+      expect(await invocation.getDefaultPermission()).toBe('allow');
     });
 
     it('should return ask if trust is true but folder is not trusted', async () => {

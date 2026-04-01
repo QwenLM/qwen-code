@@ -34,6 +34,7 @@ import {
 import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -359,9 +360,10 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
-      getEnableHooks: vi.fn().mockReturnValue(false),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
         debug: vi.fn(),
@@ -2383,6 +2385,105 @@ Other open files:
         expect(client['sessionTurnCount']).toBe(turnCountBefore);
       });
     });
+
+    describe('hooks fast-path optimization', () => {
+      let mockChat: Partial<GeminiChat>;
+
+      beforeEach(() => {
+        vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        });
+
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
+
+        mockChat = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          stripThoughtsFromHistory: vi.fn(),
+        };
+        client['chat'] = mockChat as GeminiChat;
+      });
+
+      it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {
+        // Enable hooks and provide messageBus
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-1',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called because hasHooksForEvent returned false
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should skip messageBus.request for Stop when hasHooksForEvent returns false', async () => {
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-2',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called for Stop hook either
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should not skip hooks when hasHooksForEvent returns true', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-3',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request SHOULD be called for UserPromptSubmit
+        expect(mockMessageBus.request).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('generateContent', () => {
@@ -2438,6 +2539,55 @@ Other open files:
           contents,
         },
         'test-session-id',
+      );
+    });
+
+    it('should prefer the current prompt id context for stateless requests', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('btw-prompt-id', async () => {
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'btw-prompt-id',
+      );
+    });
+
+    it('should prefer an explicit prompt id override over the current context', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('context-prompt-id', async () => {
+        await (
+          client.generateContent as unknown as (
+            ...args: unknown[]
+          ) => Promise<GenerateContentResponse>
+        )(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+          'override-prompt-id',
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'override-prompt-id',
       );
     });
 

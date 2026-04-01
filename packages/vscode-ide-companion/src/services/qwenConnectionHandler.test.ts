@@ -30,6 +30,7 @@ describe('QwenConnectionHandler', () => {
     handler = new QwenConnectionHandler();
     mockConnection = {
       connect: vi.fn().mockResolvedValue(undefined),
+      connectWithRetry: vi.fn().mockResolvedValue(undefined),
       newSession: vi.fn().mockResolvedValue({ sessionId: 'test-session' }),
       authenticate: vi.fn().mockResolvedValue({}),
     } as unknown as AcpConnection;
@@ -52,9 +53,10 @@ describe('QwenConnectionHandler', () => {
 
       await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
 
-      expect(mockConnection.connect).toHaveBeenCalled();
-      const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
-        .mock.calls[0];
+      expect(mockConnection.connectWithRetry).toHaveBeenCalled();
+      const connectArgs = (
+        mockConnection.connectWithRetry as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
       expect(connectArgs[2]).toContain('--proxy');
       expect(connectArgs[2]).toContain('http://proxy.example.com:8080');
     });
@@ -74,9 +76,10 @@ describe('QwenConnectionHandler', () => {
 
       await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
 
-      expect(mockConnection.connect).toHaveBeenCalled();
-      const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
-        .mock.calls[0];
+      expect(mockConnection.connectWithRetry).toHaveBeenCalled();
+      const connectArgs = (
+        mockConnection.connectWithRetry as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
       expect(connectArgs[2]).toContain('--proxy');
       expect(connectArgs[2]).toContain('http://https-proxy.example.com:8080');
     });
@@ -96,8 +99,9 @@ describe('QwenConnectionHandler', () => {
 
       await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
 
-      const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
-        .mock.calls[0];
+      const connectArgs = (
+        mockConnection.connectWithRetry as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
       expect(connectArgs[2]).toContain('http://http-proxy.example.com:8080');
       expect(connectArgs[2]).not.toContain(
         'http://https-proxy.example.com:8080',
@@ -111,8 +115,9 @@ describe('QwenConnectionHandler', () => {
 
       await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
 
-      const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
-        .mock.calls[0];
+      const connectArgs = (
+        mockConnection.connectWithRetry as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
       expect(connectArgs[2]).not.toContain('--proxy');
     });
 
@@ -128,8 +133,9 @@ describe('QwenConnectionHandler', () => {
 
       await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
 
-      const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
-        .mock.calls[0];
+      const connectArgs = (
+        mockConnection.connectWithRetry as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
       expect(connectArgs[2]).not.toContain('--proxy');
     });
   });

@@ -1,19 +1,24 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.13.0",
+  "version": "0.13.2",
   "engines": {
     "node": ">=20.0.0"
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/channels/base",
+    "packages/channels/telegram",
+    "packages/channels/weixin",
+    "packages/channels/dingtalk",
+    "packages/channels/plugin-example"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.13.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.13.2"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -38,8 +43,10 @@
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
-    "test:integration:cli:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude '**/sdk-typescript/**'",
-    "test:integration:cli:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/sdk-typescript/**'",
+    "test:integration:cli:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests cli",
+    "test:integration:cli:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests cli",
+    "test:integration:interactive:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive",
+    "test:integration:interactive:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests interactive",
     "test:terminal-bench": "cross-env VERBOSE=true KEEP_OUTPUT=true vitest run --config ./vitest.terminal-bench.config.ts --root ./integration-tests",
     "test:terminal-bench:oracle": "cross-env VERBOSE=true KEEP_OUTPUT=true vitest run --config ./vitest.terminal-bench.config.ts --root ./integration-tests -t 'oracle'",
     "test:terminal-bench:qwen": "cross-env VERBOSE=true KEEP_OUTPUT=true vitest run --config ./vitest.terminal-bench.config.ts --root ./integration-tests -t 'qwen'",
@@ -84,6 +91,7 @@
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",
     "@vitest/eslint-plugin": "^1.3.4",
+    "@xterm/headless": "^5.5.0",
     "@xterm/xterm": "^6.0.0",
     "cross-env": "^7.0.3",
     "esbuild": "^0.25.0",
@@ -117,12 +125,12 @@
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {
-    "@lydell/node-pty": "1.1.0",
-    "@lydell/node-pty-darwin-arm64": "1.1.0",
-    "@lydell/node-pty-darwin-x64": "1.1.0",
-    "@lydell/node-pty-linux-x64": "1.1.0",
-    "@lydell/node-pty-win32-arm64": "1.1.0",
-    "@lydell/node-pty-win32-x64": "1.1.0"
+    "@lydell/node-pty": "1.2.0-beta.10",
+    "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

@@ -7,7 +7,7 @@
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
-import { HookAggregator } from './hookAggregator.js';
+import { HookAggregator, type AggregatedHookResult } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
@@ -22,6 +22,7 @@ import type {
   PreCompactTrigger,
   NotificationType,
   PermissionSuggestion,
+  HookEventName,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -87,11 +88,25 @@ export class HookSystem {
     return this.hookRegistry.getAllHooks();
   }
 
+  /**
+   * Check if there are any enabled hooks registered for a specific event.
+   * This is a fast-path check to avoid expensive MessageBus round-trips
+   * when no hooks are configured for a given event.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return (
+      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
+    );
+  }
+
   async fireUserPromptSubmitEvent(
     prompt: string,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
-    const result =
-      await this.hookEventHandler.fireUserPromptSubmitEvent(prompt);
+    const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
+      prompt,
+      signal,
+    );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
       : undefined;
@@ -100,14 +115,13 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
-  ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireStopEvent(
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      signal,
     );
-    return result.finalOutput
-      ? createHookOutput('Stop', result.finalOutput)
-      : undefined;
   }
 
   async fireSessionStartEvent(
@@ -115,12 +129,14 @@ export class HookSystem {
     model: string,
     permissionMode?: PermissionMode,
     agentType?: AgentType,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireSessionStartEvent(
       source,
       model,
       permissionMode,
       agentType,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('SessionStart', result.finalOutput)
@@ -129,8 +145,12 @@ export class HookSystem {
 
   async fireSessionEndEvent(
     reason: SessionEndReason,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireSessionEndEvent(reason);
+    const result = await this.hookEventHandler.fireSessionEndEvent(
+      reason,
+      signal,
+    );
     return result.finalOutput
       ? createHookOutput('SessionEnd', result.finalOutput)
       : undefined;
@@ -144,12 +164,14 @@ export class HookSystem {
     toolInput: Record<string, unknown>,
     toolUseId: string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePreToolUseEvent(
       toolName,
       toolInput,
       toolUseId,
       permissionMode,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('PreToolUse', result.finalOutput)
@@ -165,6 +187,7 @@ export class HookSystem {
     toolResponse: Record<string, unknown>,
     toolUseId: string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -172,6 +195,7 @@ export class HookSystem {
       toolResponse,
       toolUseId,
       permissionMode,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -188,6 +212,7 @@ export class HookSystem {
     errorMessage: string,
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -196,6 +221,7 @@ export class HookSystem {
       errorMessage,
       isInterrupt,
       permissionMode,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -208,10 +234,12 @@ export class HookSystem {
   async firePreCompactEvent(
     trigger: PreCompactTrigger,
     customInstructions: string = '',
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePreCompactEvent(
       trigger,
       customInstructions,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('PreCompact', result.finalOutput)
@@ -225,11 +253,13 @@ export class HookSystem {
     message: string,
     notificationType: NotificationType,
     title?: string,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireNotificationEvent(
       message,
       notificationType,
       title,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('Notification', result.finalOutput)
@@ -243,11 +273,13 @@ export class HookSystem {
     agentId: string,
     agentType: AgentType | string,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireSubagentStartEvent(
       agentId,
       agentType,
       permissionMode,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('SubagentStart', result.finalOutput)
@@ -264,6 +296,7 @@ export class HookSystem {
     lastAssistantMessage: string,
     stopHookActive: boolean,
     permissionMode: PermissionMode,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireSubagentStopEvent(
       agentId,
@@ -272,6 +305,7 @@ export class HookSystem {
       lastAssistantMessage,
       stopHookActive,
       permissionMode,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('SubagentStop', result.finalOutput)
@@ -286,12 +320,14 @@ export class HookSystem {
     toolInput: Record<string, unknown>,
     permissionMode: PermissionMode,
     permissionSuggestions?: PermissionSuggestion[],
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePermissionRequestEvent(
       toolName,
       toolInput,
       permissionMode,
       permissionSuggestions,
+      signal,
     );
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
