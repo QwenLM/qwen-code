@@ -660,6 +660,19 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    '所有 Hook 当前已禁用。您有 {{count}} 未运行。',
+  '{{count}} configured hook': '{{count}} 个已配置的 Hook',
+  '{{count}} configured hooks': '{{count}} 个已配置的 Hook',
+  'When hooks are disabled:': '当 Hook 被禁用时：',
+  'No hook commands will execute': '不会执行任何 Hook 命令',
+  'StatusLine will not be displayed': '不会显示状态栏',
+  'Tool operations will proceed without hook validation':
+    '工具操作将在没有 Hook 验证的情况下继续',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    '要重新启用 Hook，请从 settings.json 中删除 "disableAllHooks" 或询问 Qwen Code。',
   // Hooks - Source
   Project: '项目',
   User: '用户',

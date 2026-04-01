@@ -1009,7 +1009,7 @@ export class CoreToolScheduler {
             const messageBus = this.config.getMessageBus() as
               | MessageBus
               | undefined;
-            const hooksEnabled = this.config.getEnableHooks();
+            const hooksEnabled = !this.config.getDisableAllHooks();
 
             if (hooksEnabled && messageBus) {
               const permissionMode = String(this.config.getApprovalMode());
@@ -1326,7 +1326,7 @@ export class CoreToolScheduler {
 
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
-    const hooksEnabled = this.config.getEnableHooks();
+    const hooksEnabled = !this.config.getDisableAllHooks();
 
     // PreToolUse Hook
     if (hooksEnabled && messageBus) {

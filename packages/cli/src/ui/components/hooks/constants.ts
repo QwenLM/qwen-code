@@ -185,21 +185,10 @@ export function getTranslatedSourceDisplayMap(): Record<
 
 /**
  * List of hook events to display in the UI
+ * Automatically synced with HookEventName enum from core
  */
-export const DISPLAY_HOOK_EVENTS: HookEventName[] = [
-  HookEventName.Stop,
-  HookEventName.PreToolUse,
-  HookEventName.PostToolUse,
-  HookEventName.PostToolUseFailure,
-  HookEventName.Notification,
-  HookEventName.UserPromptSubmit,
-  HookEventName.SessionStart,
-  HookEventName.SessionEnd,
-  HookEventName.SubagentStart,
-  HookEventName.SubagentStop,
-  HookEventName.PreCompact,
-  HookEventName.PermissionRequest,
-];
+export const DISPLAY_HOOK_EVENTS: HookEventName[] =
+  Object.values(HookEventName);
 
 /**
  * Create empty hook event display info
