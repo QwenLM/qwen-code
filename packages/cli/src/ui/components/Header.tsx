@@ -137,7 +137,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Title line: >_ DataWorks DataAgent (v{version}) */}
         <Text>
           <Text bold color={theme.text.accent}>
-            &gt;_ DataWorks DataAgent (Power by Qwen Code)
+            &gt;_ DataWorks DataAgent (Powered by Qwen Code)
           </Text>
           <Text color={theme.text.accent}> (v{version})</Text>
         </Text>
