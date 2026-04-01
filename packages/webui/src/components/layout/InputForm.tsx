@@ -104,10 +104,10 @@ export interface InputFormProps {
   /** Key down callback */
   onKeyDown: (e: React.KeyboardEvent) => void;
   /** Submit callback. When explicitText is provided, submit that value instead of reading from input state. */
-  onSubmit: (
+  onSubmit(
     e: React.FormEvent | React.KeyboardEvent,
     explicitText?: string,
-  ) => void;
+  ): void;
   /** Cancel callback */
   onCancel: () => void;
   /** Toggle edit mode callback */

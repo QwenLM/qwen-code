@@ -45,7 +45,7 @@
     "build-storybook": "storybook build"
   },
   "peerDependencies": {
-    "@qwen-code/qwen-code-core": ">=0.13.0",
+    "@qwen-code/qwen-code-core": ">=0.13.1",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },

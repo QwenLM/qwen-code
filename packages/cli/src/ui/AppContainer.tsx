@@ -987,8 +987,8 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Limit history to avoid excessive cost on long conversations
-      const fullHistory = geminiClient.getHistory();
+      // Use curated history to avoid invalid/empty entries causing API errors
+      const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
       generatePromptSuggestion(config, conversationHistory, ac.signal)
