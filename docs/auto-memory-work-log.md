@@ -312,6 +312,52 @@ Completed
 
 ---
 
+## Part 11 - Background agent runner foundation
+
+### Start review
+
+- Overall plan now extends the background runtime from plain tasks to reusable headless agent orchestration.
+- Part 10 already proved the scheduler/drainer path with mechanical dream tasks, so the next slice can safely wrap `AgentHeadless` itself.
+- Scope for this part: add a shared `BackgroundAgentRunner` that binds task registry updates to `AgentEventEmitter`, but do not yet connect any memory workflow to it.
+
+### Goal
+
+- Add a reusable background agent runner on top of `AgentHeadless`
+- Map core agent events into background task registry progress and metadata
+- Reuse the shared background scheduler and drainer for lifecycle tracking
+- Add targeted tests for success and failure execution paths
+
+### Implemented
+
+- Added `packages/core/src/background/backgroundAgentRunner.ts`
+- Added `packages/core/src/background/backgroundAgentRunner.test.ts`
+- Exported background agent runner helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Background work can now wrap `AgentHeadless` execution inside the shared task runtime.
+- Core agent streaming/tool/usage events are mapped into task registry progress and metadata updates.
+- Background agent execution is tracked by the shared scheduler/drainer and returns a summarized completion result.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/background/backgroundAgentRunner.test.ts src/background/taskScheduler.test.ts src/agents/runtime/agent-headless.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/background/taskRegistry.test.ts src/background/taskDrainer.test.ts src/background/taskScheduler.test.ts src/background/backgroundAgentRunner.test.ts src/agents/runtime/agent-headless.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extractionPlanner.test.ts src/memory/extract.test.ts src/memory/extractModel.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally stops at runner infrastructure; memory extraction/dream agents remain for later phases.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review
