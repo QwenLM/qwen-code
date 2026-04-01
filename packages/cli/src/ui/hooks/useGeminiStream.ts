@@ -1236,7 +1236,10 @@ export const useGeminiStream = (
         }
 
         // Check image format support for non-continuations
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
             addItem(
@@ -1253,7 +1256,10 @@ export const useGeminiStream = (
         lastPromptRef.current = finalQueryToSend;
         lastPromptErroredRef.current = false;
 
-        if (submitType === SendMessageType.UserQuery) {
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron
+        ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
 
@@ -1697,6 +1703,38 @@ export const useGeminiStream = (
     geminiClient,
     storage,
   ]);
+
+  // ─── Cron scheduler integration ─────────────────────────
+  const cronQueueRef = useRef<string[]>([]);
+  const [cronTrigger, setCronTrigger] = useState(0);
+
+  // Start the scheduler on mount, stop on unmount
+  useEffect(() => {
+    if (!config.isCronEnabled()) return;
+    const scheduler = config.getCronScheduler();
+    scheduler.start((job: { prompt: string }) => {
+      cronQueueRef.current.push(job.prompt);
+      setCronTrigger((n) => n + 1);
+    });
+    return () => {
+      const summary = scheduler.getExitSummary();
+      scheduler.stop();
+      if (summary) {
+        process.stderr.write(summary + '\n');
+      }
+    };
+  }, [config]);
+
+  // When idle, drain the cron queue one prompt at a time
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      cronQueueRef.current.length > 0
+    ) {
+      const prompt = cronQueueRef.current.shift()!;
+      submitQuery(prompt, SendMessageType.Cron);
+    }
+  }, [streamingState, submitQuery, cronTrigger]);
 
   return {
     streamingState,

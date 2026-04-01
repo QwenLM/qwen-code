@@ -41,6 +41,7 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
@@ -63,6 +64,9 @@ import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { LspTool } from '../tools/lsp.js';
+import { CronCreateTool } from '../tools/cron-create.js';
+import { CronListTool } from '../tools/cron-list.js';
+import { CronDeleteTool } from '../tools/cron-delete.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -368,6 +372,7 @@ export interface ConfigParameters {
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  cronEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -530,6 +535,7 @@ export class Config {
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
+  private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
@@ -557,6 +563,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly cronEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -679,6 +686,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.cronEnabled = params.cronEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -1687,6 +1695,19 @@ export class Config {
     return this.geminiClient;
   }
 
+  getCronScheduler(): CronScheduler {
+    if (!this.cronScheduler) {
+      this.cronScheduler = new CronScheduler();
+    }
+    return this.cronScheduler;
+  }
+
+  isCronEnabled(): boolean {
+    // Cron is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    return this.cronEnabled;
+  }
+
   getEnableRecursiveFileSearch(): boolean {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
@@ -2202,6 +2223,13 @@ export class Config {
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
       await registerCoreTool(LspTool, this);
+    }
+
+    // Register cron tools unless disabled
+    if (this.isCronEnabled()) {
+      await registerCoreTool(CronCreateTool, this);
+      await registerCoreTool(CronListTool, this);
+      await registerCoreTool(CronDeleteTool, this);
     }
 
     if (!options?.skipDiscovery) {

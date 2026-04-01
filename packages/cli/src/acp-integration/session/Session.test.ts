@@ -75,6 +75,7 @@ describe('Session', () => {
       getTargetDir: vi.fn().mockReturnValue(process.cwd()),
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
+      isCronEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     mockClient = {

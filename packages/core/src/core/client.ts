@@ -92,6 +92,8 @@ export enum SendMessageType {
   ToolResult = 'toolResult',
   Retry = 'retry',
   Hook = 'hook',
+  /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
+  Cron = 'cron',
 }
 
 export interface SendMessageOptions {
@@ -472,6 +474,7 @@ export class GeminiClient {
     const messageBus = this.config.getMessageBus();
     if (
       messageType !== SendMessageType.Retry &&
+      messageType !== SendMessageType.Cron &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -516,7 +519,10 @@ export class GeminiClient {
       }
     }
 
-    if (messageType === SendMessageType.UserQuery) {
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron
+    ) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
 
@@ -614,7 +620,10 @@ export class GeminiClient {
 
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (messageType === SendMessageType.UserQuery) {
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron
+    ) {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
