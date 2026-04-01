@@ -13,6 +13,7 @@ export default {
   'token-caching': 'Token Caching',
   sandbox: 'Sandboxing',
   language: 'i18n',
+  channels: 'Channels',
   hooks: 'Hooks',
   'scheduled-tasks': 'Scheduled Tasks',
 };

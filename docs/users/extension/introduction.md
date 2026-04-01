@@ -184,6 +184,12 @@ The `qwen-extension.json` file contains the configuration for the extension. The
       "command": "node my-server.js"
     }
   },
+  "channels": {
+    "my-platform": {
+      "entry": "dist/index.js",
+      "displayName": "My Platform Channel"
+    }
+  },
   "contextFileName": "QWEN.md",
   "commands": "commands",
   "skills": "skills",
@@ -203,6 +209,7 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `version`: The version of the extension.
 - `mcpServers`: A map of MCP servers to configure. The key is the name of the server, and the value is the server configuration. These servers will be loaded on startup just like MCP servers configured in a [`settings.json` file](./cli/configuration.md). If both an extension and a `settings.json` file configure an MCP server with the same name, the server defined in the `settings.json` file takes precedence.
   - Note that all MCP server configuration options are supported except for `trust`.
+- `channels`: A map of custom channel adapters. The key is the channel type name, and the value has an `entry` (path to compiled JS entry point) and optional `displayName`. The entry point must export a `plugin` object conforming to the `ChannelPlugin` interface. See [Channel Plugins](../features/channels/plugins) for a full guide.
 - `contextFileName`: The name of the file that contains the context for the extension. This will be used to load the context from the extension directory. If this property is not used but a `QWEN.md` file is present in your extension directory, then that file will be loaded.
 - `commands`: The directory containing custom commands (default: `commands`). Commands are `.md` files that define prompts.
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.

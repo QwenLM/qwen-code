@@ -88,6 +88,15 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+export interface ExtensionChannelConfig {
+  /** Relative path to JS entry point (must export `plugin: ChannelPlugin`) */
+  entry: string;
+  /** Human-readable name for CLI output */
+  displayName?: string;
+  /** Extra config fields required beyond the shared ChannelConfig fields */
+  requiredConfigFields?: string[];
+}
+
 export interface Extension {
   id: string;
   name: string;
@@ -105,6 +114,7 @@ export interface Extension {
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionConfig {
@@ -118,6 +128,7 @@ export interface ExtensionConfig {
   agents?: string | string[];
   settings?: ExtensionSetting[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionUpdateInfo {
@@ -649,6 +660,10 @@ export class ExtensionManager {
             filterMcpConfig(value),
           ]),
         );
+      }
+
+      if (config.channels) {
+        extension.channels = config.channels;
       }
 
       extension.commands = await loadCommandsFromDir(

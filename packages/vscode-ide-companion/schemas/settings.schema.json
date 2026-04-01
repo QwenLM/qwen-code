@@ -8,6 +8,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "channels": {
+      "description": "Configuration for messaging channels.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
       "type": "object",
