@@ -9,11 +9,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { getAutoMemoryTopicPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
+
+vi.mock('./extractionAgentPlanner.js', () => ({
+  planAutoMemoryExtractionPatchesByAgent: vi.fn(),
+}));
 
 vi.mock('./extractionPlanner.js', () => ({
   planAutoMemoryExtractionPatchesByModel: vi.fn(),
@@ -43,6 +48,9 @@ describe('auto-memory extraction with model planner', () => {
   });
 
   it('applies model-planned extraction patches when config is provided', async () => {
+    vi.mocked(planAutoMemoryExtractionPatchesByAgent).mockRejectedValue(
+      new Error('agent planner failed'),
+    );
     vi.mocked(planAutoMemoryExtractionPatchesByModel).mockResolvedValue([
       {
         topic: 'reference',
@@ -78,6 +86,9 @@ describe('auto-memory extraction with model planner', () => {
   });
 
   it('falls back to heuristic extraction when the model planner fails', async () => {
+    vi.mocked(planAutoMemoryExtractionPatchesByAgent).mockRejectedValue(
+      new Error('agent planner failed'),
+    );
     vi.mocked(planAutoMemoryExtractionPatchesByModel).mockRejectedValue(
       new Error('planner failed'),
     );

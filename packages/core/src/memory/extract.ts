@@ -12,6 +12,7 @@ import { partToString } from '../utils/partUtils.js';
 import { getAutoMemoryExtractCursorPath, getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
+import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import {
   type AutoMemoryExtractCursor,
@@ -234,6 +235,20 @@ async function planAutoMemoryExtractPatches(params: {
 
   if (params.config) {
     try {
+        const plannedPatches = await planAutoMemoryExtractionPatchesByAgent(
+          params.config,
+          params.projectRoot,
+          params.messages,
+        );
+        return dedupeExtractPatches(plannedPatches);
+      } catch (error) {
+        debugLogger.warn(
+          'Agent-driven auto-memory extraction failed; falling back to side-query extraction.',
+          error,
+        );
+      }
+
+      try {
       const plannedPatches = await planAutoMemoryExtractionPatchesByModel(
         params.config,
         params.projectRoot,

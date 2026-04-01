@@ -358,6 +358,55 @@ Completed
 
 ---
 
+## Part 12 - Extraction agent consumer stage A
+
+### Start review
+
+- Overall plan now moves from shared background agent infrastructure to the first memory consumer that actually uses it.
+- Part 11 already delivered `BackgroundAgentRunner`, so the next slice should connect managed extraction to it while preserving all existing fallbacks.
+- Scope for this part: add an extraction agent planner that emits structured patches via `BackgroundAgentRunner`, then fall back to side-query planner and finally heuristic extraction when needed.
+
+### Goal
+
+- Add a managed extraction agent planner on top of `BackgroundAgentRunner`
+- Parse and validate structured extraction patches from agent output
+- Integrate the agent planner into the extraction fallback chain ahead of side-query/heuristic planning
+- Add targeted tests for planner behavior and extraction integration
+
+### Implemented
+
+- Added `packages/core/src/memory/extractionAgentPlanner.ts`
+- Added `packages/core/src/memory/extractionAgentPlanner.test.ts`
+- Added `packages/core/src/memory/extractAgent.test.ts`
+- Updated `packages/core/src/memory/extract.ts` to try extraction-agent planning before side-query and heuristic fallback
+- Updated `packages/core/src/memory/extractModel.test.ts` to cover the new fallback order
+- Exported extraction agent planner helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed extraction can now first invoke a tool-free background extraction agent through `BackgroundAgentRunner` and parse structured JSON patch output.
+- If agent output is invalid or the agent fails, extraction safely falls back to the existing side-query planner and then to heuristic extraction.
+- Host-side cursoring, patch application, and dedupe remain unchanged.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/extractionAgentPlanner.test.ts src/memory/extractAgent.test.ts src/memory/extractModel.test.ts src/memory/extract.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/background/taskRegistry.test.ts src/background/taskDrainer.test.ts src/background/taskScheduler.test.ts src/background/backgroundAgentRunner.test.ts src/agents/runtime/agent-headless.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extractionAgentPlanner.test.ts src/memory/extractionPlanner.test.ts src/memory/extract.test.ts src/memory/extractAgent.test.ts src/memory/extractModel.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally keeps the extraction agent tool-free and JSON-only; constrained tool policies come later.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review

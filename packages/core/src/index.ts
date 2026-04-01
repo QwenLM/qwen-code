@@ -125,6 +125,7 @@ export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/prompt.js';
 export * from './memory/state.js';
+export * from './memory/extractionAgentPlanner.js';
 export * from './memory/extractionPlanner.js';
 export * from './memory/extract.js';
 export * from './memory/dream.js';
