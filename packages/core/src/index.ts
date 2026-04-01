@@ -111,6 +111,14 @@ export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 
 // ============================================================================
+// Managed Auto-Memory
+// ============================================================================
+
+export * from './memory/types.js';
+export * from './memory/paths.js';
+export * from './memory/store.js';
+
+// ============================================================================
 // IDE Support
 // ============================================================================
 

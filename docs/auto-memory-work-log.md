@@ -59,3 +59,59 @@ Implement a Claude Code parity memory system in Qwen Code incrementally:
 ### Status
 
 Completed
+
+---
+
+## Part 1 - Managed auto-memory storage scaffold
+
+### Start review
+
+- Overall plan remains unchanged: build the full memory system incrementally, starting with the lowest-risk storage layer.
+- Current repo baseline after Part 0: clean branch plus work log commit.
+- Scope for this part: add independent managed auto-memory storage primitives without touching main prompt flow or existing `/memory` behavior.
+
+### Goal
+
+- Add managed auto-memory types
+- Add managed auto-memory path helpers
+- Add scaffold creation for `.qwen/memory/`
+- Add tests for path stability, scaffold creation, idempotency, and read behavior
+
+### Implemented
+
+- Added `packages/core/src/memory/types.ts`
+- Added `packages/core/src/memory/paths.ts`
+- Added `packages/core/src/memory/store.ts`
+- Added `packages/core/src/memory/store.test.ts`
+- Exported the new modules from `packages/core/src/index.ts`
+
+### Functional verification
+
+- `ensureAutoMemoryScaffold(projectRoot)` now creates:
+  - `.qwen/memory/`
+  - `MEMORY.md`
+  - `meta.json`
+  - `extract-cursor.json`
+  - `user.md`
+  - `feedback.md`
+  - `project.md`
+  - `reference.md`
+- Re-running scaffold creation preserves existing files.
+
+### Test verification
+
+- Passed targeted test:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/store.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/utils/memoryDiscovery.test.ts src/core/prompts.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally does not integrate auto-memory into prompt assembly yet.
+- Existing `QWEN.md` / `AGENTS.md` behavior remains unchanged.
+
+### Status
+
+Completed
