@@ -94,20 +94,24 @@ export class LspServerManager {
   /**
    * Ensure tsserver has at least one file open so navto/navtree requests succeed.
    * Sets warmedUp flag only after successful warm-up to allow retry on failure.
+   *
+   * @param handle - The LSP server handle
+   * @param force - Force re-warmup even if already warmed up
+   * @returns The URI of the file opened during warmup, or undefined if no file was opened
    */
   async warmupTypescriptServer(
     handle: LspServerHandle,
     force = false,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!handle.connection || !this.isTypescriptServer(handle)) {
-      return;
+      return undefined;
     }
     if (handle.warmedUp && !force) {
-      return;
+      return undefined;
     }
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
-      return;
+      return undefined;
     }
 
     const uri = pathToFileURL(tsFile).toString();
@@ -138,9 +142,11 @@ export class LspServerManager {
       );
       // Only mark as warmed up after successful completion
       handle.warmedUp = true;
+      return uri;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
       debugLogger.warn('TypeScript server warm-up failed:', error);
+      return undefined;
     }
   }
 
@@ -559,40 +565,22 @@ export class LspServerManager {
       });
     }
 
-    // Warm up TypeScript server by opening a workspace file so it can create a project.
-    if (
-      config.name.includes('typescript') ||
-      (config.command?.includes('typescript') ?? false)
-    ) {
-      try {
-        const tsFile = this.findFirstTypescriptFile();
-        if (tsFile) {
-          const uri = pathToFileURL(tsFile).toString();
-          const languageId = tsFile.endsWith('.tsx')
-            ? 'typescriptreact'
-            : 'typescript';
-          const text = fs.readFileSync(tsFile, 'utf-8');
-          connection.connection.send({
-            jsonrpc: '2.0',
-            method: 'textDocument/didOpen',
-            params: {
-              textDocument: {
-                uri,
-                languageId,
-                version: 1,
-                text,
-              },
-            },
-          });
-        }
-      } catch (error) {
-        debugLogger.warn('TypeScript LSP warm-up failed:', error);
-      }
-    }
+    // Note: TypeScript server warm-up is handled by warmupTypescriptServer()
+    // which is called before every LSP request. This avoids duplicate
+    // textDocument/didOpen notifications that aren't tracked in openedDocuments.
   }
 
   /**
-   * Check if command exists
+   * Check if command exists by spawning it with --version.
+   * Only returns false when the spawn itself fails (e.g. ENOENT).
+   * A timeout means the process started successfully (command exists)
+   * but didn't exit in time — common for servers like jdtls that
+   * don't support --version and start their full runtime instead.
+   *
+   * @param command - The command to check
+   * @param env - Optional environment variables
+   * @param cwd - Optional working directory
+   * @returns true if the command can be spawned, false if not found
    */
   private async commandExists(
     command: string,
@@ -616,16 +604,20 @@ export class LspServerManager {
         if (settled) {
           return;
         }
-        // If command exists, it typically returns 0 or other non-error codes
-        // Some commands with --version may return non-0, but won't throw error
-        resolve(code !== 127); // 127 typically indicates command not found
+        settled = true;
+        // 127 typically indicates command not found in shell
+        resolve(code !== 127);
       });
 
-      // Set timeout to avoid long waits
+      // If the process is still running after the timeout, it means the
+      // command was found and started — it just didn't finish in time.
+      // This is expected for servers like jdtls that don't support --version.
       setTimeout(() => {
-        settled = true;
-        child.kill();
-        resolve(false);
+        if (!settled) {
+          settled = true;
+          child.kill();
+          resolve(true);
+        }
       }, DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS);
     });
   }

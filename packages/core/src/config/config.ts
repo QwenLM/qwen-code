@@ -108,6 +108,7 @@ import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -747,8 +748,9 @@ export class Config {
       initializeTelemetry(this);
     }
 
-    if (this.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
+    const proxyUrl = this.getProxy();
+    if (proxyUrl) {
+      setGlobalDispatcher(new ProxyAgent(proxyUrl));
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -810,19 +812,33 @@ export class Config {
               return;
             }
 
+            // Check if request was aborted
+            if (request.signal?.aborted) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook execution cancelled (aborted)'),
+              } as HookExecutionResponse);
+              return;
+            }
+
             // Execute the appropriate hook based on eventName
             let result;
             const input = request.input || {};
+            const signal = request.signal;
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
+                  signal,
                 );
                 break;
               case 'Stop':
                 result = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
+                  signal,
                 );
                 break;
               case 'PreToolUse': {
@@ -832,6 +848,7 @@ export class Config {
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode | undefined) ??
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               }
@@ -842,6 +859,7 @@ export class Config {
                   (input['tool_response'] as Record<string, unknown>) || {},
                   (input['tool_use_id'] as string) || '',
                   (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
                 );
                 break;
               case 'PostToolUseFailure':
@@ -852,6 +870,7 @@ export class Config {
                   (input['error'] as string) || '',
                   input['is_interrupt'] as boolean | undefined,
                   (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
                 );
                 break;
               case 'Notification':
@@ -860,6 +879,7 @@ export class Config {
                   (input['notification_type'] as NotificationType) ||
                     'permission_prompt',
                   (input['title'] as string) || undefined,
+                  signal,
                 );
                 break;
               case 'PermissionRequest':
@@ -871,6 +891,7 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
                 );
                 break;
               case 'SubagentStart':
@@ -879,6 +900,7 @@ export class Config {
                   (input['agent_type'] as string) || '',
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               case 'SubagentStop':
@@ -890,6 +912,7 @@ export class Config {
                   (input['stop_hook_active'] as boolean) || false,
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
+                  signal,
                 );
                 break;
               default:
@@ -1696,7 +1719,7 @@ export class Config {
   }
 
   getProxy(): string | undefined {
-    return this.proxy;
+    return normalizeProxyUrl(this.proxy);
   }
 
   getWorkingDir(): string {
@@ -1746,6 +1769,15 @@ export class Config {
    */
   getHookSystem(): HookSystem | undefined {
     return this.hookSystem;
+  }
+
+  /**
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
   }
 
   /**
@@ -2090,7 +2122,7 @@ export class Config {
 
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
+    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
       const toolName = ToolClass?.Name as ToolName | undefined;
       const className = ToolClass?.name ?? 'UnknownTool';
 
@@ -2106,7 +2138,7 @@ export class Config {
       // PermissionManager handles both the coreTools allowlist (registry-level)
       // and deny rules (runtime-level) in a single check.
       const pmEnabled = this.permissionManager
-        ? this.permissionManager.isToolEnabled(toolName)
+        ? await this.permissionManager.isToolEnabled(toolName)
         : true; // Should never reach here after initialize(), but safe default.
 
       if (pmEnabled) {
@@ -2122,10 +2154,10 @@ export class Config {
       }
     };
 
-    registerCoreTool(AgentTool, this);
-    registerCoreTool(SkillTool, this);
-    registerCoreTool(LSTool, this);
-    registerCoreTool(ReadFileTool, this);
+    await registerCoreTool(AgentTool, this);
+    await registerCoreTool(SkillTool, this);
+    await registerCoreTool(LSTool, this);
+    await registerCoreTool(ReadFileTool, this);
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
@@ -2136,7 +2168,7 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        registerCoreTool(RipGrepTool, this);
+        await registerCoreTool(RipGrepTool, this);
       } else {
         // Log for telemetry
         logRipgrepFallback(
@@ -2147,30 +2179,30 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        registerCoreTool(GrepTool, this);
+        await registerCoreTool(GrepTool, this);
       }
     } else {
-      registerCoreTool(GrepTool, this);
+      await registerCoreTool(GrepTool, this);
     }
 
-    registerCoreTool(GlobTool, this);
-    registerCoreTool(EditTool, this);
-    registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ShellTool, this);
-    registerCoreTool(MemoryTool);
-    registerCoreTool(TodoWriteTool, this);
-    registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    await registerCoreTool(GlobTool, this);
+    await registerCoreTool(EditTool, this);
+    await registerCoreTool(WriteFileTool, this);
+    await registerCoreTool(ShellTool, this);
+    await registerCoreTool(MemoryTool);
+    await registerCoreTool(TodoWriteTool, this);
+    await registerCoreTool(AskUserQuestionTool, this);
+    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
+    await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      registerCoreTool(WebSearchTool, this);
+      await registerCoreTool(WebSearchTool, this);
     }
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
-      registerCoreTool(LspTool, this);
+      await registerCoreTool(LspTool, this);
     }
 
     if (!options?.skipDiscovery) {

@@ -107,7 +107,7 @@ export interface SettingsSchema {
 
 /**
  * Common items schema for hook definitions.
- * Used by both UserPromptSubmit and Stop hooks.
+ * Used by all hook event types in the hooks configuration.
  */
 const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
   type: 'object',
@@ -1481,6 +1481,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when notifications are sent.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreToolUse: {
         type: 'array',
@@ -1491,6 +1492,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUse: {
         type: 'array',
@@ -1501,6 +1503,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute after successful tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUseFailure: {
         type: 'array',
@@ -1511,6 +1514,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when tool execution fails. ',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionStart: {
         type: 'array',
@@ -1521,6 +1525,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a new session starts or resumes.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionEnd: {
         type: 'array',
@@ -1531,6 +1536,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a session ends.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreCompact: {
         type: 'array',
@@ -1541,6 +1547,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before conversation compaction.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStart: {
         type: 'array',
@@ -1552,6 +1559,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a subagent (Task tool call) is started.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStop: {
         type: 'array',
@@ -1563,6 +1571,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute right before a subagent (Task tool call) concludes its response.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PermissionRequest: {
         type: 'array',
@@ -1574,6 +1583,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a permission dialog is displayed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
     },
   },

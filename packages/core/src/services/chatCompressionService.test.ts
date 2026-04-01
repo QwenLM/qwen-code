@@ -126,6 +126,7 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
       }),
@@ -290,6 +291,9 @@ describe('ChatCompressionService', () => {
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
       SessionStartSource.Compact,
       mockModel,
+      'default',
+      undefined,
+      undefined,
     );
   });
 
@@ -337,6 +341,9 @@ describe('ChatCompressionService', () => {
     expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
       SessionStartSource.Compact,
       mockModel,
+      'default',
+      undefined,
+      undefined,
     );
   });
 
@@ -650,6 +657,7 @@ describe('ChatCompressionService', () => {
       expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Manual,
         '',
+        undefined,
       );
     });
 
@@ -699,6 +707,7 @@ describe('ChatCompressionService', () => {
       expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Auto,
         '',
+        undefined,
       );
     });
 

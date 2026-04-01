@@ -62,7 +62,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
     if (generatorConfig.enableOpenAILogging) {
-      this.openaiLogger = new OpenAILogger(generatorConfig.openAILoggingDir);
+      this.openaiLogger = new OpenAILogger(
+        generatorConfig.openAILoggingDir,
+        config.getWorkingDir(),
+      );
       this.schemaCompliance = generatorConfig.schemaCompliance;
     }
   }

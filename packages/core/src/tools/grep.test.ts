@@ -357,6 +357,75 @@ describe('GrepTool', () => {
       // Clean up
       await fs.rm(secondDir, { recursive: true, force: true });
     });
+
+    it('should convert relative paths to absolute when searching multiple directories', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(
+        path.join(secondDir, 'extra.txt'),
+        'world content in second dir',
+      );
+
+      const multiDirConfig = {
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+        getFileExclusions: () => ({
+          getGlobExcludes: () => [],
+        }),
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
+      } as unknown as Config;
+
+      const multiDirGrepTool = new GrepTool(multiDirConfig);
+
+      const params: GrepToolParams = { pattern: 'world' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should show "across N workspace directories"
+      expect(result.llmContent).toContain('across 2 workspace directories');
+
+      // File paths from the second directory should be absolute
+      expect(result.llmContent).toContain(
+        `File: ${path.resolve(secondDir, 'extra.txt')}`,
+      );
+
+      // File paths from the first directory should also be absolute
+      expect(result.llmContent).toContain(
+        `File: ${path.resolve(tempRootDir, 'fileA.txt')}`,
+      );
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should deduplicate matches from overlapping workspace directories', async () => {
+      // This tests the fix: when workspace dirs overlap (parent + child),
+      // the same file should appear only once in the results.
+      const subDir = path.join(tempRootDir, 'sub');
+
+      const multiDirConfig = {
+        getTargetDir: () => tempRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [subDir]),
+        getFileExclusions: () => ({
+          getGlobExcludes: () => [],
+        }),
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
+      } as unknown as Config;
+
+      const multiDirGrepTool = new GrepTool(multiDirConfig);
+      // 'sub dir' exists only in sub/fileC.txt — a file that lives under both
+      // tempRootDir and subDir, so without deduplication it would appear twice.
+      const params: GrepToolParams = { pattern: 'sub dir' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // sub/fileC.txt (or its absolute path equivalent) should appear only once
+      expect(result.llmContent).toContain('Found 1 match');
+    });
   });
 
   describe('getDescription', () => {

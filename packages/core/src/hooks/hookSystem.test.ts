@@ -65,6 +65,7 @@ describe('HookSystem', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       setHookEnabled: vi.fn(),
       getAllHooks: vi.fn().mockReturnValue([]),
+      getHooksForEvent: vi.fn().mockReturnValue([]),
     } as unknown as HookRegistry;
 
     mockHookRunner = {
@@ -186,6 +187,52 @@ describe('HookSystem', () => {
     });
   });
 
+  describe('hasHooksForEvent', () => {
+    it('should return false when no hooks are registered for the event', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      expect(hookSystem.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
+
+    it('should return true when hooks are registered for the event', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        {
+          config: {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.Stop,
+          enabled: true,
+        },
+      ]);
+
+      expect(hookSystem.hasHooksForEvent('Stop')).toBe(true);
+    });
+
+    it('should check the correct event name for UserPromptSubmit', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('UserPromptSubmit');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptSubmit',
+      );
+    });
+
+    it('should check the correct event name for SessionEnd', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('SessionEnd');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'SessionEnd',
+      );
+    });
+  });
+
   describe('fireStopEvent', () => {
     it('should fire stop event and return output', async () => {
       const mockResult = {
@@ -207,6 +254,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.fireStopEvent).toHaveBeenCalledWith(
         true,
         'last message',
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -228,6 +276,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.fireStopEvent).toHaveBeenCalledWith(
         false,
         '',
+        undefined,
       );
     });
 
@@ -269,7 +318,7 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('test prompt');
+      ).toHaveBeenCalledWith('test prompt', undefined);
       expect(result).toBeDefined();
     });
 
@@ -291,7 +340,7 @@ describe('HookSystem', () => {
 
       expect(
         mockHookEventHandler.fireUserPromptSubmitEvent,
-      ).toHaveBeenCalledWith('my custom prompt');
+      ).toHaveBeenCalledWith('my custom prompt', undefined);
     });
 
     it('should return undefined when no final output', async () => {
@@ -382,6 +431,7 @@ describe('HookSystem', () => {
         'gpt-4',
         undefined,
         undefined,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -412,6 +462,7 @@ describe('HookSystem', () => {
         'claude-3',
         PermissionMode.AutoEdit,
         AgentType.Custom,
+        undefined,
       );
     });
 
@@ -458,6 +509,7 @@ describe('HookSystem', () => {
 
       expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -480,6 +532,7 @@ describe('HookSystem', () => {
 
       expect(mockHookEventHandler.fireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Other,
+        undefined,
       );
     });
 
@@ -531,6 +584,7 @@ describe('HookSystem', () => {
         { command: 'ls' },
         'toolu_test123',
         PermissionMode.AutoEdit,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -561,6 +615,7 @@ describe('HookSystem', () => {
         { path: '/test.txt', content: 'test' },
         'toolu_test456',
         PermissionMode.Yolo,
+        undefined,
       );
     });
 
@@ -674,6 +729,7 @@ describe('HookSystem', () => {
         { output: 'file1.txt\nfile2.txt' },
         'toolu_test123',
         PermissionMode.AutoEdit,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -706,6 +762,7 @@ describe('HookSystem', () => {
         { content: 'file content' },
         'toolu_test456',
         PermissionMode.Plan,
+        undefined,
       );
     });
 
@@ -794,6 +851,7 @@ describe('HookSystem', () => {
         'Command not found',
         false,
         PermissionMode.AutoEdit,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -830,6 +888,7 @@ describe('HookSystem', () => {
         'Permission denied',
         true,
         PermissionMode.Yolo,
+        undefined,
       );
     });
 
@@ -859,6 +918,7 @@ describe('HookSystem', () => {
         'bash',
         { command: 'ls' },
         'Error occurred',
+        undefined,
         undefined,
         undefined,
       );
@@ -941,6 +1001,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Auto,
         '',
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -964,6 +1025,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Manual,
         '',
+        undefined,
       );
     });
 
@@ -989,6 +1051,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.firePreCompactEvent).toHaveBeenCalledWith(
         PreCompactTrigger.Auto,
         'Custom compression instructions',
+        undefined,
       );
     });
 
@@ -1065,6 +1128,7 @@ describe('HookSystem', () => {
         'Test notification message',
         NotificationType.PermissionPrompt,
         'Permission needed',
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1093,6 +1157,7 @@ describe('HookSystem', () => {
         'Qwen Code is waiting for your input',
         NotificationType.IdlePrompt,
         'Waiting for input',
+        undefined,
       );
     });
 
@@ -1118,6 +1183,7 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.fireNotificationEvent).toHaveBeenCalledWith(
         'Authentication successful',
         NotificationType.AuthSuccess,
+        undefined,
         undefined,
       );
     });
@@ -1194,6 +1260,7 @@ describe('HookSystem', () => {
         'Dialog shown to user',
         NotificationType.ElicitationDialog,
         'Dialog',
+        undefined,
       );
     });
   });
@@ -1225,6 +1292,7 @@ describe('HookSystem', () => {
         'Bash',
         { command: 'ls -la' },
         PermissionMode.Default,
+        undefined,
         undefined,
       );
       expect(result).toBeDefined();
@@ -1259,6 +1327,7 @@ describe('HookSystem', () => {
         { command: 'npm test' },
         PermissionMode.Default,
         suggestions,
+        undefined,
       );
     });
 
@@ -1354,6 +1423,7 @@ describe('HookSystem', () => {
         'agent-123',
         'code-reviewer',
         PermissionMode.Default,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1382,6 +1452,7 @@ describe('HookSystem', () => {
         'agent-456',
         AgentType.Bash,
         PermissionMode.Yolo,
+        undefined,
       );
     });
 
@@ -1468,6 +1539,7 @@ describe('HookSystem', () => {
         'Final output from subagent',
         false,
         PermissionMode.Default,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1502,6 +1574,7 @@ describe('HookSystem', () => {
         'last message from agent',
         true,
         PermissionMode.Plan,
+        undefined,
       );
     });
 

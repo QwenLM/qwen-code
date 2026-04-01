@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.13.0",
+  "version": "0.13.2",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -49,7 +49,7 @@
           "id": "qwen-code-sidebar",
           "title": "Qwen Code",
           "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:doesNotSupportSecondarySidebar"
+          "when": "!qwen-code:supportsSecondarySidebar"
         }
       ],
       "secondarySidebar": [
@@ -57,7 +57,7 @@
           "id": "qwen-code-secondary",
           "title": "Qwen Code",
           "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:doesNotSupportSecondarySidebar"
+          "when": "qwen-code:supportsSecondarySidebar"
         }
       ]
     },
@@ -68,7 +68,7 @@
           "id": "qwen-code.chatView.sidebar",
           "name": "Qwen Code",
           "icon": "assets/sidebar-icon.svg",
-          "when": "qwen-code:doesNotSupportSecondarySidebar"
+          "when": "!qwen-code:supportsSecondarySidebar"
         }
       ],
       "qwen-code-secondary": [
@@ -77,7 +77,7 @@
           "id": "qwen-code.chatView.secondary",
           "name": "Qwen Code",
           "icon": "assets/sidebar-icon.svg",
-          "when": "!qwen-code:doesNotSupportSecondarySidebar"
+          "when": "qwen-code:supportsSecondarySidebar"
         }
       ]
     },
