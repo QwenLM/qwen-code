@@ -7,12 +7,10 @@
 import {
   AUTO_MEMORY_TYPES,
   getErrorMessage,
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryRoot,
+  getManagedAutoMemoryStatus,
   getAutoMemoryTopicPath,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
-  parseAutoMemoryTopicDocument,
   QWEN_DIR,
   scheduleAutoMemoryExtract,
 } from '@qwen-code/qwen-code-core';
@@ -25,52 +23,99 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
 async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
-  const root = getAutoMemoryRoot(projectRoot);
+  const status = await getManagedAutoMemoryStatus(projectRoot);
 
-  let cursorSummary = t('No extraction cursor found yet.');
-  try {
-    const cursor = JSON.parse(
-      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
-    ) as { sessionId?: string; processedOffset?: number; updatedAt?: string };
-    cursorSummary = t(
-      'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
-      {
-        sessionId: cursor.sessionId || 'n/a',
-        offset: String(cursor.processedOffset ?? 0),
-        updatedAt: cursor.updatedAt || 'n/a',
-      },
-    );
-  } catch {
-    // Keep default summary.
-  }
+  const cursorSummary = status.cursor
+    ? t(
+        'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+        {
+          sessionId: status.cursor.sessionId || 'n/a',
+          offset: String(status.cursor.processedOffset ?? 0),
+          updatedAt: status.cursor.updatedAt || 'n/a',
+        },
+      )
+    : t('No extraction cursor found yet.');
 
-  const topicSummaries = await Promise.all(
-    AUTO_MEMORY_TYPES.map(async (topic) => {
-      try {
-        const content = await fs.readFile(
-          getAutoMemoryTopicPath(projectRoot, topic),
-          'utf-8',
-        );
-        const parsed = parseAutoMemoryTopicDocument(
-          getAutoMemoryTopicPath(projectRoot, topic),
-          content,
-        );
-        const entryCount = parsed?.body
-          .split('\n')
-          .filter((line) => /^[-*]\s+/.test(line.trim())).length;
-        return `- ${topic}.md: ${entryCount ?? 0} entries`;
-      } catch {
-        return `- ${topic}.md: 0 entries`;
-      }
-    }),
+  const extractionSummary = t(
+    'Extraction: running={{running}}, last={{last}}, status={{status}}, touched={{touched}}',
+    {
+      running: status.extractionRunning ? 'yes' : 'no',
+      last: status.metadata?.lastExtractionAt || 'n/a',
+      status: status.metadata?.lastExtractionStatus || 'n/a',
+      touched:
+        status.metadata?.lastExtractionTouchedTopics?.join(', ') || 'none',
+    },
+  );
+
+  const dreamSummary = t(
+    'Dream: last={{last}}, status={{status}}, touched={{touched}}, activeTasks={{activeTasks}}',
+    {
+      last: status.metadata?.lastDreamAt || 'n/a',
+      status: status.metadata?.lastDreamStatus || 'n/a',
+      touched: status.metadata?.lastDreamTouchedTopics?.join(', ') || 'none',
+      activeTasks: String(
+        status.dreamTasks.filter(
+          (task) => task.status === 'pending' || task.status === 'running',
+        ).length,
+      ),
+    },
+  );
+
+  const topicSummaries = status.topics.map(
+    (topic) =>
+      `- ${topic.topic}.md: ${topic.entryCount} entries${topic.hooks.length > 0 ? ` | hooks: ${topic.hooks.join(' ; ')}` : ''}`,
   );
 
   return [
-    t('Managed auto-memory root: {{root}}', { root }),
+    t('Managed auto-memory root: {{root}}', { root: status.root }),
     cursorSummary,
+    extractionSummary,
+    dreamSummary,
     t('Managed auto-memory topics:'),
     ...topicSummaries,
   ].join('\n');
+}
+
+async function buildManagedMemoryTasks(projectRoot: string): Promise<string> {
+  const status = await getManagedAutoMemoryStatus(projectRoot);
+  const lines = [
+    t('Managed auto-memory background tasks:'),
+    `- extraction: ${status.extractionRunning ? 'running' : 'idle'}`,
+  ];
+
+  if (status.dreamTasks.length === 0) {
+    lines.push('- dream: no tracked tasks');
+    return lines.join('\n');
+  }
+
+  for (const task of status.dreamTasks) {
+    lines.push(
+      `- dream ${task.id}: ${task.status} | updated=${task.updatedAt}${task.progressText ? ` | ${task.progressText}` : ''}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+async function buildManagedMemoryInspect(
+  projectRoot: string,
+  target?: string,
+): Promise<string> {
+  const normalizedTarget = target?.trim().toLowerCase();
+  const status = await getManagedAutoMemoryStatus(projectRoot);
+  if (!normalizedTarget || normalizedTarget === 'index' || normalizedTarget === 'memory') {
+    return status.indexContent || t('Managed memory index is empty.');
+  }
+
+  if (!AUTO_MEMORY_TYPES.includes(normalizedTarget as (typeof AUTO_MEMORY_TYPES)[number])) {
+    return t('Unknown managed memory target: {{target}}', { target: target ?? '' });
+  }
+
+  const topicPath = getAutoMemoryTopicPath(projectRoot, normalizedTarget as (typeof AUTO_MEMORY_TYPES)[number]);
+  try {
+    return await fs.readFile(topicPath, 'utf-8');
+  } catch {
+    return t('Unknown managed memory target: {{target}}', { target: target ?? '' });
+  }
 }
 
 /**
@@ -232,6 +277,56 @@ export const memoryCommand: SlashCommand = {
         );
 
         return;
+      },
+    },
+    {
+      name: 'tasks',
+      get description() {
+        return t('Show managed auto-memory background task status.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: await buildManagedMemoryTasks(config.getProjectRoot()),
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
+      name: 'inspect',
+      get description() {
+        return t('Inspect managed auto-memory index or a topic file.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context, args) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: await buildManagedMemoryInspect(config.getProjectRoot(), args),
+          },
+          Date.now(),
+        );
       },
     },
     {

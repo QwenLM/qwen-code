@@ -44,8 +44,14 @@ export interface AutoMemoryMetadata {
   version: typeof AUTO_MEMORY_SCHEMA_VERSION;
   createdAt: string;
   updatedAt: string;
+  lastExtractionAt?: string;
+  lastExtractionSessionId?: string;
+  lastExtractionTouchedTopics?: AutoMemoryType[];
+  lastExtractionStatus?: 'updated' | 'noop';
   lastDreamAt?: string;
   lastDreamSessionId?: string;
+  lastDreamTouchedTopics?: AutoMemoryType[];
+  lastDreamStatus?: 'updated' | 'noop';
   recentSessionIdsSinceDream?: string[];
 }
 

@@ -16,9 +16,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   AUTO_MEMORY_TYPES,
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryTopicPath,
   getErrorMessage,
+  getManagedAutoMemoryStatus,
   loadServerHierarchicalMemory,
   QWEN_DIR,
   scheduleAutoMemoryExtract,
@@ -36,6 +35,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       if (error instanceof Error) return error.message;
       return String(error);
     }),
+    getManagedAutoMemoryStatus: vi.fn(),
     loadServerHierarchicalMemory: vi.fn(),
     scheduleAutoMemoryExtract: vi.fn(),
   };
@@ -53,12 +53,13 @@ vi.mock('node:fs/promises', () => {
 
 const mockLoadServerHierarchicalMemory = loadServerHierarchicalMemory as Mock;
 const mockScheduleAutoMemoryExtract = scheduleAutoMemoryExtract as Mock;
+const mockGetManagedAutoMemoryStatus = getManagedAutoMemoryStatus as Mock;
 const mockReadFile = readFile as unknown as Mock;
 
 describe('memoryCommand', () => {
   let mockContext: CommandContext;
 
-  const getSubCommand = (name: 'show' | 'add' | 'refresh'): SlashCommand => {
+  const getSubCommand = (name: 'show' | 'add' | 'refresh' | 'status' | 'tasks' | 'inspect'): SlashCommand => {
     const subCommand = memoryCommand.subCommands?.find(
       (cmd) => cmd.name === name,
     );
@@ -293,7 +294,7 @@ describe('memoryCommand', () => {
       statusCommand = memoryCommand.subCommands?.find(
         (cmd) => cmd.name === 'status',
       ) as SlashCommand;
-      mockReadFile.mockReset();
+      mockGetManagedAutoMemoryStatus.mockReset();
       mockContext = createMockCommandContext({
         services: {
           config: {
@@ -304,33 +305,35 @@ describe('memoryCommand', () => {
     });
 
     it('shows managed auto-memory root, cursor and topic counts', async () => {
-      mockReadFile.mockImplementation(async (filePath: string) => {
-        if (filePath === getAutoMemoryExtractCursorPath('/test/project')) {
-          return JSON.stringify({
-            sessionId: 'session-1',
-            processedOffset: 3,
-            updatedAt: '2026-04-01T00:00:00.000Z',
-          });
-        }
-
-        for (const topic of AUTO_MEMORY_TYPES) {
-          if (filePath === getAutoMemoryTopicPath('/test/project', topic)) {
-            return [
-              '---',
-              `type: ${topic}`,
-              `title: ${topic}`,
-              'description: topic',
-              '---',
-              '',
-              `# ${topic}`,
-              '',
-              '- one',
-              '- two',
-            ].join('\n');
-          }
-        }
-
-        throw new Error('ENOENT');
+      mockGetManagedAutoMemoryStatus.mockResolvedValue({
+        root: '/test/project/.qwen/memory',
+        indexPath: '/test/project/.qwen/memory/MEMORY.md',
+        indexContent: '# Managed Auto-Memory Index',
+        cursor: {
+          sessionId: 'session-1',
+          processedOffset: 3,
+          updatedAt: '2026-04-01T00:00:00.000Z',
+        },
+        metadata: {
+          version: 1,
+          createdAt: '2026-04-01T00:00:00.000Z',
+          updatedAt: '2026-04-01T00:00:00.000Z',
+          lastExtractionAt: '2026-04-01T00:00:00.000Z',
+          lastExtractionStatus: 'updated',
+          lastExtractionTouchedTopics: ['user'],
+          lastDreamAt: '2026-04-01T01:00:00.000Z',
+          lastDreamStatus: 'noop',
+          lastDreamTouchedTopics: [],
+        },
+        extractionRunning: false,
+        dreamTasks: [],
+        topics: AUTO_MEMORY_TYPES.map((topic) => ({
+          topic,
+          title: topic,
+          entryCount: 2,
+          hooks: ['one', 'two'],
+          filePath: `/test/project/.qwen/memory/${topic}.md`,
+        })),
       });
 
       await statusCommand.action?.(mockContext, '');
@@ -345,6 +348,110 @@ describe('memoryCommand', () => {
       const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
       expect(text).toContain('Cursor: session=session-1, offset=3');
       expect(text).toContain('- user.md: 2 entries');
+      expect(text).toContain('Extraction: running=no');
+      expect(text).toContain('Dream: last=2026-04-01T01:00:00.000Z');
+    });
+  });
+
+  describe('/memory tasks', () => {
+    let tasksCommand: SlashCommand;
+
+    beforeEach(() => {
+      tasksCommand = getSubCommand('tasks');
+      mockGetManagedAutoMemoryStatus.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          },
+        },
+      });
+    });
+
+    it('shows extraction and dream task state', async () => {
+      mockGetManagedAutoMemoryStatus.mockResolvedValue({
+        root: '/test/project/.qwen/memory',
+        indexPath: '/test/project/.qwen/memory/MEMORY.md',
+        indexContent: '',
+        extractionRunning: true,
+        topics: [],
+        dreamTasks: [
+          {
+            id: 'dream-1',
+            taskType: 'managed-auto-memory-dream',
+            title: 'Managed auto-memory dream',
+            projectRoot: '/test/project',
+            status: 'running',
+            createdAt: '2026-04-01T00:00:00.000Z',
+            updatedAt: '2026-04-01T00:01:00.000Z',
+            progressText: 'Consolidating topics',
+          },
+        ],
+      });
+
+      await tasksCommand.action?.(mockContext, '');
+
+      const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
+      expect(text).toContain('extraction: running');
+      expect(text).toContain('dream dream-1: running');
+    });
+  });
+
+  describe('/memory inspect', () => {
+    let inspectCommand: SlashCommand;
+
+    beforeEach(() => {
+      inspectCommand = getSubCommand('inspect');
+      mockGetManagedAutoMemoryStatus.mockReset();
+      mockReadFile.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          },
+        },
+      });
+    });
+
+    it('shows the managed index by default', async () => {
+      mockGetManagedAutoMemoryStatus.mockResolvedValue({
+        root: '/test/project/.qwen/memory',
+        indexPath: '/test/project/.qwen/memory/MEMORY.md',
+        indexContent: '# Managed Auto-Memory Index\n\n- hook',
+        extractionRunning: false,
+        topics: [],
+        dreamTasks: [],
+      });
+
+      await inspectCommand.action?.(mockContext, '');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: '# Managed Auto-Memory Index\n\n- hook',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('shows a topic file when a valid topic is requested', async () => {
+      mockGetManagedAutoMemoryStatus.mockResolvedValue({
+        root: '/test/project/.qwen/memory',
+        indexPath: '/test/project/.qwen/memory/MEMORY.md',
+        indexContent: '# Managed Auto-Memory Index',
+        extractionRunning: false,
+        topics: [],
+        dreamTasks: [],
+      });
+      mockReadFile.mockResolvedValue('# User Memory\n\n- User prefers terse responses.');
+
+      await inspectCommand.action?.(mockContext, 'user');
+
+      expect(mockReadFile).toHaveBeenCalledWith(
+        '/test/project/.qwen/memory/user.md',
+        'utf-8',
+      );
+      const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
+      expect(text).toContain('User prefers terse responses.');
     });
   });
 

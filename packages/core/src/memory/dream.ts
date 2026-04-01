@@ -71,6 +71,7 @@ async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
     const content = await fs.readFile(metadataPath, 'utf-8');
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
+    metadata.lastDreamAt = now.toISOString();
     await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
   } catch {
     // Best-effort metadata bump.
@@ -136,6 +137,7 @@ export async function runManagedAutoMemoryDream(
           await bumpMetadata(projectRoot, now);
           await rebuildManagedAutoMemoryIndex(projectRoot);
         }
+        await updateDreamMetadataResult(projectRoot, now, agentResult.touchedTopics);
         return agentResult;
       }
     } catch {
@@ -170,6 +172,8 @@ export async function runManagedAutoMemoryDream(
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
+  await updateDreamMetadataResult(projectRoot, now, [...touchedTopics]);
+
   return {
     touchedTopics: [...touchedTopics],
     dedupedEntries,
@@ -178,4 +182,23 @@ export async function runManagedAutoMemoryDream(
         ? `Managed auto-memory dream updated: ${[...touchedTopics].map((topic) => `${topic}.md`).join(', ')}`
         : undefined,
   };
+}
+
+async function updateDreamMetadataResult(
+  projectRoot: string,
+  now: Date,
+  touchedTopics: AutoMemoryType[],
+): Promise<void> {
+  const metadataPath = getAutoMemoryMetadataPath(projectRoot);
+  try {
+    const content = await fs.readFile(metadataPath, 'utf-8');
+    const metadata = JSON.parse(content) as AutoMemoryMetadata;
+    metadata.updatedAt = now.toISOString();
+    metadata.lastDreamAt = now.toISOString();
+    metadata.lastDreamTouchedTopics = touchedTopics;
+    metadata.lastDreamStatus = touchedTopics.length > 0 ? 'updated' : 'noop';
+    await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
+  } catch {
+    // Best-effort metadata bump.
+  }
 }

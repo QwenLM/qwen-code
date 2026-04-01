@@ -296,11 +296,20 @@ async function writeExtractCursor(
   );
 }
 
-async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
+async function bumpMetadata(
+  projectRoot: string,
+  now: Date,
+  sessionId: string,
+  touchedTopics: AutoMemoryType[],
+): Promise<void> {
   try {
     const content = await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8');
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
+    metadata.lastExtractionAt = now.toISOString();
+    metadata.lastExtractionSessionId = sessionId;
+    metadata.lastExtractionTouchedTopics = touchedTopics;
+    metadata.lastExtractionStatus = touchedTopics.length > 0 ? 'updated' : 'noop';
     await fs.writeFile(
       getAutoMemoryMetadataPath(projectRoot),
       `${JSON.stringify(metadata, null, 2)}\n`,
@@ -338,6 +347,7 @@ export async function applyExtractedMemoryPatches(
   projectRoot: string,
   patches: AutoMemoryExtractPatch[],
   now = new Date(),
+  sessionId?: string,
 ): Promise<AutoMemoryType[]> {
   const touchedTopics = new Set<AutoMemoryType>();
 
@@ -353,8 +363,13 @@ export async function applyExtractedMemoryPatches(
     touchedTopics.add(patch.topic);
   }
 
+  if (sessionId) {
+    await bumpMetadata(projectRoot, now, sessionId, [...touchedTopics]);
+  } else if (touchedTopics.size > 0) {
+    await bumpMetadata(projectRoot, now, 'unknown', [...touchedTopics]);
+  }
+
   if (touchedTopics.size > 0) {
-    await bumpMetadata(projectRoot, now);
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
@@ -387,6 +402,7 @@ export async function runAutoMemoryExtract(params: {
     params.projectRoot,
     patches,
     now,
+    params.sessionId,
   );
 
   const cursor: AutoMemoryExtractCursor = {

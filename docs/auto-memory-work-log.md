@@ -163,6 +163,56 @@ Completed
 
 ---
 
+## Part 15 - Memory governance entrypoints
+
+### Start review
+
+- Overall plan now moves from keeping `MEMORY.md` synchronized to making managed memory easier to inspect and govern from the CLI.
+- Part 14 already gave the system a dynamic index, but `/memory` still exposed only a minimal status view and no direct task/index inspection path.
+- Scope for this part: add reusable managed-memory status aggregation, enrich metadata with recent extraction/dream outcomes, and expand `/memory` with governance-oriented status, tasks, and inspect commands.
+
+### Goal
+
+- Add a reusable status reader for managed auto-memory state
+- Record recent extraction/dream outcomes in metadata for governance views
+- Expand `/memory` with richer `status`, plus `tasks` and `inspect` subcommands
+- Add targeted tests for status aggregation and CLI governance flows
+
+### Implemented
+
+- Added `packages/core/src/memory/status.ts`
+- Added `packages/core/src/memory/status.test.ts`
+- Extended `packages/core/src/memory/types.ts` metadata with recent extraction/dream result fields
+- Updated `packages/core/src/memory/extract.ts` to persist recent extraction status into metadata
+- Updated `packages/core/src/memory/dream.ts` to persist recent dream status into metadata
+- Exported status helpers from `packages/core/src/index.ts`
+- Enhanced `packages/cli/src/ui/commands/memoryCommand.ts` to use structured status aggregation
+- Added `/memory tasks` and `/memory inspect` governance subcommands
+- Updated `packages/cli/src/ui/commands/memoryCommand.test.ts` with governance coverage
+
+### Functional verification
+
+- Managed memory now has a reusable status surface covering cursor state, dynamic index, topic hooks, extraction running-state, recent dream/extraction results, and tracked dream tasks.
+- `/memory status` now surfaces more operational context instead of only file counts.
+- `/memory tasks` and `/memory inspect` provide direct governance entrypoints for recent task activity and current managed memory contents.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/status.test.ts src/memory/extract.test.ts src/memory/dreamScheduler.test.ts src/memory/dream.test.ts`
+  - `npm exec --workspace=packages/cli -- vitest run src/ui/commands/memoryCommand.test.ts`
+
+### Notes
+
+- Extraction still runs in-process rather than in the shared background task runtime, so governance currently reports extraction running-state separately from tracked dream tasks.
+- This part focuses on observability and inspectability, not on adding an interactive review UI.
+
+### Status
+
+Completed
+
+---
+
 ## Part 6 - Auxiliary side-query foundation
 
 ### Start review
