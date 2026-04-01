@@ -60,6 +60,7 @@ The main CLI package providing:
 Core library containing:
 
 - **Tools**: File operations (read, write, edit, glob, grep), shell execution, web fetch, LSP integration, MCP client, task management (beads_rust)
+- **Memory**: File-per-memory system with YAML frontmatter, 4-type taxonomy (user/feedback/project/reference), auto-extraction agent, MEMORY.md index
 - **Subagents**: Task delegation to specialized agents
 - **Skills**: 16 bundled skills for agentic workflows
 - **Models**: Model configuration and registry for any OpenAI-compatible API
@@ -127,7 +128,7 @@ npm run typecheck     # Type check
 
 ## Configuration
 
-Settings live in `~/.qwen/settings.json` (global) and `.qwen/settings.json` (per-project).
+Settings live in `~/.proto/settings.json` (global) and `.proto/settings.json` (per-project).
 
 Key config sections:
 
@@ -136,11 +137,22 @@ Key config sections:
 - `env` — API keys and environment variables
 - `model.name` — Default model
 
+## Memory System
+
+Proto uses a file-per-memory architecture with YAML frontmatter. Each memory is a `.md` file in `.proto/memory/` (project) or `~/.proto/memory/` (global). Four types: user, feedback, project, reference.
+
+A `MEMORY.md` index is auto-generated and loaded into the system prompt. After each turn, a background extraction agent reviews recent messages and auto-creates memories.
+
 ## Session Commands (within CLI)
 
 - `/help` - Display available commands
 - `/model` - Switch models
 - `/skills` - List available skills
+- `/memory show` - Display loaded memory content
+- `/memory list` - List all memories with metadata
+- `/memory add <fact>` - Save a memory
+- `/memory forget <name>` - Delete a memory
+- `/memory refresh` - Reload from disk
 - `/clear` - Clear conversation history
 - `/compress` - Compress history to save tokens
 - `/stats` - Show session information

@@ -23,13 +23,14 @@ proto is a fork of [Qwen Code](https://github.com/QwenLM/qwen-code) (itself fork
 
 ## What's Different
 
-| Feature          | Qwen Code          | proto                                                                          |
-| ---------------- | ------------------ | ------------------------------------------------------------------------------ |
-| Default model    | Qwen3-Coder        | Any (configurable)                                                             |
-| Task management  | In-memory JSON     | [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (SQLite + JSONL) |
-| MCP servers      | None               | Configurable via `~/.proto/settings.json`                                      |
-| Plugin discovery | Qwen only          | Auto-discovers Claude Code plugins from `~/.claude/plugins/`                   |
-| Skills           | Nested superpowers | Flat bundled skills (16 skills, all discoverable)                              |
+| Feature          | Qwen Code               | proto                                                                          |
+| ---------------- | ----------------------- | ------------------------------------------------------------------------------ |
+| Default model    | Qwen3-Coder             | Any (configurable)                                                             |
+| Task management  | In-memory JSON          | [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (SQLite + JSONL) |
+| Memory           | Single append-only file | File-per-memory with YAML frontmatter, 4-type taxonomy, auto-extraction        |
+| MCP servers      | None                    | Configurable via `~/.proto/settings.json`                                      |
+| Plugin discovery | Qwen only               | Auto-discovers Claude Code plugins from `~/.claude/plugins/`                   |
+| Skills           | Nested superpowers      | Flat bundled skills (16 skills, all discoverable)                              |
 
 ## Installation
 
@@ -37,8 +38,8 @@ Requires Node.js 20+ and Rust toolchain (for beads_rust).
 
 ```bash
 # Clone and build
-git clone https://github.com/protoLabsAI/quad-code.git
-cd quad-code
+git clone https://github.com/protoLabsAI/protoCLI.git
+cd protoCLI
 npm install
 npm run build
 
@@ -186,6 +187,45 @@ br create --title "Fix auth bug" --type task --priority 1
 br close <id> --reason "Fixed in commit abc123"
 ```
 
+## Memory
+
+proto has a persistent memory system inspired by Claude Code. Memories are individual markdown files with YAML frontmatter, organized by type and stored per-project or globally.
+
+### Memory types
+
+| Type        | Purpose                               | Example                                        |
+| ----------- | ------------------------------------- | ---------------------------------------------- |
+| `user`      | Preferences, role, knowledge          | "prefers tabs over spaces"                     |
+| `feedback`  | Approach corrections or confirmations | "don't mock the database in integration tests" |
+| `project`   | Deadlines, decisions, ongoing work    | "merge freeze starts April 5"                  |
+| `reference` | Pointers to external systems          | "bugs tracked in Linear project INGEST"        |
+
+### How it works
+
+Each memory is a `.md` file in `.proto/memory/` (project) or `~/.proto/memory/` (global):
+
+```markdown
+---
+name: prefer-dark-theme
+description: User prefers dark themes in all editors
+type: user
+---
+
+User explicitly stated they prefer dark themes.
+```
+
+A `MEMORY.md` index is auto-generated and loaded into the system prompt at the start of each session. The agent can create memories via the `save_memory` tool, or you can use slash commands:
+
+```
+/memory add --project I prefer dark themes
+/memory list
+/memory forget prefer-dark-theme
+/memory show
+/memory refresh
+```
+
+After each conversation turn, a background extraction agent reviews recent messages and auto-creates memories for notable facts. This runs fire-and-forget with restricted tools (read/write/glob in the memory directory only).
+
 ## Skills
 
 proto ships with 16 bundled skills for agentic workflows:
@@ -211,16 +251,21 @@ Use `/skills` to list available skills in a session.
 
 ## Commands
 
-| Command     | Description                     |
-| ----------- | ------------------------------- |
-| `/help`     | Show available commands         |
-| `/auth`     | Configure authentication        |
-| `/model`    | Switch models                   |
-| `/skills`   | List available skills           |
-| `/clear`    | Clear conversation              |
-| `/compress` | Compress history to save tokens |
-| `/stats`    | Session info                    |
-| `/exit`     | Exit proto                      |
+| Command                 | Description                               |
+| ----------------------- | ----------------------------------------- |
+| `/help`                 | Show available commands                   |
+| `/auth`                 | Configure authentication                  |
+| `/model`                | Switch models                             |
+| `/skills`               | List available skills                     |
+| `/memory show`          | Display loaded memory content             |
+| `/memory list`          | List all memories with type, scope, age   |
+| `/memory add <fact>`    | Save a memory (`--global` or `--project`) |
+| `/memory forget <name>` | Delete a memory                           |
+| `/memory refresh`       | Reload memories from disk                 |
+| `/clear`                | Clear conversation                        |
+| `/compress`             | Compress history to save tokens           |
+| `/stats`                | Session info                              |
+| `/exit`                 | Exit proto                                |
 
 ## Keyboard Shortcuts
 
