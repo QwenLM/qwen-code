@@ -70,6 +70,12 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    hooks: options.hooks,
+    extensions: options.extensions,
+    includeDirs: options.includeDirs,
+    sandbox: options.sandbox,
+    chatRecording: options.chatRecording,
+    webSearch: options.webSearch,
   });
 
   const queryOptions: QueryOptions = {

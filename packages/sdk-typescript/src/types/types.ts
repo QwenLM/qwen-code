@@ -46,6 +46,53 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+
+  /**
+   * Enable the hooks system for event-driven automation.
+   * Hook definitions are loaded from settings.json when settingSources is configured.
+   * @default false
+   */
+  hooks?: boolean;
+
+  /**
+   * Extensions to enable for the session.
+   * Pass extension names to selectively enable specific extensions.
+   * Extensions provide skills, agents, hooks, MCP servers, and commands.
+   * @example ['protolabs', 'code-review']
+   */
+  extensions?: string[];
+
+  /**
+   * Additional directories to include in the workspace.
+   * Useful for multi-root workspaces or monorepo setups.
+   * @example ['/path/to/shared-lib', '/path/to/config']
+   */
+  includeDirs?: string[];
+
+  /**
+   * Enable sandbox mode for isolated execution.
+   * When true, the agent runs in a sandboxed environment with restricted access.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Control chat recording (session persistence).
+   * Set to false to disable session recording.
+   * @default true
+   */
+  chatRecording?: boolean;
+
+  /**
+   * Web search API configuration.
+   * Provide API keys and settings for web search capabilities.
+   */
+  webSearch?: {
+    tavilyApiKey?: string;
+    googleApiKey?: string;
+    googleSearchEngineId?: string;
+    defaultProvider?: string;
+  };
 };
 
 export interface QuerySystemPromptPreset {
@@ -455,6 +502,48 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Enable the hooks system for event-driven automation.
+   * Hook definitions are loaded from settings.json when settingSources is configured.
+   * @default false
+   */
+  hooks?: boolean;
+
+  /**
+   * Extensions to enable for the session.
+   * Pass extension names to selectively enable specific extensions.
+   * @example ['protolabs', 'code-review']
+   */
+  extensions?: string[];
+
+  /**
+   * Additional directories to include in the workspace.
+   * @example ['/path/to/shared-lib']
+   */
+  includeDirs?: string[];
+
+  /**
+   * Enable sandbox mode for isolated execution.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Control chat recording. Set to false to disable.
+   * @default true
+   */
+  chatRecording?: boolean;
+
+  /**
+   * Web search API configuration.
+   */
+  webSearch?: {
+    tavilyApiKey?: string;
+    googleApiKey?: string;
+    googleSearchEngineId?: string;
+    defaultProvider?: string;
+  };
 
   /**
    * Timeout configuration for various SDK operations.

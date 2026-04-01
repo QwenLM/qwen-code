@@ -185,6 +185,20 @@ export const QueryOptionsSchema = z
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    hooks: z.boolean().optional(),
+    extensions: z.array(z.string()).optional(),
+    includeDirs: z.array(z.string()).optional(),
+    sandbox: z.boolean().optional(),
+    chatRecording: z.boolean().optional(),
+    webSearch: z
+      .object({
+        tavilyApiKey: z.string().optional(),
+        googleApiKey: z.string().optional(),
+        googleSearchEngineId: z.string().optional(),
+        defaultProvider: z.string().optional(),
+      })
+      .strict()
+      .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();
