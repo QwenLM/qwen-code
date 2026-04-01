@@ -104,7 +104,7 @@ export class OverlayFs {
         await copyFile(overlayPath, realPath);
         applied.push(realPath);
       } catch {
-        // Best-effort — log but don't throw
+        // Best-effort — ignore errors and continue
       }
     }
 
