@@ -193,6 +193,14 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), 'memory.md');
   }
 
+  static getGlobalMemoryDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'memory');
+  }
+
+  static getProjectMemoryDir(targetDir: string): string {
+    return path.join(targetDir, QWEN_DIR, 'memory');
+  }
+
   static getGlobalTempDir(): string {
     return path.join(Storage.getRuntimeBaseDir(), TMP_DIR_NAME);
   }

@@ -339,16 +339,41 @@ export async function loadServerHierarchicalMemory(
     extensionContextFilePaths,
     folderTrust,
   );
+  // Also discover MEMORY.md index files from the new file-per-memory system
+  const { getMemoryIndexPath } = await import('../memory/memoryStore.js');
+  const { MEMORY_SYSTEM_PROMPT } = await import('../memory/memoryPrompt.js');
+  for (const scope of ['global', 'project'] as const) {
+    const indexPath = getMemoryIndexPath(scope, currentWorkingDirectory);
+    try {
+      const { readFile } = await import('node:fs/promises');
+      await readFile(indexPath, 'utf-8');
+      // Index exists and is readable — add it to the discovery paths
+      if (!filePaths.includes(indexPath)) {
+        filePaths.push(indexPath);
+      }
+    } catch {
+      // No MEMORY.md yet — that's fine
+    }
+  }
+
   if (filePaths.length === 0) {
-    logger.debug('No QWEN.md files found in hierarchy.');
+    logger.debug('No context files found in hierarchy.');
     return { memoryContent: '', fileCount: 0 };
   }
   const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
   // Pass CWD for relative path display in concatenated content
-  const combinedInstructions = concatenateInstructions(
+  let combinedInstructions = concatenateInstructions(
     contentsWithPaths,
     currentWorkingDirectory,
   );
+
+  // Prepend memory system prompt if any MEMORY.md was loaded
+  const hasMemoryIndex = contentsWithPaths.some(
+    (item) => path.basename(item.filePath) === 'MEMORY.md',
+  );
+  if (hasMemoryIndex) {
+    combinedInstructions = MEMORY_SYSTEM_PROMPT + '\n\n' + combinedInstructions;
+  }
 
   // Only count files that match configured memory filenames (e.g., QWEN.md),
   // excluding system context files like output-language.md

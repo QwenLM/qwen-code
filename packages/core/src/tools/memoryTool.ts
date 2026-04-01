@@ -41,10 +41,16 @@ const memoryToolSchemaData: FunctionDeclaration = {
         description:
           'The specific fact or piece of information to remember. Should be a clear, self-contained statement.',
       },
+      type: {
+        type: 'string',
+        description:
+          'The type of memory: "user" for personal preferences/role, "feedback" for approach corrections/confirmations, "project" for ongoing work/deadlines, "reference" for pointers to external systems.',
+        enum: ['user', 'feedback', 'project', 'reference'],
+      },
       scope: {
         type: 'string',
         description:
-          'Where to save the memory: "global" saves to user-level ~/.proto/QWEN.md (shared across all projects), "project" saves to current project\'s QWEN.md (project-specific). If not specified, will prompt user to choose.',
+          'Where to save the memory: "global" saves to ~/.proto/memory/ (shared across all projects), "project" saves to .proto/memory/ (project-specific). Defaults to project.',
         enum: ['global', 'project'],
       },
     },
@@ -115,6 +121,7 @@ export function getAllGeminiMdFilenames(): string[] {
 
 interface SaveMemoryParams {
   fact: string;
+  type?: 'user' | 'feedback' | 'project' | 'reference';
   modified_by_user?: boolean;
   modified_content?: string;
   scope?: 'global' | 'project';
@@ -325,27 +332,13 @@ Preview of changes to be made to GLOBAL memory:
       };
     }
 
-    // If scope is not specified and user didn't modify content, return error prompting for choice
-    if (!this.params.scope && !modified_by_user) {
-      const globalPath = tildeifyPath(getMemoryFilePath('global'));
-      const projectPath = tildeifyPath(getMemoryFilePath('project'));
-      const errorMessage = `Please specify where to save this memory:
-
-Global: ${globalPath} (shared across all projects)
-Project: ${projectPath} (current project only)`;
-
-      return {
-        llmContent: errorMessage,
-        returnDisplay: errorMessage,
-      };
-    }
-
-    const scope = this.params.scope || 'global';
-    const memoryFilePath = getMemoryFilePath(scope);
+    const scope = this.params.scope || 'project';
+    const memoryType = this.params.type || 'user';
 
     try {
       if (modified_by_user && modified_content !== undefined) {
         // User modified the content in external editor, write it directly
+        const memoryFilePath = getMemoryFilePath(scope);
         await fs.mkdir(path.dirname(memoryFilePath), {
           recursive: true,
         });
@@ -356,13 +349,24 @@ Project: ${projectPath} (current project only)`;
           returnDisplay: successMessage,
         };
       } else {
-        // Use the normal memory entry logic
-        await MemoryTool.performAddMemoryEntry(fact, memoryFilePath, {
-          readFile: fs.readFile,
-          writeFile: fs.writeFile,
-          mkdir: fs.mkdir,
+        // Create a new file-per-memory via the memory store
+        const { createMemory } = await import('../memory/memoryStore.js');
+        const words = fact.split(/\s+/).slice(0, 6).join(' ');
+        const name =
+          words.length > 50 ? words.slice(0, 50).trim() : words.trim();
+        const description =
+          fact.length > 120 ? fact.slice(0, 120).trim() + '...' : fact.trim();
+
+        const mem = await createMemory({
+          name,
+          description,
+          type: memoryType,
+          content: fact,
+          scope,
         });
-        const successMessage = `Okay, I've remembered that in ${scope} memory: "${fact}"`;
+
+        const displayPath = tildeifyPath(mem.filePath);
+        const successMessage = `Okay, I've remembered that in ${scope} memory (${memoryType}): "${fact}"\nSaved to: ${displayPath}`;
         return {
           llmContent: successMessage,
           returnDisplay: successMessage,
