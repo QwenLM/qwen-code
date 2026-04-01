@@ -981,6 +981,11 @@ export class WebViewProvider {
 
             await this.agentManager.authenticate(methodId, _meta);
 
+            // Clear the stale session that doInitializeAgentConnection may
+            // have created under the previous credentials, so
+            // createNewSession() builds a fresh one with the new auth.
+            this.agentManager.clearSession();
+
             await this.agentManager.createNewSession(
               this.agentManager.workingDir,
             );

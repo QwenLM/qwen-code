@@ -26,7 +26,7 @@ export function buildAuthMethods(): AuthMethod[] {
         'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
       _meta: {
         type: 'terminal',
-        args: ['--auth-type=coding-plan'],
+        args: ['auth', 'coding-plan'],
       },
     },
     {

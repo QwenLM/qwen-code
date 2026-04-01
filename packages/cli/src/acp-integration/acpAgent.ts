@@ -466,7 +466,19 @@ class QwenAgent implements Agent {
     }
 
     if (selectedType) {
-      const matched = authMethods.filter((m) => m.id === selectedType);
+      const ids = new Set<string>([selectedType]);
+
+      // When selectedType is 'openai' but the user previously configured
+      // Coding Plan, include the coding-plan method so the onboarding UI
+      // can offer the key-entry flow to repair the configuration.
+      if (
+        selectedType === AuthType.USE_OPENAI &&
+        (this.settings.merged as Record<string, unknown>)?.['codingPlan']
+      ) {
+        ids.add('coding-plan');
+      }
+
+      const matched = authMethods.filter((m) => ids.has(m.id));
       return matched.length ? matched : authMethods;
     }
 

@@ -1173,6 +1173,13 @@ export class QwenAgentManager {
     await this.connection.authenticate(methodId, _meta);
   }
 
+  /**
+   * Clear the current session so the next createNewSession() builds a fresh one.
+   */
+  clearSession(): void {
+    this.connection.clearSession();
+  }
+
   async createNewSession(
     workingDir: string,
     options?: AgentSessionOptions,

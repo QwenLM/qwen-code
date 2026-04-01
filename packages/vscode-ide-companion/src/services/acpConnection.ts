@@ -577,6 +577,15 @@ export class AcpConnection {
     return this.sessionId !== null;
   }
 
+  /**
+   * Clear the current session ID without disconnecting the underlying process.
+   * Used when switching auth methods so that the next createNewSession() call
+   * creates a fresh session instead of reusing the stale one.
+   */
+  clearSession(): void {
+    this.sessionId = null;
+  }
+
   get currentSessionId(): string | null {
     return this.sessionId;
   }
