@@ -263,6 +263,57 @@ Completed
 
 ---
 
+## Part 17 - Agent stage B observability and constrained tools
+
+### Start review
+
+- Overall plan now advances from basic tool-free agent planners to a more realistic constrained-agent runtime shape.
+- Parts 11 to 13 already established `BackgroundAgentRunner` and initial dream/extraction agent consumers, but they still ran in a mostly JSON-only, tool-free configuration with limited task observability.
+- Scope for this part: make the shared runner expose richer runtime metadata, support cancelled task results, and upgrade extraction/dream planners to a constrained read-only tool mode with larger budgets.
+
+### Goal
+
+- Improve `BackgroundAgentRunner` observability with budget, round, and touched-file tracking
+- Support cancelled background agent results distinctly from generic failures
+- Upgrade extraction and dream planners from tool-free stage A into constrained read-only multi-turn agents
+- Add targeted tests for runner metadata, cancelled behavior, and planner configuration
+
+### Implemented
+
+- Updated `packages/core/src/background/taskScheduler.ts` to allow explicit final task status from background callbacks
+- Updated `packages/core/src/background/backgroundAgentRunner.ts` to track budget metadata, current round, `filesTouched`, and cancelled outcomes
+- Updated `packages/core/src/background/backgroundAgentRunner.test.ts` with filesTouched/round/cancelled coverage
+- Updated `packages/core/src/memory/extractionAgentPlanner.ts` to expose topic file paths, increase agent budget, and allow constrained `read_file` use
+- Updated `packages/core/src/memory/extractionAgentPlanner.test.ts` for the new stage-B planner configuration
+- Updated `packages/core/src/memory/dreamAgentPlanner.ts` to expose topic file paths, increase agent budget, and allow constrained `read_file` use
+- Updated `packages/core/src/memory/dreamAgentPlanner.test.ts` for the new stage-B planner configuration
+
+### Functional verification
+
+- Background agent tasks now expose more useful runtime metadata for governance and future UI work, including budget, rounds, and touched file paths.
+- Cancelled headless-agent runs are now represented as cancelled outcomes instead of being collapsed into generic failures.
+- Dream and extraction agent planners can now perform constrained read-only inspection of topic files when the provided summaries are insufficient, while still keeping host-side write application.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm run build --workspace=packages/core`
+  - `npm run typecheck --workspace=packages/core`
+  - `npm exec --workspace=packages/core -- vitest run src/background/backgroundAgentRunner.test.ts src/background/taskScheduler.test.ts src/memory/extractionAgentPlanner.test.ts src/memory/dreamAgentPlanner.test.ts src/memory/extractAgent.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts src/memory/extract.test.ts`
+  - `npm exec --workspace=packages/cli -- vitest run src/ui/commands/forgetCommand.test.ts src/ui/commands/memoryCommand.test.ts src/services/BuiltinCommandLoader.test.ts`
+  - `npm run generate && npm run build --workspace=packages/web-templates && npm run typecheck --workspace=packages/cli`
+
+### Notes
+
+- This stage still keeps host-side application of extraction patches and dream rewrites; agents only inspect and propose.
+- The allowed tool surface is intentionally narrow (`read_file`) to keep the rollout low-risk while still exercising the shared background-agent runtime more realistically.
+
+### Status
+
+Completed
+
+---
+
 ## Part 6 - Auxiliary side-query foundation
 
 ### Start review

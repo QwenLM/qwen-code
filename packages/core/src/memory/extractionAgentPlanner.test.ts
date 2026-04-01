@@ -72,6 +72,11 @@ describe('planAutoMemoryExtractionPatchesByAgent', () => {
       expect.objectContaining({
         taskType: 'managed-auto-memory-extraction-agent',
         sessionId: 'session-1',
+        runConfig: expect.objectContaining({
+          max_turns: 4,
+          max_time_minutes: 2,
+        }),
+        toolConfig: { tools: ['read_file'] },
       }),
     );
   });

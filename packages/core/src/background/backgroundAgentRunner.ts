@@ -43,7 +43,7 @@ export interface BackgroundAgentTaskRequest {
 
 export interface BackgroundAgentResult {
   taskId: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'cancelled';
   finalText?: string;
   terminateReason?: string;
   usage?: {
@@ -51,6 +51,7 @@ export interface BackgroundAgentResult {
     outputTokens?: number;
     totalTokens?: number;
   };
+  roundCount?: number;
   filesTouched: string[];
   error?: string;
 }
@@ -91,16 +92,29 @@ export class BackgroundAgentRunner {
     request: BackgroundAgentTaskRequest,
   ): Promise<BackgroundAgentResult> {
     const usage: BackgroundAgentResult['usage'] = {};
+    const filesTouched = new Set<string>();
+    let roundCount = 0;
     const scheduled = this.scheduler.schedule({
       taskType: request.taskType,
       title: request.title,
       projectRoot: request.projectRoot,
       sessionId: request.sessionId,
       dedupeKey: request.dedupeKey,
-      metadata: request.metadata,
+      metadata: {
+        ...(request.metadata ?? {}),
+        budget: {
+          maxTurns: request.runConfig.max_turns,
+          maxTimeMinutes: request.runConfig.max_time_minutes,
+        },
+        allowedTools: request.toolConfig?.tools?.map((tool) =>
+          typeof tool === 'string' ? tool : tool.name,
+        ) ?? ['*'],
+      },
       run: async (task) => {
         const emitter = new AgentEventEmitter();
-        this.bindTaskEvents(task.id, emitter, usage);
+        this.bindTaskEvents(task.id, emitter, usage, filesTouched, (nextRound) => {
+          roundCount = Math.max(roundCount, nextRound);
+        });
 
         const headless = await this.createAgentHeadless(
           request.name,
@@ -119,10 +133,24 @@ export class BackgroundAgentRunner {
         const terminateReason = headless.getTerminateMode();
         if (
           terminateReason === AgentTerminateMode.ERROR ||
-          terminateReason === AgentTerminateMode.CANCELLED ||
           terminateReason === AgentTerminateMode.TIMEOUT
         ) {
           throw new Error(`Background agent terminated with ${terminateReason}`);
+        }
+
+        if (terminateReason === AgentTerminateMode.CANCELLED) {
+          return {
+            status: 'cancelled',
+            progressText: 'Background agent cancelled.',
+            error: 'Background agent terminated with CANCELLED',
+            metadata: {
+              finalText: headless.getFinalText(),
+              terminateReason,
+              usage,
+              roundCount,
+              filesTouched: [...filesTouched],
+            },
+          };
         }
 
         return {
@@ -131,7 +159,8 @@ export class BackgroundAgentRunner {
             finalText: headless.getFinalText(),
             terminateReason,
             usage,
-            filesTouched: [],
+            roundCount,
+            filesTouched: [...filesTouched],
           },
         };
       },
@@ -145,7 +174,18 @@ export class BackgroundAgentRunner {
     taskId: string,
     emitter: AgentEventEmitter,
     usage: NonNullable<BackgroundAgentResult['usage']>,
+    filesTouched: Set<string>,
+    onRound: (round: number) => void,
   ): void {
+    emitter.on(AgentEventType.ROUND_START, (event) => {
+      onRound(event.round);
+      this.registry.update(taskId, {
+        metadata: {
+          currentRound: event.round,
+        },
+      });
+    });
+
     emitter.on(AgentEventType.STREAM_TEXT, (event) => {
       if (!event.thought && event.text.trim().length > 0) {
         this.registry.update(taskId, {
@@ -155,9 +195,15 @@ export class BackgroundAgentRunner {
     });
 
     emitter.on(AgentEventType.TOOL_CALL, (event) => {
+      onRound(event.round);
+      for (const filePath of extractFilePathsFromArgs(event.args)) {
+        filesTouched.add(filePath);
+      }
       this.registry.update(taskId, {
         metadata: {
+          currentRound: event.round,
           lastToolCall: event.name,
+          filesTouched: [...filesTouched],
         },
       });
     });
@@ -183,10 +229,16 @@ export class BackgroundAgentRunner {
     const terminateReason = metadata['terminateReason'];
     const usage = metadata['usage'];
     const filesTouched = metadata['filesTouched'];
+    const roundCount = metadata['roundCount'];
 
     return {
       taskId,
-      status: finalTask.status === 'completed' ? 'completed' : 'failed',
+      status:
+        finalTask.status === 'completed'
+          ? 'completed'
+          : finalTask.status === 'cancelled'
+            ? 'cancelled'
+            : 'failed',
       finalText: typeof finalText === 'string' ? finalText : undefined,
       terminateReason:
         typeof terminateReason === 'string' ? terminateReason : undefined,
@@ -194,8 +246,43 @@ export class BackgroundAgentRunner {
         usage && typeof usage === 'object'
           ? (usage as BackgroundAgentResult['usage'])
           : undefined,
+      roundCount: typeof roundCount === 'number' ? roundCount : undefined,
       filesTouched: Array.isArray(filesTouched) ? (filesTouched as string[]) : [],
       error: finalTask.error,
     };
   }
+}
+
+function extractFilePathsFromArgs(args: Record<string, unknown>): string[] {
+  const matches = new Set<string>();
+
+  const visit = (value: unknown, key?: string): void => {
+    if (typeof value === 'string') {
+      const normalizedKey = key?.toLowerCase() ?? '';
+      if (
+        normalizedKey.includes('path') ||
+        normalizedKey.includes('file') ||
+        normalizedKey.includes('target')
+      ) {
+        matches.add(value);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item, key);
+      }
+      return;
+    }
+
+    if (value && typeof value === 'object') {
+      for (const [nextKey, nextValue] of Object.entries(value as Record<string, unknown>)) {
+        visit(nextValue, nextKey);
+      }
+    }
+  };
+
+  visit(args);
+  return [...matches];
 }

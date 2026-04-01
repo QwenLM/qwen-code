@@ -30,7 +30,8 @@ Rules:
 - Preserve durable information.
 - Remove duplicates and obvious clutter.
 - Keep topic headings.
-- If a topic has no durable entries, use the standard placeholder: _No entries yet._`;
+- If a topic has no durable entries, use the standard placeholder: _No entries yet._
+- You may use read-only tools to inspect topic files when the provided excerpts are insufficient.`;
 
 const DREAM_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -82,6 +83,7 @@ async function buildTopicDocumentBlock(projectRoot: string): Promise<string> {
     .map((doc) =>
       [
         `topic=${doc.type}`,
+        `path=${doc.filePath}`,
         `title=${doc.title}`,
         `description=${doc.description || '(none)'}`,
         'body:',
@@ -153,14 +155,15 @@ export async function planManagedAutoMemoryDreamByAgent(
       temp: 0,
     },
     runConfig: {
-      max_turns: 2,
-      max_time_minutes: 1,
+      max_turns: 4,
+      max_time_minutes: 2,
     },
     toolConfig: {
-      tools: [],
+      tools: ['read_file'],
     },
     metadata: {
       planner: 'dream-agent',
+      stage: 'agent-b',
     },
   });
 

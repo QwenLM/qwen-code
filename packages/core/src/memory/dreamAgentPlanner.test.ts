@@ -88,7 +88,11 @@ describe('dreamAgentPlanner', () => {
       expect.objectContaining({
         projectRoot,
         sessionId: 'session-1',
-        toolConfig: { tools: [] },
+        runConfig: expect.objectContaining({
+          max_turns: 4,
+          max_time_minutes: 2,
+        }),
+        toolConfig: { tools: ['read_file'] },
       }),
     );
   });

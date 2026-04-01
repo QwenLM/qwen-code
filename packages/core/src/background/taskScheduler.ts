@@ -6,6 +6,7 @@
 
 import {
   BackgroundTaskRegistry,
+  type BackgroundTaskStatus,
   type BackgroundTaskState,
 } from './taskRegistry.js';
 import { BackgroundTaskDrainer } from './taskDrainer.js';
@@ -18,7 +19,9 @@ export interface ScheduleBackgroundTaskParams {
   dedupeKey?: string;
   metadata?: Record<string, unknown>;
   run: (task: BackgroundTaskState) => Promise<{
+    status?: BackgroundTaskStatus;
     progressText?: string;
+    error?: string;
     metadata?: Record<string, unknown>;
   } | void>;
 }
@@ -81,8 +84,9 @@ export class BackgroundTaskScheduler {
         try {
           const result = await params.run(this.registry.get(task.id) as BackgroundTaskState);
           const finalTask = this.registry.update(task.id, {
-            status: 'completed',
+            status: result?.status ?? 'completed',
             progressText: result?.progressText,
+            error: result?.error,
             metadata: result?.metadata,
           });
           return finalTask;

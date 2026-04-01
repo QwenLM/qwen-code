@@ -31,7 +31,8 @@ Rules:
 - Ignore temporary, session-specific, speculative, or question content.
 - Use one of the allowed topics: user, feedback, project, reference.
 - Keep summaries concise and suitable for bullet points.
-- Do not include leading bullet markers.`;
+- Do not include leading bullet markers.
+- You may use read-only tools to inspect topic files when the summaries seem insufficient.`;
 
 const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -94,6 +95,7 @@ async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
       );
       return [
         `topic=${doc.type}`,
+        `path=${doc.filePath}`,
         `title=${doc.title}`,
         `description=${doc.description || '(none)'}`,
         `current=${body || '(empty)'}`,
@@ -186,14 +188,15 @@ export async function planAutoMemoryExtractionPatchesByAgent(
       temp: 0,
     },
     runConfig: {
-      max_turns: 2,
-      max_time_minutes: 1,
+      max_turns: 4,
+      max_time_minutes: 2,
     },
     toolConfig: {
-      tools: [],
+      tools: ['read_file'],
     },
     metadata: {
       planner: 'extraction-agent',
+      stage: 'agent-b',
     },
   });
 

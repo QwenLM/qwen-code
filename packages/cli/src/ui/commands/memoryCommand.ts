@@ -56,14 +56,15 @@ async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
       touched: status.metadata?.lastDreamTouchedTopics?.join(', ') || 'none',
       activeTasks: String(
         status.dreamTasks.filter(
-          (task) => task.status === 'pending' || task.status === 'running',
+          (task: { status: string }) =>
+            task.status === 'pending' || task.status === 'running',
         ).length,
       ),
     },
   );
 
   const topicSummaries = status.topics.map(
-    (topic) =>
+    (topic: { topic: string; entryCount: number; hooks: string[] }) =>
       `- ${topic.topic}.md: ${topic.entryCount} entries${topic.hooks.length > 0 ? ` | hooks: ${topic.hooks.join(' ; ')}` : ''}`,
   );
 
@@ -303,6 +304,8 @@ export const memoryCommand: SlashCommand = {
           },
           Date.now(),
         );
+
+        return;
       },
     },
     {
@@ -328,6 +331,8 @@ export const memoryCommand: SlashCommand = {
           },
           Date.now(),
         );
+
+        return;
       },
     },
     {
@@ -417,6 +422,8 @@ export const memoryCommand: SlashCommand = {
           },
           Date.now(),
         );
+
+        return;
       },
     },
     {
