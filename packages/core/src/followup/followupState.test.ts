@@ -66,7 +66,7 @@ describe('createFollowupController', () => {
     ctrl.cleanup();
   });
 
-  it('accept invokes onAccept callback and clears state', () => {
+  it('accept invokes onAccept callback and clears state', async () => {
     const onStateChange = vi.fn();
     const onAccept = vi.fn();
     const ctrl = createFollowupController({
@@ -84,7 +84,10 @@ describe('createFollowupController', () => {
     expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
 
     // Callback fires via microtask — flush it
-    vi.advanceTimersByTime(0);
+    await Promise.resolve();
+
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept).toHaveBeenCalledWith('commit this');
 
     ctrl.cleanup();
   });

@@ -56,7 +56,10 @@ import {
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 // Forked query cache
-import { saveCacheSafeParams } from '../followup/forkedQuery.js';
+import {
+  saveCacheSafeParams,
+  clearCacheSafeParams,
+} from '../followup/forkedQuery.js';
 
 // Utilities
 import {
@@ -230,6 +233,8 @@ export class GeminiClient {
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     this.hasFailedCompressionAttempt = false;
+    // Clear stale cache params on session reset to prevent cross-session leakage
+    clearCacheSafeParams();
 
     const history = await getInitialChatHistory(this.config, extraHistory);
 
@@ -804,9 +809,16 @@ export class GeminiClient {
     if (!signal?.aborted && this.isInitialized()) {
       try {
         const chat = this.getChat();
+        // Truncate history before cloning to avoid full-session deep copy overhead
+        const fullHistory = chat.getHistory(true);
+        const maxHistoryForCache = 40;
+        const cachedHistory =
+          fullHistory.length > maxHistoryForCache
+            ? fullHistory.slice(-maxHistoryForCache)
+            : fullHistory;
         saveCacheSafeParams(
           chat.getGenerationConfig(),
-          chat.getHistory(true),
+          cachedHistory,
           this.config.getModel(),
         );
       } catch {

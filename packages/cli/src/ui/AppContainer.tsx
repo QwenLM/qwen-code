@@ -1145,10 +1145,9 @@ export const AppContainer = (props: AppContainerProps) => {
     settingInputRequests,
   ]);
 
-  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, etc.)
-  // Note: user-initiated dismiss (typing a character) only clears the followup hook's
-  // internal state, not promptSuggestion. Speculation continues briefly until the next
-  // turn starts and suggestionAbortRef (the parentSignal) is aborted.
+  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
+  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
+  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
   useEffect(() => {
     if (!promptSuggestion && speculationRef.current.status !== 'idle') {
       abortSpeculation(speculationRef.current).catch(() => {});
