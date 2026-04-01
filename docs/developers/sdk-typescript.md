@@ -83,6 +83,7 @@ Creates a new query session with the Qwen Code.
 | `sandbox`                | `boolean`                                                    | `false`          | Enable sandbox mode for isolated execution with restricted file access.                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `chatRecording`          | `boolean`                                                    | `true`           | Session persistence. Set to `false` to disable recording.                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `webSearch`              | `object`                                                     | -                | Web search config: `{ tavilyApiKey?, googleApiKey?, googleSearchEngineId?, defaultProvider? }`. Provide API keys and a default provider to enable web search.                                                                                                                                                                                                                                                                                                                         |
+| `lsp`                    | `boolean`                                                    | `false`          | Enable Language Server Protocol integration. The agent gains code intelligence: goToDefinition, findReferences, hover, diagnostics, codeActions, and more. Requires language server binaries installed on the system. See [LSP](../users/features/lsp.md).                                                                                                                                                                                                                            |
 
 ### Timeouts
 
@@ -482,6 +483,32 @@ for await (const message of conversation) {
 | `data.memory.name` | `string` | Memory name                           |
 | `data.memory.type` | `string` | Memory type (user, feedback, project) |
 | `data.memory.file` | `string` | File path                             |
+
+## LSP Diagnostics
+
+When `lsp: true` is set, the agent gets automatic code intelligence. After every file edit, language servers analyze changes and report errors and warnings. These appear as `lsp_diagnostic` system messages:
+
+```typescript
+import { isLspDiagnosticEvent } from '@qwen-code/sdk';
+
+const conversation = query({
+  prompt: 'Fix all type errors in src/',
+  options: {
+    lsp: true,
+    permissionMode: 'auto-edit',
+  },
+});
+
+for await (const message of conversation) {
+  if (isLspDiagnosticEvent(message)) {
+    const { uri, diagnostics } = message.data;
+    const errors = diagnostics.filter((d) => d.severity === 'error');
+    console.log(`${errors.length} errors in ${uri}`);
+  }
+}
+```
+
+LSP requires language server binaries installed on the system. Configure servers via `.lsp.json` in the project root or install LSP plugins. See [LSP features](../users/features/lsp.md) for setup details.
 
 ## Error Handling
 

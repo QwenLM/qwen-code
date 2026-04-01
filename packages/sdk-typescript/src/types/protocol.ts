@@ -167,6 +167,28 @@ export interface SDKMemoryEvent extends SDKSystemMessage {
   };
 }
 
+/**
+ * LSP diagnostic event emitted as a system message.
+ * Fired after file edits when language servers report errors or warnings.
+ */
+export interface SDKLspDiagnosticEvent extends SDKSystemMessage {
+  subtype: 'lsp_diagnostic';
+  data: {
+    uri: string;
+    serverName?: string;
+    diagnostics: Array<{
+      severity: 'error' | 'warning' | 'info' | 'hint';
+      message: string;
+      range: {
+        start: { line: number; character: number };
+        end: { line: number; character: number };
+      };
+      source?: string;
+      code?: string | number;
+    }>;
+  };
+}
+
 export interface SDKResultMessageSuccess {
   type: 'result';
   subtype: 'success';
@@ -583,6 +605,10 @@ export function isTaskEvent(msg: any): msg is SDKTaskEvent {
 
 export function isMemoryEvent(msg: any): msg is SDKMemoryEvent {
   return isSDKSystemMessage(msg) && msg.subtype === 'memory_event';
+}
+
+export function isLspDiagnosticEvent(msg: any): msg is SDKLspDiagnosticEvent {
+  return isSDKSystemMessage(msg) && msg.subtype === 'lsp_diagnostic';
 }
 
 export type SubagentLevel = 'session';

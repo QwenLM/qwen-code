@@ -40,6 +40,7 @@ export type {
   RunConfig,
   SDKTaskEvent,
   SDKMemoryEvent,
+  SDKLspDiagnosticEvent,
 } from './types/protocol.js';
 
 export {
@@ -53,6 +54,7 @@ export {
   isControlCancel,
   isTaskEvent,
   isMemoryEvent,
+  isLspDiagnosticEvent,
 } from './types/protocol.js';
 
 export type {

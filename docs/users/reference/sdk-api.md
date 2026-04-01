@@ -88,6 +88,7 @@ All fields are optional.
 | `mcpServers`  | `Record<string, McpServerConfig>` | -       | MCP servers (external or SDK-embedded)                                                          |
 | `extensions`  | `string[]`                        | -       | Extension names to enable                                                                       |
 | `includeDirs` | `string[]`                        | -       | Additional workspace directories                                                                |
+| `lsp`         | `boolean`                         | `false` | Enable LSP code intelligence (goToDefinition, diagnostics, etc.). See [LSP](../features/lsp.md) |
 
 ### Hook options
 
@@ -278,6 +279,28 @@ Memory lifecycle event. Check with `isMemoryEvent()`.
 }
 ```
 
+### SDKLspDiagnosticEvent
+
+LSP diagnostic event. Check with `isLspDiagnosticEvent()`. Emitted when language servers report errors/warnings after file edits.
+
+```typescript
+{
+  type: 'system';
+  subtype: 'lsp_diagnostic';
+  data: {
+    uri: string;
+    serverName?: string;
+    diagnostics: Array<{
+      severity: 'error' | 'warning' | 'info' | 'hint';
+      message: string;
+      range: { start: { line: number; character: number }; end: { line: number; character: number } };
+      source?: string;
+      code?: string | number;
+    }>;
+  };
+}
+```
+
 ---
 
 ## Content blocks
@@ -306,6 +329,7 @@ All type guards accept `unknown` and return a type predicate.
 | `isSDKPartialAssistantMessage(msg)` | `SDKPartialAssistantMessage` |
 | `isTaskEvent(msg)`                  | `SDKTaskEvent`               |
 | `isMemoryEvent(msg)`                | `SDKMemoryEvent`             |
+| `isLspDiagnosticEvent(msg)`         | `SDKLspDiagnosticEvent`      |
 | `isControlRequest(msg)`             | `CLIControlRequest`          |
 | `isControlResponse(msg)`            | `CLIControlResponse`         |
 | `isControlCancel(msg)`              | `ControlCancelRequest`       |
@@ -481,7 +505,7 @@ try {
 
 All types are available as named imports from `@qwen-code/sdk`:
 
-**Message types:** `SDKMessage`, `SDKUserMessage`, `SDKAssistantMessage`, `SDKSystemMessage`, `SDKResultMessage`, `SDKPartialAssistantMessage`, `SDKTaskEvent`, `SDKMemoryEvent`
+**Message types:** `SDKMessage`, `SDKUserMessage`, `SDKAssistantMessage`, `SDKSystemMessage`, `SDKResultMessage`, `SDKPartialAssistantMessage`, `SDKTaskEvent`, `SDKMemoryEvent`, `SDKLspDiagnosticEvent`
 
 **Content types:** `ContentBlock`, `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `ToolResultBlock`
 
@@ -497,4 +521,4 @@ All types are available as named imports from `@qwen-code/sdk`:
 
 **Functions:** `query`, `tool`, `createSdkMcpServer`, `isSdkMcpServerConfig`, `isAbortError`, `SdkLogger`
 
-**Type guards:** `isSDKUserMessage`, `isSDKAssistantMessage`, `isSDKSystemMessage`, `isSDKResultMessage`, `isSDKPartialAssistantMessage`, `isTaskEvent`, `isMemoryEvent`, `isControlRequest`, `isControlResponse`, `isControlCancel`, `isTextBlock`, `isThinkingBlock`, `isToolUseBlock`, `isToolResultBlock`
+**Type guards:** `isSDKUserMessage`, `isSDKAssistantMessage`, `isSDKSystemMessage`, `isSDKResultMessage`, `isSDKPartialAssistantMessage`, `isTaskEvent`, `isMemoryEvent`, `isLspDiagnosticEvent`, `isControlRequest`, `isControlResponse`, `isControlCancel`, `isTextBlock`, `isThinkingBlock`, `isToolUseBlock`, `isToolResultBlock`

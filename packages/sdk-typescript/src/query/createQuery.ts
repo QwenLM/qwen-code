@@ -81,6 +81,7 @@ export function query({
     sandbox: options.sandbox,
     chatRecording: options.chatRecording,
     webSearch: options.webSearch,
+    lsp: options.lsp,
   });
 
   const queryOptions: QueryOptions = {

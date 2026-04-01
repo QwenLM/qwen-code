@@ -299,6 +299,10 @@ export class ProcessTransport implements Transport {
       args.push('--chat-recording', 'false');
     }
 
+    if (this.options.lsp) {
+      args.push('--experimental-lsp');
+    }
+
     if (this.options.webSearch) {
       const ws = this.options.webSearch;
       if (ws.tavilyApiKey) args.push('--tavily-api-key', ws.tavilyApiKey);

@@ -118,6 +118,15 @@ export type TransportOptions = {
     googleSearchEngineId?: string;
     defaultProvider?: string;
   };
+
+  /**
+   * Enable the Language Server Protocol integration.
+   * When true, the CLI starts configured language servers and enables
+   * the LSP tool (goToDefinition, findReferences, hover, diagnostics, etc.).
+   * Language servers must be installed on the system.
+   * @default false
+   */
+  lsp?: boolean;
 };
 
 export interface QuerySystemPromptPreset {
@@ -599,6 +608,27 @@ export interface QueryOptions {
    * ```
    */
   hookCallbacks?: Partial<Record<HookEvent, HookCallback | HookCallback[]>>;
+
+  /**
+   * Enable Language Server Protocol integration for code intelligence.
+   * When true, the CLI starts language servers configured in `.lsp.json`
+   * or via installed LSP plugins. Enables the LSP tool with operations:
+   * goToDefinition, findReferences, hover, diagnostics, documentSymbol,
+   * workspaceSymbol, goToImplementation, callHierarchy, codeActions.
+   *
+   * Requires language server binaries to be installed on the system
+   * (e.g., typescript-language-server, pyright, gopls, rust-analyzer).
+   *
+   * @default false
+   * @example
+   * ```typescript
+   * const conversation = query({
+   *   prompt: 'Fix all type errors in src/',
+   *   options: { lsp: true, permissionMode: 'auto-edit' },
+   * });
+   * ```
+   */
+  lsp?: boolean;
 
   /**
    * Timeout configuration for various SDK operations.

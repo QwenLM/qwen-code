@@ -199,6 +199,7 @@ export const QueryOptionsSchema = z
       })
       .strict()
       .optional(),
+    lsp: z.boolean().optional(),
     hookCallbacks: z
       .record(
         z.string(),
