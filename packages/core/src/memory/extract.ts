@@ -6,10 +6,13 @@
 
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
+import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
 import { getAutoMemoryExtractCursorPath, getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
+import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -22,6 +25,7 @@ import {
 } from './state.js';
 
 const MIN_CANDIDATE_LENGTH = 12;
+const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
 export interface AutoMemoryTranscriptMessage {
   offset: number;
@@ -175,6 +179,78 @@ export function extractMemoryPatchesFromTranscript(
   return patches;
 }
 
+function normalizeExtractPatch(
+  patch: AutoMemoryExtractPatch,
+): AutoMemoryExtractPatch | null {
+  const summary = normalizeSummary(
+    patch.summary.replace(/^[-*]\s+/, '').trim(),
+  );
+  if (
+    summary.length < MIN_CANDIDATE_LENGTH ||
+    summary.endsWith('?') ||
+    isTemporaryTask(summary)
+  ) {
+    return null;
+  }
+
+  return {
+    topic: patch.topic,
+    summary,
+    sourceOffset: patch.sourceOffset,
+  };
+}
+
+function dedupeExtractPatches(
+  patches: AutoMemoryExtractPatch[],
+): AutoMemoryExtractPatch[] {
+  const seen = new Set<string>();
+  const deduped: AutoMemoryExtractPatch[] = [];
+
+  for (const patch of patches) {
+    const normalizedPatch = normalizeExtractPatch(patch);
+    if (!normalizedPatch) {
+      continue;
+    }
+
+    const dedupeKey = `${normalizedPatch.topic}:${normalizedPatch.summary.toLowerCase()}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    deduped.push(normalizedPatch);
+  }
+
+  return deduped;
+}
+
+async function planAutoMemoryExtractPatches(params: {
+  projectRoot: string;
+  messages: AutoMemoryTranscriptMessage[];
+  config?: Config;
+}): Promise<AutoMemoryExtractPatch[]> {
+  if (params.messages.length === 0) {
+    return [];
+  }
+
+  if (params.config) {
+    try {
+      const plannedPatches = await planAutoMemoryExtractionPatchesByModel(
+        params.config,
+        params.projectRoot,
+        params.messages,
+      );
+      return dedupeExtractPatches(plannedPatches);
+    } catch (error) {
+      debugLogger.warn(
+        'Model-driven auto-memory extraction failed; falling back to heuristic extraction.',
+        error,
+      );
+    }
+  }
+
+  return dedupeExtractPatches(extractMemoryPatchesFromTranscript(params.messages));
+}
+
 async function readExtractCursor(
   projectRoot: string,
 ): Promise<AutoMemoryExtractCursor> {
@@ -273,6 +349,7 @@ export async function runAutoMemoryExtract(params: {
   sessionId: string;
   history: Content[];
   now?: Date;
+  config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   await ensureAutoMemoryScaffold(params.projectRoot, now);
@@ -284,7 +361,11 @@ export async function runAutoMemoryExtract(params: {
     transcript,
     currentCursor,
   );
-  const patches = extractMemoryPatchesFromTranscript(slice.messages);
+  const patches = await planAutoMemoryExtractPatches({
+    projectRoot: params.projectRoot,
+    messages: slice.messages,
+    config: params.config,
+  });
   const touchedTopics = await applyExtractedMemoryPatches(
     params.projectRoot,
     patches,
@@ -314,6 +395,7 @@ export async function scheduleAutoMemoryExtract(params: {
   sessionId: string;
   history: Content[];
   now?: Date;
+  config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   if (isExtractRunning(params.projectRoot)) {
     return {

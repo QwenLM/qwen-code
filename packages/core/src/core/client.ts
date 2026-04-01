@@ -464,6 +464,7 @@ export class GeminiClient {
       projectRoot: this.config.getProjectRoot(),
       sessionId: this.config.getSessionId(),
       history: this.getHistory(),
+      config: this.config,
     });
 
     if (result?.systemMessage) {

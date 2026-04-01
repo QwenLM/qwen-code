@@ -162,6 +162,56 @@ Completed
 
 ---
 
+## Part 8 - Side-query extraction patches
+
+### Start review
+
+- Overall plan now advances from recall selection to the next most valuable model-driven memory improvement: extraction quality.
+- Part 7 already validated that side-query can safely drive memory decisions with fallback, so extraction is the next consumer.
+- Scope for this part: keep host-side cursoring, patch application, and dedupe, but replace heuristic-only patch planning with a model-driven side-query planner plus heuristic fallback.
+
+### Goal
+
+- Add a side-query extraction planner that consumes transcript slices and topic summaries
+- Keep host-side patch application, dedupe, and cursor updates unchanged
+- Fallback safely to the existing heuristic extraction planner on model failure
+- Add targeted tests for planner behavior, fallback behavior, and client integration
+
+### Implemented
+
+- Added `packages/core/src/memory/extractionPlanner.ts`
+- Added `packages/core/src/memory/extractionPlanner.test.ts`
+- Added `packages/core/src/memory/extractModel.test.ts`
+- Updated `packages/core/src/memory/extract.ts` to use model-driven patch planning with heuristic fallback
+- Updated `packages/core/src/core/client.ts` to pass `Config` into managed extraction scheduling
+- Updated `packages/core/src/core/client.test.ts` with extraction config coverage
+- Exported extraction planner helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed extraction now supports a side-query planner that consumes transcript slices plus current topic summaries and returns structured topic patches.
+- If the planner fails or returns invalid output, extraction safely falls back to the existing heuristic patch extractor.
+- Host-side cursor persistence, topic patch application, dedupe, and system messages remain unchanged.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/extractionPlanner.test.ts src/memory/extractModel.test.ts src/memory/extract.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extractionPlanner.test.ts src/memory/extract.test.ts src/memory/extractModel.test.ts src/memory/dream.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally stays single-shot and structured; it does not introduce forked extractor agents or background task runtime yet.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review

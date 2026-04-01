@@ -1474,6 +1474,7 @@ hello
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
         history: recordedHistory,
+        config: mockConfig,
       });
       expect(events).toContainEqual({
         type: GeminiEventType.HookSystemMessage,
