@@ -1,202 +1,153 @@
-# Subagents
+# Sub-Agents
 
-Subagents are specialized AI assistants that handle specific types of tasks within Qwen Code. They allow you to delegate focused work to AI agents that are configured with task-specific prompts, tools, and behaviors.
+Delegate focused tasks to specialized AI agents with their own system prompts, tool restrictions, and model selection.
 
-## What are Subagents?
+This page covers how to create and use sub-agents, the configuration format, built-in agents, and multi-agent team coordination.
 
-Subagents are independent AI assistants that:
+## Create a sub-agent
 
-- **Specialize in specific tasks** - Each Subagent is configured with a focused system prompt for particular types of work
-- **Have separate context** - They maintain their own conversation history, separate from your main chat
-- **Use controlled tools** - You can configure which tools each Subagent has access to
-- **Work autonomously** - Once given a task, they work independently until completion or failure
-- **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
+Sub-agents are Markdown files with YAML frontmatter stored in `.proto/agents/` (project) or `~/.proto/agents/` (global). Project agents take precedence over global agents with the same name.
 
-## Key Benefits
+### Minimal example
 
-- **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
-- **Context Isolation**: Keep specialized work separate from your main conversation
-- **Reusability**: Save and reuse agent configurations across projects and sessions
-- **Controlled Access**: Limit which tools each agent can use for security and focus
-- **Progress Visibility**: Monitor agent execution with real-time progress updates
+Create `.proto/agents/code-reviewer.md`:
 
-## How Subagents Work
-
-1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents
-3. **Execution**: Subagents work independently, using their configured tools to complete tasks
-4. **Results**: They return results and execution summaries back to the main conversation
-
-## Getting Started
-
-### Quick Start
-
-1. **Create your first Subagent**:
-
-   `/agents create`
-
-   Follow the guided wizard to create a specialized agent.
-
-2. **Manage existing agents**:
-
-   `/agents manage`
-
-   View and manage your configured Subagents.
-
-3. **Use Subagents automatically**: Simply ask the main AI to perform tasks that match your Subagents' specializations. The AI will automatically delegate appropriate work.
-
-### Example Usage
-
-```
-User: "Please write comprehensive tests for the authentication module"
-AI: I'll delegate this to your testing specialist Subagents.
-[Delegates to "testing-expert" Subagents]
-[Shows real-time progress of test creation]
-[Returns with completed test files and execution summary]`
-```
-
-## Management
-
-### CLI Commands
-
-Subagents are managed through the `/agents` slash command and its subcommands:
-
-**Usage:**：`/agents create`。Creates a new Subagent through a guided step wizard.
-
-**Usage:**：`/agents manage`。Opens an interactive management dialog for viewing and managing existing Subagents.
-
-### Storage Locations
-
-Subagents are stored as Markdown files in multiple locations:
-
-- **Project-level**: `.qwen/agents/` (highest precedence)
-- **User-level**: `~/.qwen/agents/` (fallback)
-- **Extension-level**: Provided by installed extensions
-
-This allows you to have project-specific agents, personal agents that work across all projects, and extension-provided agents that add specialized capabilities.
-
-### Extension Subagents
-
-Extensions can provide custom subagents that become available when the extension is enabled. These agents are stored in the extension's `agents/` directory and follow the same format as personal and project agents.
-
-Extension subagents:
-
-- Are automatically discovered when the extension is enabled
-- Appear in the `/agents manage` dialog under "Extension Agents" section
-- Cannot be edited directly (edit the extension source instead)
-- Follow the same configuration format as user-defined agents
-
-To see which extensions provide subagents, check the extension's `qwen-extension.json` file for an `agents` field.
-
-### File Format
-
-Subagents are configured using Markdown files with YAML frontmatter. This format is human-readable and easy to edit with any text editor.
-
-#### Basic Structure
-
-```
+```markdown
 ---
-name: agent-name
-description: Brief description of when and how to use this agent
+name: code-reviewer
+description: Reviews code for quality, security, and maintainability
 tools:
-  - tool1
-  - tool2
-  - tool3 # Optional
-disallowedTools:  # Optional denylist (applied before tools allowlist)
-  - write_file
-  - edit
-permissionMode: default  # Optional: default, plan, autoEdit, yolo
-modelConfig:
-  model: sonnet  # Optional: haiku, sonnet, opus, or full model ID
-runConfig:
-  max_turns: 25  # Optional
-  max_time_minutes: 10  # Optional
+  - read_file
+  - grep_search
+  - glob
 ---
 
-System prompt content goes here.
-Multiple paragraphs are supported.
-You can use ${variable} templating for dynamic content.
+You are a code reviewer. Analyze code for:
+
+- Security vulnerabilities
+- Performance issues
+- Maintainability concerns
+
+Provide specific, actionable feedback with file paths and line numbers.
 ```
 
-#### Tool Restrictions
+### Use the agent
 
-Two mechanisms for controlling tool access:
+Ask the model naturally and it will delegate based on the `description` field:
 
-- **`tools` (allowlist)**: Only these tools are available. If omitted, the agent inherits all tools.
-- **`disallowedTools` (denylist)**: These tools are removed from the inherited set. Applied before the allowlist.
+```
+Review the authentication module for security issues
+```
 
-When both are specified, `disallowedTools` filters first, then `tools` resolves against the remainder.
+Or invoke explicitly:
+
+```
+Use the code-reviewer agent to check my recent changes
+```
+
+### Management commands
+
+| Command          | Purpose                            |
+| ---------------- | ---------------------------------- |
+| `/agents create` | Guided agent creation wizard       |
+| `/agents manage` | View, edit, delete existing agents |
+
+## Configuration reference
+
+### Frontmatter fields
+
+| Field                        | Required | Description                                        |
+| ---------------------------- | -------- | -------------------------------------------------- |
+| `name`                       | Yes      | Unique identifier (lowercase, hyphens, 2-50 chars) |
+| `description`                | Yes      | When to delegate to this agent                     |
+| `tools`                      | No       | Allowlist of permitted tools. Omit to inherit all. |
+| `disallowedTools`            | No       | Denylist of tools to exclude from inherited set    |
+| `permissionMode`             | No       | `default`, `plan`, `autoEdit`, `yolo`              |
+| `modelConfig.model`          | No       | `haiku`, `sonnet`, `opus`, or full model ID        |
+| `modelConfig.temp`           | No       | Temperature (0-2)                                  |
+| `runConfig.max_turns`        | No       | Maximum agentic turns                              |
+| `runConfig.max_time_minutes` | No       | Maximum execution time                             |
+| `color`                      | No       | Display color for UI                               |
+
+### Tool restrictions
+
+Two mechanisms control which tools an agent can use:
+
+**Allowlist (`tools`)** — Only these tools are available:
 
 ```yaml
-# Read-only agent: inherit all tools except write/edit
-disallowedTools:
-  - write_file
-  - edit
-
-# Restricted agent: only search tools
 tools:
   - read_file
   - grep_search
   - glob
 ```
 
-#### Permission Mode
+**Denylist (`disallowedTools`)** — Remove these from the inherited set:
 
-Override the session permission mode for a specific agent:
-
-- `default` — standard confirmation prompts
-- `plan` — read-only mode, no file modifications
-- `autoEdit` — auto-approve file edits
-- `yolo` — auto-approve everything
-
-If the parent session uses `bypassPermissions`, it takes precedence and cannot be overridden.
-
-#### Background Execution
-
-Agents can run in the background using `run_in_background: true` in the Agent tool call. Background agents:
-
-- Return immediately with an agent ID
-- Run concurrently while you continue working
-- Notify you when they complete (injected at the next tool boundary)
-- Results appear as mid-turn context alongside tool results
-
-#### Example Usage
-
-```
----
-name: project-documenter
-description: Creates project documentation and README files
----
-
-You are a documentation specialist for the ${project_name} project.
-
-Your task: ${task_description}
-
-Working directory: ${current_directory}
-Generated on: ${timestamp}
-
-Focus on creating clear, comprehensive documentation that helps both
-new contributors and end users understand the project.
+```yaml
+disallowedTools:
+  - write_file
+  - edit
 ```
 
-## Built-in Agents
+When both are specified, `disallowedTools` is applied first, then `tools` filters the remainder.
 
-Proto ships with four built-in agents always available:
+### Permission mode
 
-| Agent               | Purpose                                              | Model     | Tools                     |
-| ------------------- | ---------------------------------------------------- | --------- | ------------------------- |
-| **general-purpose** | Complex multi-step tasks, code search                | Inherited | All                       |
-| **Explore**         | Fast codebase search and analysis                    | Inherited | Read-only (no Write/Edit) |
-| **verify**          | Review changes for correctness before finalizing     | Inherited | Read-only                 |
-| **coordinator**     | Orchestrate multi-agent work with task decomposition | Inherited | All + Agent tool          |
+Override the session's permission mode for a specific agent:
 
-The **coordinator** agent is designed for team work. It decomposes tasks, delegates to teammates via the Agent tool with `run_in_background`, and synthesizes results.
+| Mode       | Behavior                         |
+| ---------- | -------------------------------- |
+| `default`  | Standard confirmation prompts    |
+| `plan`     | Read-only, no file modifications |
+| `autoEdit` | Auto-approve file edits          |
+| `yolo`     | Auto-approve everything          |
 
-## Agent Teams
+If the parent session uses bypass permissions, it takes precedence.
 
-Proto supports multi-agent coordination through teams. Teams are configured in `.proto/teams/{name}/config.json`.
+### Template variables
 
-### Team Commands
+System prompts support `${variable}` syntax. Variables are resolved from `ContextState` at runtime.
+
+### Storage hierarchy
+
+| Level     | Location                        | Priority |
+| --------- | ------------------------------- | -------- |
+| Session   | Passed via SDK at runtime       | Highest  |
+| Project   | `.proto/agents/`                | 2        |
+| User      | `~/.proto/agents/`              | 3        |
+| Extension | Installed extension's `agents/` | 4        |
+| Built-in  | Embedded in proto               | Lowest   |
+
+When multiple agents share the same name, higher-priority location wins.
+
+## Built-in agents
+
+Four agents are always available:
+
+| Agent             | Purpose                                              | Tools              |
+| ----------------- | ---------------------------------------------------- | ------------------ |
+| `general-purpose` | Complex multi-step tasks, code search                | All (except Agent) |
+| `Explore`         | Fast codebase search and analysis                    | Read-only          |
+| `verify`          | Review changes for correctness before finalizing     | Read-only          |
+| `coordinator`     | Orchestrate multi-agent work with task decomposition | All + Agent        |
+
+## Background execution
+
+Agents can run in the background using `run_in_background: true` in the Agent tool call:
+
+- Returns immediately with an agent ID
+- Runs concurrently while the main conversation continues
+- Completion notification is injected at the next tool boundary
+- Results appear alongside tool results via mid-turn injection
+
+The `coordinator` agent uses this to delegate subtasks in parallel.
+
+## Agent teams
+
+Teams enable coordinated multi-agent work with shared task visibility and messaging.
+
+### Team commands
 
 | Command                                | Description               |
 | -------------------------------------- | ------------------------- |
@@ -206,408 +157,79 @@ Proto supports multi-agent coordination through teams. Teams are configured in `
 | `/team stop <name>`                    | Stop a running team       |
 | `/team delete <name>`                  | Delete a team config      |
 
-### Starting a Team
+### Start a team
 
 ```
 /team start research researcher:Explore implementer:general-purpose
 ```
 
-If no members are specified, defaults to `lead` (coordinator) + `scout` (Explore).
+Default (no members specified): `lead` (coordinator) + `scout` (Explore).
 
-### Shared Task List
+Team config is stored at `.proto/teams/{name}/config.json`.
+
+### Shared task list
 
 Teammates share task visibility through the task system:
 
-- `claimTask(id, agentId)` — atomically claim and start a task
-- `getUnclaimedTasks()` — find available work
-- Tasks gain an `assignee` field for ownership tracking
+- **Claim a task**: `claimTask(id, agentId)` atomically assigns and starts it
+- **Find available work**: `getUnclaimedTasks()` returns pending tasks with no assignee
+- Tasks track their `assignee` for ownership
 
-### Inter-Agent Messaging
+### Inter-agent messaging
 
-The TeamMailbox enables direct communication between agents:
+`TeamMailbox` enables direct communication:
 
-- `send(from, to, message)` — direct message
-- `broadcast(from, message)` — message all except sender
-- `receive(agentId)` — drain unread messages
+| Method                     | Purpose                             |
+| -------------------------- | ----------------------------------- |
+| `send(from, to, message)`  | Direct message to a teammate        |
+| `broadcast(from, message)` | Message all teammates except sender |
+| `receive(agentId)`         | Drain unread messages               |
+| `peek(agentId)`            | Read without draining               |
 
-## Using Subagents Effectively
+### Team lifecycle hooks
 
-### Automatic Delegation
+Three hook events fire during team coordination:
 
-Qwen Code proactively delegates tasks based on:
+| Hook            | When it fires                                              |
+| --------------- | ---------------------------------------------------------- |
+| `TeammateIdle`  | Background agent finishes (exit 2 = reject, send feedback) |
+| `TaskCreated`   | Task added to shared list                                  |
+| `TaskCompleted` | Task marked done                                           |
 
-- The task description in your request
-- The description field in Subagents configurations
-- Current context and available tools
+See [Hooks](./hooks.md#team-events) for configuration details.
 
-To encourage more proactive Subagents use, include phrases like "use PROACTIVELY" or "MUST BE USED" in your description field.
+## Design guidelines
 
-### Explicit Invocation
+### Single responsibility
 
-Request a specific Subagent by mentioning it in your command:
+Each agent should have one clear purpose.
 
-```
-Let the testing-expert Subagents create unit tests for the payment module
-Have the documentation-writer Subagents update the API reference
-Get the react-specialist Subagents to optimize this component's performance
-```
-
-## Examples
-
-### Development Workflow Agents
-
-#### Testing Specialist
-
-Perfect for comprehensive test creation and test-driven development.
-
-```
----
+```yaml
+# Focused
 name: testing-expert
-description: Writes comprehensive unit tests, integration tests, and handles test automation with best practices
-tools:
-  - read_file
-  - write_file
-  - read_many_files
-  - run_shell_command
----
+description: Writes comprehensive unit and integration tests
 
-You are a testing specialist focused on creating high-quality, maintainable tests.
-
-Your expertise includes:
-
-- Unit testing with appropriate mocking and isolation
-- Integration testing for component interactions
-- Test-driven development practices
-- Edge case identification and comprehensive coverage
-- Performance and load testing when appropriate
-
-For each testing task:
-
-1. Analyze the code structure and dependencies
-2. Identify key functionality, edge cases, and error conditions
-3. Create comprehensive test suites with descriptive names
-4. Include proper setup/teardown and meaningful assertions
-5. Add comments explaining complex test scenarios
-6. Ensure tests are maintainable and follow DRY principles
-
-Always follow testing best practices for the detected language and framework.
-Focus on both positive and negative test cases.
-```
-
-**Use Cases:**
-
-- “Write unit tests for the authentication service”
-- “Create integration tests for the payment processing workflow”
-- “Add test coverage for edge cases in the data validation module”
-
-#### Documentation Writer
-
-Specialized in creating clear, comprehensive documentation.
-
-```
----
-name: documentation-writer
-description: Creates comprehensive documentation, README files, API docs, and user guides
-tools:
-  - read_file
-  - write_file
-  - read_many_files
-  - web_search
----
-
-You are a technical documentation specialist for ${project_name}.
-
-Your role is to create clear, comprehensive documentation that serves both
-developers and end users. Focus on:
-
-**For API Documentation:**
-
-- Clear endpoint descriptions with examples
-- Parameter details with types and constraints
-- Response format documentation
-- Error code explanations
-- Authentication requirements
-
-**For User Documentation:**
-
-- Step-by-step instructions with screenshots when helpful
-- Installation and setup guides
-- Configuration options and examples
-- Troubleshooting sections for common issues
-- FAQ sections based on common user questions
-
-**For Developer Documentation:**
-
-- Architecture overviews and design decisions
-- Code examples that actually work
-- Contributing guidelines
-- Development environment setup
-
-Always verify code examples and ensure documentation stays current with
-the actual implementation. Use clear headings, bullet points, and examples.
-```
-
-**Use Cases:**
-
-- “Create API documentation for the user management endpoints”
-- “Write a comprehensive README for this project”
-- “Document the deployment process with troubleshooting steps”
-
-#### Code Reviewer
-
-Focused on code quality, security, and best practices.
-
-```
----
-name: code-reviewer
-description: Reviews code for best practices, security issues, performance, and maintainability
-tools:
-  - read_file
-  - read_many_files
----
-
-You are an experienced code reviewer focused on quality, security, and maintainability.
-
-Review criteria:
-
-- **Code Structure**: Organization, modularity, and separation of concerns
-- **Performance**: Algorithmic efficiency and resource usage
-- **Security**: Vulnerability assessment and secure coding practices
-- **Best Practices**: Language/framework-specific conventions
-- **Error Handling**: Proper exception handling and edge case coverage
-- **Readability**: Clear naming, comments, and code organization
-- **Testing**: Test coverage and testability considerations
-
-Provide constructive feedback with:
-
-1. **Critical Issues**: Security vulnerabilities, major bugs
-2. **Important Improvements**: Performance issues, design problems
-3. **Minor Suggestions**: Style improvements, refactoring opportunities
-4. **Positive Feedback**: Well-implemented patterns and good practices
-
-Focus on actionable feedback with specific examples and suggested solutions.
-Prioritize issues by impact and provide rationale for recommendations.
-```
-
-**Use Cases:**
-
-- “Review this authentication implementation for security issues”
-- “Check the performance implications of this database query logic”
-- “Evaluate the code structure and suggest improvements”
-
-### Technology-Specific Agents
-
-#### React Specialist
-
-Optimized for React development, hooks, and component patterns.
-
-```
----
-name: react-specialist
-description: Expert in React development, hooks, component patterns, and modern React best practices
-tools:
-  - read_file
-  - write_file
-  - read_many_files
-  - run_shell_command
----
-
-You are a React specialist with deep expertise in modern React development.
-
-Your expertise covers:
-
-- **Component Design**: Functional components, custom hooks, composition patterns
-- **State Management**: useState, useReducer, Context API, and external libraries
-- **Performance**: React.memo, useMemo, useCallback, code splitting
-- **Testing**: React Testing Library, Jest, component testing strategies
-- **TypeScript Integration**: Proper typing for props, hooks, and components
-- **Modern Patterns**: Suspense, Error Boundaries, Concurrent Features
-
-For React tasks:
-
-1. Use functional components and hooks by default
-2. Implement proper TypeScript typing
-3. Follow React best practices and conventions
-4. Consider performance implications
-5. Include appropriate error handling
-6. Write testable, maintainable code
-
-Always stay current with React best practices and avoid deprecated patterns.
-Focus on accessibility and user experience considerations.
-```
-
-**Use Cases:**
-
-- “Create a reusable data table component with sorting and filtering”
-- “Implement a custom hook for API data fetching with caching”
-- “Refactor this class component to use modern React patterns”
-
-#### Python Expert
-
-Specialized in Python development, frameworks, and best practices.
-
-```
----
-name: python-expert
-description: Expert in Python development, frameworks, testing, and Python-specific best practices
-tools:
-  - read_file
-  - write_file
-  - read_many_files
-  - run_shell_command
----
-
-You are a Python expert with deep knowledge of the Python ecosystem.
-
-Your expertise includes:
-
-- **Core Python**: Pythonic patterns, data structures, algorithms
-- **Frameworks**: Django, Flask, FastAPI, SQLAlchemy
-- **Testing**: pytest, unittest, mocking, test-driven development
-- **Data Science**: pandas, numpy, matplotlib, jupyter notebooks
-- **Async Programming**: asyncio, async/await patterns
-- **Package Management**: pip, poetry, virtual environments
-- **Code Quality**: PEP 8, type hints, linting with pylint/flake8
-
-For Python tasks:
-
-1. Follow PEP 8 style guidelines
-2. Use type hints for better code documentation
-3. Implement proper error handling with specific exceptions
-4. Write comprehensive docstrings
-5. Consider performance and memory usage
-6. Include appropriate logging
-7. Write testable, modular code
-
-Focus on writing clean, maintainable Python code that follows community standards.
-```
-
-**Use Cases:**
-
-- “Create a FastAPI service for user authentication with JWT tokens”
-- “Implement a data processing pipeline with pandas and error handling”
-- “Write a CLI tool using argparse with comprehensive help documentation”
-
-## Best Practices
-
-### Design Principles
-
-#### Single Responsibility Principle
-
-Each Subagent should have a clear, focused purpose.
-
-**✅ Good:**
-
-```
----
-name: testing-expert
-description: Writes comprehensive unit tests and integration tests
----
-```
-
-**❌ Avoid:**
-
-```
----
+# Too broad
 name: general-helper
-description: Helps with testing, documentation, code review, and deployment
----
+description: Helps with testing, documentation, review, and deployment
 ```
 
-**Why:** Focused agents produce better results and are easier to maintain.
+### Actionable descriptions
 
-#### Clear Specialization
+Write descriptions that clearly indicate when to delegate:
 
-Define specific expertise areas rather than broad capabilities.
+```yaml
+# Clear trigger
+description: Reviews code for security vulnerabilities, performance issues, and maintainability
 
-**✅ Good:**
-
-```
----
-name: react-performance-optimizer
-description: Optimizes React applications for performance using profiling and best practices
----
-```
-
-**❌ Avoid:**
-
-```
----
-name: frontend-developer
-description: Works on frontend development tasks
----
-```
-
-**Why:** Specific expertise leads to more targeted and effective assistance.
-
-#### Actionable Descriptions
-
-Write descriptions that clearly indicate when to use the agent.
-
-**✅ Good:**
-
-```
-description: Reviews code for security vulnerabilities, performance issues, and maintainability concerns
-```
-
-**❌ Avoid:**
-
-```
+# Vague
 description: A helpful code reviewer
 ```
 
-**Why:** Clear descriptions help the main AI choose the right agent for each task.
+### Minimal tool access
 
-### Configuration Best Practices
+Grant only the tools the agent needs. Read-only agents should not have `write_file` or `edit`.
 
-#### System Prompt Guidelines
+### Proactive delegation
 
-**Be Specific About Expertise:**
-
-```
-You are a Python testing specialist with expertise in:
-
-- pytest framework and fixtures
-- Mock objects and dependency injection
-- Test-driven development practices
-- Performance testing with pytest-benchmark
-```
-
-**Include Step-by-Step Approaches:**
-
-```
-For each testing task:
-
-1. Analyze the code structure and dependencies
-2. Identify key functionality and edge cases
-3. Create comprehensive test suites with clear naming
-4. Include setup/teardown and proper assertions
-5. Add comments explaining complex test scenarios
-```
-
-**Specify Output Standards:**
-
-```
-Always follow these standards:
-
-- Use descriptive test names that explain the scenario
-- Include both positive and negative test cases
-- Add docstrings for complex test functions
-- Ensure tests are independent and can run in any order
-```
-
-## Security Considerations
-
-- **Tool Restrictions**: Subagents only have access to their configured tools
-- **Sandboxing**: All tool execution follows the same security model as direct tool use
-- **Audit Trail**: All Subagents actions are logged and visible in real-time
-- **Access Control**: Project and user-level separation provides appropriate boundaries
-- **Sensitive Information**: Avoid including secrets or credentials in agent configurations
-- **Production Environments**: Consider separate agents for production vs development environments
-
-## Limits
-
-The following soft warnings apply to Subagent configurations (no hard limits are enforced):
-
-- **Description Field**: A warning is shown for descriptions exceeding 1,000 characters
-- **System Prompt**: A warning is shown for system prompts exceeding 10,000 characters
+Include "use proactively" in the description to encourage automatic delegation without explicit user request.

@@ -1,466 +1,41 @@
-# Qwen Code Hooks Documentation
+# Hooks
 
-## Overview
+Run custom scripts at key points in the proto lifecycle — before tool calls, after edits, at session boundaries, and during agent team coordination.
 
-Qwen Code hooks provide a powerful mechanism for extending and customizing the behavior of the Qwen Code application. Hooks allow users to execute custom scripts or programs at specific points in the application lifecycle, such as before tool execution, after tool execution, at session start/end, and during other key events.
+This page covers how to configure hooks, the available hook types and events, and the input/output contract for each event.
 
-> **⚠️ EXPERIMENTAL FEATURE**
->
-> Hooks are currently in an experimental stage. To enable hooks, start Qwen Code with the `--experimental-hooks` flag:
->
-> ```bash
-> qwen --experimental-hooks
-> ```
+## Configure a hook
 
-## What are Hooks?
-
-Hooks are user-defined scripts or programs that are automatically executed by Qwen Code at predefined points in the application flow. They allow users to:
-
-- Monitor and audit tool usage
-- Enforce security policies
-- Inject additional context into conversations
-- Customize application behavior based on events
-- Integrate with external systems and services
-- Modify tool inputs or responses programmatically
-
-## Hook Architecture
-
-The Qwen Code hook system consists of several key components:
-
-1. **Hook Registry**: Stores and manages all configured hooks
-2. **Hook Planner**: Determines which hooks should run for each event
-3. **Hook Runner**: Executes individual hooks with proper context
-4. **Hook Aggregator**: Combines results from multiple hooks
-5. **Hook Event Handler**: Coordinates the firing of hooks for events
-
-## Hook Events
-
-Hooks fire at specific points during a Qwen Code session. When an event fires and a matcher matches, Qwen Code passes JSON context about the event to your hook handler. For command hooks, input arrives on stdin. Your handler can inspect the input, take action, and optionally return a decision. Some events fire once per session, while others fire repeatedly inside the agentic loop.
-
-<div align="center">
-<img src="https://img.alicdn.com/imgextra/i4/O1CN01sYWUTh1RDJl7Lz2ne_!!6000000002077-2-tps-812-1212.png" alt="Hook Lifecycle Diagram" width="400"/>
-</div>
-
-The following table lists all available hook events in Qwen Code:
-
-| Event Name           | Description                                 | Use Case                                        |
-| -------------------- | ------------------------------------------- | ----------------------------------------------- |
-| `PreToolUse`         | Fired before tool execution                 | Permission checking, input validation, logging  |
-| `PostToolUse`        | Fired after successful tool execution       | Logging, output processing, monitoring          |
-| `PostToolUseFailure` | Fired when tool execution fails             | Error handling, alerting, remediation           |
-| `Notification`       | Fired when notifications are sent           | Notification customization, logging             |
-| `UserPromptSubmit`   | Fired when user submits a prompt            | Input processing, validation, context injection |
-| `SessionStart`       | Fired when a new session starts             | Initialization, context setup                   |
-| `Stop`               | Fired before Qwen concludes its response    | Finalization, cleanup                           |
-| `SubagentStart`      | Fired when a subagent starts                | Subagent initialization                         |
-| `SubagentStop`       | Fired when a subagent stops                 | Subagent finalization                           |
-| `PreCompact`         | Fired before conversation compaction        | Pre-compaction processing                       |
-| `SessionEnd`         | Fired when a session ends                   | Cleanup, reporting                              |
-| `PermissionRequest`  | Fired when permission dialogs are displayed | Permission automation, policy enforcement       |
-| `TeammateIdle`       | Fired when a background agent becomes idle  | Quality gates, continue-working feedback        |
-| `TaskCreated`        | Fired when a task is created                | Task notifications, auto-assignment             |
-| `TaskCompleted`      | Fired when a task is completed              | Progress tracking, next-step triggers           |
-
-## Input/Output Rules
-
-### Hook Input Structure
-
-All hooks receive standardized input in JSON format through stdin. Common fields included in every hook event:
+Hooks are defined in `.proto/settings.json` (project) or `~/.proto/settings.json` (global). Each hook attaches to an event name and optionally filters by a matcher pattern.
 
 ```json
 {
-  "session_id": "string",
-  "transcript_path": "string",
-  "cwd": "string",
-  "hook_event_name": "string",
-  "timestamp": "string"
-}
-```
-
-Event-specific fields are added based on the hook type. Below are the event-specific fields for each hook event:
-
-### Individual Hook Event Details
-
-#### PreToolUse
-
-**Purpose**: Executed before a tool is used to allow for permission checks, input validation, or context injection.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_name": "name of the tool being executed",
-  "tool_input": "object containing the tool's input parameters",
-  "tool_use_id": "unique identifier for this tool use instance"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
-- `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
-- `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
-- `hookSpecificOutput.additionalContext`: additional context information
-
-**Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "permissionDecisionReason": "My reason here",
-    "updatedInput": {
-      "field_to_modify": "new value"
-    },
-    "additionalContext": "Current environment: production. Proceed with caution."
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/check-bash-safety.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-#### PostToolUse
-
-**Purpose**: Executed after a tool completes successfully to process results, log outcomes, or inject additional context.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_name": "name of the tool that was executed",
-  "tool_input": "object containing the tool's input parameters",
-  "tool_response": "object containing the tool's response",
-  "tool_use_id": "unique identifier for this tool use instance"
-}
-```
-
-**Output Options**:
-
-- `decision`: "allow", "deny", "block" (defaults to "allow" if not specified)
-- `reason`: reason for the decision
-- `hookSpecificOutput.additionalContext`: additional information to be included
-
-**Example Output**:
-
-```json
-{
-  "decision": "allow",
-  "reason": "Tool executed successfully",
-  "hookSpecificOutput": {
-    "additionalContext": "File modification recorded in audit log"
-  }
-}
-```
-
-#### PostToolUseFailure
-
-**Purpose**: Executed when a tool execution fails to handle errors, send alerts, or record failures.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_use_id": "unique identifier for the tool use",
-  "tool_name": "name of the tool that failed",
-  "tool_input": "object containing the tool's input parameters",
-  "error": "error message describing the failure",
-  "is_interrupt": "boolean indicating if failure was due to user interruption (optional)"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.additionalContext`: error handling information
-- Standard hook output fields
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "additionalContext": "Error: File not found. Failure logged in monitoring system."
-  }
-}
-```
-
-#### UserPromptSubmit
-
-**Purpose**: Executed when the user submits a prompt to modify, validate, or enrich the input.
-
-**Event-specific fields**:
-
-```json
-{
-  "prompt": "the user's submitted prompt text"
-}
-```
-
-**Output Options**:
-
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-- `hookSpecificOutput.additionalContext`: additional context to append to the prompt (optional)
-
-**Note**: Since UserPromptSubmitOutput extends HookOutput, all standard fields are available but only additionalContext in hookSpecificOutput is specifically defined for this event.
-
-**Example Output**:
-
-```json
-{
-  "decision": "allow",
-  "reason": "Prompt reviewed and approved",
-  "hookSpecificOutput": {
-    "additionalContext": "Remember to follow company coding standards."
-  }
-}
-```
-
-#### SessionStart
-
-**Purpose**: Executed when a new session starts to perform initialization tasks.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "source": "startup | resume | clear | compact",
-  "model": "the model being used",
-  "agent_type": "the type of agent if applicable (optional)"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.additionalContext`: context to be available in the session
-- Standard hook output fields
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "additionalContext": "Session started with security policies enabled."
-  }
-}
-```
-
-#### SessionEnd
-
-**Purpose**: Executed when a session ends to perform cleanup tasks.
-
-**Event-specific fields**:
-
-```json
-{
-  "reason": "clear | logout | prompt_input_exit | bypass_permissions_disabled | other"
-}
-```
-
-**Output Options**:
-
-- Standard hook output fields (typically not used for blocking)
-
-#### Stop
-
-**Purpose**: Executed before Qwen concludes its response to provide final feedback or summaries.
-
-**Event-specific fields**:
-
-```json
-{
-  "stop_hook_active": "boolean indicating if stop hook is active",
-  "last_assistant_message": "the last message from the assistant"
-}
-```
-
-**Output Options**:
-
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-- `stopReason`: feedback to include in the stop response
-- `continue`: set to false to stop execution
-- `hookSpecificOutput.additionalContext`: additional context information
-
-**Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
-
-**Example Output**:
-
-```json
-{
-  "decision": "block",
-  "reason": "Must be provided when Qwen Code is blocked from stopping"
-}
-```
-
-#### SubagentStart
-
-**Purpose**: Executed when a subagent (like the Task tool) is started to set up context or permissions.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "agent_id": "identifier for the subagent",
-  "agent_type": "type of agent (Bash, Explorer, Plan, Custom, etc.)"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.additionalContext`: initial context for the subagent
-- Standard hook output fields
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "additionalContext": "Subagent initialized with restricted permissions."
-  }
-}
-```
-
-#### SubagentStop
-
-**Purpose**: Executed when a subagent finishes to perform finalization tasks.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "stop_hook_active": "boolean indicating if stop hook is active",
-  "agent_id": "identifier for the subagent",
-  "agent_type": "type of agent",
-  "agent_transcript_path": "path to the subagent's transcript",
-  "last_assistant_message": "the last message from the subagent"
-}
-```
-
-**Output Options**:
-
-- `decision`: "allow", "deny", "block", or "ask"
-- `reason`: human-readable explanation for the decision
-
-**Example Output**:
-
-```json
-{
-  "decision": "block",
-  "reason": "Must be provided when Qwen Code is blocked from stopping"
-}
-```
-
-#### PreCompact
-
-**Purpose**: Executed before conversation compaction to prepare or log the compaction.
-
-**Event-specific fields**:
-
-```json
-{
-  "trigger": "manual | auto",
-  "custom_instructions": "custom instructions currently set"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.additionalContext`: context to include before compaction
-- Standard hook output fields
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "additionalContext": "Compacting conversation to maintain optimal context window."
-  }
-}
-```
-
-#### Notification
-
-**Purpose**: Executed when notifications are sent to customize or intercept them.
-
-**Event-specific fields**:
-
-```json
-{
-  "message": "notification message content",
-  "title": "notification title (optional)",
-  "notification_type": "permission_prompt | idle_prompt | auth_success"
-}
-```
-
-> **Note**: `elicitation_dialog` type is defined but not currently implemented.
-
-**Output Options**:
-
-- `hookSpecificOutput.additionalContext`: additional information to include
-- Standard hook output fields
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "additionalContext": "Notification processed by monitoring system."
-  }
-}
-```
-
-#### PermissionRequest
-
-**Purpose**: Executed when permission dialogs are displayed to automate decisions or update permissions.
-
-**Event-specific fields**:
-
-```json
-{
-  "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_name": "name of the tool requesting permission",
-  "tool_input": "object containing the tool's input parameters",
-  "permission_suggestions": "array of suggested permissions (optional)"
-}
-```
-
-**Output Options**:
-
-- `hookSpecificOutput.decision`: structured object with permission decision details:
-  - `behavior`: "allow" or "deny"
-  - `updatedInput`: modified tool input (optional)
-  - `updatedPermissions`: modified permissions (optional)
-  - `message`: message to show to user (optional)
-  - `interrupt`: whether to interrupt the workflow (optional)
-
-**Example Output**:
-
-```json
-{
-  "hookSpecificOutput": {
-    "decision": {
-      "behavior": "allow",
-      "message": "Permission granted based on security policy",
-      "interrupt": false
-    }
-  }
-}
-```
-
-## Hook Types
-
-Proto supports three hook types:
-
-### Command Hooks
-
-Shell commands that receive event JSON on stdin and return decisions via stdout/exit code.
+### Hook types
+
+| Type      | Purpose                                                       | Key fields                         |
+| --------- | ------------------------------------------------------------- | ---------------------------------- |
+| `command` | Run a shell script. Event JSON on stdin, decisions on stdout. | `command`, `env`, `timeout`        |
+| `http`    | POST event JSON to a webhook URL.                             | `url`, `headers`, `allowedEnvVars` |
+| `prompt`  | Ask an LLM to make a judgment call.                           | `prompt`, `model`                  |
+
+#### Command hooks
 
 ```json
 {
@@ -471,9 +46,7 @@ Shell commands that receive event JSON on stdin and return decisions via stdout/
 }
 ```
 
-### HTTP Hooks
-
-POST event JSON to a webhook URL. Useful for integrating with Slack, CI, or monitoring services without shell scripts.
+#### HTTP hooks
 
 ```json
 {
@@ -484,333 +57,218 @@ POST event JSON to a webhook URL. Useful for integrating with Slack, CI, or moni
 }
 ```
 
-- `allowedEnvVars`: Only these environment variables are interpolated in `url` and `headers`. All other `$VAR` references resolve to empty string.
-- Response body is parsed as JSON for structured decisions.
-- Non-2xx status codes are treated as errors.
+Only variables listed in `allowedEnvVars` are interpolated in `url` and `headers`. Other `$VAR` references resolve to empty string.
 
-### Prompt Hooks
-
-LLM-based judgment calls. The event JSON is injected via `$ARGUMENTS` placeholder.
+#### Prompt hooks
 
 ```json
 {
   "type": "prompt",
-  "prompt": "Is this a safe operation? Respond with JSON: {\"decision\": \"allow\"} or {\"decision\": \"deny\", \"reason\": \"why\"}. Event: $ARGUMENTS",
+  "prompt": "Is this safe? Event: $ARGUMENTS. Respond with JSON: {\"decision\": \"allow\"} or {\"decision\": \"deny\", \"reason\": \"why\"}",
   "model": "haiku"
 }
 ```
 
-- `model`: `"haiku"` (default, fast), `"sonnet"`, or `"opus"`.
-- `$ARGUMENTS` is replaced with the full event JSON as a string.
+`$ARGUMENTS` is replaced with the event JSON. Model options: `haiku` (default), `sonnet`, `opus`.
 
-## Hook Modifiers
+### Hook modifiers
 
-### Async Hooks
-
-Add `"async": true` to run a hook in the background without blocking. Output and decisions are ignored.
+**`async`** — Run the hook in the background without blocking. Output and decisions are ignored.
 
 ```json
-{
-  "type": "command",
-  "command": "send-notification.sh",
-  "async": true
-}
+{ "type": "command", "command": "log-to-slack.sh", "async": true }
 ```
 
-Use for logging, notifications, and telemetry where you don't need the result.
-
-### Fine-Grained Filtering with `if`
-
-The `if` field uses permission-rule syntax to filter by tool arguments, not just tool name. This avoids spawning hook processes for non-matching calls.
+**`if`** — Fine-grained filter using permission-rule syntax. Only fires when tool arguments match the pattern. Avoids spawning a hook process for non-matching calls.
 
 ```json
 {
   "matcher": "bash",
   "hooks": [
-    {
-      "type": "command",
-      "if": "Bash(git *)",
-      "command": "check-git-policy.sh"
-    }
+    { "type": "command", "if": "Bash(git *)", "command": "check-git-policy.sh" }
   ]
 }
 ```
 
-Supported syntax: `ToolName(glob pattern)` where the glob matches against the tool's primary argument (command for Bash, file_path for Edit/Write, pattern for Grep).
+Syntax: `ToolName(glob)` where the glob matches the tool's primary argument (`command` for Bash, `file_path` for Edit/Write, `pattern` for Grep). Valid only for tool events.
 
-Valid only for tool events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`.
+## Events reference
 
-## Team Lifecycle Hooks
+### Lifecycle events
 
-Three hook events for multi-agent coordination:
+| Event              | When it fires                            | Can block?           |
+| ------------------ | ---------------------------------------- | -------------------- |
+| `SessionStart`     | Session begins or resumes                | No                   |
+| `SessionEnd`       | Session terminates                       | No                   |
+| `PreCompact`       | Before context compaction                | No                   |
+| `UserPromptSubmit` | User submits a prompt, before processing | Yes (exit 2)         |
+| `Stop`             | Before the model concludes its response  | Yes (exit 2 or JSON) |
 
-| Event           | When It Fires                              | Matcher Support |
-| --------------- | ------------------------------------------ | --------------- |
-| `TeammateIdle`  | Background agent finishes and becomes idle | No              |
-| `TaskCreated`   | Task created on the shared task list       | No              |
-| `TaskCompleted` | Task marked as completed                   | No              |
+### Tool events
 
-These events enable quality gates for agent teams. Exit code 2 on `TeammateIdle` rejects the idle state and sends feedback to continue working.
+| Event                | When it fires           | Can block? | Matcher target    |
+| -------------------- | ----------------------- | ---------- | ----------------- |
+| `PreToolUse`         | Before tool executes    | Yes        | Tool name (regex) |
+| `PostToolUse`        | After tool succeeds     | Limited    | Tool name (regex) |
+| `PostToolUseFailure` | After tool fails        | Limited    | Tool name (regex) |
+| `PermissionRequest`  | Permission dialog shown | Yes        | Tool name (regex) |
 
-## Hook Configuration
+### Agent events
 
-Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files:
+| Event           | When it fires     | Matcher target     |
+| --------------- | ----------------- | ------------------ |
+| `SubagentStart` | Subagent spawned  | Agent type (regex) |
+| `SubagentStop`  | Subagent finishes | Agent type (regex) |
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^bash$", // Regex to match tool names
-        "sequential": false, // Whether to run hooks sequentially
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/script.sh",
-            "name": "security-check",
-            "description": "Run security checks before tool execution",
-            "timeout": 30000
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo 'Session started'",
-            "name": "session-init"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+### Team events
 
-### Matcher Patterns
+| Event           | When it fires                  | Can block?                  |
+| --------------- | ------------------------------ | --------------------------- |
+| `TeammateIdle`  | Background agent becomes idle  | Yes (exit 2 sends feedback) |
+| `TaskCreated`   | Task added to shared task list | No                          |
+| `TaskCompleted` | Task marked as completed       | No                          |
 
-Matchers allow filtering hooks based on context. Not all hook events support matchers:
+### Notification events
 
-| Event Type          | Events                                                                 | Matcher Support | Matcher Target (Values)                                                                |
-| ------------------- | ---------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------- |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Yes (regex)  | Tool name: `bash`, `read_file`, `write_file`, `edit`, `glob`, `grep_search`, etc.      |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Yes (regex)  | Agent type: `Bash`, `Explorer`, etc.                                                   |
-| Session Events      | `SessionStart`                                                         | ✅ Yes (regex)  | Source: `startup`, `resume`, `clear`, `compact`                                        |
-| Session Events      | `SessionEnd`                                                           | ✅ Yes (regex)  | Reason: `clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, `other` |
-| Notification Events | `Notification`                                                         | ✅ Yes (exact)  | Type: `permission_prompt`, `idle_prompt`, `auth_success`                               |
-| Compact Events      | `PreCompact`                                                           | ✅ Yes (exact)  | Trigger: `manual`, `auto`                                                              |
-| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                                                    |
-| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                                                    |
+| Event          | When it fires     | Matcher target                                           |
+| -------------- | ----------------- | -------------------------------------------------------- |
+| `Notification` | Notification sent | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
 
-**Matcher Syntax**:
+## Input/output contract
 
-- Regex pattern matched against the target field
-- Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^bash$`, `read.*`, `(bash|run_shell_command)`)
-
-**Examples**:
+### Common input fields (all events)
 
 ```json
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^bash$",           // Only match bash tool
-        "hooks": [...]
-      },
-      {
-        "matcher": "read.*",           // Match read_file, read_multiple_files, etc.
-        "hooks": [...]
-      },
-      {
-        "matcher": "",                 // Match all tools (same as "*" or omitting matcher)
-        "hooks": [...]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "^(Bash|Explorer)$", // Only match Bash and Explorer agents
-        "hooks": [...]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "^(startup|resume)$", // Only match startup and resume sources
-        "hooks": [...]
-      }
-    ]
-  }
+  "session_id": "string",
+  "transcript_path": "string",
+  "cwd": "string",
+  "hook_event_name": "string",
+  "timestamp": "ISO 8601 string"
 }
 ```
 
-## Hook Execution
+### Exit codes (command hooks)
 
-### Parallel vs Sequential Execution
+| Exit code | Meaning            | Behavior                                          |
+| --------- | ------------------ | ------------------------------------------------- |
+| `0`       | Success            | Parse stdout as JSON for decisions                |
+| `1`       | Non-blocking error | Continue; stderr logged but not shown to model    |
+| `2`       | Blocking error     | Block the action; stderr fed to model as feedback |
 
-- By default, hooks execute in parallel for better performance
-- Use `sequential: true` in hook definition to enforce order-dependent execution
-- Sequential hooks can modify input for subsequent hooks in the chain
+### JSON output format
 
-### Security Model
-
-- Hooks run in the user's environment with user privileges
-- Project-level hooks require trusted folder status
-- Timeouts prevent hanging hooks (default: 60 seconds)
-
-### Exit Codes
-
-Hook scripts communicate their result through exit codes:
-
-| Exit Code | Meaning            | Behavior                                        |
-| --------- | ------------------ | ----------------------------------------------- |
-| `0`       | Success            | stdout/stderr not shown                         |
-| `2`       | Blocking error     | Show stderr to model and block tool call        |
-| Other     | Non-blocking error | Show stderr to user only but continue tool call |
-
-**Examples**:
-
-```bash
-#!/bin/bash
-
-# Success (exit 0 is default, can be omitted)
-echo '{"decision": "allow"}'
-exit 0
-
-# Blocking error - prevents operation
-echo "Dangerous operation blocked by security policy" >&2
-exit 2
-```
-
-> **Note**: If no exit code is specified, the script defaults to `0` (success).
-
-## Best Practices
-
-### Example 1: Security Validation Hook
-
-A PreToolUse hook that logs and potentially blocks dangerous commands:
-
-**security_check.sh**
-
-```bash
-#!/bin/bash
-
-# Read input from stdin
-INPUT=$(cat)
-
-# Parse the input to extract tool info
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
-TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input')
-
-# Check for potentially dangerous operations
-if echo "$TOOL_INPUT" | grep -qiE "(rm.*-rf|mv.*\/|chmod.*777)"; then
-  echo '{
-    "decision": "deny",
-    "reason": "Potentially dangerous operation detected",
-    "hookSpecificOutput": {
-      "hookEventName": "PreToolUse",
-      "permissionDecision": "deny",
-      "permissionDecisionReason": "Dangerous command blocked by security policy"
-    }
-  }'
-  exit 2  # Blocking error
-fi
-
-# Allow the operation with a log
-echo "INFO: Tool $TOOL_NAME executed safely at $(date)" >> /var/log/qwen-security.log
-
-# Allow with additional context
-echo '{
+```json
+{
+  "continue": true,
   "decision": "allow",
-  "reason": "Operation approved by security checker",
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "permissionDecisionReason": "Security check passed",
-    "additionalContext": "Command approved by security policy"
-  }
-}'
-exit 0
-```
-
-Configure in `.qwen/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SECURITY_CHECK_SCRIPT}",
-            "name": "security-checker",
-            "description": "Security validation for bash commands",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
+  "reason": "explanation",
+  "hookSpecificOutput": {}
 }
 ```
 
-### Example 2: User Prompt Validation Hook
+### Event-specific fields
 
-A UserPromptSubmit hook that validates user prompts for sensitive information and provides context for long prompts:
+#### PreToolUse
 
-**prompt_validator.py**
+**Additional input:** `permission_mode`, `tool_name`, `tool_input`, `tool_use_id`
 
-```python
-import json
-import sys
-import re
+**Output:** `hookSpecificOutput.permissionDecision` (`allow` | `deny` | `ask`), `hookSpecificOutput.permissionDecisionReason`, `hookSpecificOutput.updatedInput`
 
-# Load input from stdin
-try:
-    input_data = json.load(sys.stdin)
-except json.JSONDecodeError as e:
-    print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-    exit(1)
+#### PostToolUse
 
-user_prompt = input_data.get("prompt", "")
+**Additional input:** `permission_mode`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id`
 
-# Sensitive words list
-sensitive_words = ["password", "secret", "token", "api_key"]
+**Output:** `decision` (`allow` | `block`), `hookSpecificOutput.additionalContext`
 
-# Check for sensitive information
-for word in sensitive_words:
-    if re.search(rf"\b{word}\b", user_prompt.lower()):
-        # Block prompts containing sensitive information
-        output = {
-            "decision": "block",
-            "reason": f"Prompt contains sensitive information '{word}'. Please remove sensitive content and resubmit.",
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit"
-            }
-        }
-        print(json.dumps(output))
-        exit(0)
+#### PostToolUseFailure
 
-# Check prompt length and add warning context if too long
-if len(user_prompt) > 1000:
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "Note: User submitted a long prompt. Please read carefully and ensure all requirements are understood."
-        }
-    }
-    print(json.dumps(output))
-    exit(0)
+**Additional input:** `permission_mode`, `tool_use_id`, `tool_name`, `tool_input`, `error`, `is_interrupt`
 
-# No processing needed for normal cases
-exit(0)
+#### UserPromptSubmit
+
+**Additional input:** `prompt`
+
+**Output:** `decision` (`allow` | `block`), `hookSpecificOutput.additionalContext`
+
+#### Stop
+
+**Additional input:** `stop_hook_active`, `last_assistant_message`
+
+**Output:** `decision` (`allow` | `block`), `reason`
+
+When `stop_hook_active` is `true`, the hook has already triggered a continuation. Exit early to prevent infinite loops.
+
+#### SessionStart
+
+**Additional input:** `permission_mode`, `source` (`startup` | `resume` | `clear` | `compact`), `model`, `agent_type`
+
+**Output:** `hookSpecificOutput.additionalContext` (injected into session context)
+
+#### SessionEnd
+
+**Additional input:** `reason` (`clear` | `logout` | `prompt_input_exit` | `other`)
+
+#### SubagentStart / SubagentStop
+
+**Additional input:** `permission_mode`, `agent_id`, `agent_type`
+
+SubagentStop also includes: `stop_hook_active`, `agent_transcript_path`, `last_assistant_message`
+
+#### PermissionRequest
+
+**Additional input:** `permission_mode`, `tool_name`, `tool_input`, `permission_suggestions`
+
+**Output:** `hookSpecificOutput.decision.behavior` (`allow` | `deny`), `hookSpecificOutput.decision.updatedInput`, `hookSpecificOutput.decision.message`
+
+#### PreCompact
+
+**Additional input:** `trigger` (`manual` | `auto`), `custom_instructions`
+
+#### TeammateIdle
+
+**Additional input:** `agent_id`, `agent_name`, `result_summary`, `success`
+
+#### TaskCreated
+
+**Additional input:** `task_id`, `task_title`, `task_description`, `created_by`
+
+#### TaskCompleted
+
+**Additional input:** `task_id`, `task_title`, `completed_by`, `output`
+
+## Matcher patterns
+
+Matchers are regex patterns that filter which occurrences of an event trigger a hook.
+
+| Event type             | Matches on      | Example                            |
+| ---------------------- | --------------- | ---------------------------------- |
+| Tool events            | Tool name       | `^bash$`, `read.*`, `(bash\|edit)` |
+| Subagent events        | Agent type      | `^Explore$`, `coordinator`         |
+| SessionStart           | Source          | `^(startup\|resume)$`              |
+| SessionEnd             | Reason          | `^clear$`                          |
+| Notification           | Type (exact)    | `permission_prompt`                |
+| PreCompact             | Trigger (exact) | `manual`                           |
+| UserPromptSubmit, Stop | Not supported   | Always fires                       |
+
+Empty string `""` or `"*"` matches all.
+
+## Execution model
+
+- Hooks run **in parallel** by default. Use `sequential: true` on a hook definition to enforce order.
+- When multiple hooks return conflicting decisions, the **most restrictive wins**: `deny` > `ask` > `allow`.
+- Project hooks require trusted folder status.
+- Default timeout: 60 seconds.
+- Max output: 1 MB per hook.
+
+## Environment variables
+
+Command hooks inherit `process.env` plus:
+
+```
+GEMINI_PROJECT_DIR  — project root
+CLAUDE_PROJECT_DIR  — same (compatibility alias)
+QWEN_PROJECT_DIR    — same (compatibility alias)
 ```
 
-## Troubleshooting
-
-- Check application logs for hook execution details
-- Verify hook script permissions and executability
-- Ensure proper JSON formatting in hook outputs
-- Use specific matcher patterns to avoid unintended hook execution
+Custom variables can be added via the `env` field on command hooks.
