@@ -100,6 +100,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
+  override getSummaryLabel(): string {
+    const name =
+      this.params.file_path.split('/').pop() ?? this.params.file_path;
+    return `Wrote ${name}`;
+  }
+
   /**
    * Write operations always need user confirmation.
    */

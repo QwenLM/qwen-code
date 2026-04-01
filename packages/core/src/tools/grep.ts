@@ -320,6 +320,11 @@ class GrepToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  override getSummaryLabel(): string {
+    const pattern = this.params.pattern.slice(0, 20);
+    return `Searched '${pattern}'`;
+  }
+
   /**
    * Performs the actual search using the prioritized strategies.
    * @param options Search options including pattern, absolute path, and glob filter.

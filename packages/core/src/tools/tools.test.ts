@@ -20,6 +20,10 @@ class TestToolInvocation implements ToolInvocation<object, ToolResult> {
     return 'A test invocation';
   }
 
+  getSummaryLabel(): string {
+    return 'Test invocation';
+  }
+
   toolLocations() {
     return [];
   }

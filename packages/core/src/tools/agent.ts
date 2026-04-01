@@ -549,6 +549,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return this.params.description;
   }
 
+  override getSummaryLabel(): string {
+    const bg = this.params.run_in_background ? ' (bg)' : '';
+    return `Agent: ${this.params.subagent_type}${bg}`;
+  }
+
   async execute(
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,

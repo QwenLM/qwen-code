@@ -34,6 +34,13 @@ export interface ToolInvocation<
   getDescription(): string;
 
   /**
+   * One-line summary label for UI display (~30 chars max).
+   * Past-tense verb + distinctive noun, generated from params.
+   * Falls back to getDescription() if not overridden.
+   */
+  getSummaryLabel(): string;
+
+  /**
    * Determines what file system paths the tool will affect.
    * @returns A list of such paths.
    */
@@ -88,6 +95,15 @@ export abstract class BaseToolInvocation<
   constructor(readonly params: TParams) {}
 
   abstract getDescription(): string;
+
+  /**
+   * One-line summary label for UI display (~30 chars max).
+   * Generated from tool params, not LLM. Past-tense verb + distinctive noun.
+   * Override in subclasses for tool-specific summaries.
+   */
+  getSummaryLabel(): string {
+    return this.getDescription();
+  }
 
   toolLocations(): ToolLocation[] {
     return [];

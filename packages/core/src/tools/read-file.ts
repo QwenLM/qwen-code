@@ -75,6 +75,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return shortPath;
   }
 
+  override getSummaryLabel(): string {
+    const name =
+      this.params.file_path.split('/').pop() ?? this.params.file_path;
+    return `Read ${name}`;
+  }
+
   override toolLocations(): ToolLocation[] {
     return [{ path: this.params.file_path, line: this.params.offset }];
   }

@@ -366,6 +366,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     return `${shortenPath(relativePath)}: ${oldStringSnippet} => ${newStringSnippet}`;
   }
 
+  getSummaryLabel(): string {
+    const name =
+      this.params.file_path.split('/').pop() ?? this.params.file_path;
+    if (this.params.old_string === '') return `Created ${name}`;
+    return `Edited ${name}`;
+  }
+
   /**
    * Executes the edit operation with the given parameters.
    * @param params Parameters for the edit operation

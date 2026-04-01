@@ -89,6 +89,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  override getSummaryLabel(): string {
+    const cmd = this.params.command.split(/\s+/)[0] ?? 'shell';
+    const desc = this.params.description;
+    if (desc) return desc.slice(0, 30);
+    return `Ran ${cmd}`;
+  }
+
   /**
    * AST-based permission check for the shell command.
    * - Read-only commands (via AST analysis) → 'allow'
