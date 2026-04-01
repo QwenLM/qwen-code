@@ -823,23 +823,79 @@ export const AppContainer = (props: AppContainerProps) => {
               addMessage(submittedValue);
             } else {
               // Speculation completed fully — render results in UI
-              // Add user message
-              historyManager.addItem(
-                { type: 'user' as const, text: submittedValue },
-                Date.now(),
-              );
-              // Add model response (extract text from speculated messages)
-              const modelText = result.messages
-                .filter((m) => m.role === 'model')
-                .flatMap((m) => m.parts ?? [])
-                .map((p) => p.text ?? '')
-                .filter(Boolean)
-                .join('\n');
-              if (modelText) {
-                historyManager.addItem(
-                  { type: 'gemini' as const, text: modelText },
-                  Date.now(),
-                );
+              const now = Date.now();
+
+              // Render each speculated message as the appropriate HistoryItem
+              for (const msg of result.messages) {
+                if (msg.role === 'user' && msg.parts) {
+                  // Check if this is a tool result (functionResponse) or user text
+                  const hasText = msg.parts.some(
+                    (p) => p.text && !p.functionResponse,
+                  );
+                  if (hasText) {
+                    const text = msg.parts
+                      .map((p) => p.text ?? '')
+                      .filter(Boolean)
+                      .join('');
+                    if (text) {
+                      historyManager.addItem(
+                        { type: 'user' as const, text },
+                        now,
+                      );
+                    }
+                  }
+                  // functionResponse parts are rendered as part of the tool_group below
+                } else if (msg.role === 'model' && msg.parts) {
+                  // Extract text and tool calls separately
+                  const textParts = msg.parts
+                    .filter((p) => p.text && !p.functionCall)
+                    .map((p) => p.text!)
+                    .join('');
+                  const toolCalls = msg.parts.filter((p) => p.functionCall);
+
+                  if (textParts) {
+                    historyManager.addItem(
+                      { type: 'gemini' as const, text: textParts },
+                      now,
+                    );
+                  }
+
+                  if (toolCalls.length > 0) {
+                    // Find matching tool results from the next message
+                    const nextMsg =
+                      result.messages[result.messages.indexOf(msg) + 1];
+                    const toolResults =
+                      nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
+
+                    const tools = toolCalls.map((tc, i) => {
+                      const name = tc.functionCall?.name ?? 'unknown';
+                      const args = tc.functionCall?.args ?? {};
+                      const resp = toolResults[i]?.functionResponse?.response;
+                      const resultText =
+                        typeof resp === 'object' && resp
+                          ? ((resp as Record<string, unknown>)['output'] ??
+                            JSON.stringify(resp))
+                          : String(resp ?? '');
+                      return {
+                        callId: `spec-${name}-${i}`,
+                        name,
+                        description:
+                          Object.entries(args)
+                            .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+                            .join(', ') || name,
+                        resultDisplay: String(resultText).slice(0, 500),
+                        status: ToolCallStatus.Success,
+                        confirmationDetails: undefined,
+                      };
+                    });
+
+                    const toolGroupItem: HistoryItemWithoutId = {
+                      type: 'tool_group' as const,
+                      tools,
+                    };
+                    historyManager.addItem(toolGroupItem, now);
+                  }
+                }
               }
             }
             if (result.nextSuggestion) {
@@ -1097,7 +1153,9 @@ export const AppContainer = (props: AppContainerProps) => {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
-              startSpeculation(config, result.suggestion, ac.signal)
+              startSpeculation(config, result.suggestion, ac.signal, {
+                model: settings.merged.ui?.speculationModel || undefined,
+              })
                 .then((state) => {
                   speculationRef.current = state;
                 })

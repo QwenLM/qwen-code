@@ -89,6 +89,7 @@ export async function startSpeculation(
   config: Config,
   suggestion: string,
   parentSignal?: AbortSignal,
+  options?: { model?: string },
 ): Promise<SpeculationState> {
   const cacheSafe = getCacheSafeParams();
   if (!cacheSafe) {
@@ -119,7 +120,7 @@ export async function startSpeculation(
   };
 
   // Run the speculative loop in the background
-  runSpeculativeLoop(config, state, cacheSafe)
+  runSpeculativeLoop(config, state, cacheSafe, options?.model)
     .then(async (result) => {
       if (state.status === 'running') {
         state.messages = result.messages;
@@ -136,6 +137,7 @@ export async function startSpeculation(
                 suggestion,
                 result.messages,
                 abortController.signal,
+                options?.model,
               );
               if (next && state.status === 'completed') {
                 state.pipelinedSuggestion = next;
@@ -177,9 +179,10 @@ async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
   cacheSafe: import('./forkedQuery.js').CacheSafeParams,
+  modelOverride?: string,
 ): Promise<LoopResult> {
   const chat = createForkedChat(config, cacheSafe);
-  const model = cacheSafe.model;
+  const model = modelOverride || cacheSafe.model;
   const approvalMode = config.getApprovalMode();
   const messages: Content[] = [];
 
@@ -495,6 +498,7 @@ async function generatePipelinedSuggestion(
   suggestionText: string,
   speculatedMessages: Content[],
   abortSignal: AbortSignal,
+  modelOverride?: string,
 ): Promise<string | null> {
   try {
     // Build augmented prompt that includes the speculated context inline
@@ -514,6 +518,7 @@ ${SUGGESTION_PROMPT}`;
     const result = await runForkedQuery(config, augmentedPrompt, {
       abortSignal,
       jsonSchema: PIPELINED_SCHEMA,
+      model: modelOverride,
     });
 
     if (abortSignal.aborted) return null;

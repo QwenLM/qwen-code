@@ -543,6 +543,16 @@ const SETTINGS_SCHEMA = {
           'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
         showInDialog: false,
       },
+      speculationModel: {
+        type: 'string',
+        label: 'Speculation Model',
+        category: 'UI',
+        requiresRestart: false,
+        default: '',
+        description:
+          'Model to use for speculation and pipelined suggestion generation. Leave empty to use the main model. A smaller/faster model reduces cost and latency.',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',
