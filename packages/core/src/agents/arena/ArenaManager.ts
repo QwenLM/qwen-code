@@ -98,7 +98,7 @@ export class ArenaManager {
     this.callbacks = callbacks;
     this.eventEmitter = new ArenaEventEmitter();
     const arenaSettings = config.getAgentsSettings().arena;
-    // Use the user-configured base dir, or default to ~/.qwen/arena.
+    // Use the user-configured base dir, or default to ~/.proto/arena.
     this.arenaBaseDir =
       arenaSettings?.worktreeBaseDir ??
       path.join(Storage.getGlobalQwenDir(), 'arena');
@@ -1225,7 +1225,7 @@ export class ArenaManager {
    * All status and control files are stored here.
    *
    * Returns the absolute path to the session directory, e.g.
-   * `~/.qwen/worktrees/<sessionId>/`.  The directory contains:
+   * `~/.proto/worktrees/<sessionId>/`.  The directory contains:
    * - `config.json` — consolidated session config + per-agent status
    * - `agents/<safeAgentId>.json` — individual agent status files
    * - `control/` — control signals (shutdown, cancel)

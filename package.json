@@ -23,6 +23,7 @@
     "generate:settings-schema": "tsx scripts/generate-settings-schema.ts",
     "build": "node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
+    "ship": "npm run build && npm link",
     "build:vscode": "node scripts/build_vscode_companion.js",
     "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
     "build:packages": "npm run build --workspaces",

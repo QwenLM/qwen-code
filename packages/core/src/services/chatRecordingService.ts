@@ -168,7 +168,7 @@ export interface UiTelemetryRecordPayload {
  * - Linear history reconstruction
  * - Future checkpointing (branch from any historical point)
  *
- * File location: ~/.qwen/tmp/<project_id>/chats/
+ * File location: ~/.proto/tmp/<project_id>/chats/
  *
  * For session management (list, load, remove), use SessionService.
  */

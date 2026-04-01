@@ -63,13 +63,13 @@ function getPermScopeItems(): PermScopeItem[] {
   return [
     {
       label: t('Project settings'),
-      description: t('Checked in at .qwen/settings.json'),
+      description: t('Checked in at .proto/settings.json'),
       value: SettingScope.Workspace,
       key: 'project',
     },
     {
       label: t('User settings'),
-      description: t('Saved in at ~/.qwen/settings.json'),
+      description: t('Saved in at ~/.proto/settings.json'),
       value: SettingScope.User,
       key: 'user',
     },

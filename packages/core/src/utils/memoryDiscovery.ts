@@ -124,7 +124,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   const geminiMdFilenames = getAllGeminiMdFilenames();
 
   // Map each context filename to the global ~/.{dir}/ it belongs in.
-  // CLAUDE.md lives in ~/.claude/; everything else defaults to ~/.qwen/.
+  // CLAUDE.md lives in ~/.claude/; everything else defaults to ~/.proto/.
   const GLOBAL_DIR_FOR_FILENAME: Record<string, string> = {
     'CLAUDE.md': CLAUDE_DIR,
   };

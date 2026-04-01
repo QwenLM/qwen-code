@@ -23,7 +23,7 @@ export const BASELINE_COMMIT_MESSAGE = 'baseline (dirty state overlay)';
 
 /**
  * Default directory and branch-prefix name used for worktrees.
- * Changing this value affects the on-disk layout (`~/.qwen/<WORKTREES_DIR>/`)
+ * Changing this value affects the on-disk layout (`~/.proto/<WORKTREES_DIR>/`)
  * **and** the default git branch prefix (`<WORKTREES_DIR>/<sessionId>/…`).
  */
 export const WORKTREES_DIR = 'worktrees';

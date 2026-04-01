@@ -10,11 +10,16 @@ import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
-export const QWEN_DIR = '.qwen';
+export const QWEN_DIR = '.proto';
 export const CLAUDE_DIR = '.claude';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 export const OAUTH_FILE = 'oauth_creds.json';
-export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents', '.claude'];
+export const SKILL_PROVIDER_CONFIG_DIRS = [
+  '.proto',
+  '.qwen',
+  '.agents',
+  '.claude',
+];
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
@@ -286,9 +291,9 @@ export class Storage {
   }
 
   /**
-   * Returns the user-level extensions directory (~/.qwen/extensions/).
+   * Returns the user-level extensions directory (~/.proto/extensions/).
    * Extensions installed at user scope are stored here, as opposed to
-   * project-level extensions which live in <project>/.qwen/extensions/.
+   * project-level extensions which live in <project>/.proto/extensions/.
    */
   static getUserExtensionsDir(): string {
     return path.join(Storage.getGlobalQwenDir(), 'extensions');

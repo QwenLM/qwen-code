@@ -39,7 +39,7 @@ const getUserLocalesDir = (): string =>
 /**
  * Get the path to the user's custom locales directory.
  * Users can place custom language packs (e.g., es.js, fr.js) in this directory.
- * @returns The path to ~/.qwen/locales
+ * @returns The path to ~/.proto/locales
  */
 export function getUserLocalesDirectory(): string {
   return getUserLocalesDir();

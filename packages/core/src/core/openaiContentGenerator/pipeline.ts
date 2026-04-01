@@ -145,7 +145,7 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
-        // Log raw delta for debugging (visible in ~/.qwen/debug/latest)
+        // Log raw delta for debugging (visible in ~/.proto/debug/latest)
         const delta = chunk.choices?.[0]?.delta;
         if (delta) {
           debugLogger.debug(
@@ -237,7 +237,7 @@ export class ContentGenerationPipeline {
       context.duration = Date.now() - context.startTime;
       // Cast through unknown to avoid TypeScript narrowing-to-never after the
       // conditional yield above; the variable is still live and mutable at this point.
-       
+
       const lastResponse =
         pendingFinishResponse as unknown as GenerateContentResponse | null;
       debugLogger.info(

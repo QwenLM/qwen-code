@@ -718,13 +718,13 @@ export async function start_sandbox(
 
   // Check if we should use current user's UID/GID in sandbox
   // In integration test mode, we still respect SANDBOX_SET_UID_GID to allow
-  // tests that need to access host's ~/.qwen (e.g., --resume functionality)
+  // tests that need to access host's ~/.proto (e.g., --resume functionality)
   const useCurrentUser = await shouldUseCurrentUserInSandbox();
 
   if (useCurrentUser) {
     // SANDBOX_SET_UID_GID is enabled: create user with host's UID/GID
     // This includes integration test mode with SANDBOX_SET_UID_GID=true,
-    // allowing tests that need to access host's ~/.qwen (e.g., --resume) to work.
+    // allowing tests that need to access host's ~/.proto (e.g., --resume) to work.
     // For the user-creation logic to work, the container must start as root.
     // The entrypoint script then handles dropping privileges to the correct user.
     args.push('--user', 'root');

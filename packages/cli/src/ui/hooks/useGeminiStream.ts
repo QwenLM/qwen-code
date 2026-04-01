@@ -613,7 +613,9 @@ export const useGeminiStream = (
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
-        newGeminiMessageBuffer = eventValue;
+        // Trim leading newlines from the first chunk — some models (especially
+        // local ones) emit a leading \n that creates an ugly blank line after ✦.
+        newGeminiMessageBuffer = eventValue.replace(/^\n+/, '');
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.

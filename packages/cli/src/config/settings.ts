@@ -405,7 +405,7 @@ export function createMinimalSettings(): LoadedSettings {
  * Finds the .env file to load, respecting workspace trust settings.
  *
  * When workspace is untrusted, only allow user-level .env files at:
- * - ~/.qwen/.env
+ * - ~/.proto/.env
  * - ~/.env
  */
 function findEnvFile(settings: Settings, startDir: string): string | null {
