@@ -500,7 +500,21 @@ async function generatePipelinedSuggestion(
   abortSignal: AbortSignal,
 ): Promise<string | null> {
   try {
-    const result = await runForkedQuery(config, PIPELINED_SUGGESTION_PROMPT, {
+    // Build augmented prompt that includes the speculated context inline
+    const speculatedSummary = speculatedMessages
+      .filter((m) => m.role === 'model')
+      .flatMap((m) => m.parts ?? [])
+      .map((p) => p.text ?? '')
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 500);
+
+    const augmentedPrompt = `The user just said: "${suggestionText}"
+The assistant responded: ${speculatedSummary || '(tool calls executed)'}
+
+${PIPELINED_SUGGESTION_PROMPT}`;
+
+    const result = await runForkedQuery(config, augmentedPrompt, {
       abortSignal,
       jsonSchema: PIPELINED_SCHEMA,
     });

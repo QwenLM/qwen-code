@@ -244,17 +244,24 @@ export const InputForm: FC<InputFormProps> = ({
       onCancel();
       return;
     }
-    // Tab to accept prompt suggestion
-    if (e.key === 'Tab' && hasFollowup && !inputText && !completionActive) {
+    // Tab to accept prompt suggestion (only when callback is wired)
+    if (
+      e.key === 'Tab' &&
+      hasFollowup &&
+      onAcceptFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
       e.preventDefault();
       e.stopPropagation();
-      onAcceptFollowup?.('tab');
+      onAcceptFollowup('tab');
       return;
     }
-    // Right arrow to accept prompt suggestion (fills input without submitting)
+    // Right arrow to accept prompt suggestion (only when callback is wired)
     if (
       e.key === 'ArrowRight' &&
       hasFollowup &&
+      onAcceptFollowup &&
       !inputText &&
       !completionActive
     ) {
