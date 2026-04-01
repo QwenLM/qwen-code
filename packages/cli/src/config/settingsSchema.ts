@@ -508,7 +508,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show context-aware follow-up suggestions after task completion (e.g., "commit this", "run tests"). Press Tab to accept, arrow keys to cycle.',
+          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
       },
       accessibility: {
