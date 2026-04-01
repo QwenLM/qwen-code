@@ -126,8 +126,12 @@ export class OverlayFs {
    * Convert an absolute path to a relative path within cwd.
    * Returns null if the path is outside cwd.
    */
-  private toRelative(path: string): string | null {
-    const rel = relative(this.realCwd, path);
+  private toRelative(inputPath: string): string | null {
+    // Resolve relative paths against realCwd (not process.cwd())
+    const abs = isAbsolute(inputPath)
+      ? inputPath
+      : join(this.realCwd, inputPath);
+    const rel = relative(this.realCwd, abs);
     if (isAbsolute(rel) || rel.startsWith('..')) {
       return null;
     }
