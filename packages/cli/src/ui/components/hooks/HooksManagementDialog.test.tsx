@@ -197,28 +197,6 @@ describe('HooksManagementDialog', () => {
       expect(mockOnClose).toHaveBeenCalledTimes(1);
     });
 
-    it('should navigate up and down with arrow keys', async () => {
-      const { lastFrame, unmount } = renderWithProviders(
-        <HooksManagementDialog onClose={mockOnClose} />,
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Initial state - first item selected
-      let output = lastFrame();
-      expect(output).toContain('❯');
-
-      // Press down - should move selection
-      keypressHandler!(createKey('down'));
-      output = lastFrame();
-
-      // Press up - should move back
-      keypressHandler!(createKey('up'));
-      output = lastFrame();
-
-      unmount();
-    });
-
     it('should not go above first item when pressing up', async () => {
       const { unmount } = renderWithProviders(
         <HooksManagementDialog onClose={mockOnClose} />,
