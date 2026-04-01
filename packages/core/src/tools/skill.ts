@@ -280,7 +280,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       return {
         llmContent: [{ text: llmContent }],
-        returnDisplay: skill.description,
+        returnDisplay: `Skill loaded: ${skill.name} — ${skill.description}`,
       };
     } catch (error) {
       const errorMessage =

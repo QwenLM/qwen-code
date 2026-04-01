@@ -32,6 +32,14 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * When true, this skill is only available for the agent to invoke
+   * internally — it does not appear in /skills list or autocomplete.
+   * The agent sees it in the tool description and can invoke it when
+   * contextually appropriate.
+   */
+  agentOnly?: boolean;
+
+  /**
    * Storage level - determines where the configuration file is stored
    */
   level: SkillLevel;

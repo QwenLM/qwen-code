@@ -108,10 +108,14 @@ export function parseSkillContent(
     }
   }
 
+  // Parse agentOnly flag (default: false)
+  const agentOnly = frontmatter['agentOnly'] === true;
+
   const config: SkillConfig = {
     name,
     description,
     allowedTools,
+    agentOnly,
     filePath,
     body: body.trim(),
     level: 'extension',

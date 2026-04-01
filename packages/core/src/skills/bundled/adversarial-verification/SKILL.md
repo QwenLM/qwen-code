@@ -1,6 +1,7 @@
 ---
 name: adversarial-verification
 description: Use when you need to verify code changes by actively trying to break them - not just confirming they work, but probing for failures through boundary testing, concurrency, and edge cases
+agentOnly: true
 ---
 
 # Adversarial Verification

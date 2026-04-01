@@ -40,7 +40,9 @@ export const skillsCommand: SlashCommand = {
       return;
     }
 
-    const skills = await skillManager.listSkills();
+    const allSkills = await skillManager.listSkills();
+    // Filter out agent-only skills from user-facing list
+    const skills = allSkills.filter((s) => !s.agentOnly);
     if (skills.length === 0) {
       context.ui.addItem(
         {
@@ -94,7 +96,9 @@ export const skillsCommand: SlashCommand = {
       return [];
     }
 
-    const skills = await skillManager.listSkills();
+    const allSkills = await skillManager.listSkills();
+    // Filter out agent-only skills from autocomplete
+    const skills = allSkills.filter((s) => !s.agentOnly);
     const normalizedPartial = partialArg.trim();
     const matches = await getSkillMatches(skills, normalizedPartial);
 
