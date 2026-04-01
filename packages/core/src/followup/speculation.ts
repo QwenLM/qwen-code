@@ -191,10 +191,10 @@ async function runSpeculativeLoop(
         if (part.text) {
           modelParts.push({ text: part.text });
         }
-        if (part.functionCall) {
+        if (part.functionCall && part.functionCall.name) {
           modelParts.push({
             functionCall: {
-              name: part.functionCall.name!,
+              name: part.functionCall.name,
               args: part.functionCall.args,
             },
           });
@@ -240,7 +240,13 @@ async function runSpeculativeLoop(
       }
 
       if (gate.action === 'redirect') {
-        await rewritePathArgs(args, state.overlayFs!);
+        try {
+          await rewritePathArgs(args, state.overlayFs!);
+        } catch {
+          // Path rewrite failed (e.g., absolute path outside cwd) — treat as boundary
+          hitBoundary = true;
+          break;
+        }
       }
 
       // Execute the tool directly (bypassing CoreToolScheduler)
