@@ -217,3 +217,59 @@ Completed
 ### Status
 
 Completed
+
+---
+
+## Part 4 - Managed auto-memory extraction flow
+
+### Start review
+
+- Overall plan remains: storage → managed index integration → relevant recall → extraction → dream and commands.
+- Parts 1 to 3 already provide scaffold, index loading, and request-time relevant recall.
+- Scope for this part: add a safe MVP extraction pipeline that runs after a completed user query, tracks incremental cursor state, and writes durable summaries into managed topic files.
+
+### Goal
+
+- Add extraction running-state guards
+- Add transcript slicing and cursor persistence
+- Add heuristic durable-memory patch extraction and topic-file application
+- Trigger extraction after completed user queries in the client flow
+- Add tests for extraction state, cursor/idempotency, and client integration
+
+### Implemented
+
+- Added `packages/core/src/memory/state.ts`
+- Added `packages/core/src/memory/state.test.ts`
+- Added `packages/core/src/memory/extract.ts`
+- Added `packages/core/src/memory/extract.test.ts`
+- Updated `packages/core/src/core/client.ts` to trigger managed extraction after completed `UserQuery` turns
+- Updated `packages/core/src/core/client.test.ts` with extraction integration coverage
+- Exported the new extraction/state helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed extraction now reads the current session transcript incrementally using `extract-cursor.json`.
+- Durable user statements are heuristically classified into `user`, `feedback`, `project`, or `reference` topic patches.
+- Topic files are updated idempotently, metadata is bumped, and duplicate writes are avoided on repeated runs.
+- Completed user queries can emit a `Managed auto-memory updated` system message when extraction writes topic files.
+- Concurrent extraction attempts for the same project are skipped safely in-process.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/state.test.ts src/memory/extract.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/config/config.test.ts src/core/prompts.test.ts src/utils/memoryDiscovery.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/recall.test.ts src/memory/scan.test.ts src/memory/state.test.ts src/memory/extract.test.ts src/core/client.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This MVP extraction path is intentionally heuristic and host-driven; it does not yet launch a dedicated extractor agent.
+- Cursor persistence is session-aware and sufficient for incremental turn-end extraction in the current process model.
+- Dream/consolidation and richer extraction prompts remain deferred to the next parts.
+
+### Status
+
+Completed
+

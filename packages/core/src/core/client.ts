@@ -47,6 +47,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
 import { AgentTool } from '../tools/agent.js';
+import { scheduleAutoMemoryExtract } from '../memory/extract.js';
 import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Telemetry
@@ -450,6 +451,27 @@ export class GeminiClient {
     }
   }
 
+  private async *runManagedAutoMemoryExtraction(
+    messageType: SendMessageType,
+  ): AsyncGenerator<ServerGeminiStreamEvent, void> {
+    if (messageType !== SendMessageType.UserQuery) {
+      return;
+    }
+
+    const result = await scheduleAutoMemoryExtract({
+      projectRoot: this.config.getProjectRoot(),
+      sessionId: this.config.getSessionId(),
+      history: this.getHistory(),
+    });
+
+    if (result?.systemMessage) {
+      yield {
+        type: GeminiEventType.HookSystemMessage,
+        value: result.systemMessage,
+      };
+    }
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     signal: AbortSignal,
@@ -770,6 +792,7 @@ export class GeminiClient {
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
+        yield* this.runManagedAutoMemoryExtraction(messageType);
         // Report completed before returning — agent has no more work to do
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
@@ -802,7 +825,11 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
-      } else if (arenaAgentClient) {
+      }
+
+      yield* this.runManagedAutoMemoryExtraction(messageType);
+
+      if (arenaAgentClient) {
         // No continuation needed — agent completed its task
         await arenaAgentClient.reportCompleted();
       }

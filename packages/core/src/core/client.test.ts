@@ -38,6 +38,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { scheduleAutoMemoryExtract } from '../memory/extract.js';
 import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -91,6 +92,13 @@ vi.mock('./turn', async (importOriginal) => {
 
 vi.mock('../config/config.js');
 vi.mock('./prompts');
+vi.mock('../memory/extract.js', () => ({
+  scheduleAutoMemoryExtract: vi.fn().mockResolvedValue({
+    patches: [],
+    touchedTopics: [],
+    cursor: { updatedAt: new Date(0).toISOString() },
+  }),
+}));
 vi.mock('../memory/recall.js', () => ({
   buildRelevantAutoMemoryPromptForQuery: vi.fn().mockResolvedValue(''),
 }));
@@ -1334,6 +1342,54 @@ hello
         ]),
         expect.any(AbortSignal),
       );
+    });
+
+    it('should run managed auto-memory extraction after a completed user query', async () => {
+      vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
+        patches: [{ topic: 'user', summary: 'I prefer terse responses.', sourceOffset: 0 }],
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'test-session-id',
+          processedOffset: 2,
+          updatedAt: new Date(0).toISOString(),
+        },
+        systemMessage: 'Managed auto-memory updated: user.md',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: GeminiEventType.Content, value: 'Done' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+          { role: 'model', parts: [{ text: 'Done' }] },
+        ]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Please answer tersely' }],
+          new AbortController().signal,
+          'prompt-id-extract',
+        ),
+      );
+
+      const recordedHistory = mockChat.getHistory?.();
+
+      expect(scheduleAutoMemoryExtract).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
+        history: recordedHistory,
+      });
+      expect(events).toContainEqual({
+        type: GeminiEventType.HookSystemMessage,
+        value: 'Managed auto-memory updated: user.md',
+      });
     });
 
     it('should add context if ideMode is enabled and there are open files but no active file', async () => {

@@ -118,6 +118,8 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/prompt.js';
+export * from './memory/state.js';
+export * from './memory/extract.js';
 export * from './memory/scan.js';
 export * from './memory/recall.js';
 
