@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "@protolabs/proto",
   "version": "0.13.2",
   "engines": {
     "node": ">=20.0.0"
