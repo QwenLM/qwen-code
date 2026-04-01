@@ -67,6 +67,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onPlan = vi.fn();
     onPermissionRequest = vi.fn();
     onAskUserQuestion = vi.fn();
+    onDisconnected = vi.fn();
     disconnect = vi.fn();
   },
 }));

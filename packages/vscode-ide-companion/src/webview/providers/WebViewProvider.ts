@@ -57,6 +57,7 @@ export class WebViewProvider {
   private isViewHost = false;
   /** Guards against concurrent auth-restore / connection init */
   private initializationPromise: Promise<void> | null = null;
+  private isReconnecting = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -437,6 +438,16 @@ export class WebViewProvider {
         });
       },
     );
+
+    this.agentManager.onDisconnected((code, signal) => {
+      console.log(
+        `[WebViewProvider] Agent disconnected (code: ${code}, signal: ${signal})`,
+      );
+      // Only auto-reconnect for unexpected disconnects
+      if (this.agentInitialized && !this.isReconnecting) {
+        this.attemptAutoReconnect();
+      }
+    });
   }
 
   /**
@@ -963,6 +974,53 @@ export class WebViewProvider {
         }
       },
     );
+  }
+
+  /**
+   * Attempt to automatically reconnect after unexpected ACP process death.
+   * Uses exponential backoff with a maximum number of attempts.
+   */
+  private async attemptAutoReconnect(): Promise<void> {
+    if (this.isReconnecting) {
+      return;
+    }
+    this.isReconnecting = true;
+    this.agentInitialized = false;
+
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      console.log(
+        `[WebViewProvider] Auto-reconnect attempt ${attempt}/${maxAttempts}`,
+      );
+
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+
+      try {
+        await this.doInitializeAgentConnection();
+        console.log('[WebViewProvider] Auto-reconnect succeeded');
+        this.isReconnecting = false;
+        return;
+      } catch (error) {
+        console.error(
+          `[WebViewProvider] Auto-reconnect attempt ${attempt} failed:`,
+          error,
+        );
+      }
+    }
+
+    // All attempts exhausted
+    this.isReconnecting = false;
+    console.error('[WebViewProvider] Auto-reconnect failed after all attempts');
+
+    this.sendMessageToWebView({
+      type: 'agentConnectionError',
+      data: {
+        message:
+          'Lost connection to Qwen agent and auto-reconnect failed. Please use the refresh button to try again.',
+      },
+    });
   }
 
   /**
