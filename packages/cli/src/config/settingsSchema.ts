@@ -891,14 +891,14 @@ const SETTINGS_SCHEMA = {
               'Minimum hours that must pass since the last consolidation.',
             showInDialog: false,
           },
-          maxMemoryLines: {
+          minMemories: {
             type: 'number',
-            label: 'Maximum Memory File Lines',
+            label: 'Minimum Memories for Consolidation',
             category: 'Context',
             requiresRestart: false,
-            default: 200,
+            default: 5,
             description:
-              'Maximum number of lines a memory file can have before triggering consolidation.',
+              'Minimum number of memory files before consolidation is worthwhile.',
             showInDialog: false,
           },
           scope: {

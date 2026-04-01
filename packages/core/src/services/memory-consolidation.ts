@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 protoLabs
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,18 +8,28 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ContentGenerator } from '../core/contentGenerator.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  listMemories,
+  deleteMemory,
+  updateMemory,
+  regenerateIndex,
+} from '../memory/memoryStore.js';
+import { isStale } from '../memory/memoryAge.js';
+import type { MemoryScope } from '../memory/types.js';
 
 const debugLogger = createDebugLogger('MEMORY_CONSOLIDATION');
 
 const DEFAULT_MIN_SESSIONS = 5;
 const DEFAULT_MIN_HOURS = 24;
-const DEFAULT_MAX_LINES = 200;
+const DEFAULT_MIN_MEMORIES = 5;
+const STALE_THRESHOLD_DAYS = 90;
 const LOCK_STALE_HOURS = 1;
 
 export interface ConsolidationConfig {
   minSessionsBetween: number;
   minHoursBetween: number;
-  maxMemoryLines: number;
+  /** Minimum memory count before consolidation is worthwhile */
+  minMemories: number;
   scope: 'global' | 'project' | 'both';
 }
 
@@ -33,16 +43,27 @@ interface ConsolidationState {
 export interface ConsolidationResult {
   consolidated: boolean;
   reason?: string;
-  linesBeforeGlobal?: number;
-  linesAfterGlobal?: number;
-  linesBeforeProject?: number;
-  linesAfterProject?: number;
+  memoriesBefore?: number;
+  memoriesAfter?: number;
+  merged?: number;
+  pruned?: number;
 }
 
+/**
+ * Periodic "dream pass" consolidation for the file-per-memory system.
+ *
+ * Pipeline:
+ *   Orient  → read all memory headers + bodies
+ *   Detect  → group by semantic similarity (LLM-assisted)
+ *   Merge   → combine duplicate groups into strongest entry
+ *   Prune   → remove stale entries (>90 days with no update)
+ *   Index   → regenerateIndex() to refresh MEMORY.md
+ *
+ * Gated by time (24h), session count (5), and process lock.
+ */
 export class MemoryConsolidationService {
   private statePath: string;
-  private globalMemoryPath: string;
-  private projectMemoryPath: string;
+  private projectDir: string;
   private config: ConsolidationConfig;
 
   constructor(
@@ -53,21 +74,16 @@ export class MemoryConsolidationService {
     config?: Partial<ConsolidationConfig>,
   ) {
     this.statePath = path.join(runtimeDir, 'memory-consolidation-state.json');
-    this.globalMemoryPath = path.join(
-      process.env['HOME'] ?? '~',
-      '.qwen',
-      'QWEN.md',
-    );
-    this.projectMemoryPath = path.join(projectDir, 'QWEN.md');
+    this.projectDir = projectDir;
     this.config = {
       minSessionsBetween: config?.minSessionsBetween ?? DEFAULT_MIN_SESSIONS,
       minHoursBetween: config?.minHoursBetween ?? DEFAULT_MIN_HOURS,
-      maxMemoryLines: config?.maxMemoryLines ?? DEFAULT_MAX_LINES,
+      minMemories: config?.minMemories ?? DEFAULT_MIN_MEMORIES,
       scope: config?.scope ?? 'both',
     };
   }
 
-  /** Call on every session end. Gates determine if actual work happens. */
+  /** Call on session end or after extraction. Gates determine if work happens. */
   async maybeConsolidate(): Promise<ConsolidationResult> {
     const state = this.loadState();
 
@@ -77,12 +93,12 @@ export class MemoryConsolidationService {
     this.saveState(state);
 
     // Gate 1: Time
-    const hoursSinceLastConsolidation =
+    const hoursSince =
       (Date.now() - (state.lastConsolidatedAt ?? 0)) / (1000 * 60 * 60);
-    if (hoursSinceLastConsolidation < this.config.minHoursBetween) {
+    if (hoursSince < this.config.minHoursBetween) {
       return {
         consolidated: false,
-        reason: `Only ${hoursSinceLastConsolidation.toFixed(1)}h since last consolidation (min: ${this.config.minHoursBetween}h)`,
+        reason: `Only ${hoursSince.toFixed(1)}h since last consolidation (min: ${this.config.minHoursBetween}h)`,
       };
     }
 
@@ -110,72 +126,109 @@ export class MemoryConsolidationService {
   }
 
   private async consolidate(): Promise<ConsolidationResult> {
-    const result: ConsolidationResult = { consolidated: true };
-    const contentGenerator = this.getContentGenerator();
-    if (!contentGenerator) {
-      return { consolidated: false, reason: 'No content generator available' };
-    }
+    const scopes: MemoryScope[] =
+      this.config.scope === 'both'
+        ? ['project', 'global']
+        : [this.config.scope];
 
-    // Phase 1: Orient -- read current memory files
-    const targets: Array<{ path: string; scope: 'global' | 'project' }> = [];
-    if (
-      this.config.scope !== 'project' &&
-      fs.existsSync(this.globalMemoryPath)
-    ) {
-      targets.push({ path: this.globalMemoryPath, scope: 'global' });
-    }
-    if (
-      this.config.scope !== 'global' &&
-      fs.existsSync(this.projectMemoryPath)
-    ) {
-      targets.push({ path: this.projectMemoryPath, scope: 'project' });
-    }
+    let totalBefore = 0;
+    let totalAfter = 0;
+    let totalMerged = 0;
+    let totalPruned = 0;
 
-    if (targets.length === 0) {
-      return { consolidated: false, reason: 'No memory files found' };
-    }
+    for (const scope of scopes) {
+      const memories = await listMemories(scope, this.projectDir);
+      totalBefore += memories.length;
 
-    for (const target of targets) {
-      const content = fs.readFileSync(target.path, 'utf8');
-      const lines = content.split('\n');
-      const linesBefore = lines.length;
-
-      if (linesBefore <= this.config.maxMemoryLines * 0.8) {
-        // Not worth consolidating yet
+      if (memories.length < this.config.minMemories) {
         debugLogger.debug(
-          `Skipping ${target.scope} memory: ${linesBefore} lines (threshold: ${this.config.maxMemoryLines})`,
+          `Skipping ${scope}: only ${memories.length} memories (min: ${this.config.minMemories})`,
         );
+        totalAfter += memories.length;
         continue;
       }
 
-      // Phase 2: Gather -- the content itself is the signal
-      // Phase 3: Consolidate -- side-query to model
-      const consolidatedContent = await this.consolidateContent(
-        content,
+      // Phase 1: Prune stale entries (>90 days)
+      const staleFiles = memories.filter((m) =>
+        isStale(m.mtimeMs, STALE_THRESHOLD_DAYS),
+      );
+      for (const stale of staleFiles) {
+        await deleteMemory(stale.filePath, scope, this.projectDir);
+        totalPruned++;
+        debugLogger.debug(`Pruned stale memory: ${stale.header.name}`);
+      }
+
+      const remaining = memories.filter(
+        (m) => !isStale(m.mtimeMs, STALE_THRESHOLD_DAYS),
+      );
+
+      if (remaining.length < 2) {
+        totalAfter += remaining.length;
+        continue;
+      }
+
+      // Phase 2: Detect duplicates via LLM
+      const contentGenerator = this.getContentGenerator();
+      if (!contentGenerator) {
+        totalAfter += remaining.length;
+        continue;
+      }
+
+      const manifest = remaining
+        .map(
+          (m) =>
+            `- ${path.basename(m.filePath)}: [${m.header.type}] ${m.header.name} — ${m.header.description}`,
+        )
+        .join('\n');
+
+      const mergeGroups = await this.detectDuplicates(
+        manifest,
         contentGenerator,
       );
 
-      // Phase 4: Prune -- enforce line limit
-      const pruned = this.prune(
-        consolidatedContent,
-        this.config.maxMemoryLines,
-      );
+      // Phase 3: Merge duplicate groups
+      for (const group of mergeGroups) {
+        if (group.length < 2) continue;
 
-      // Write back
-      fs.writeFileSync(target.path, pruned, 'utf8');
+        // Find the memories in the remaining list
+        const groupMemories = group
+          .map((filename) =>
+            remaining.find((m) => path.basename(m.filePath) === filename),
+          )
+          .filter(Boolean);
 
-      const linesAfter = pruned.split('\n').length;
-      if (target.scope === 'global') {
-        result.linesBeforeGlobal = linesBefore;
-        result.linesAfterGlobal = linesAfter;
-      } else {
-        result.linesBeforeProject = linesBefore;
-        result.linesAfterProject = linesAfter;
+        if (groupMemories.length < 2) continue;
+
+        // Keep the first (newest by mtime), merge descriptions
+        const keeper = groupMemories[0]!;
+        const others = groupMemories.slice(1);
+
+        // Combine descriptions
+        const combinedDesc = [
+          keeper.header.description,
+          ...others.map((m) => m!.header.description),
+        ]
+          .filter((d, i, arr) => arr.indexOf(d) === i) // dedup
+          .join('; ');
+
+        await updateMemory(
+          keeper.filePath,
+          { description: combinedDesc },
+          scope,
+          this.projectDir,
+        );
+
+        for (const dup of others) {
+          await deleteMemory(dup!.filePath, scope, this.projectDir);
+          totalMerged++;
+        }
       }
 
-      debugLogger.info(
-        `Consolidated ${target.scope} memory: ${linesBefore} -> ${linesAfter} lines`,
-      );
+      // Phase 4: Refresh index
+      await regenerateIndex(scope, this.projectDir);
+
+      const afterCount = (await listMemories(scope, this.projectDir)).length;
+      totalAfter += afterCount;
     }
 
     // Update state
@@ -184,71 +237,72 @@ export class MemoryConsolidationService {
     state.sessionsSinceLastConsolidation = 0;
     this.saveState(state);
 
-    return result;
-  }
-
-  private async consolidateContent(
-    content: string,
-    contentGenerator: ContentGenerator,
-  ): Promise<string> {
-    const prompt = `You are a memory consolidation engine. Below is a memory file used by an AI coding assistant to remember important facts, patterns, and decisions across sessions.
-
-Your task: Consolidate this memory file by:
-1. Merging duplicate or near-duplicate entries
-2. Removing entries that contradict newer entries (keep the newer one)
-3. Combining related entries into concise summaries
-4. Preserving all unique, actionable information
-5. Maintaining the original markdown formatting and section headers
-
-IMPORTANT: Do NOT add commentary, explanations, or meta-text. Return ONLY the consolidated memory content.
-
-Current memory file:
----
-${content}
----
-
-Return the consolidated memory content:`;
-
-    const response = await contentGenerator.generateContent(
-      {
-        model: this.getModel(),
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: {
-          maxOutputTokens: 4096,
-          temperature: 0,
-        },
-      },
-      'memory-consolidation',
+    debugLogger.info(
+      `Consolidation complete: ${totalBefore} -> ${totalAfter} memories (merged: ${totalMerged}, pruned: ${totalPruned})`,
     );
 
-    return response.text?.trim() ?? content;
+    return {
+      consolidated: true,
+      memoriesBefore: totalBefore,
+      memoriesAfter: totalAfter,
+      merged: totalMerged,
+      pruned: totalPruned,
+    };
   }
 
-  private prune(content: string, maxLines: number): string {
-    const lines = content.split('\n');
-    if (lines.length <= maxLines) return content;
+  /**
+   * Ask the LLM to identify groups of duplicate/overlapping memories.
+   * Returns arrays of filenames that should be merged.
+   */
+  private async detectDuplicates(
+    manifest: string,
+    contentGenerator: ContentGenerator,
+  ): Promise<string[][]> {
+    const prompt = `You are a memory deduplication engine. Below is a list of memory files stored by an AI coding assistant.
 
-    // Keep the first maxLines lines, preserving complete sections
-    // Find the last section header before the cutoff
-    let cutPoint = maxLines;
-    for (let i = maxLines - 1; i >= maxLines - 20; i--) {
-      if (i >= 0 && lines[i]?.startsWith('#')) {
-        cutPoint = i;
-        break;
+Identify groups of memories that are duplicates or near-duplicates (same fact stated differently, overlapping information, contradictory entries about the same topic).
+
+Return ONLY a JSON array of arrays. Each inner array contains the filenames that should be merged. Only include groups of 2+. If no duplicates exist, return [].
+
+Example: [["user_prefer-tabs.md", "user_tab-spaces.md"], ["project_deadline.md", "project_launch-date.md"]]
+
+Memory files:
+${manifest}
+
+Return JSON array:`;
+
+    try {
+      const response = await contentGenerator.generateContent(
+        {
+          model: this.getModel(),
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          config: { maxOutputTokens: 1024, temperature: 0 },
+        },
+        'memory-consolidation',
+      );
+
+      const text = response.text?.trim() ?? '[]';
+      // Extract JSON from potential markdown code fences
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]) as string[][];
       }
+      return [];
+    } catch (err) {
+      debugLogger.warn('Duplicate detection failed:', err);
+      return [];
     }
-
-    return lines.slice(0, cutPoint).join('\n').trimEnd() + '\n';
   }
+
+  // --- Gating infrastructure (unchanged) ---
 
   private acquireLock(state: ConsolidationState): boolean {
     if (state.lockPid && state.lockAcquiredAt) {
       const lockAge = (Date.now() - state.lockAcquiredAt) / (1000 * 60 * 60);
       if (lockAge < LOCK_STALE_HOURS) {
-        // Check if process is still alive
         try {
           process.kill(state.lockPid, 0);
-          return false; // Process alive, lock valid
+          return false;
         } catch {
           // Process dead, lock stale
         }
