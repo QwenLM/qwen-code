@@ -9,6 +9,10 @@ import {
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   QWEN_DIR,
+  listMemories,
+  deleteMemory,
+  formatAge,
+  getStaleWarning,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
 import os from 'node:os';
@@ -289,6 +293,110 @@ export const memoryCommand: SlashCommand = {
           },
         },
       ],
+    },
+    {
+      name: 'list',
+      get description() {
+        return t(
+          'List all individual memory files with type, age, and description.',
+        );
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const cwd = context.services.config?.getWorkingDir?.() ?? process.cwd();
+        const projectMemories = await listMemories('project', cwd);
+        const globalMemories = await listMemories('global');
+        const all = [
+          ...projectMemories.map((m) => ({ ...m, scope: 'project' as const })),
+          ...globalMemories.map((m) => ({ ...m, scope: 'global' as const })),
+        ];
+
+        if (all.length === 0) {
+          context.ui.addItem(
+            {
+              type: MessageType.INFO,
+              text: t(
+                'No memory files found. Use /memory add or save_memory tool to create memories.',
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
+        const lines = all.map((m) => {
+          const age = formatAge(m.mtimeMs);
+          const stale = getStaleWarning(m.mtimeMs) ?? '';
+          const filename = path.basename(m.filePath);
+          return `  [${m.header.type}] ${m.header.name} (${m.scope}, ${age}) ${stale}\n    ${m.header.description}\n    ${filename}`;
+        });
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: `${all.length} memories:\n\n${lines.join('\n\n')}`,
+          },
+          Date.now(),
+        );
+      },
+    },
+    {
+      name: 'forget',
+      get description() {
+        return t('Delete a memory by name. Usage: /memory forget <name>');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (
+        context,
+        args,
+      ): Promise<void | SlashCommandActionReturn> => {
+        const name = args?.trim();
+        if (!name) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Usage: /memory forget <memory-name>'),
+          };
+        }
+
+        const cwd = context.services.config?.getWorkingDir?.() ?? process.cwd();
+
+        // Search both scopes for a matching memory
+        for (const scope of ['project', 'global'] as const) {
+          const memories = await listMemories(scope, cwd);
+          const match = memories.find(
+            (m) =>
+              m.header.name === name ||
+              m.header.name.toLowerCase() === name.toLowerCase() ||
+              path.basename(m.filePath, '.md') === name,
+          );
+
+          if (match) {
+            const deleted = await deleteMemory(match.filePath, scope, cwd);
+            if (deleted) {
+              context.ui.addItem(
+                {
+                  type: MessageType.INFO,
+                  text: t('Deleted memory: {{name}} ({{scope}})', {
+                    name: match.header.name,
+                    scope,
+                  }),
+                },
+                Date.now(),
+              );
+              return;
+            }
+          }
+        }
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t('No memory found matching "{{name}}".', { name }),
+          },
+          Date.now(),
+        );
+      },
     },
     {
       name: 'refresh',

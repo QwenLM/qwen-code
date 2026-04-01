@@ -31,7 +31,6 @@ export {
   slugify,
 } from './memoryStore.js';
 export { MEMORY_SYSTEM_PROMPT } from './memoryPrompt.js';
-export { migrateProtoMd } from './migration.js';
 export { formatAge, isStale, getStaleWarning } from './memoryAge.js';
 export {
   scanMemories,
