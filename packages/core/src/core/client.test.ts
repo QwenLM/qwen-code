@@ -31,9 +31,10 @@ import {
   Turn,
   type ChatCompressionInfo,
 } from './turn.js';
-import { getCoreSystemPrompt } from './prompts.js';
+import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -314,6 +315,8 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -356,8 +359,18 @@ describe('Gemini Client (client.ts)', () => {
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getArenaAgentClient: vi.fn().mockReturnValue(null),
       getEnableHooks: vi.fn().mockReturnValue(false),
+      getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDebugLogger: vi.fn().mockReturnValue({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
@@ -501,9 +514,10 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       };
 
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // New token count formula: originalTokenCount - (compressionInputTokenCount - 1000) + compressionOutputTokenCount
       const estimatedNewTokenCount = Math.max(
@@ -805,9 +819,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 501 - (1400 - 1000) + 50 = 501 - 400 + 50 = 151 <= 501 (success)
@@ -899,9 +914,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 700 - (1500 - 1000) + 50 = 700 - 500 + 50 = 250 <= 700 (success)
@@ -975,9 +991,10 @@ describe('Gemini Client (client.ts)', () => {
       const mockNewChat: Partial<GeminiChat> = {
         getHistory: vi.fn().mockReturnValue(newCompressedHistory),
       };
-      client['startChat'] = vi
-        .fn()
-        .mockResolvedValue(mockNewChat as GeminiChat);
+      client['startChat'] = vi.fn().mockImplementation(async () => {
+        client['chat'] = mockNewChat as GeminiChat;
+        return mockNewChat as GeminiChat;
+      });
 
       // Mock the summary response from the chat
       // newTokenCount = 100 - (1060 - 1000) + 20 = 100 - 60 + 20 = 60 <= 100 (success)
@@ -2368,6 +2385,105 @@ Other open files:
         expect(client['sessionTurnCount']).toBe(turnCountBefore);
       });
     });
+
+    describe('hooks fast-path optimization', () => {
+      let mockChat: Partial<GeminiChat>;
+
+      beforeEach(() => {
+        vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        });
+
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
+
+        mockChat = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          stripThoughtsFromHistory: vi.fn(),
+        };
+        client['chat'] = mockChat as GeminiChat;
+      });
+
+      it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {
+        // Enable hooks and provide messageBus
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.spyOn(client['config'], 'hasHooksForEvent').mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-1',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called because hasHooksForEvent returned false
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should skip messageBus.request for Stop when hasHooksForEvent returns false', async () => {
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.spyOn(client['config'], 'hasHooksForEvent').mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-2',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called for Stop hook either
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should not skip hooks when hasHooksForEvent returns true', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
+          response: vi.fn(),
+        };
+        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.spyOn(client['config'], 'hasHooksForEvent').mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-3',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request SHOULD be called for UserPromptSubmit
+        expect(mockMessageBus.request).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('generateContent', () => {
@@ -2422,6 +2538,153 @@ Other open files:
           config: expect.any(Object),
           contents,
         },
+        'test-session-id',
+      );
+    });
+
+    it('should prefer the current prompt id context for stateless requests', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('btw-prompt-id', async () => {
+        await client.generateContent(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'btw-prompt-id',
+      );
+    });
+
+    it('should prefer an explicit prompt id override over the current context', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await promptIdContext.run('context-prompt-id', async () => {
+        await (
+          client.generateContent as unknown as (
+            ...args: unknown[]
+          ) => Promise<GenerateContentResponse>
+        )(
+          contents,
+          {},
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+          'override-prompt-id',
+        );
+      });
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: DEFAULT_QWEN_FLASH_MODEL,
+          contents,
+        }),
+        'override-prompt-id',
+      );
+    });
+
+    it('should use config system prompt override when provided', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.spyOn(client['config'], 'getSystemPrompt').mockReturnValue(
+        'Override prompt',
+      );
+      vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
+        'Saved memory',
+      );
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Override prompt with memory',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
+        'Override prompt',
+        'Saved memory',
+        undefined,
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Override prompt with memory',
+          }),
+        }),
+        'test-session-id',
+      );
+    });
+
+    it('should append config appendSystemPrompt to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
+        'Be extra concise.',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        '',
+        'test-model',
+        'Be extra concise.',
+      );
+    });
+
+    it('should append config appendSystemPrompt after a config system prompt override', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.spyOn(client['config'], 'getSystemPrompt').mockReturnValue(
+        'Override prompt',
+      );
+      vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
+        'Focus on findings only.',
+      );
+      vi.spyOn(client['config'], 'getUserMemory').mockReturnValue(
+        'Saved memory',
+      );
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Override prompt with memory and append',
+      );
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
+        'Override prompt',
+        'Saved memory',
+        'Focus on findings only.',
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Override prompt with memory and append',
+          }),
+        }),
         'test-session-id',
       );
     });

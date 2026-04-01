@@ -57,14 +57,10 @@ function getWindowsPathFingerprint(
   env: NodeJS.ProcessEnv,
   pathKeys: string[],
 ): string {
-  return pathKeys
-    .map((key) => `${key}=${env[key] ?? ''}`)
-    .join('\0');
+  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
 }
 
-function normalizePathEnvForWindows(
-  env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
+function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (os.platform() !== 'win32') {
     return env;
   }
@@ -110,6 +106,18 @@ function normalizePathEnvForWindows(
   }
 
   return normalized;
+}
+
+/**
+ * On Windows with PowerShell, prefix the command with a statement that forces
+ * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
+ * as UTF-8 regardless of the system codepage.
+ */
+function applyPowerShellUtf8Prefix(command: string, shell: string): string {
+  if (os.platform() === 'win32' && shell === 'powershell') {
+    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  }
+  return command;
 }
 
 /** A structured result from a shell command execution. */
@@ -177,9 +185,39 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
-const REPLAY_TERMINAL_COLS = 1024;
-const REPLAY_TERMINAL_ROWS = 24;
-const REPLAY_TERMINAL_SCROLLBACK = 2000;
+const getErrnoCode = (error: unknown): string | undefined => {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isExpectedPtyReadExitError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'EIO') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return message.includes('read EIO');
+};
+
+const isExpectedPtyExitRaceError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'ESRCH' || code === 'EBADF') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return (
+    message.includes('ioctl(2) failed, EBADF') ||
+    message.includes('Cannot resize a pty that has already exited')
+  );
+};
 
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
@@ -192,12 +230,16 @@ const getFullBufferText = (terminal: pkg.Terminal): string => {
   return lines.join('\n').trimEnd();
 };
 
-const replayTerminalOutput = async (output: string): Promise<string> => {
+const replayTerminalOutput = async (
+  output: string,
+  cols: number,
+  rows: number,
+): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
-    cols: REPLAY_TERMINAL_COLS,
-    rows: REPLAY_TERMINAL_ROWS,
-    scrollback: REPLAY_TERMINAL_SCROLLBACK,
+    cols,
+    rows,
+    scrollback: 10000,
     convertEol: true,
   });
 
@@ -334,6 +376,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -533,6 +576,8 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
       // that contain spaces, which mangles user-provided quoted arguments
@@ -575,7 +620,6 @@ export class ShellExecutionService {
 
         let processingChain = Promise.resolve();
         let decoder: TextDecoder | null = null;
-        let outputEncoding = 'utf-8';
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const error: Error | null = null;
@@ -707,10 +751,8 @@ export class ShellExecutionService {
           const encoding = getCachedEncodingForBuffer(data);
           try {
             decoder = new TextDecoder(encoding);
-            outputEncoding = encoding;
           } catch {
             decoder = new TextDecoder('utf-8');
-            outputEncoding = 'utf-8';
           }
         };
 
@@ -760,6 +802,20 @@ export class ShellExecutionService {
           handleOutput(bufferData);
         });
 
+        // Handle PTY errors - EIO is expected when the PTY process exits
+        // due to race conditions between the exit event and read operations.
+        // This is a normal behavior on macOS/Linux and should not crash the app.
+        // See: https://github.com/microsoft/node-pty/issues/178
+        ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+          if (isExpectedPtyReadExitError(err)) {
+            // EIO is expected when the PTY process exits - ignore it
+            return;
+          }
+
+          // Surface unexpected PTY errors to preserve existing crash behavior.
+          throw err;
+        });
+
         ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
@@ -773,10 +829,19 @@ export class ShellExecutionService {
 
               try {
                 if (isStreamingRawContent) {
-                  const decodedOutput = new TextDecoder(outputEncoding).decode(
+                  // Re-decode the full buffer with proper encoding detection.
+                  // The streaming decoder used the first-chunk heuristic which
+                  // can misdetect when early output is ASCII-only but later
+                  // output is in a different encoding (e.g. GBK).
+                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                  const decodedOutput = new TextDecoder(finalEncoding).decode(
                     finalBuffer,
                   );
-                  fullOutput = await replayTerminalOutput(decodedOutput);
+                  fullOutput = await replayTerminalOutput(
+                    decodedOutput,
+                    cols,
+                    rows,
+                  );
                 } else {
                   fullOutput = getFullBufferText(headlessTerminal);
                 }
@@ -921,7 +986,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;
@@ -951,7 +1018,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;

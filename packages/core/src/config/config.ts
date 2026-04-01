@@ -21,6 +21,8 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type { ArenaManager } from '../agents/arena/ArenaManager.js';
+import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -37,7 +39,6 @@ import {
   type FileSystemService,
   StandardFileSystemService,
   type FileEncodingType,
-  FileEncoding,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
 
@@ -55,7 +56,7 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
 import { SkillTool } from '../tools/skill.js';
-import { TaskTool } from '../tools/task.js';
+import { AgentTool } from '../tools/agent.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
@@ -69,6 +70,7 @@ import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import {
@@ -92,13 +94,19 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
+import {
+  PermissionMode,
+  NotificationType,
+  type PermissionSuggestion,
+} from '../hooks/types.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
@@ -285,6 +293,26 @@ export interface SandboxConfig {
   image: string;
 }
 
+/**
+ * Settings shared across multi-agent collaboration features
+ * (Arena, Team, Swarm).
+ */
+export interface AgentsCollabSettings {
+  /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
+  displayMode?: string;
+  /** Arena-specific settings */
+  arena?: {
+    /** Custom base directory for Arena worktrees (default: ~/.qwen/arena) */
+    worktreeBaseDir?: string;
+    /** Preserve worktrees and state files after session ends */
+    preserveArtifacts?: boolean;
+    /** Maximum rounds (turns) per agent. No limit if unset. */
+    maxRoundsPerAgent?: number;
+    /** Total timeout in seconds for the Arena session. No limit if unset. */
+    timeoutSeconds?: number;
+  };
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -294,9 +322,17 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  /** Merged permission rules from all sources (settings + CLI args). */
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+  };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -380,6 +416,8 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  agents?: AgentsCollabSettings;
   /** Enable hook system for lifecycle events */
   enableHooks?: boolean;
   /** Hooks configuration from settings */
@@ -388,6 +426,20 @@ export interface ConfigParameters {
   hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /**
+   * Callback for persisting a permission rule to settings.
+   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
+   * to project or user settings when the user clicks "Always Allow".
+   *
+   * @param scope - 'project' for workspace settings, 'user' for user settings.
+   * @param ruleType - 'allow' | 'ask' | 'deny'.
+   * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   */
+  onPersistPermissionRule?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
 }
 
 function normalizeConfigOutputFormat(
@@ -429,6 +481,7 @@ export class Config {
   private subagentManager!: SubagentManager;
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
+  private permissionManager: PermissionManager | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -445,9 +498,14 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
+  private readonly systemPrompt: string | undefined;
+  private readonly appendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly permissionsAllow: string[];
+  private readonly permissionsAsk: string[];
+  private readonly permissionsDeny: string[];
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -513,9 +571,20 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
+  private arenaManager: ArenaManager | null = null;
+  private arenaManagerChangeCallback:
+    | ((manager: ArenaManager | null) => void)
+    | null = null;
+  private readonly arenaAgentClient: ArenaAgentClient | null;
+  private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly onPersistPermissionRuleCallback?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
@@ -523,7 +592,7 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
-  private readonly defaultFileEncoding: FileEncodingType;
+  private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
@@ -551,9 +620,14 @@ export class Config {
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
+    this.systemPrompt = params.systemPrompt;
+    this.appendSystemPrompt = params.appendSystemPrompt;
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.permissionsAllow = params.permissions?.allow || [];
+    this.permissionsAsk = params.permissions?.ask || [];
+    this.permissionsDeny = params.permissions?.deny || [];
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -621,6 +695,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -641,11 +716,13 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
-    this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
+    this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.arenaAgentClient = ArenaAgentClient.create();
+    this.agentsSettings = params.agents ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -733,19 +810,107 @@ export class Config {
               return;
             }
 
+            // Check if request was aborted
+            if (request.signal?.aborted) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook execution cancelled (aborted)'),
+              } as HookExecutionResponse);
+              return;
+            }
+
             // Execute the appropriate hook based on eventName
             let result;
             const input = request.input || {};
+            const signal = request.signal;
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
                   (input['prompt'] as string) || '',
+                  signal,
                 );
                 break;
               case 'Stop':
                 result = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'PreToolUse': {
+                result = await hookSystem.firePreToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode | undefined) ??
+                    PermissionMode.Default,
+                  signal,
+                );
+                break;
+              }
+              case 'PostToolUse':
+                result = await hookSystem.firePostToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_response'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'PostToolUseFailure':
+                result = await hookSystem.firePostToolUseFailureEvent(
+                  (input['tool_use_id'] as string) || '',
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['error'] as string) || '',
+                  input['is_interrupt'] as boolean | undefined,
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'Notification':
+                result = await hookSystem.fireNotificationEvent(
+                  (input['message'] as string) || '',
+                  (input['notification_type'] as NotificationType) ||
+                    'permission_prompt',
+                  (input['title'] as string) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionRequest':
+                result = await hookSystem.firePermissionRequestEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  (input['permission_suggestions'] as
+                    | PermissionSuggestion[]
+                    | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'SubagentStart':
+                result = await hookSystem.fireSubagentStartEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  signal,
+                );
+                break;
+              case 'SubagentStop':
+                result = await hookSystem.fireSubagentStopEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['agent_transcript_path'] as string) || '',
+                  (input['last_assistant_message'] as string) || '',
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  signal,
                 );
                 break;
               default:
@@ -775,12 +940,18 @@ export class Config {
       );
 
       this.debugLogger.debug('MessageBus initialized with hook subscription');
+    } else {
+      this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
     await this.skillManager.startWatching();
     this.debugLogger.debug('Skill manager initialized');
+
+    this.permissionManager = new PermissionManager(this);
+    this.permissionManager.initialize();
+    this.debugLogger.debug('Permission manager initialized');
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
@@ -898,6 +1069,21 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    // Fire auth_success notification hook (supports both interactive & non-interactive)
+    const messageBus = this.getMessageBus();
+    const hooksEnabled = this.getEnableHooks();
+    if (hooksEnabled && messageBus) {
+      fireNotificationHook(
+        messageBus,
+        `Successfully authenticated with ${authMethod}`,
+        NotificationType.AuthSuccess,
+        'Authentication successful',
+      ).catch(() => {
+        // Silently ignore errors - fireNotificationHook has internal error handling
+        // and notification hooks should not block the auth flow
+      });
+    }
   }
 
   /**
@@ -1154,6 +1340,10 @@ export class Config {
     return this.targetDir;
   }
 
+  getCwd(): string {
+    return this.targetDir;
+  }
+
   getWorkspaceContext(): WorkspaceContext {
     return this.workspaceContext;
   }
@@ -1178,6 +1368,8 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -1196,16 +1388,68 @@ export class Config {
     return this.question;
   }
 
+  getSystemPrompt(): string | undefined {
+    return this.systemPrompt;
+  }
+
+  getAppendSystemPrompt(): string | undefined {
+    return this.appendSystemPrompt;
+  }
+
+  /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
     return this.coreTools;
   }
 
-  getAllowedTools(): string[] | undefined {
-    return this.allowedTools;
+  /**
+   * Returns the merged allow-rules for PermissionManager.
+   *
+   * This merges all sources so that PermissionManager receives a single,
+   * authoritative list:
+   *   - settings.permissions.allow  (persistent rules from all scopes)
+   *   - allowedTools param  (SDK / argv auto-approve list)
+   *
+   * Note: coreTools is intentionally excluded here — it has whitelist semantics
+   * (only listed tools are registered), not auto-approve semantics. It is
+   * handled separately via PermissionManager.coreToolsAllowList.
+   *
+   * CLI callers (loadCliConfig) already pre-merge argv into permissionsAllow
+   * before constructing Config, so those fields will be empty for CLI usage.
+   * SDK callers construct Config directly and rely on allowedTools.
+   */
+  getPermissionsAllow(): string[] {
+    const base = this.permissionsAllow ?? [];
+    const sdkAllow = [...(this.allowedTools ?? [])];
+    if (sdkAllow.length === 0) return base.length > 0 ? base : [];
+    const merged = [...base];
+    for (const t of sdkAllow) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
   }
 
-  getExcludeTools(): string[] | undefined {
-    return this.excludeTools;
+  getPermissionsAsk(): string[] {
+    return this.permissionsAsk;
+  }
+
+  /**
+   * Returns the merged deny-rules for PermissionManager.
+   *
+   * Merges:
+   *   - settings.permissions.deny  (persistent rules from all scopes)
+   *   - excludeTools param  (SDK / argv blocklist)
+   *
+   * CLI callers pre-merge argv.excludeTools into permissionsDeny.
+   */
+  getPermissionsDeny(): string[] {
+    const base = this.permissionsDeny ?? [];
+    const sdkDeny = this.excludeTools ?? [];
+    if (sdkDeny.length === 0) return base.length > 0 ? base : [];
+    const merged = [...base];
+    for (const t of sdkDeny) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
   }
 
   getToolDiscoveryCommand(): string | undefined {
@@ -1320,6 +1564,50 @@ export class Config {
 
   setGeminiMdFileCount(count: number): void {
     this.geminiMdFileCount = count;
+  }
+
+  getArenaManager(): ArenaManager | null {
+    return this.arenaManager;
+  }
+
+  setArenaManager(manager: ArenaManager | null): void {
+    this.arenaManager = manager;
+    this.arenaManagerChangeCallback?.(manager);
+  }
+
+  /**
+   * Register a callback invoked whenever the arena manager changes.
+   * Pass `null` to unsubscribe. Only one subscriber is supported.
+   */
+  onArenaManagerChange(
+    cb: ((manager: ArenaManager | null) => void) | null,
+  ): void {
+    this.arenaManagerChangeCallback = cb;
+  }
+
+  getArenaAgentClient(): ArenaAgentClient | null {
+    return this.arenaAgentClient;
+  }
+
+  getAgentsSettings(): AgentsCollabSettings {
+    return this.agentsSettings;
+  }
+
+  /**
+   * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
+   * always removes worktrees regardless of preserveArtifacts.
+   */
+  async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    const manager = this.arenaManager;
+    if (!manager) {
+      return;
+    }
+    if (!force && this.agentsSettings.arena?.preserveArtifacts) {
+      await manager.cleanupRuntime();
+    } else {
+      await manager.cleanup();
+    }
+    this.setArenaManager(null);
   }
 
   getApprovalMode(): ApprovalMode {
@@ -1479,6 +1767,15 @@ export class Config {
    */
   getHookSystem(): HookSystem | undefined {
     return this.hookSystem;
+  }
+
+  /**
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
   }
 
   /**
@@ -1647,7 +1944,7 @@ export class Config {
    * Get the default file encoding for new files.
    * @returns FileEncodingType
    */
-  getDefaultFileEncoding(): FileEncodingType {
+  getDefaultFileEncoding(): FileEncodingType | undefined {
     return this.defaultFileEncoding;
   }
 
@@ -1793,8 +2090,27 @@ export class Config {
     return this.skillManager;
   }
 
+  getPermissionManager(): PermissionManager | null {
+    return this.permissionManager;
+  }
+
+  /**
+   * Returns the callback for persisting permission rules to settings files.
+   * Returns undefined if no callback was provided (e.g. SDK mode).
+   */
+  getOnPersistPermissionRule():
+    | ((
+        scope: 'project' | 'user',
+        ruleType: 'allow' | 'ask' | 'deny',
+        rule: string,
+      ) => Promise<void>)
+    | undefined {
+    return this.onPersistPermissionRuleCallback;
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
+    options?: { skipDiscovery?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -1802,12 +2118,9 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    const coreToolsConfig = this.getCoreTools();
-    const excludeToolsConfig = this.getExcludeTools();
-
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
+    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
       const toolName = ToolClass?.Name as ToolName | undefined;
       const className = ToolClass?.name ?? 'UnknownTool';
 
@@ -1820,7 +2133,13 @@ export class Config {
         return;
       }
 
-      if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      const pmEnabled = this.permissionManager
+        ? await this.permissionManager.isToolEnabled(toolName)
+        : true; // Should never reach here after initialize(), but safe default.
+
+      if (pmEnabled) {
         try {
           registry.registerTool(new ToolClass(...args));
         } catch (error) {
@@ -1833,10 +2152,10 @@ export class Config {
       }
     };
 
-    registerCoreTool(TaskTool, this);
-    registerCoreTool(SkillTool, this);
-    registerCoreTool(LSTool, this);
-    registerCoreTool(ReadFileTool, this);
+    await registerCoreTool(AgentTool, this);
+    await registerCoreTool(SkillTool, this);
+    await registerCoreTool(LSTool, this);
+    await registerCoreTool(ReadFileTool, this);
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
@@ -1847,7 +2166,7 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        registerCoreTool(RipGrepTool, this);
+        await registerCoreTool(RipGrepTool, this);
       } else {
         // Log for telemetry
         logRipgrepFallback(
@@ -1858,33 +2177,35 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        registerCoreTool(GrepTool, this);
+        await registerCoreTool(GrepTool, this);
       }
     } else {
-      registerCoreTool(GrepTool, this);
+      await registerCoreTool(GrepTool, this);
     }
 
-    registerCoreTool(GlobTool, this);
-    registerCoreTool(EditTool, this);
-    registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ShellTool, this);
-    registerCoreTool(MemoryTool);
-    registerCoreTool(TodoWriteTool, this);
-    registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    await registerCoreTool(GlobTool, this);
+    await registerCoreTool(EditTool, this);
+    await registerCoreTool(WriteFileTool, this);
+    await registerCoreTool(ShellTool, this);
+    await registerCoreTool(MemoryTool);
+    await registerCoreTool(TodoWriteTool, this);
+    await registerCoreTool(AskUserQuestionTool, this);
+    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
+    await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      registerCoreTool(WebSearchTool, this);
+      await registerCoreTool(WebSearchTool, this);
     }
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
-      registerCoreTool(LspTool, this);
+      await registerCoreTool(LspTool, this);
     }
 
-    await registry.discoverAllTools();
+    if (!options?.skipDiscovery) {
+      await registry.discoverAllTools();
+    }
     this.debugLogger.debug(
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );

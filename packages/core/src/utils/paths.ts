@@ -241,6 +241,10 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
   );
 }
 
+export function isSubpaths(parentPath: string[], childPath: string): boolean {
+  return parentPath.some((p) => isSubpath(p, childPath));
+}
+
 /**
  * Resolves a path with tilde (~) expansion and relative path resolution.
  * Handles tilde expansion for home directory and resolves relative paths
@@ -272,6 +276,13 @@ export interface PathValidationOptions {
    * If true, allows both files and directories. If false (default), only allows directories.
    */
   allowFiles?: boolean;
+
+  /**
+   * If true, allows paths outside the workspace boundaries.
+   * The caller is responsible for adjusting permissions (e.g. 'ask') for
+   * external paths.
+   */
+  allowExternalPaths?: boolean;
 }
 
 /**
@@ -287,11 +298,20 @@ export function validatePath(
   resolvedPath: string,
   options: PathValidationOptions = {},
 ): void {
-  const { allowFiles = false } = options;
+  const { allowFiles = false, allowExternalPaths = false } = options;
   const workspaceContext = config.getWorkspaceContext();
+  const isWithinWorkspace =
+    workspaceContext.isPathWithinWorkspace(resolvedPath);
 
-  if (!workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+  if (!allowExternalPaths && !isWithinWorkspace) {
     throw new Error('Path is not within workspace');
+  }
+
+  // For external paths where allowExternalPaths is true, skip filesystem checks.
+  // The path may not exist locally on the current machine, and permissions for
+  // external paths are handled at runtime rather than at validation time.
+  if (allowExternalPaths && !isWithinWorkspace) {
+    return;
   }
 
   try {

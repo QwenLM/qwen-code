@@ -32,6 +32,9 @@ const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
   // AuthDialog only uses handleAuthSelect
   const baseActions = {
     handleAuthSelect: vi.fn(),
+    handleCodingPlanSubmit: vi.fn(),
+    handleAlibabaStandardSubmit: vi.fn(),
+    onAuthError: vi.fn(),
     handleRetryLastPrompt: vi.fn(),
   } as Partial<UIActions>;
 

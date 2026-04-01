@@ -41,6 +41,13 @@ if (!fs.existsSync(vendorDir)) {
   process.exit(1);
 }
 
+const bundledDocsDir = path.join(distDir, 'bundled', 'qc-helper', 'docs');
+if (!fs.existsSync(bundledDocsDir)) {
+  console.error(`Error: Bundled docs not found at ${bundledDocsDir}`);
+  console.error('Please run "npm run bundle" first');
+  process.exit(1);
+}
+
 // Copy README and LICENSE
 console.log('Copying documentation files...');
 const filesToCopy = ['README.md', 'LICENSE'];
@@ -150,7 +157,15 @@ const distPackageJson = {
   bin: {
     qwen: 'cli.js',
   },
-  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE', 'locales'],
+  files: [
+    'cli.js',
+    'vendor',
+    '*.sb',
+    'README.md',
+    'LICENSE',
+    'locales',
+    'bundled',
+  ],
   config: rootPackageJson.config,
   dependencies: {},
   optionalDependencies: {

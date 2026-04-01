@@ -14,6 +14,8 @@ import { getCompressionPrompt } from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
+import type { PermissionMode } from '../hooks/types.js';
+import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -83,6 +85,7 @@ export class ChatCompressionService {
     model: string,
     config: Config,
     hasFailedCompressionAttempt: boolean,
+    signal?: AbortSignal,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const curatedHistory = chat.getHistory(true);
     const threshold =
@@ -121,6 +124,17 @@ export class ChatCompressionService {
             compressionStatus: CompressionStatus.NOOP,
           },
         };
+      }
+    }
+
+    // Fire PreCompact hook before compression begins
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const trigger = force ? PreCompactTrigger.Manual : PreCompactTrigger.Auto;
+      try {
+        await hookSystem.firePreCompactEvent(trigger, '', signal);
+      } catch (err) {
+        config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
     }
 
@@ -261,6 +275,25 @@ export class ChatCompressionService {
       };
     } else {
       uiTelemetryService.setLastPromptTokenCount(newTokenCount);
+
+      // Fire SessionStart event after successful compression
+      try {
+        const permissionMode = String(
+          config.getApprovalMode(),
+        ) as PermissionMode;
+        await config
+          .getHookSystem()
+          ?.fireSessionStartEvent(
+            SessionStartSource.Compact,
+            model ?? '',
+            permissionMode,
+            undefined,
+            signal,
+          );
+      } catch (err) {
+        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      }
+
       return {
         newHistory: extraHistory,
         info: {

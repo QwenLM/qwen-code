@@ -668,6 +668,118 @@ export default {
   'List all configured hooks': 'List all configured hooks',
   'Enable a disabled hook': 'Enable a disabled hook',
   'Disable an active hook': 'Disable an active hook',
+  // Hooks - Dialog
+  Hooks: 'Hooks',
+  'Loading hooks...': 'Loading hooks...',
+  'Error loading hooks:': 'Error loading hooks:',
+  'Press Escape to close': 'Press Escape to close',
+  'No hook selected': 'No hook selected',
+  // Hooks - List Step
+  'No hook events found.': 'No hook events found.',
+  '{{count}} hook configured': '{{count}} hook configured',
+  '{{count}} hooks configured': '{{count}} hooks configured',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
+  // Hooks - Detail Step
+  'Exit codes:': 'Exit codes:',
+  'Configured hooks:': 'Configured hooks:',
+  'No hooks configured for this event.': 'No hooks configured for this event.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'To add hooks, edit settings.json directly or ask Qwen.',
+  'Enter to select · Esc to go back': 'Enter to select · Esc to go back',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook details',
+  'Event:': 'Event:',
+  'Extension:': 'Extension:',
+  'Desc:': 'Desc:',
+  'No hook config selected': 'No hook config selected',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  // Hooks - Source
+  Project: 'Project',
+  User: 'User',
+  System: 'System',
+  Extension: 'Extension',
+  'Local Settings': 'Local Settings',
+  'User Settings': 'User Settings',
+  'System Settings': 'System Settings',
+  Extensions: 'Extensions',
+  // Hooks - Status
+  '✓ Enabled': '✓ Enabled',
+  '✗ Disabled': '✗ Disabled',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Before tool execution',
+  'After tool execution': 'After tool execution',
+  'After tool execution fails': 'After tool execution fails',
+  'When notifications are sent': 'When notifications are sent',
+  'When the user submits a prompt': 'When the user submits a prompt',
+  'When a new session is started': 'When a new session is started',
+  'Right before Qwen Code concludes its response':
+    'Right before Qwen Code concludes its response',
+  'When a subagent (Agent tool call) is started':
+    'When a subagent (Agent tool call) is started',
+  'Right before a subagent concludes its response':
+    'Right before a subagent concludes its response',
+  'Before conversation compaction': 'Before conversation compaction',
+  'When a session is ending': 'When a session is ending',
+  'When a permission dialog is displayed':
+    'When a permission dialog is displayed',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Input to command is JSON of tool call arguments.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Input to command is JSON with notification message and type.',
+  'Input to command is JSON with original user prompt text.':
+    'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with session start source.':
+    'Input to command is JSON with session start source.',
+  'Input to command is JSON with session end reason.':
+    'Input to command is JSON with session end reason.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Input to command is JSON with agent_id and agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Input to command is JSON with compaction details.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr not shown',
+  'show stderr to model and continue conversation':
+    'show stderr to model and continue conversation',
+  'show stderr to user only': 'show stderr to user only',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout shown in transcript mode (ctrl+o)',
+  'show stderr to model immediately': 'show stderr to model immediately',
+  'show stderr to user only but continue with tool call':
+    'show stderr to user only but continue with tool call',
+  'block processing, erase original prompt, and show stderr to user only':
+    'block processing, erase original prompt, and show stderr to user only',
+  'stdout shown to Qwen': 'stdout shown to Qwen',
+  'show stderr to user only (blocking errors ignored)':
+    'show stderr to user only (blocking errors ignored)',
+  'command completes successfully': 'command completes successfully',
+  'stdout shown to subagent': 'stdout shown to subagent',
+  'show stderr to subagent and continue having it run':
+    'show stderr to subagent and continue having it run',
+  'stdout appended as custom compact instructions':
+    'stdout appended as custom compact instructions',
+  'block compaction': 'block compaction',
+  'show stderr to user only but continue with compaction':
+    'show stderr to user only but continue with compaction',
+  'use hook decision if provided': 'use hook decision if provided',
+  // Hooks - Messages
+  'Config not loaded.': 'Config not loaded.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hooks are not enabled. Enable hooks in settings to use this feature.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'No hooks configured. Add hooks in your settings.json file.',
+  'Configured Hooks ({{count}} total)': 'Configured Hooks ({{count}} total)',
 
   // ============================================================================
   // Commands - Session Export
@@ -775,7 +887,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
   'Apply To': 'Apply To',
-  'User Settings': 'User Settings',
   'Workspace Settings': 'Workspace Settings',
 
   // ============================================================================
@@ -829,7 +940,6 @@ export default {
     'List configured MCP servers and tools',
   'Restarts MCP servers.': 'Restarts MCP servers.',
   'Open MCP management dialog': 'Open MCP management dialog',
-  'Config not loaded.': 'Config not loaded.',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   'No MCP servers configured with OAuth authentication.':
     'No MCP servers configured with OAuth authentication.',
@@ -895,7 +1005,6 @@ export default {
   prompts: 'prompts',
   '(disabled)': '(disabled)',
   'Error:': 'Error:',
-  Extension: 'Extension',
   tool: 'tool',
   tools: 'tools',
   connected: 'connected',
@@ -1102,6 +1211,12 @@ export default {
   'No, suggest changes (esc)': 'No, suggest changes (esc)',
   "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
   'Yes, allow always ...': 'Yes, allow always ...',
+  'Always allow in this project': 'Always allow in this project',
+  'Always allow {{action}} in this project':
+    'Always allow {{action}} in this project',
+  'Always allow for this user': 'Always allow for this user',
+  'Always allow {{action}} for this user':
+    'Always allow {{action}} for this user',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',
@@ -1266,6 +1381,73 @@ export default {
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': 'Manage folder trust settings',
+  'Manage permission rules': 'Manage permission rules',
+  Allow: 'Allow',
+  Ask: 'Ask',
+  Deny: 'Deny',
+  Workspace: 'Workspace',
+  "Qwen Code won't ask before using allowed tools.":
+    "Qwen Code won't ask before using allowed tools.",
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code will ask before using these tools.',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code is not allowed to use denied tools.',
+  'Manage trusted directories for this workspace.':
+    'Manage trusted directories for this workspace.',
+  'Any use of the {{tool}} tool': 'Any use of the {{tool}} tool',
+  "{{tool}} commands matching '{{pattern}}'":
+    "{{tool}} commands matching '{{pattern}}'",
+  'From user settings': 'From user settings',
+  'From project settings': 'From project settings',
+  'From session': 'From session',
+  'Project settings (local)': 'Project settings (local)',
+  'Saved in .qwen/settings.local.json': 'Saved in .qwen/settings.local.json',
+  'Project settings': 'Project settings',
+  'Checked in at .qwen/settings.json': 'Checked in at .qwen/settings.json',
+  'User settings': 'User settings',
+  'Saved in at ~/.qwen/settings.json': 'Saved in at ~/.qwen/settings.json',
+  'Add a new rule…': 'Add a new rule…',
+  'Add {{type}} permission rule': 'Add {{type}} permission rule',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    'Permission rules are a tool name, optionally followed by a specifier in parentheses.',
+  'e.g.,': 'e.g.,',
+  or: 'or',
+  'Enter permission rule…': 'Enter permission rule…',
+  'Enter to submit · Esc to cancel': 'Enter to submit · Esc to cancel',
+  'Where should this rule be saved?': 'Where should this rule be saved?',
+  'Enter to confirm · Esc to cancel': 'Enter to confirm · Esc to cancel',
+  'Delete {{type}} rule?': 'Delete {{type}} rule?',
+  'Are you sure you want to delete this permission rule?':
+    'Are you sure you want to delete this permission rule?',
+  'Permissions:': 'Permissions:',
+  '(←/→ or tab to cycle)': '(←/→ or tab to cycle)',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel',
+  'Search…': 'Search…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    'Use /trust to manage folder trust settings for this workspace.',
+  // Workspace directory management
+  'Add directory…': 'Add directory…',
+  'Add directory to workspace': 'Add directory to workspace',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+  'Enter the path to the directory:': 'Enter the path to the directory:',
+  'Enter directory path…': 'Enter directory path…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab to complete · Enter to add · Esc to cancel',
+  'Remove directory?': 'Remove directory?',
+  'Are you sure you want to remove this directory from the workspace?':
+    'Are you sure you want to remove this directory from the workspace?',
+  '  (Original working directory)': '  (Original working directory)',
+  '  (from settings)': '  (from settings)',
+  'Directory does not exist.': 'Directory does not exist.',
+  'Path is not a directory.': 'Path is not a directory.',
+  'This directory is already in the workspace.':
+    'This directory is already in the workspace.',
+  'Already covered by existing directory: {{dir}}':
+    'Already covered by existing directory: {{dir}}',
 
   // ============================================================================
   // Status Bar
@@ -1651,8 +1833,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    "Paste your api key of Bailian Coding Plan and you're all set!",
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    "Paste your api key of ModelStudio Coding Plan and you're all set!",
   Custom: 'Custom',
   'More instructions about configuring `modelProviders` manually.':
     'More instructions about configuring `modelProviders` manually.',
@@ -1672,6 +1854,34 @@ export default {
     'New model configurations are available for {{region}}. Update now?',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} configuration updated successfully. Model switched to "{{model}}".',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'Context Usage',
+  'No API response yet. Send a message to see actual usage.':
+    'No API response yet. Send a message to see actual usage.',
+  'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
+  'Context window': 'Context window',
+  tokens: 'tokens',
+  Used: 'Used',
+  Free: 'Free',
+  'Autocompact buffer': 'Autocompact buffer',
+  'Usage by category': 'Usage by category',
+  'System prompt': 'System prompt',
+  'Built-in tools': 'Built-in tools',
+  'MCP tools': 'MCP tools',
+  'Memory files': 'Memory files',
+  Skills: 'Skills',
+  Messages: 'Messages',
+  'Show context window usage breakdown.':
+    'Show context window usage breakdown.',
+  'Run /context detail for per-item breakdown.':
+    'Run /context detail for per-item breakdown.',
+  'body loaded': 'body loaded',
+  memory: 'memory',
   '{{region}} configuration updated successfully.':
     '{{region}} configuration updated successfully.',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
@@ -1706,4 +1916,77 @@ export default {
     '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓: Navigate | Enter: Select | Esc: Cancel',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan',
+  'Authenticate using Qwen OAuth': 'Authenticate using Qwen OAuth',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Authenticate using Alibaba Cloud Coding Plan',
+  'Region for Coding Plan (china/global)':
+    'Region for Coding Plan (china/global)',
+  'API key for Coding Plan': 'API key for Coding Plan',
+  'Show current authentication status': 'Show current authentication status',
+  'Authentication completed successfully.':
+    'Authentication completed successfully.',
+  'Starting Qwen OAuth authentication...':
+    'Starting Qwen OAuth authentication...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Successfully authenticated with Qwen OAuth.',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Failed to authenticate with Qwen OAuth: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Processing Alibaba Cloud Coding Plan authentication...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Successfully authenticated with Alibaba Cloud Coding Plan.',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Failed to authenticate with Coding Plan: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'Global',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Select region for Coding Plan:',
+  'Enter your Coding Plan API key: ': 'Enter your Coding Plan API key: ',
+  'Select authentication method:': 'Select authentication method:',
+  '\n=== Authentication Status ===\n': '\n=== Authentication Status ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  No authentication method configured.\n',
+  'Run one of the following commands to get started:\n':
+    'Run one of the following commands to get started:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
+  'Or simply run:': 'Or simply run:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - Interactive authentication setup\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
+  '  Type: Free tier': '  Type: Free tier',
+  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ Authentication Method: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'Global - Alibaba Cloud',
+  '  Region: {{region}}': '  Region: {{region}}',
+  '  Current Model: {{model}}': '  Current Model: {{model}}',
+  '  Config Version: {{version}}': '  Config Version: {{version}}',
+  '  Status: API key configured\n': '  Status: API key configured\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+  '  Issue: API key not found in environment or settings\n':
+    '  Issue: API key not found in environment or settings\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  Run `qwen auth coding-plan` to re-configure.\n',
+  '✓ Authentication Method: {{type}}': '✓ Authentication Method: {{type}}',
+  '  Status: Configured\n': '  Status: Configured\n',
+  'Failed to check authentication status: {{error}}':
+    'Failed to check authentication status: {{error}}',
+  'Select an option:': 'Select an option:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Raw mode not available. Please run in an interactive terminal.',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
 };

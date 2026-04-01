@@ -21,6 +21,12 @@ Start the CLI and follow the browser flow:
 qwen
 ```
 
+Or authenticate directly without starting a session:
+
+```bash
+qwen auth qwen-oauth
+```
+
 > [!note]
 >
 > In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.  
@@ -31,18 +37,32 @@ qwen
 Use this if you want predictable costs with diverse model options and higher usage quotas.
 
 - **How it works**: Subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
-- **Requirements**: Obtain an active Coding Plan subscription from [Aliyun Bailian](https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan) or [Alibaba Cloud](https://bailian.console.alibabacloud.com/?tab=model#/efm/coding_plan), depending on the region of your account.
+- **Requirements**: Obtain an active Coding Plan subscription from [Alibaba Cloud ModelStudio(Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio(intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), depending on the region of your account.
 - **Benefits**: Diverse model options, higher usage quotas, predictable monthly costs, access to a wide range of models (Qwen, GLM, Kimi, Minimax and more).
-- **Cost & quota**: View [Aliyun Bailian Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
+- **Cost & quota**: View Aliyun ModelStudio Coding Plan documentation[Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961)[intl](https://modelstudio.console.alibabacloud.com/?tab=doc#/doc/?type=model&url=2840914).
 
 Alibaba Cloud Coding Plan is available in two regions:
 
-| Region                           | Console URL                                                                  |
-| -------------------------------- | ---------------------------------------------------------------------------- |
-| Aliyun Bailian (aliyun.com)      | [bailian.console.aliyun.com](https://bailian.console.aliyun.com)             |
-| Alibaba Cloud (alibabacloud.com) | [bailian.console.alibabacloud.com](https://bailian.console.alibabacloud.com) |
+| Region                       | Console URL                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| Aliyun ModelStudio (Beijing) | [bailian.console.aliyun.com](https://bailian.console.aliyun.com)             |
+| Alibaba Cloud (intl)         | [bailian.console.alibabacloud.com](https://bailian.console.alibabacloud.com) |
 
 ### Interactive setup
+
+You can set up Coding Plan authentication in two ways:
+
+**Option A: From the terminal (recommended for first-time setup)**
+
+```bash
+# Interactive — prompts for region and API key
+qwen auth coding-plan
+
+# Or non-interactive — pass region and key directly
+qwen auth coding-plan --region china --key sk-sp-xxxxxxxxx
+```
+
+**Option B: Inside a Qwen Code session**
 
 Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command and select **Alibaba Cloud Coding Plan**. Choose your region, then enter your `sk-sp-xxxxxxxxx` key.
 
@@ -288,6 +308,55 @@ qwen --model "qwen3-coder-plus"
 # In another terminal
 
 qwen --model "qwen3.5-plus"
+```
+
+## `qwen auth` CLI command
+
+In addition to the in-session `/auth` slash command, Qwen Code provides a standalone `qwen auth` CLI command for managing authentication directly from the terminal — without starting an interactive session first.
+
+### Interactive mode
+
+Run `qwen auth` without arguments to get an interactive menu:
+
+```bash
+qwen auth
+```
+
+You'll see a selector with arrow-key navigation:
+
+```
+Select authentication method:
+
+> Qwen OAuth - Free · Up to 1,000 requests/day · Qwen latest models
+  Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
+
+(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
+```
+
+### Subcommands
+
+| Command                                              | Description                                       |
+| ---------------------------------------------------- | ------------------------------------------------- |
+| `qwen auth`                                          | Interactive authentication setup                  |
+| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth                      |
+| `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
+| `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
+| `qwen auth status`                                   | Show current authentication status                |
+
+**Examples:**
+
+```bash
+# Authenticate with Qwen OAuth directly
+qwen auth qwen-oauth
+
+# Set up Coding Plan interactively (prompts for region and key)
+qwen auth coding-plan
+
+# Set up Coding Plan non-interactively (useful for CI/scripting)
+qwen auth coding-plan --region china --key sk-sp-xxxxxxxxx
+
+# Check your current auth configuration
+qwen auth status
 ```
 
 ## Security notes

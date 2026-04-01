@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useEffect, useState } from 'react';
 import { renderHook, act } from '@testing-library/react';
 import {
   useSelectionList,
@@ -914,6 +915,37 @@ describe('useSelectionList', () => {
       rerender({ items: newItems });
 
       expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('should handle equivalent items regenerated on each render', () => {
+      const { result } = renderHook(() => {
+        const [tick, setTick] = useState(0);
+        const regeneratedItems = [
+          { value: 'A', key: 'A' },
+          { value: 'B', disabled: true, key: 'B' },
+          { value: 'C', key: 'C' },
+        ];
+
+        const selection = useSelectionList({
+          items: regeneratedItems,
+          onSelect: mockOnSelect,
+          initialIndex: 0,
+        });
+
+        useEffect(() => {
+          if (tick === 0) {
+            setTick(1);
+          }
+        }, [tick]);
+
+        return {
+          tick,
+          activeIndex: selection.activeIndex,
+        };
+      });
+
+      expect(result.current.tick).toBe(1);
+      expect(result.current.activeIndex).toBe(0);
     });
   });
 

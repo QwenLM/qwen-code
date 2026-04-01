@@ -24,6 +24,9 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
 // Hoisted Mocks
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
@@ -74,6 +77,10 @@ vi.mock('../utils/terminalSerializer.js', () => ({
 }));
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
+}));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getSystemEncoding: mockGetSystemEncoding,
 }));
 
 const mockProcessKill = vi
@@ -406,6 +413,67 @@ describe('ShellExecutionService', () => {
       expect(mockHeadlessTerminal.resize).toHaveBeenCalledWith(100, 40);
     });
 
+    it('should ignore expected PTY read EIO errors on process exit', async () => {
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        const eioError = Object.assign(new Error('read EIO'), { code: 'EIO' });
+        pty.emit('error', eioError);
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('should throw unexpected PTY errors from error event', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'ls -l',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+      );
+      await new Promise((resolve) => process.nextTick(resolve));
+
+      const unexpectedError = Object.assign(new Error('unexpected pty error'), {
+        code: 'EPIPE',
+      });
+      expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
+        'unexpected pty error',
+      );
+
+      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      await handle.result;
+    });
+
+    it('should ignore ioctl EBADF message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('ioctl(2) failed, EBADF');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
+    it('should ignore exited-pty message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('Cannot resize a pty that has already exited');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
     it('should scroll the headless terminal', async () => {
       await simulateExecution('ls -l', (pty) => {
         pty.onData.mock.calls[0][0]('file1.txt\n');
@@ -551,7 +619,7 @@ describe('ShellExecutionService', () => {
       });
     });
 
-    it('should use PowerShell on Windows with array args', async () => {
+    it('should use PowerShell on Windows with array args and UTF-8 prefix', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -562,9 +630,14 @@ describe('ShellExecutionService', () => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -1018,7 +1091,7 @@ describe('ShellExecutionService child_process fallback', () => {
       });
     });
 
-    it('should use PowerShell without windowsVerbatimArguments on Windows', async () => {
+    it('should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'powershell.exe',
@@ -1029,9 +1102,14 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'powershell.exe',
-        ['-NoProfile', '-Command', 'Test-Path "C:\\Temp\\"'],
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
         expect.objectContaining({
           detached: false,
           windowsHide: true,

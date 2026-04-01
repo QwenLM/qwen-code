@@ -16,7 +16,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
-  SubAgentEventEmitter,
+  AgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -29,11 +29,20 @@ import {
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  TaskTool,
+  AgentTool,
   UserPromptEvent,
   TodoWriteTool,
   ExitPlanModeTool,
   readManyFiles,
+  Storage,
+  ToolNames,
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+  fireNotificationHook,
+  firePermissionRequestHook,
+  injectPermissionRulesIfMissing,
+  NotificationType,
+  persistPermissionOutcome,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -41,7 +50,6 @@ import type {
   AvailableCommand,
   ContentBlock,
   EmbeddedResourceResource,
-  PermissionOption,
   PromptRequest,
   PromptResponse,
   RequestPermissionRequest,
@@ -52,7 +60,6 @@ import type {
   SetSessionModeResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
-  ToolCallContent,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -77,6 +84,10 @@ import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+import {
+  buildPermissionRequestContent,
+  toPermissionOptions,
+} from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -99,6 +110,7 @@ export class Session implements SessionContext {
    */
   private pendingPromptCompletion: Promise<void> | null = null;
   private turn: number = 0;
+  private readonly runtimeBaseDir: string;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -117,6 +129,7 @@ export class Session implements SessionContext {
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
+    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -188,150 +201,170 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
   ): Promise<PromptResponse> {
-    // Increment turn counter for each user prompt
-    this.turn += 1;
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        // Increment turn counter for each user prompt
+        this.turn += 1;
 
-    const chat = this.chat;
-    const promptId = this.config.getSessionId() + '########' + this.turn;
+        const chat = this.chat;
+        const promptId = this.config.getSessionId() + '########' + this.turn;
 
-    // Extract text from all text blocks to construct the full prompt text for logging
-    const promptText = params.prompt
-      .filter((block) => block.type === 'text')
-      .map((block) => (block.type === 'text' ? block.text : ''))
-      .join(' ');
+        // Extract text from all text blocks to construct the full prompt text for logging
+        const promptText = params.prompt
+          .filter((block) => block.type === 'text')
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join(' ');
 
-    // Log user prompt
-    logUserPrompt(
-      this.config,
-      new UserPromptEvent(
-        promptText.length,
-        promptId,
-        this.config.getContentGeneratorConfig()?.authType,
-        promptText,
-      ),
-    );
-
-    // record user message for session management
-    this.config.getChatRecordingService()?.recordUserMessage(promptText);
-
-    // Check if the input contains a slash command
-    // Extract text from the first text block if present
-    const firstTextBlock = params.prompt.find((block) => block.type === 'text');
-    const inputText = firstTextBlock?.text || '';
-
-    let parts: Part[] | null;
-
-    if (isSlashCommand(inputText)) {
-      // Handle slash command - uses default allowed commands (init, summary, compress)
-      const slashCommandResult = await handleSlashCommand(
-        inputText,
-        pendingSend,
-        this.config,
-        this.settings,
-      );
-
-      parts = await this.#processSlashCommandResult(
-        slashCommandResult,
-        params.prompt,
-      );
-
-      // If parts is null, the command was fully handled (e.g., /summary completed)
-      // Return early without sending to the model
-      if (parts === null) {
-        return { stopReason: 'end_turn' };
-      }
-    } else {
-      // Normal processing for non-slash commands
-      parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
-    }
-
-    let nextMessage: Content | null = { role: 'user', parts };
-
-    while (nextMessage !== null) {
-      if (pendingSend.signal.aborted) {
-        chat.addHistory(nextMessage);
-        return { stopReason: 'cancelled' };
-      }
-
-      const functionCalls: FunctionCall[] = [];
-      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-      const streamStartTime = Date.now();
-
-      try {
-        const responseStream = await chat.sendMessageStream(
-          this.config.getModel(),
-          {
-            message: nextMessage?.parts ?? [],
-            config: {
-              abortSignal: pendingSend.signal,
-            },
-          },
-          promptId,
+        // Log user prompt
+        logUserPrompt(
+          this.config,
+          new UserPromptEvent(
+            promptText.length,
+            promptId,
+            this.config.getContentGeneratorConfig()?.authType,
+            promptText,
+          ),
         );
-        nextMessage = null;
 
-        for await (const resp of responseStream) {
+        // record user message for session management
+        this.config.getChatRecordingService()?.recordUserMessage(promptText);
+
+        // Check if the input contains a slash command
+        // Extract text from the first text block if present
+        const firstTextBlock = params.prompt.find(
+          (block) => block.type === 'text',
+        );
+        const inputText = firstTextBlock?.text || '';
+
+        let parts: Part[] | null;
+
+        if (isSlashCommand(inputText)) {
+          // Handle slash command - uses default allowed commands (init, summary, compress)
+          const slashCommandResult = await handleSlashCommand(
+            inputText,
+            pendingSend,
+            this.config,
+            this.settings,
+          );
+
+          parts = await this.#processSlashCommandResult(
+            slashCommandResult,
+            params.prompt,
+          );
+
+          // If parts is null, the command was fully handled (e.g., /summary completed)
+          // Return early without sending to the model
+          if (parts === null) {
+            return { stopReason: 'end_turn' };
+          }
+        } else {
+          // Normal processing for non-slash commands
+          parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+        }
+
+        let nextMessage: Content | null = { role: 'user', parts };
+
+        while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
+            chat.addHistory(nextMessage);
             return { stopReason: 'cancelled' };
           }
 
-          if (
-            resp.type === StreamEventType.CHUNK &&
-            resp.value.candidates &&
-            resp.value.candidates.length > 0
-          ) {
-            const candidate = resp.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) {
-                continue;
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const responseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId,
+            );
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
               }
 
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) {
+                    continue;
+                  }
+
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            if (getErrorStatus(error) === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
               );
             }
+
+            throw error;
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
-            usageMetadata = resp.value.usageMetadata;
+          if (usageMetadata) {
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
-            functionCalls.push(...resp.value.functionCalls);
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const response = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...response);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
-      } catch (error) {
-        if (getErrorStatus(error) === 429) {
-          throw new RequestError(429, 'Rate limit exceeded. Try again later.');
-        }
-
-        throw error;
-      }
-
-      if (usageMetadata) {
-        const durationMs = Date.now() - streamStartTime;
-        await this.messageEmitter.emitUsageMetadata(
-          usageMetadata,
-          '',
-          durationMs,
-        );
-      }
-
-      if (functionCalls.length > 0) {
-        const toolResponseParts: Part[] = [];
-
-        for (const fc of functionCalls) {
-          const response = await this.runTool(pendingSend.signal, promptId, fc);
-          toolResponseParts.push(...response);
-        }
-
-        nextMessage = { role: 'user', parts: toolResponseParts };
-      }
-    }
-
-    return { stopReason: 'end_turn' };
+        return { stopReason: 'end_turn' };
+      },
+    );
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -463,13 +496,34 @@ export class Session implements SessionContext {
     await this.sendUpdate(update);
   }
 
+  private async resolveIdeDiffForOutcome(
+    confirmationDetails: ToolCallConfirmationDetails,
+    outcome: ToolConfirmationOutcome,
+  ): Promise<void> {
+    if (
+      confirmationDetails.type !== 'edit' ||
+      !confirmationDetails.ideConfirmation
+    ) {
+      return;
+    }
+
+    const { IdeClient } = await import('@qwen-code/qwen-code-core');
+    const ideClient = await IdeClient.getInstance();
+    const cliOutcome =
+      outcome === ToolConfirmationOutcome.Cancel ? 'rejected' : 'accepted';
+    await ideClient.resolveDiffFromCli(
+      confirmationDetails.filePath,
+      cliOutcome as 'accepted' | 'rejected',
+    );
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
     fc: FunctionCall,
   ): Promise<Part[]> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
-    const args = (fc.args ?? {}) as Record<string, unknown>;
+    let args = (fc.args ?? {}) as Record<string, unknown>;
 
     const startTime = Date.now();
 
@@ -502,22 +556,52 @@ export class Session implements SessionContext {
       ];
     };
 
+    const earlyErrorResponse = async (
+      error: Error,
+      toolName = fc.name ?? 'unknown_tool',
+    ) => {
+      if (toolName !== TodoWriteTool.Name) {
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      }
+
+      const errorParts = errorResponse(error);
+      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+        callId,
+        status: 'error',
+        resultDisplay: undefined,
+        error,
+        errorType: undefined,
+      });
+      return errorParts;
+    };
+
     if (!fc.name) {
-      return errorResponse(new Error('Missing function name'));
+      return earlyErrorResponse(new Error('Missing function name'));
     }
 
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(fc.name as string);
 
     if (!tool) {
-      return errorResponse(
+      return earlyErrorResponse(
         new Error(`Tool "${fc.name}" not found in registry.`),
+      );
+    }
+
+    // ---- L1: Tool enablement check ----
+    const pm = this.config.getPermissionManager?.();
+    if (pm && !(await pm.isToolEnabled(fc.name as string))) {
+      return earlyErrorResponse(
+        new Error(
+          `Qwen Code requires permission to use "${fc.name}", but that permission was declined.`,
+        ),
+        fc.name,
       );
     }
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
     const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isTaskTool = tool.name === TaskTool.Name;
+    const isAgentTool = tool.name === AgentTool.Name;
     const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
 
     // Track cleanup functions for sub-agent event listeners
@@ -526,20 +610,20 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isTaskTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from TaskTool invocation
+      if (isAgentTool && 'eventEmitter' in invocation) {
+        // Access eventEmitter from AgentTool invocation
         const taskEventEmitter = (
           invocation as {
-            eventEmitter: SubAgentEventEmitter;
+            eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
-        // Extract subagent metadata from TaskTool call
+        // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
 
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(
+        const subSubAgentTracker = new SubAgentTracker(
           this,
           this.client,
           parentToolCallId,
@@ -547,122 +631,244 @@ export class Session implements SessionContext {
         );
 
         // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subAgentTracker.setup(
+        subAgentCleanupFunctions = subSubAgentTracker.setup(
           taskEventEmitter,
           abortSignal,
         );
       }
 
-      const confirmationDetails =
-        await invocation.shouldConfirmExecute(abortSignal);
+      // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
+      //
+      // L3: Tool's intrinsic default permission
+      // L4: PermissionManager rule override
+      // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
+      //
+      // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
+      // The VS Code extension is just a UI layer for requestPermission.
+      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
 
-      // In YOLO mode, auto-approve everything except ask_user_question
-      // (the user must always have a chance to respond to questions)
-      const isAskUserQuestionTool =
-        confirmationDetails && confirmationDetails.type === 'ask_user_question';
-      const effectiveConfirmationDetails =
-        this.config.getApprovalMode() === ApprovalMode.YOLO &&
-        !isAskUserQuestionTool
-          ? false
-          : confirmationDetails;
+      // ---- L3: Tool's default permission ----
+      // In YOLO mode, force 'allow' for everything except ask_user_question.
+      const defaultPermission =
+        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
+        isAskUserQuestionTool
+          ? await invocation.getDefaultPermission()
+          : 'allow';
 
-      // Check for plan mode enforcement - block non-read-only tools
-      // but allow ask_user_question so users can answer clarification questions
-      const isPlanMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
+      // ---- L4: PermissionManager override (if relevant rules exist) ----
+      const toolParams = invocation.params as Record<string, unknown>;
+      const pmCtx = buildPermissionCheckContext(
+        fc.name,
+        toolParams,
+        this.config.getTargetDir?.() ?? '',
+      );
+      const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
+        pm,
+        defaultPermission,
+        pmCtx,
+      );
+
+      const needsConfirmation = finalPermission === 'ask';
+
+      // ---- L5: ApprovalMode overrides ----
+      const approvalMode = this.config.getApprovalMode();
+      const isPlanMode = approvalMode === ApprovalMode.PLAN;
+
+      // PLAN mode: block non-read-only tools
       if (
         isPlanMode &&
         !isExitPlanModeTool &&
         !isAskUserQuestionTool &&
-        effectiveConfirmationDetails
+        needsConfirmation
       ) {
-        // In plan mode, block any tool that requires confirmation (write operations)
-        return errorResponse(
+        return earlyErrorResponse(
           new Error(
             `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
               'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
           ),
+          fc.name,
         );
       }
 
-      if (effectiveConfirmationDetails) {
-        const content: ToolCallContent[] = [];
+      if (finalPermission === 'deny') {
+        return earlyErrorResponse(
+          new Error(
+            defaultPermission === 'deny'
+              ? `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`
+              : `Tool "${fc.name}" is denied by permission rules.`,
+          ),
+          fc.name,
+        );
+      }
 
-        if (effectiveConfirmationDetails.type === 'edit') {
-          content.push({
-            type: 'diff',
-            path: effectiveConfirmationDetails.fileName,
-            oldText: effectiveConfirmationDetails.originalContent,
-            newText: effectiveConfirmationDetails.newContent,
-          });
-        }
+      let didRequestPermission = false;
 
-        // Add plan content for exit_plan_mode
-        if (effectiveConfirmationDetails.type === 'plan') {
-          content.push({
-            type: 'content',
-            content: {
-              type: 'text',
-              text: effectiveConfirmationDetails.plan,
-            },
-          });
-        }
+      if (needsConfirmation) {
+        const confirmationDetails =
+          await invocation.getConfirmationDetails(abortSignal);
 
-        // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
-        const mappedKind = this.toolCallEmitter.mapToolKind(tool.kind, fc.name);
+        // Centralised rule injection (for display and persistence)
+        injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
-        const params: RequestPermissionRequest = {
-          sessionId: this.sessionId,
-          options: toPermissionOptions(effectiveConfirmationDetails),
-          toolCall: {
-            toolCallId: callId,
-            status: 'pending',
-            title: invocation.getDescription(),
-            content,
-            locations: invocation.toolLocations(),
-            kind: mappedKind,
-            rawInput: args,
-          },
-        };
+        const messageBus = this.config.getMessageBus?.();
+        const hooksEnabled = this.config.getEnableHooks?.() ?? false;
+        let hookHandled = false;
 
-        const output = (await this.client.requestPermission(
-          params,
-        )) as RequestPermissionResponse & {
-          answers?: Record<string, string>;
-        };
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
+        if (hooksEnabled && messageBus) {
+          const hookResult = await firePermissionRequestHook(
+            messageBus,
+            fc.name,
+            args,
+            String(approvalMode),
+          );
 
-        await effectiveConfirmationDetails.onConfirm(outcome, {
-          answers: output.answers,
-        });
+          if (hookResult.hasDecision) {
+            hookHandled = true;
+            if (hookResult.shouldAllow) {
+              if (hookResult.updatedInput) {
+                args = hookResult.updatedInput;
+                invocation.params =
+                  hookResult.updatedInput as typeof invocation.params;
+              }
 
-        // After exit_plan_mode confirmation, send current_mode_update notification
-        if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
-          await this.sendCurrentModeUpdateNotification(outcome);
-        }
-
-        switch (outcome) {
-          case ToolConfirmationOutcome.Cancel:
-            return errorResponse(
-              new Error(`Tool "${fc.name}" was canceled by the user.`),
-            );
-          case ToolConfirmationOutcome.ProceedOnce:
-          case ToolConfirmationOutcome.ProceedAlways:
-          case ToolConfirmationOutcome.ProceedAlwaysServer:
-          case ToolConfirmationOutcome.ProceedAlwaysTool:
-          case ToolConfirmationOutcome.ModifyWithEditor:
-            break;
-          default: {
-            const resultOutcome: never = outcome;
-            throw new Error(`Unexpected: ${resultOutcome}`);
+              await this.resolveIdeDiffForOutcome(
+                confirmationDetails,
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+              await confirmationDetails.onConfirm(
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+            } else {
+              return earlyErrorResponse(
+                new Error(
+                  hookResult.denyMessage ||
+                    `Permission denied by hook for "${fc.name}"`,
+                ),
+                fc.name,
+              );
+            }
           }
         }
-      } else if (!isTodoWriteTool) {
-        // Skip tool_call event for TodoWriteTool - use ToolCallEmitter
+
+        // AUTO_EDIT mode: auto-approve edit and info tools
+        // (same as coreToolScheduler L5 — NOT delegated to the extension)
+        if (
+          approvalMode === ApprovalMode.AUTO_EDIT &&
+          (confirmationDetails.type === 'edit' ||
+            confirmationDetails.type === 'info')
+        ) {
+          // Auto-approve, skip requestPermission.
+          // didRequestPermission stays false → emitStart below.
+        } else if (!hookHandled) {
+          // Show permission dialog via ACP requestPermission
+          didRequestPermission = true;
+          const content = buildPermissionRequestContent(confirmationDetails);
+
+          // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
+          const mappedKind = this.toolCallEmitter.mapToolKind(
+            tool.kind,
+            fc.name,
+          );
+
+          if (hooksEnabled && messageBus) {
+            void fireNotificationHook(
+              messageBus,
+              `Qwen Code needs your permission to use ${fc.name}`,
+              NotificationType.PermissionPrompt,
+              'Permission needed',
+            );
+          }
+
+          const params: RequestPermissionRequest = {
+            sessionId: this.sessionId,
+            options: toPermissionOptions(confirmationDetails, pmForcedAsk),
+            toolCall: {
+              toolCallId: callId,
+              status: 'pending',
+              title: invocation.getDescription(),
+              content,
+              locations: invocation.toolLocations(),
+              kind: mappedKind,
+              rawInput: args,
+            },
+          };
+
+          const output = (await this.client.requestPermission(
+            params,
+          )) as RequestPermissionResponse & {
+            answers?: Record<string, string>;
+          };
+          const outcome =
+            output.outcome.outcome === 'cancelled'
+              ? ToolConfirmationOutcome.Cancel
+              : z
+                  .nativeEnum(ToolConfirmationOutcome)
+                  .parse(output.outcome.optionId);
+
+          await this.resolveIdeDiffForOutcome(confirmationDetails, outcome);
+
+          await confirmationDetails.onConfirm(outcome, {
+            answers: output.answers,
+          });
+
+          // Persist permission rules when user explicitly chose "Always Allow".
+          // This branch is only reached for tools that went through
+          // requestPermission (user saw dialog and made a choice).
+          // AUTO_EDIT auto-approved tools never reach here.
+          if (
+            outcome === ToolConfirmationOutcome.ProceedAlways ||
+            outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+            outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+          ) {
+            await persistPermissionOutcome(
+              outcome,
+              confirmationDetails,
+              this.config.getOnPersistPermissionRule?.(),
+              this.config.getPermissionManager?.(),
+              { answers: output.answers },
+            );
+          }
+
+          // After exit_plan_mode confirmation, send current_mode_update
+          if (
+            isExitPlanModeTool &&
+            outcome !== ToolConfirmationOutcome.Cancel
+          ) {
+            await this.sendCurrentModeUpdateNotification(outcome);
+          }
+
+          // After edit tool ProceedAlways, notify the client about mode change
+          if (
+            confirmationDetails.type === 'edit' &&
+            outcome === ToolConfirmationOutcome.ProceedAlways
+          ) {
+            await this.sendCurrentModeUpdateNotification(outcome);
+          }
+
+          switch (outcome) {
+            case ToolConfirmationOutcome.Cancel:
+              return errorResponse(
+                new Error(`Tool "${fc.name}" was canceled by the user.`),
+              );
+            case ToolConfirmationOutcome.ProceedOnce:
+            case ToolConfirmationOutcome.ProceedAlways:
+            case ToolConfirmationOutcome.ProceedAlwaysProject:
+            case ToolConfirmationOutcome.ProceedAlwaysUser:
+            case ToolConfirmationOutcome.ProceedAlwaysServer:
+            case ToolConfirmationOutcome.ProceedAlwaysTool:
+            case ToolConfirmationOutcome.ModifyWithEditor:
+              break;
+            default: {
+              const resultOutcome: never = outcome;
+              throw new Error(`Unexpected: ${resultOutcome}`);
+            }
+          }
+        }
+      }
+
+      if (!didRequestPermission && !isTodoWriteTool) {
+        // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
+        // → emit tool_call start notification
         const startParams: ToolCallStartParams = {
           callId,
           toolName: fc.name,
@@ -855,13 +1061,12 @@ export class Session implements SessionContext {
       }
 
       case 'no_command':
-        // No command was found or executed, use original prompt
-        return originalPrompt.map((block) => {
-          if (block.type === 'text') {
-            return { text: block.text };
-          }
-          throw new Error(`Unsupported block type: ${block.type}`);
-        });
+        // No command was found or executed, resolve the original prompt
+        // through the standard path that handles all block types
+        return this.#resolvePrompt(
+          originalPrompt,
+          new AbortController().signal,
+        );
 
       default: {
         // Exhaustiveness check
@@ -1004,106 +1209,6 @@ export class Session implements SessionContext {
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
-    }
-  }
-}
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-const basicPermissionOptions = [
-  {
-    optionId: ToolConfirmationOutcome.ProceedOnce,
-    name: 'Allow',
-    kind: 'allow_once',
-  },
-  {
-    optionId: ToolConfirmationOutcome.Cancel,
-    name: 'Reject',
-    kind: 'reject_once',
-  },
-] as const;
-
-function toPermissionOptions(
-  confirmation: ToolCallConfirmationDetails,
-): PermissionOption[] {
-  switch (confirmation.type) {
-    case 'edit':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: 'Allow All Edits',
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'exec':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow ${confirmation.rootCommand}`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'mcp':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-          name: `Always Allow ${confirmation.serverName}`,
-          kind: 'allow_always',
-        },
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-          name: `Always Allow ${confirmation.toolName}`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'info':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'plan':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Yes, and auto-accept edits`,
-          kind: 'allow_always',
-        },
-        {
-          optionId: ToolConfirmationOutcome.ProceedOnce,
-          name: `Yes, and manually approve edits`,
-          kind: 'allow_once',
-        },
-        {
-          optionId: ToolConfirmationOutcome.Cancel,
-          name: `No, keep planning (esc)`,
-          kind: 'reject_once',
-        },
-      ];
-    case 'ask_user_question':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedOnce,
-          name: 'Submit',
-          kind: 'allow_once',
-        },
-        {
-          optionId: ToolConfirmationOutcome.Cancel,
-          name: 'Cancel',
-          kind: 'reject_once',
-        },
-      ];
-    default: {
-      const unreachable: never = confirmation;
-      throw new Error(`Unexpected: ${unreachable}`);
     }
   }
 }

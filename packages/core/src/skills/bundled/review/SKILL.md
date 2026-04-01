@@ -15,15 +15,16 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 ## Step 1: Determine what to review
 
-Based on the arguments provided:
+Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 2. Based on the arguments provided:
 
 - **No arguments**: Review local uncommitted changes
   - Run `git diff` and `git diff --staged` to get all changes
   - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
 
 - **PR number or URL** (e.g., `123` or `https://github.com/.../pull/123`):
-  - Run `gh pr view <number>` to get PR details
-  - Run `gh pr diff <number>` to get the diff
+  - Save the current branch name, stash any local changes (`git stash --include-untracked`), then `gh pr checkout <number>`
+  - Run `gh pr view <number>` and save the output (title, description, base branch, etc.) to a temp file (e.g., `/tmp/pr-review-context.md`) so agents can read it without you repeating it in each prompt
+  - Note the base branch (e.g., `main`) — agents will use `git diff <base>...HEAD` to get the diff and can read files directly
 
 - **File path** (e.g., `src/foo.ts`):
   - Run `git diff HEAD -- <file>` to get recent changes
@@ -32,6 +33,8 @@ Based on the arguments provided:
 ## Step 2: Parallel multi-dimensional review
 
 Launch **four parallel review agents** to analyze the changes from different angles. Each agent should focus exclusively on its dimension.
+
+**IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it 4x. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, and its review focus. Each agent can read files and search the codebase on its own.
 
 ### Agent 1: Correctness & Security
 
@@ -77,9 +80,11 @@ Focus areas:
 - Unexpected side effects or hidden coupling
 - Anything else that looks off — trust your instincts
 
-## Step 3: Aggregate and present findings
+## Step 3: Restore environment and present findings
 
-Combine results from all four agents into a single, well-organized review. Use this format:
+If you checked out a PR branch in Step 1, restore the original state first: check out the original branch, `git stash pop` if changes were stashed, and remove the temp file.
+
+Then combine results from all four agents into a single, well-organized review. Use this format:
 
 ### Summary
 

@@ -78,6 +78,21 @@ vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
+vi.mock('./contexts/AgentViewContext.js', () => ({
+  useAgentViewState: vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+  })),
+  useAgentViewActions: vi.fn(() => ({
+    switchToMain: vi.fn(),
+    switchToAgent: vi.fn(),
+    switchToNext: vi.fn(),
+    switchToPrevious: vi.fn(),
+    registerAgent: vi.fn(),
+    unregisterAgent: vi.fn(),
+    unregisterAll: vi.fn(),
+  })),
+}));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
 
@@ -175,6 +190,8 @@ describe('AppContainer State Management', () => {
       isAuthDialogOpen: false,
       isAuthenticating: false,
       handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -253,7 +270,7 @@ describe('AppContainer State Management', () => {
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
-    // Mock GeminiClient to prevent unhandled errors from TaskTool.refreshSubagents
+    // Mock GeminiClient to prevent unhandled errors from AgentTool.refreshSubagents
     const mockGeminiClient: Partial<GeminiClient> = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
@@ -263,12 +280,12 @@ describe('AppContainer State Management', () => {
       mockGeminiClient as GeminiClient,
     );
 
-    // Mock SubagentManager to prevent errors during TaskTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createSubagent: vi.fn(),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -418,6 +435,41 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('submits /btw immediately instead of queueing while responding', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw quick side question');
+
+      expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockQueueMessage).not.toHaveBeenCalled();
     });
   });
 

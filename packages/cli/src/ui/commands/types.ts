@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
+  HistoryItemBtw,
   ConfirmationRequest,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -66,6 +67,14 @@ export interface CommandContext {
      * @param item The history item to display as pending, or `null` to clear.
      */
     setPendingItem: (item: HistoryItemWithoutId | null) => void;
+    /** The current btw side-question item rendered in the fixed bottom area. */
+    btwItem: HistoryItemBtw | null;
+    /** Sets the btw item independently of the main pendingItem. */
+    setBtwItem: (item: HistoryItemBtw | null) => void;
+    /** Cancels a pending btw (aborts the in-flight API call and clears the btw area). */
+    cancelBtw: () => void;
+    /** Ref to the btw AbortController, set by btwCommand so cancelBtw can abort it. */
+    btwAbortControllerRef: MutableRefObject<AbortController | null>;
     /**
      * Loads a new set of history items, replacing the current history.
      *
@@ -139,6 +148,10 @@ export interface OpenDialogActionReturn {
 
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'
@@ -146,10 +159,12 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'trust'
     | 'permissions'
     | 'approval-mode'
     | 'resume'
     | 'extensions_manage'
+    | 'hooks'
     | 'mcp';
 }
 

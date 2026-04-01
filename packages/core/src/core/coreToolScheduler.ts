@@ -19,6 +19,17 @@ import type {
   ChatRecordingService,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  generateToolUseId,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
+  fireNotificationHook,
+  firePermissionRequestHook,
+  appendAdditionalContext,
+} from './toolHookTriggers.js';
+import { NotificationType } from '../hooks/types.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
@@ -38,6 +49,12 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+  injectPermissionRulesIfMissing,
+  persistPermissionOutcome,
+} from './permission-helpers.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -45,7 +62,6 @@ import {
   modifyWithEditor,
 } from '../tools/modifiable-tool.js';
 import * as Diff from 'diff';
-import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
@@ -683,22 +699,44 @@ export class CoreToolScheduler {
       }
       const requestsToProcess = Array.isArray(request) ? request : [request];
 
-      const newToolCalls: ToolCall[] = requestsToProcess.map(
-        (reqInfo): ToolCall => {
-          // Check if the tool is excluded due to permissions/environment restrictions
-          // This check should happen before registry lookup to provide a clear permission error
-          const excludeTools = this.config.getExcludeTools?.() ?? undefined;
+      const newToolCalls: ToolCall[] = [];
+      for (const reqInfo of requestsToProcess) {
+        // Check if the tool is excluded due to permissions/environment restrictions
+        // This check should happen before registry lookup to provide a clear permission error
+        const pm = this.config.getPermissionManager?.();
+        if (pm && !(await pm.isToolEnabled(reqInfo.name))) {
+          const matchingRule = pm.findMatchingDenyRule({
+            toolName: reqInfo.name,
+          });
+          const ruleInfo = matchingRule
+            ? ` Matching deny rule: "${matchingRule}".`
+            : '';
+          const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            response: createErrorResponse(
+              reqInfo,
+              new Error(permissionErrorMessage),
+              ToolErrorType.EXECUTION_DENIED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
+        // Legacy fallback: check getPermissionsDeny() when PM is not available
+        if (!pm) {
+          const excludeTools = this.config.getPermissionsDeny?.() ?? undefined;
           if (excludeTools && excludeTools.length > 0) {
             const normalizedToolName = reqInfo.name.toLowerCase().trim();
             const excludedMatch = excludeTools.find(
               (excludedTool) =>
                 excludedTool.toLowerCase().trim() === normalizedToolName,
             );
-
             if (excludedMatch) {
-              // The tool exists but is excluded - return permission error directly
               const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
-              return {
+              newToolCalls.push({
                 status: 'error',
                 request: reqInfo,
                 response: createErrorResponse(
@@ -707,75 +745,79 @@ export class CoreToolScheduler {
                   ToolErrorType.EXECUTION_DENIED,
                 ),
                 durationMs: 0,
-              };
+              });
+              continue;
             }
           }
+        }
 
-          const toolInstance = this.toolRegistry.getTool(reqInfo.name);
-          if (!toolInstance) {
-            // Tool is not in registry and not excluded - likely hallucinated or typo
-            const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
-            return {
-              status: 'error',
-              request: reqInfo,
-              response: createErrorResponse(
-                reqInfo,
-                new Error(errorMessage),
-                ToolErrorType.TOOL_NOT_REGISTERED,
-              ),
-              durationMs: 0,
-            };
-          }
+        const toolInstance = this.toolRegistry.getTool(reqInfo.name);
+        if (!toolInstance) {
+          // Tool is not in registry and not excluded - likely hallucinated or typo
+          const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            response: createErrorResponse(
+              reqInfo,
+              new Error(errorMessage),
+              ToolErrorType.TOOL_NOT_REGISTERED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
 
-          const invocationOrError = this.buildInvocation(
-            toolInstance,
-            reqInfo.args,
-          );
-          if (invocationOrError instanceof Error) {
-            const error = reqInfo.wasOutputTruncated
-              ? new Error(
-                  `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
-                )
-              : invocationOrError;
-            return {
-              status: 'error',
-              request: reqInfo,
-              tool: toolInstance,
-              response: createErrorResponse(
-                reqInfo,
-                error,
-                ToolErrorType.INVALID_TOOL_PARAMS,
-              ),
-              durationMs: 0,
-            };
-          }
-
-          // Reject file-modifying calls when truncated to prevent
-          // writing incomplete content.
-          if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-            const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
-            return {
-              status: 'error',
-              request: reqInfo,
-              tool: toolInstance,
-              response: createErrorResponse(
-                reqInfo,
-                truncationError,
-                ToolErrorType.OUTPUT_TRUNCATED,
-              ),
-              durationMs: 0,
-            };
-          }
-
-          return {
-            status: 'validating',
+        const invocationOrError = this.buildInvocation(
+          toolInstance,
+          reqInfo.args,
+        );
+        if (invocationOrError instanceof Error) {
+          const error = reqInfo.wasOutputTruncated
+            ? new Error(
+                `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
+              )
+            : invocationOrError;
+          newToolCalls.push({
+            status: 'error',
             request: reqInfo,
             tool: toolInstance,
-            invocation: invocationOrError,
-            startTime: Date.now(),
-          };
-        },
-      );
+            response: createErrorResponse(
+              reqInfo,
+              error,
+              ToolErrorType.INVALID_TOOL_PARAMS,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
+        // Reject file-modifying calls when truncated to prevent
+        // writing incomplete content.
+        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            tool: toolInstance,
+            response: createErrorResponse(
+              reqInfo,
+              truncationError,
+              ToolErrorType.OUTPUT_TRUNCATED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
+        newToolCalls.push({
+          status: 'validating',
+          request: reqInfo,
+          tool: toolInstance,
+          invocation: invocationOrError,
+          startTime: Date.now(),
+        });
+      }
 
       this.toolCalls = this.toolCalls.concat(newToolCalls);
       this.notifyToolCallsUpdate();
@@ -797,10 +839,32 @@ export class CoreToolScheduler {
             continue;
           }
 
-          const confirmationDetails =
-            await invocation.shouldConfirmExecute(signal);
+          // =================================================================
+          // L3→L4→L5 Permission Flow
+          // =================================================================
 
-          if (!confirmationDetails) {
+          // ---- L3: Tool's default permission ----
+          const defaultPermission: string =
+            await invocation.getDefaultPermission();
+
+          // ---- L4: PermissionManager override (if relevant rules exist) ----
+          const pm = this.config.getPermissionManager?.();
+          const toolParams = invocation.params as Record<string, unknown>;
+          const pmCtx = buildPermissionCheckContext(
+            reqInfo.name,
+            toolParams,
+            this.config.getTargetDir?.() ?? '',
+          );
+          const { finalPermission, pmForcedAsk } =
+            await evaluatePermissionRules(pm, defaultPermission, pmCtx);
+
+          // ---- L5: Final decision based on permission + ApprovalMode ----
+          const approvalMode = this.config.getApprovalMode();
+          const isPlanMode = approvalMode === ApprovalMode.PLAN;
+          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+
+          if (finalPermission === 'allow') {
+            // Auto-approve: tool is inherently safe (read-only) or PM allows
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -809,54 +873,83 @@ export class CoreToolScheduler {
             continue;
           }
 
-          const allowedTools = this.config.getAllowedTools() || [];
-          const isPlanMode =
-            this.config.getApprovalMode() === ApprovalMode.PLAN;
-          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
-
-          // ask_user_question needs the confirmation flow even in plan mode
-          // so the user can actually answer the questions
-          const isAskUserQuestionTool =
-            confirmationDetails &&
-            confirmationDetails.type === 'ask_user_question';
-
-          if (isPlanMode && !isExitPlanModeTool && !isAskUserQuestionTool) {
-            if (confirmationDetails) {
-              this.setStatusInternal(reqInfo.callId, 'error', {
-                callId: reqInfo.callId,
-                responseParts: convertToFunctionResponse(
-                  reqInfo.name,
-                  reqInfo.callId,
-                  getPlanModeSystemReminder(),
-                ),
-                resultDisplay: 'Plan mode blocked a non-read-only tool call.',
-                error: undefined,
-                errorType: undefined,
-              });
+          if (finalPermission === 'deny') {
+            // Hard deny: security violation or PM explicit deny
+            let denyMessage: string;
+            if (defaultPermission === 'deny') {
+              denyMessage = `Tool "${reqInfo.name}" is denied: command substitution is not allowed for security reasons.`;
             } else {
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              const matchingRule = pm?.findMatchingDenyRule(pmCtx);
+              const ruleInfo = matchingRule
+                ? ` Matching deny rule: "${matchingRule}".`
+                : '';
+              denyMessage = `Tool "${reqInfo.name}" is denied by permission rules.${ruleInfo}`;
             }
-          } else if (
-            (this.config.getApprovalMode() === ApprovalMode.YOLO ||
-              doesToolInvocationMatch(
-                toolCall.tool,
-                invocation,
-                allowedTools,
-              )) &&
-            // Even in YOLO mode, ask_user_question tool requires user confirmation to ensure the user always has a chance to respond to questions
-            confirmationDetails.type !== 'ask_user_question'
-          ) {
+            this.setStatusInternal(
+              reqInfo.callId,
+              'error',
+              createErrorResponse(
+                reqInfo,
+                new Error(denyMessage),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+            continue;
+          }
+
+          // finalPermission === 'ask' (or 'default' from PM → treat as ask)
+          // apply ApprovalMode overrides.
+          // ask_user_question always needs confirmation so the user can answer;
+          // it must bypass both YOLO auto-approve and plan-mode blocking.
+          const isAskUserQuestionTool =
+            reqInfo.name === ToolNames.ASK_USER_QUESTION;
+
+          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
+          } else if (
+            isPlanMode &&
+            !isExitPlanModeTool &&
+            !isAskUserQuestionTool
+          ) {
+            this.setStatusInternal(reqInfo.callId, 'error', {
+              callId: reqInfo.callId,
+              responseParts: convertToFunctionResponse(
+                reqInfo.name,
+                reqInfo.callId,
+                getPlanModeSystemReminder(),
+              ),
+              resultDisplay: 'Plan mode blocked a non-read-only tool call.',
+              error: undefined,
+              errorType: undefined,
+            });
           } else {
+            // Get confirmation details from the tool
+            const confirmationDetails =
+              await invocation.getConfirmationDetails(signal);
+
+            // ── Centralised rule injection ──────────────────────────────────
+            injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+            // AUTO_EDIT mode: auto-approve edit-like and info tools
+            if (
+              approvalMode === ApprovalMode.AUTO_EDIT &&
+              (confirmationDetails.type === 'edit' ||
+                confirmationDetails.type === 'info')
+            ) {
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              continue;
+            }
+
             /**
-             * In non-interactive mode where no user will respond to approval prompts,
-             * and not running as IDE companion or Zed integration, automatically deny approval.
-             * This is intended to create an explicit denial of the tool call,
-             * rather than silently waiting for approval and hanging forever.
+             * In non-interactive mode, automatically deny.
              */
             const shouldAutoDeny =
               !this.config.isInteractive() &&
@@ -864,7 +957,7 @@ export class CoreToolScheduler {
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
             if (shouldAutoDeny) {
-              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -883,6 +976,17 @@ export class CoreToolScheduler {
               confirmationDetails.ideConfirmation
             ) {
               confirmationDetails.ideConfirmation.then((resolution) => {
+                // Guard: skip if the tool was already handled (e.g. by CLI
+                // confirmation).  Without this check, resolveDiffFromCli
+                // triggers this handler AND the CLI's onConfirm, causing a
+                // race where ProceedOnce overwrites ProceedAlways.
+                const still = this.toolCalls.find(
+                  (c) =>
+                    c.request.callId === reqInfo.callId &&
+                    c.status === 'awaiting_approval',
+                );
+                if (!still) return;
+
                 if (resolution.status === 'accepted') {
                   this.handleConfirmationResponse(
                     reqInfo.callId,
@@ -901,9 +1005,78 @@ export class CoreToolScheduler {
               });
             }
 
+            // Fire PermissionRequest hook before showing the permission dialog.
+            const messageBus = this.config.getMessageBus() as
+              | MessageBus
+              | undefined;
+            const hooksEnabled = this.config.getEnableHooks();
+
+            if (hooksEnabled && messageBus) {
+              const permissionMode = String(this.config.getApprovalMode());
+              const hookResult = await firePermissionRequestHook(
+                messageBus,
+                reqInfo.name,
+                (reqInfo.args as Record<string, unknown>) || {},
+                permissionMode,
+              );
+
+              if (hookResult.hasDecision) {
+                if (hookResult.shouldAllow) {
+                  // Hook granted permission - apply updated input if provided and proceed
+                  if (
+                    hookResult.updatedInput &&
+                    typeof reqInfo.args === 'object'
+                  ) {
+                    this.setArgsInternal(
+                      reqInfo.callId,
+                      hookResult.updatedInput,
+                    );
+                  }
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                  this.setStatusInternal(reqInfo.callId, 'scheduled');
+                } else {
+                  // Hook denied permission - cancel with optional message
+                  const cancelPayload = hookResult.denyMessage
+                    ? { cancelMessage: hookResult.denyMessage }
+                    : undefined;
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.Cancel,
+                    cancelPayload,
+                  );
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
+                  );
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        hookResult.denyMessage ||
+                          `Permission denied by hook for "${reqInfo.name}"`,
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                    ),
+                  );
+                }
+                continue;
+              }
+            }
+
             const originalOnConfirm = confirmationDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
+              // When PM has an explicit 'ask' rule, 'always allow' would be
+              // ineffective because ask takes priority over allow.
+              // Hide the option so users aren't misled.
+              ...(pmForcedAsk ? { hideAlwaysAllow: true } : {}),
               onConfirm: (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
@@ -921,6 +1094,20 @@ export class CoreToolScheduler {
               'awaiting_approval',
               wrappedConfirmationDetails,
             );
+
+            // Fire permission_prompt notification hook
+            if (hooksEnabled && messageBus) {
+              fireNotificationHook(
+                messageBus,
+                `Qwen Code needs your permission to use ${reqInfo.name}`,
+                NotificationType.PermissionPrompt,
+                'Permission needed',
+              ).catch((error) => {
+                debugLogger.warn(
+                  `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+            }
           }
         } catch (error) {
           if (signal.aborted) {
@@ -964,9 +1151,26 @@ export class CoreToolScheduler {
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
 
+    // Guard: if the tool is no longer awaiting approval (already handled by
+    // another confirmation path, e.g. IDE vs CLI race), skip to avoid double
+    // processing and potential re-execution.
+    if (!toolCall) return;
+
     await originalOnConfirm(outcome, payload);
 
-    if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+    if (
+      outcome === ToolConfirmationOutcome.ProceedAlways ||
+      outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+      outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+    ) {
+      // Persist permission rules for Project/User scope outcomes
+      await persistPermissionOutcome(
+        outcome,
+        (toolCall as WaitingToolCall).confirmationDetails,
+        this.config.getOnPersistPermissionRule?.(),
+        this.config.getPermissionManager?.(),
+        payload,
+      );
       await this.autoApproveCompatiblePendingTools(signal, callId);
     }
 
@@ -1081,9 +1285,28 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
-        await this.executeSingleToolCall(toolCall, signal);
-      }
+      // Task tools are safe to run concurrently — they spawn independent
+      // sub-agents with no shared mutable state.  All other tools run
+      // sequentially in their original order to preserve any implicit
+      // ordering the model may rely on.
+      const taskCalls = callsToExecute.filter(
+        (call) => call.request.name === ToolNames.AGENT,
+      );
+      const otherCalls = callsToExecute.filter(
+        (call) => call.request.name !== ToolNames.AGENT,
+      );
+
+      const taskPromise = Promise.all(
+        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
+      );
+
+      const othersPromise = (async () => {
+        for (const toolCall of otherCalls) {
+          await this.executeSingleToolCall(toolCall, signal);
+        }
+      })();
+
+      await Promise.all([taskPromise, othersPromise]);
     }
   }
 
@@ -1096,6 +1319,41 @@ export class CoreToolScheduler {
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
     const invocation = scheduledCall.invocation;
+    const toolInput = scheduledCall.request.args as Record<string, unknown>;
+
+    // Generate unique tool_use_id for hook tracking
+    const toolUseId = generateToolUseId();
+
+    // Get MessageBus for hook execution
+    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
+    const hooksEnabled = this.config.getEnableHooks();
+
+    // PreToolUse Hook
+    if (hooksEnabled && messageBus) {
+      // Convert ApprovalMode to permission_mode string for hooks
+      const permissionMode = this.config.getApprovalMode();
+      const preHookResult = await firePreToolUseHook(
+        messageBus,
+        toolName,
+        toolInput,
+        toolUseId,
+        permissionMode,
+      );
+
+      if (!preHookResult.shouldProceed) {
+        // Hook blocked the execution
+        const blockMessage =
+          preHookResult.blockReason || 'Tool execution blocked by hook';
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          new Error(blockMessage),
+          ToolErrorType.EXECUTION_DENIED,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+        return;
+      }
+    }
+
     this.setStatusInternal(callId, 'executing');
 
     const liveOutputCallback = scheduledCall.tool.canUpdateOutput
@@ -1145,18 +1403,76 @@ export class CoreToolScheduler {
     try {
       const toolResult: ToolResult = await promise;
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
-        return;
+        // PostToolUseFailure Hook
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
+        }
+        return; // Both code paths should return here
       }
 
       if (toolResult.error === undefined) {
-        const content = toolResult.llmContent;
+        let content = toolResult.llmContent;
         const contentLength =
           typeof content === 'string' ? content.length : undefined;
+
+        // PostToolUse Hook
+        if (hooksEnabled && messageBus) {
+          const toolResponse = {
+            llmContent: content,
+            returnDisplay: toolResult.returnDisplay,
+          };
+          const permissionMode = this.config.getApprovalMode();
+          const postHookResult = await firePostToolUseHook(
+            messageBus,
+            toolName,
+            toolInput,
+            toolResponse,
+            toolUseId,
+            permissionMode,
+          );
+
+          // Append additional context from hook if provided
+          if (postHookResult.additionalContext) {
+            content = appendAdditionalContext(
+              content,
+              postHookResult.additionalContext,
+            );
+          }
+
+          // Check if hook requested to stop execution
+          if (postHookResult.shouldStop) {
+            const stopMessage =
+              postHookResult.stopReason || 'Execution stopped by hook';
+            const errorResponse = createErrorResponse(
+              scheduledCall.request,
+              new Error(stopMessage),
+              ToolErrorType.EXECUTION_DENIED,
+            );
+            this.setStatusInternal(callId, 'error', errorResponse);
+            return;
+          }
+        }
 
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
@@ -1170,7 +1486,26 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'success', successResponse);
       } else {
         // It is a failure
-        const error = new Error(toolResult.error.message);
+        // PostToolUseFailure Hook
+        let errorMessage = toolResult.error.message;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            toolResult.error.message,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            errorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
+
+        const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
           scheduledCall.request,
           error,
@@ -1179,20 +1514,64 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'error', errorResponse);
       }
     } catch (executionError: unknown) {
+      const errorMessage =
+        executionError instanceof Error
+          ? executionError.message
+          : String(executionError);
+
       if (signal.aborted) {
-        this.setStatusInternal(
-          callId,
-          'cancelled',
-          'User cancelled tool execution.',
-        );
+        // PostToolUseFailure Hook (user interrupt)
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            'User cancelled tool execution.',
+            true,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          let cancelMessage = 'User cancelled tool execution.';
+          if (failureHookResult.additionalContext) {
+            cancelMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+          this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        } else {
+          this.setStatusInternal(
+            callId,
+            'cancelled',
+            'User cancelled tool execution.',
+          );
+        }
+        return;
       } else {
+        // PostToolUseFailure Hook
+        let exceptionErrorMessage = errorMessage;
+        if (hooksEnabled && messageBus) {
+          const failureHookResult = await firePostToolUseFailureHook(
+            messageBus,
+            toolUseId,
+            toolName,
+            toolInput,
+            errorMessage,
+            false,
+            this.config.getApprovalMode(),
+          );
+
+          // Append additional context from hook if provided
+          if (failureHookResult.additionalContext) {
+            exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
+          }
+        }
         this.setStatusInternal(
           callId,
           'error',
           createErrorResponse(
             scheduledCall.request,
             executionError instanceof Error
-              ? executionError
+              ? new Error(exceptionErrorMessage)
               : new Error(String(executionError)),
             ToolErrorType.UNHANDLED_EXCEPTION,
           ),
@@ -1291,10 +1670,25 @@ export class CoreToolScheduler {
 
     for (const pendingTool of pendingTools) {
       try {
-        const stillNeedsConfirmation =
-          await pendingTool.invocation.shouldConfirmExecute(signal);
+        // Re-run L3→L4 to see if the tool can now be auto-approved
+        const defaultPermission =
+          await pendingTool.invocation.getDefaultPermission();
+        const toolParams = pendingTool.invocation.params as Record<
+          string,
+          unknown
+        >;
+        const pmCtx = buildPermissionCheckContext(
+          pendingTool.request.name,
+          toolParams,
+          this.config.getTargetDir?.() ?? '',
+        );
+        const { finalPermission } = await evaluatePermissionRules(
+          this.config.getPermissionManager?.(),
+          defaultPermission,
+          pmCtx,
+        );
 
-        if (!stillNeedsConfirmation) {
+        if (finalPermission === 'allow') {
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,

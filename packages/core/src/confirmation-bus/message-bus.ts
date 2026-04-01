@@ -90,10 +90,17 @@ export class MessageBus extends EventEmitter {
     request: Omit<TRequest, 'correlationId'>,
     responseType: TResponse['type'],
     timeoutMs: number = 60000,
+    signal?: AbortSignal,
   ): Promise<TResponse> {
     const correlationId = randomUUID();
 
     return new Promise<TResponse>((resolve, reject) => {
+      // Check if already aborted
+      if (signal?.aborted) {
+        reject(new Error('Request aborted'));
+        return;
+      }
+
       const timeoutId = setTimeout(() => {
         cleanup();
         reject(new Error(`Request timed out waiting for ${responseType}`));
@@ -102,7 +109,19 @@ export class MessageBus extends EventEmitter {
       const cleanup = () => {
         clearTimeout(timeoutId);
         this.unsubscribe(responseType, responseHandler);
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
       };
+
+      const abortHandler = () => {
+        cleanup();
+        reject(new Error('Request aborted'));
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
 
       const responseHandler = (response: TResponse) => {
         // Check if this response matches our request

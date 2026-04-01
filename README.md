@@ -98,12 +98,22 @@ Your browser does not support the video tag.
 
 </details>
 
+## 🦞 Use Qwen Code for Coding Tasks in Claw
+
+Copy the prompt below and paste it into your agent:
+
+```
+Use Qwen Code as a coding agent. First, fetch and read this skill reference:
+https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/.qwen/skills/qwen-code-claw/SKILL.md
+Then follow the instructions inside to install, authenticate, and use Qwen Code via acpx for all coding tasks.
+```
+
 ## Authentication
 
 Qwen Code supports two authentication methods:
 
 - **Qwen OAuth (recommended & free)**: sign in with your `qwen.ai` account in a browser.
-- **API-KEY**: use an API key to connect to any supported provider (OpenAI, Anthropic, Google GenAI, Alibaba Cloud Bailian, and other compatible endpoints).
+- **API-KEY**: use an API key to connect to any supported provider (OpenAI, Anthropic, Google GenAI, Alibaba Cloud ModelStudio, and other compatible endpoints).
 
 #### Qwen OAuth (recommended)
 
@@ -121,7 +131,7 @@ Choose **Qwen OAuth** and complete the browser flow. Your credentials are cached
 
 Use this if you want more flexibility over which provider and model to use. Supports multiple protocols:
 
-- **OpenAI-compatible**: Alibaba Cloud Bailian, ModelScope, OpenAI, OpenRouter, and other OpenAI-compatible providers
+- **OpenAI-compatible**: Alibaba Cloud ModelStudio, ModelScope, OpenAI, OpenRouter, and other OpenAI-compatible providers
 - **Anthropic**: Claude models
 - **Google GenAI**: Gemini models
 
@@ -183,7 +193,7 @@ Use the `/model` command at any time to switch between all configured models.
 ##### More Examples
 
 <details>
-<summary>Coding Plan (Alibaba Cloud Bailian) — fixed monthly fee, higher quotas</summary>
+<summary>Coding Plan (Alibaba Cloud ModelStudio) — fixed monthly fee, higher quotas</summary>
 
 ```json
 {
@@ -193,7 +203,7 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "qwen3.5-plus",
         "name": "qwen3.5-plus (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3.5-plus with thinking enabled from Bailian Coding Plan",
+        "description": "qwen3.5-plus with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -205,14 +215,14 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "qwen3-coder-plus",
         "name": "qwen3-coder-plus (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-plus from Bailian Coding Plan",
+        "description": "qwen3-coder-plus from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY"
       },
       {
         "id": "qwen3-coder-next",
         "name": "qwen3-coder-next (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-next with thinking enabled from Bailian Coding Plan",
+        "description": "qwen3-coder-next with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -224,7 +234,7 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "glm-4.7",
         "name": "glm-4.7 (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "glm-4.7 with thinking enabled from Bailian Coding Plan",
+        "description": "glm-4.7 with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -236,7 +246,7 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "kimi-k2.5",
         "name": "kimi-k2.5 (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "kimi-k2.5 with thinking enabled from Bailian Coding Plan",
+        "description": "kimi-k2.5 with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -260,7 +270,7 @@ Use the `/model` command at any time to switch between all configured models.
 }
 ```
 
-> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud Bailian](https://modelstudio.console.aliyun.com/?tab=dashboard#/efm/coding_plan).
+> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud ModelStudio(Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio(intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index).
 
 </details>
 
@@ -457,7 +467,7 @@ To report a bug from within the CLI, run `/bug` and include a short title and re
 
 ## Connect with Us
 
-- Discord: https://discord.gg/ycKBjdNd
+- Discord: https://discord.gg/RN7tqZCeDK
 - Dingtalk: https://qr.dingtalk.com/action/joingroup?code=v1,k1,+FX6Gf/ZDlTahTIRi8AEQhIaBlqykA0j+eBKKdhLeAE=&_dt_no_comment=1&origin=1
 
 ## Acknowledgments

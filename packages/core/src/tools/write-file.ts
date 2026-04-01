@@ -17,6 +17,7 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -24,7 +25,12 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { FileEncoding } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -94,14 +100,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    const mode = this.config.getApprovalMode();
-    if (mode === ApprovalMode.AUTO_EDIT || mode === ApprovalMode.YOLO) {
-      return false;
-    }
+  /**
+   * Write operations always need user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
 
+  /**
+   * Constructs the write-file diff confirmation details.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
     const fileExists = await isFilefileExists(this.params.file_path);
     if (fileExists) {
@@ -111,12 +122,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           .readTextFile({ path: this.params.file_path });
         originalContent = content;
       } catch (err) {
-        debugLogger.error(
+        throw new Error(
           `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
         );
-        return false;
       }
     }
+
     const relativePath = makeRelative(
       this.params.file_path,
       this.config.getTargetDir(),
@@ -132,9 +143,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       DEFAULT_DIFF_OPTIONS,
     );
 
+    const approvalMode = this.config.getApprovalMode();
     const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
+      this.config.getIdeMode() &&
+      ideClient.isDiffingEnabled() &&
+      approvalMode !== ApprovalMode.AUTO_EDIT &&
+      approvalMode !== ApprovalMode.YOLO
         ? ideClient.openDiff(this.params.file_path, this.params.content)
         : undefined;
 
@@ -171,6 +186,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let originalContent = '';
     let useBOM = false;
     let detectedEncoding: string | undefined;
+    let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
     if (fileExists) {
       try {
@@ -185,6 +201,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        detectedLineEnding = detectLineEnding(fileInfo.content);
         originalContent = fileInfo.content;
         fileExists = true; // File exists and was read
       } catch (err) {
@@ -212,7 +229,17 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
     if (!fileExists) {
       fs.mkdirSync(dirName, { recursive: true });
-      useBOM = this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
+      const userEncoding = this.config.getDefaultFileEncoding();
+      if (userEncoding === FileEncoding.UTF8_BOM) {
+        // User explicitly configured UTF-8 BOM for all new files
+        useBOM = true;
+      } else if (userEncoding === undefined) {
+        // No explicit setting: auto-detect based on platform/extension.
+        // e.g. .ps1 on Windows with a non-UTF-8 code page needs BOM so
+        // PowerShell 5.1 reads the file as UTF-8 instead of the system ANSI page
+        useBOM = needsUtf8Bom(file_path);
+      }
+      // else: user explicitly set 'utf-8' (no BOM) — respect it
       detectedEncoding = undefined;
     }
 
@@ -223,6 +250,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
+          lineEnding: detectedLineEnding,
         },
       });
 
@@ -383,14 +411,6 @@ export class WriteFileTool
 
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute: ${filePath}`;
-    }
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(filePath)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
     }
 
     try {

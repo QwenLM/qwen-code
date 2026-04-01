@@ -93,12 +93,12 @@ describe('BaseSelectionList', () => {
       expect(mockRenderItem).toHaveBeenCalledWith(items[0], expect.any(Object));
     });
 
-    it('should render the selection indicator (● or space) and layout', () => {
+    it('should render the selection indicator (› or space) and layout', () => {
       const { lastFrame } = renderComponent({}, 0);
       const output = lastFrame();
 
       // Use regex to assert the structure: Indicator + Whitespace + Number + Label
-      expect(output).toMatch(/●\s+1\.\s+Item A/);
+      expect(output).toMatch(/›\s+1\.\s+Item A/);
       expect(output).toMatch(/\s+2\.\s+Item B/);
       expect(output).toMatch(/\s+3\.\s+Item C/);
     });

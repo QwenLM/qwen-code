@@ -14,8 +14,7 @@ import {
   type WebViewProviderFactory,
 } from './ChatWebviewViewProvider.js';
 
-const SECONDARY_SIDEBAR_CONTEXT_KEY =
-  'qwen-code:doesNotSupportSecondarySidebar';
+const SECONDARY_SIDEBAR_CONTEXT_KEY = 'qwen-code:supportsSecondarySidebar';
 
 export function detectSecondarySidebarSupport(vscodeVersion: string): boolean {
   const [major, minor] = vscodeVersion.split('.').map(Number);
@@ -35,25 +34,29 @@ export function registerChatViewProviders(params: {
 
   const supportsSecondarySidebar = detectSecondarySidebarSupport(vscodeVersion);
 
-  if (!supportsSecondarySidebar) {
-    void vscode.commands.executeCommand(
-      'setContext',
-      SECONDARY_SIDEBAR_CONTEXT_KEY,
-      true,
-    );
-  }
+  // Set the context key so package.json `when` clauses can gate the
+  // secondarySidebar view container. The key defaults to undefined (falsy),
+  // which keeps the secondary container hidden until we explicitly enable it.
+  // This prevents the "view container not found" warning on older VS Code
+  // versions that don't recognise the `secondarySidebar` location.
+  void vscode.commands.executeCommand(
+    'setContext',
+    SECONDARY_SIDEBAR_CONTEXT_KEY,
+    supportsSecondarySidebar,
+  );
 
-  const chatViewProvider = new ChatWebviewViewProvider(createViewProvider);
+  const sidebarViewProvider = new ChatWebviewViewProvider(createViewProvider);
+  const secondaryViewProvider = new ChatWebviewViewProvider(createViewProvider);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       CHAT_VIEW_ID_SIDEBAR,
-      chatViewProvider,
+      sidebarViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
     vscode.window.registerWebviewViewProvider(
       CHAT_VIEW_ID_SECONDARY,
-      chatViewProvider,
+      secondaryViewProvider,
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );

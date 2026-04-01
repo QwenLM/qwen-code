@@ -46,6 +46,10 @@ import type {
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  HookCallEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -62,6 +66,7 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
+import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -642,12 +647,13 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 0,
-      message: event.error,
+      message: event.error_message,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        error_message: event.error_message,
         error_type: event.error_type,
       },
     });
@@ -931,6 +937,92 @@ export class QwenLogger {
         retry_delay_ms: event.retry_delay_ms,
       },
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // arena events
+  logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        model_ids: JSON.stringify(event.model_ids),
+        task_length: event.task_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaAgentCompletedEvent(event: ArenaAgentCompletedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_agent_completed', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        agent_session_id: event.agent_session_id,
+        agent_model_id: event.agent_model_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        rounds: event.rounds,
+        total_tokens: event.total_tokens,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        tool_calls: event.tool_calls,
+        successful_tool_calls: event.successful_tool_calls,
+        failed_tool_calls: event.failed_tool_calls,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaSessionEndedEvent(event: ArenaSessionEndedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_ended', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        display_backend: event.display_backend,
+        agent_count: event.agent_count,
+        completed_agents: event.completed_agents,
+        failed_agents: event.failed_agents,
+        cancelled_agents: event.cancelled_agents,
+        winner_model_id: event.winner_model_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  /**
+   * Log a hook call event
+   * Records hook execution telemetry for observability
+   */
+  logHookCallEvent(event: HookCallEvent): void {
+    // Sanitize hook name to remove potentially sensitive information
+    const sanitizedHookName = sanitizeHookName(event.hook_name);
+
+    const properties: Record<string, unknown> = {
+      hook_event_name: event.hook_event_name,
+      hook_type: event.hook_type,
+      hook_name: sanitizedHookName,
+      duration_ms: event.duration_ms,
+      success: event.success ? 1 : 0,
+      exit_code: event.exit_code,
+    };
+
+    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
+      properties['error'] = event.error;
+    }
+
+    const rumEvent = this.createActionEvent(
+      'hook',
+      `hook_call#${event.hook_event_name}`,
+      { properties },
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

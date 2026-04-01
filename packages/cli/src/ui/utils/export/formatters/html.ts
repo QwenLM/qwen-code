@@ -36,6 +36,7 @@ export function injectDataIntoHtmlTemplate(
     sessionId: string;
     startTime: string;
     messages: unknown[];
+    metadata?: unknown;
   },
 ): string {
   const jsonData = JSON.stringify(data, null, 2);

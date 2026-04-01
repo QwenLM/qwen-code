@@ -16,6 +16,7 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
+import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -107,16 +108,28 @@ describe('ChatCompressionService', () => {
   let mockConfig: Config;
   const mockModel = 'gemini-pro';
   const mockPromptId = 'test-prompt-id';
+  let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
+  let mockGetHookSystem: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     service = new ChatCompressionService();
     mockChat = {
       getHistory: vi.fn(),
     } as unknown as GeminiChat;
+    mockFireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    mockGetHookSystem = vi.fn().mockReturnValue({
+      fireSessionStartEvent: mockFireSessionStartEvent,
+    });
     mockConfig = {
       getChatCompression: vi.fn(),
       getContentGenerator: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getHookSystem: mockGetHookSystem,
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+      }),
     } as unknown as Config;
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
@@ -274,6 +287,14 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).not.toBeNull();
     expect(result.newHistory![0].parts![0].text).toBe('Summary');
     expect(mockGenerateContent).toHaveBeenCalled();
+    expect(mockGetHookSystem).toHaveBeenCalled();
+    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
+      SessionStartSource.Compact,
+      mockModel,
+      'default',
+      undefined,
+      undefined,
+    );
   });
 
   it('should force compress even if under threshold', async () => {
@@ -317,6 +338,13 @@ describe('ChatCompressionService', () => {
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.newHistory).not.toBeNull();
+    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
+      SessionStartSource.Compact,
+      mockModel,
+      'default',
+      undefined,
+      undefined,
+    );
   });
 
   it('should return FAILED if new token count is inflated', async () => {
@@ -480,5 +508,430 @@ describe('ChatCompressionService', () => {
       CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
     );
     expect(result.newHistory).toBeNull();
+  });
+
+  it('should not fire SessionStart event when compression fails', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(10);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1,
+        candidatesTokenCount: 20,
+        totalTokenCount: 21,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      true,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+  });
+
+  it('should handle SessionStart hook errors gracefully', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 1000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    mockFireSessionStartEvent.mockRejectedValue(
+      new Error('SessionStart hook failed'),
+    );
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'Summary' }],
+          },
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1600,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1650,
+      },
+    } as unknown as GenerateContentResponse);
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    // Should still complete compression despite hook error
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+  });
+
+  describe('PreCompact hook', () => {
+    let mockFirePreCompactEvent: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      mockFirePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+      mockGetHookSystem.mockReturnValue({
+        fireSessionStartEvent: mockFireSessionStartEvent,
+        firePreCompactEvent: mockFirePreCompactEvent,
+      });
+    });
+
+    it('should fire PreCompact hook with Manual trigger when force=true', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1150,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        true, // force = true -> Manual trigger
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
+        PreCompactTrigger.Manual,
+        '',
+        undefined,
+      );
+    });
+
+    it('should fire PreCompact hook with Auto trigger when force=false', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        false, // force = false -> Auto trigger
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(mockFirePreCompactEvent).toHaveBeenCalledWith(
+        PreCompactTrigger.Auto,
+        '',
+        undefined,
+      );
+    });
+
+    it('should not fire PreCompact hook when history is empty', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([]);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        true,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should not fire PreCompact hook when threshold is 0', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        contextPercentageThreshold: 0,
+      });
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        true,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should not fire PreCompact hook when under threshold and not forced', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        600,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should handle PreCompact hook errors gracefully', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      mockFirePreCompactEvent.mockRejectedValue(
+        new Error('PreCompact hook failed'),
+      );
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Should still complete compression despite hook error
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.newHistory).not.toBeNull();
+      expect(mockFirePreCompactEvent).toHaveBeenCalled();
+    });
+
+    it('should fire PreCompact hook before compression and SessionStart after', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const callOrder: string[] = [];
+      mockFirePreCompactEvent.mockImplementation(async () => {
+        callOrder.push('PreCompact');
+      });
+      mockFireSessionStartEvent.mockImplementation(async () => {
+        callOrder.push('SessionStart');
+      });
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // PreCompact should be called before SessionStart
+      expect(callOrder).toEqual(['PreCompact', 'SessionStart']);
+    });
+
+    it('should not fire PreCompact hook when hookSystem is null', async () => {
+      mockGetHookSystem.mockReturnValue(null);
+
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Should still complete compression without hook
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.newHistory).not.toBeNull();
+      // mockFirePreCompactEvent should not be called since hookSystem is null
+      expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
   });
 });

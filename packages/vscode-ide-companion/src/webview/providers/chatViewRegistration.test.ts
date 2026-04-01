@@ -67,14 +67,19 @@ describe('registerChatViewProviders', () => {
       'qwen-code.chatView.sidebar',
       'qwen-code.chatView.secondary',
     ]);
+    expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
     expect(calls[0]?.[2]).toEqual({
       webviewOptions: { retainContextWhenHidden: true },
     });
-    expect(executeCommand).not.toHaveBeenCalled();
+    expect(executeCommand).toHaveBeenCalledWith(
+      'setContext',
+      'qwen-code:supportsSecondarySidebar',
+      true,
+    );
     expect(context.subscriptions).toHaveLength(2);
   });
 
-  it('sets the fallback context key when secondary sidebar is unavailable', () => {
+  it('sets context key to false when secondary sidebar is unavailable', () => {
     registerChatViewProviders({
       context: context as never,
       createViewProvider: vi.fn(),
@@ -83,8 +88,8 @@ describe('registerChatViewProviders', () => {
 
     expect(executeCommand).toHaveBeenCalledWith(
       'setContext',
-      'qwen-code:doesNotSupportSecondarySidebar',
-      true,
+      'qwen-code:supportsSecondarySidebar',
+      false,
     );
   });
 });

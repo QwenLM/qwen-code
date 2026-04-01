@@ -16,10 +16,11 @@ import type {
   PermissionResponseMessage,
   AskUserQuestionResponseMessage,
 } from '../../types/webviewMessageTypes.js';
-import { PanelManager } from './PanelManager.js';
+import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
+import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
@@ -88,6 +89,10 @@ export class WebViewProvider {
     this.messageHandler.setLoginHandler(async () => {
       await this.forceReLogin();
     });
+
+    // Setup file watchers for cache invalidation
+    const fileWatcherDisposable = this.messageHandler.setupFileWatchers();
+    this.disposables.push(fileWatcherDisposable);
 
     // Setup agent callbacks
     this.agentManager.onMessage((message) => {
@@ -251,25 +256,6 @@ export class WebViewProvider {
 
     this.agentManager.onPermissionRequest(
       async (request: RequestPermissionRequest) => {
-        // Auto-approve in auto/yolo mode (no UI, no diff)
-        if (this.isAutoMode()) {
-          const options = request.options || [];
-          const pick = (substr: string) =>
-            options.find((o) =>
-              (o.optionId || '').toLowerCase().includes(substr),
-            )?.optionId;
-          const pickByKind = (k: string) =>
-            options.find((o) => (o.kind || '').toLowerCase().includes(k))
-              ?.optionId;
-          const optionId =
-            pick('allow_once') ||
-            pickByKind('allow') ||
-            pick('proceed') ||
-            options[0]?.optionId ||
-            'allow_once';
-          return optionId;
-        }
-
         // Send permission request to WebView
         this.sendMessageToWebView({
           type: 'permissionRequest',
@@ -472,10 +458,10 @@ export class WebViewProvider {
     // Configure webview options
     webview.options = {
       enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.extensionUri, 'dist'),
-        vscode.Uri.joinPath(this.extensionUri, 'assets'),
-      ],
+      localResourceRoots: getLocalResourceRoots(
+        this.extensionUri,
+        vscode.workspace.workspaceFolders,
+      ),
     };
 
     // Store reference so sendMessageToWebView can reach it
@@ -494,6 +480,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data, webview);
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -647,6 +637,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data, newPanel.webview);
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1225,12 +1219,42 @@ export class WebViewProvider {
    */
   private sendMessageToWebView(message: unknown): void {
     this.updateAuthStateFromMessage(message);
-    const panel = this.panelManager.getPanel();
-    if (panel) {
-      panel.webview.postMessage(message);
-    } else if (this.attachedWebview) {
-      this.attachedWebview.postMessage(message);
+    this.getActiveWebview()?.postMessage(message);
+  }
+
+  private handleResolveImagePaths(
+    data: unknown,
+    targetWebview?: vscode.Webview,
+  ): void {
+    const webview = targetWebview ?? this.getActiveWebview();
+    if (!webview) {
+      return;
     }
+
+    const payload = data as
+      | { paths?: string[]; requestId?: number }
+      | undefined;
+    const paths = Array.isArray(payload?.paths) ? (payload?.paths ?? []) : [];
+
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const workspaceRoots = workspaceFolders.map((folder) => folder.uri.fsPath);
+
+    const resolveImagePaths = createImagePathResolver({
+      workspaceRoots,
+      toWebviewUri: (filePath: string) =>
+        webview.asWebviewUri(vscode.Uri.file(filePath)).toString(),
+    });
+
+    const resolved = resolveImagePaths(paths);
+
+    webview.postMessage({
+      type: 'imagePathsResolved',
+      data: { resolved, requestId: payload?.requestId },
+    });
+  }
+
+  private getActiveWebview(): vscode.Webview | null {
+    return this.panelManager.getPanel()?.webview ?? this.attachedWebview;
   }
 
   /**
@@ -1374,6 +1398,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'resolveImagePaths') {
+          this.handleResolveImagePaths(message.data, panel.webview);
           return;
         }
         if (message.type === 'updatePanelTitle') {

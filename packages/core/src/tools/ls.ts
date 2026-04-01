@@ -9,12 +9,14 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -115,6 +117,26 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       this.config.getTargetDir(),
     );
     return shortenPath(relativePath);
+  }
+
+  /**
+   * Returns 'ask' for paths outside the workspace/userSkills directories,
+   * so that external directory listings require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const dirPath = path.resolve(this.params.path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+
+    if (
+      workspaceContext.isPathWithinWorkspace(dirPath) ||
+      isSubpaths(userSkillsDirs, dirPath) ||
+      isSubpath(userExtensionsDir, dirPath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
   }
 
   // Helper for consistent error formatting
@@ -335,19 +357,6 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
       return `Path must be absolute: ${params.path}`;
     }
 
-    const userSkillsBase = this.config.storage.getUserSkillsDir();
-    const isUnderUserSkills = isSubpath(userSkillsBase, params.path);
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (
-      !workspaceContext.isPathWithinWorkspace(params.path) &&
-      !isUnderUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `Path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
-    }
     return null;
   }
 

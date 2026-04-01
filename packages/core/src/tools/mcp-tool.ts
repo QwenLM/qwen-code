@@ -13,16 +13,14 @@ import type {
   ToolResultDisplay,
   ToolConfirmationPayload,
   McpToolProgressData,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
   ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
@@ -132,44 +130,46 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     super(params);
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    const serverAllowListKey = this.serverName;
-    const toolAllowListKey = `${this.serverName}.${this.serverToolName}`;
-
-    if (this.cliConfig?.isTrustedFolder() && this.trust) {
-      return false; // server is trusted, no confirmation needed
+  /**
+   * MCP tool default permission based on trust and annotations:
+   * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
+   * - readOnlyHint → 'allow'
+   * - All other MCP tools → 'ask'
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    // MCP servers explicitly marked as trusted bypass confirmation,
+    // but only when the workspace folder is also trusted (security gate).
+    if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
+      return 'allow';
     }
-
-    // MCP tools annotated with readOnlyHint: true are safe to execute
-    // without confirmation, especially important for plan mode support
+    // MCP tools annotated with readOnlyHint: true are safe
     if (this.annotations?.readOnlyHint === true) {
-      return false;
+      return 'allow';
     }
+    return 'ask';
+  }
 
-    if (
-      DiscoveredMCPToolInvocation.allowlist.has(serverAllowListKey) ||
-      DiscoveredMCPToolInvocation.allowlist.has(toolAllowListKey)
-    ) {
-      return false; // server and/or tool already allowlisted
-    }
+  /**
+   * Constructs confirmation dialog details for an MCP tool call.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    // Construct the permission rule for this specific MCP tool.
+    const permissionRule = `mcp__${this.serverName}__${this.serverToolName}`;
 
     const confirmationDetails: ToolMcpConfirmationDetails = {
       type: 'mcp',
       title: 'Confirm MCP Tool Execution',
       serverName: this.serverName,
-      toolName: this.serverToolName, // Display original tool name in confirmation
-      toolDisplayName: this.displayName, // Display global registry name exposed to model and user
+      toolName: this.serverToolName,
+      toolDisplayName: this.displayName,
+      permissionRules: [permissionRule],
       onConfirm: async (
-        outcome: ToolConfirmationOutcome,
+        _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlwaysServer) {
-          DiscoveredMCPToolInvocation.allowlist.add(serverAllowListKey);
-        } else if (outcome === ToolConfirmationOutcome.ProceedAlwaysTool) {
-          DiscoveredMCPToolInvocation.allowlist.add(toolAllowListKey);
-        }
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
@@ -338,10 +338,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const truncatedParts = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: transformedParts,
-        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+        llmContent: truncatedParts,
+        returnDisplay: getDisplayFromParts(truncatedParts),
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal, updateOutput);
@@ -412,14 +413,40 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const truncatedParts = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: transformedParts,
-        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+        llmContent: truncatedParts,
+        returnDisplay: getDisplayFromParts(truncatedParts),
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal);
     }
+  }
+
+  /**
+   * Truncates text parts in the transformed result if they exceed the
+   * configured threshold. Non-text parts (images, audio, etc.) are preserved.
+   */
+  private async truncateTextParts(parts: Part[]): Promise<Part[]> {
+    if (!this.cliConfig) {
+      return parts;
+    }
+
+    const result: Part[] = [];
+    for (const part of parts) {
+      if (part.text && !part.inlineData) {
+        const truncated = await truncateToolOutput(
+          this.cliConfig,
+          `mcp__${this.serverName}__${this.serverToolName}`,
+          part.text,
+        );
+        result.push({ text: truncated.content });
+      } else {
+        result.push(part);
+      }
+    }
+    return result;
   }
 
   getDescription(): string {
@@ -606,43 +633,22 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
 }
 
 /**
- * Processes the raw response from the MCP tool to generate a clean,
- * human-readable string for display in the CLI. It summarizes non-text
- * content and presents text directly.
- *
- * @param rawResponse The raw Part[] array from the GenAI SDK.
- * @returns A formatted string representing the tool's output.
+ * Builds a human-readable display string from transformed Part[].
+ * Text parts are shown directly; inline data is summarized by mime type.
  */
-function getStringifiedResultForDisplay(rawResponse: Part[]): string {
-  const mcpContent = rawResponse?.[0]?.functionResponse?.response?.[
-    'content'
-  ] as McpContentBlock[];
-
-  if (!Array.isArray(mcpContent)) {
-    return '```json\n' + JSON.stringify(rawResponse, null, 2) + '\n```';
+function getDisplayFromParts(parts: Part[]): string {
+  if (parts.length === 0) {
+    return '';
   }
 
-  const displayParts = mcpContent.map((block: McpContentBlock): string => {
-    switch (block.type) {
-      case 'text':
-        return block.text;
-      case 'image':
-        return `[Image: ${block.mimeType}]`;
-      case 'audio':
-        return `[Audio: ${block.mimeType}]`;
-      case 'resource_link':
-        return `[Link to ${block.title || block.name}: ${block.uri}]`;
-      case 'resource':
-        if (block.resource?.text) {
-          return block.resource.text;
-        }
-        return `[Embedded Resource: ${
-          block.resource?.mimeType || 'unknown type'
-        }]`;
-      default:
-        return `[Unknown content type: ${(block as { type: string }).type}]`;
+  const displayParts: string[] = [];
+  for (const part of parts) {
+    if (part.text !== undefined) {
+      displayParts.push(part.text);
+    } else if (part.inlineData) {
+      displayParts.push(`[${part.inlineData.mimeType}]`);
     }
-  });
+  }
 
   return displayParts.join('\n');
 }

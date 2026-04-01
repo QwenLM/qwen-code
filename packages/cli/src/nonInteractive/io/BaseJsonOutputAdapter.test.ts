@@ -10,7 +10,7 @@ import {
   type Config,
   type ServerGeminiStreamEvent,
   type ToolCallRequestInfo,
-  type TaskResultDisplay,
+  type AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -144,7 +144,7 @@ class TestJsonOutputAdapter extends BaseJsonOutputAdapter {
 
   exposeCreateSubagentToolUseBlock(
     state: MessageState,
-    toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number],
+    toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     parentToolUseId: string,
   ) {
     return this.createSubagentToolUseBlock(state, toolCall, parentToolUseId);
@@ -1314,7 +1314,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should process subagent tool call', () => {
       const parentToolUseId = 'parent-tool-1';
       adapter.startSubagentAssistantMessage(parentToolUseId);
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: { param: 'value' },
@@ -1346,7 +1346,7 @@ describe('BaseJsonOutputAdapter', () => {
       const state = adapter.exposeGetMessageState(parentToolUseId);
       adapter.exposeAppendText(state, 'Text', parentToolUseId);
 
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: {},
@@ -1367,7 +1367,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should create tool_use block for subagent', () => {
       const state = adapter.exposeCreateMessageState();
       adapter.startAssistantMessage();
-      const toolCall: NonNullable<TaskResultDisplay['toolCalls']>[number] = {
+      const toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number] = {
         callId: 'tool-1',
         name: 'test_tool',
         args: { param: 'value' },

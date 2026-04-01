@@ -1,0 +1,1648 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { GitWorktreeService } from '../../services/gitWorktreeService.js';
+import { Storage } from '../../config/storage.js';
+import type { Config } from '../../config/config.js';
+import { getCoreSystemPrompt } from '../../core/prompts.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isNodeError } from '../../utils/errors.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import type { AnsiOutput } from '../../utils/terminalSerializer.js';
+import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
+import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
+import { detectBackend, DISPLAY_MODE } from '../index.js';
+import type { InProcessBackend } from '../backends/InProcessBackend.js';
+import {
+  AgentEventType,
+  type AgentStatusChangeEvent,
+} from '../runtime/agent-events.js';
+import {
+  type ArenaConfig,
+  type ArenaConfigFile,
+  type ArenaControlSignal,
+  type ArenaStartOptions,
+  type ArenaAgentResult,
+  type ArenaSessionResult,
+  type ArenaAgentState,
+  type ArenaCallbacks,
+  type ArenaStatusFile,
+  ArenaSessionStatus,
+  ARENA_MAX_AGENTS,
+  safeAgentId,
+} from './types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  isSettledStatus,
+  isSuccessStatus,
+} from '../runtime/agent-types.js';
+import {
+  logArenaSessionStarted,
+  logArenaAgentCompleted,
+  logArenaSessionEnded,
+  makeArenaSessionStartedEvent,
+  makeArenaAgentCompletedEvent,
+  makeArenaSessionEndedEvent,
+} from '../../telemetry/index.js';
+import type { ArenaSessionEndedStatus } from '../../telemetry/index.js';
+
+const debugLogger = createDebugLogger('ARENA');
+
+const ARENA_POLL_INTERVAL_MS = 500;
+
+/**
+ * ArenaManager orchestrates multi-model competitive execution.
+ *
+ * It manages:
+ * - Git worktree creation for isolated environments
+ * - Parallel agent execution via PTY subprocesses (through Backend)
+ * - Event emission for UI updates
+ * - Result collection and comparison
+ * - Active agent switching, input routing, and screen capture
+ */
+export class ArenaManager {
+  private readonly config: Config;
+  private readonly eventEmitter: ArenaEventEmitter;
+  private readonly worktreeService: GitWorktreeService;
+  private readonly arenaBaseDir: string;
+  private readonly callbacks: ArenaCallbacks;
+  private backend: Backend | null = null;
+  private cachedResult: ArenaSessionResult | null = null;
+
+  private sessionId: string | undefined;
+  /** Short directory name used for worktree paths (derived from sessionId). */
+  private worktreeDirName: string | undefined;
+  private sessionStatus: ArenaSessionStatus = ArenaSessionStatus.INITIALIZING;
+  private agents: Map<string, ArenaAgentState> = new Map();
+  private arenaConfig: ArenaConfig | undefined;
+
+  private startedAt: number | undefined;
+  private masterAbortController: AbortController | undefined;
+  private terminalCols: number;
+  private terminalRows: number;
+  private pollingInterval: ReturnType<typeof setInterval> | null = null;
+  private lifecyclePromise: Promise<void> | null = null;
+  /** Cleanup functions for in-process event bridge listeners. */
+  private eventBridgeCleanups: Array<() => void> = [];
+  /** Guard to prevent double-emitting the session-ended telemetry event. */
+  private sessionEndedLogged = false;
+
+  constructor(config: Config, callbacks: ArenaCallbacks = {}) {
+    this.config = config;
+    this.callbacks = callbacks;
+    this.eventEmitter = new ArenaEventEmitter();
+    const arenaSettings = config.getAgentsSettings().arena;
+    // Use the user-configured base dir, or default to ~/.qwen/arena.
+    this.arenaBaseDir =
+      arenaSettings?.worktreeBaseDir ??
+      path.join(Storage.getGlobalQwenDir(), 'arena');
+    this.worktreeService = new GitWorktreeService(
+      config.getWorkingDir(),
+      this.arenaBaseDir,
+    );
+    this.terminalCols = process.stdout.columns || 120;
+    this.terminalRows = process.stdout.rows || 40;
+  }
+
+  // ─── Public API ────────────────────────────────────────────────
+
+  /**
+   * Get the event emitter for subscribing to Arena events.
+   */
+  getEventEmitter(): ArenaEventEmitter {
+    return this.eventEmitter;
+  }
+
+  /**
+   * Get the current session ID.
+   */
+  getSessionId(): string | undefined {
+    return this.sessionId;
+  }
+
+  /**
+   * Get the current session status.
+   */
+  getSessionStatus(): ArenaSessionStatus {
+    return this.sessionStatus;
+  }
+
+  /**
+   * Get the current task description (available while session is active).
+   */
+  getTask(): string | undefined {
+    return this.arenaConfig?.task;
+  }
+
+  /**
+   * Get all agent states.
+   */
+  getAgentStates(): ArenaAgentState[] {
+    return Array.from(this.agents.values());
+  }
+
+  /**
+   * Get a specific agent state.
+   */
+  getAgentState(agentId: string): ArenaAgentState | undefined {
+    return this.agents.get(agentId);
+  }
+
+  /**
+   * Get the cached session result (available after session completes).
+   */
+  getResult(): ArenaSessionResult | null {
+    return this.cachedResult;
+  }
+
+  /**
+   * Get the underlying backend for direct access.
+   * Returns null before the session initializes a backend.
+   */
+  getBackend(): Backend | null {
+    return this.backend;
+  }
+
+  /**
+   * Store the outer lifecycle promise so cancel/stop can wait for start()
+   * to fully unwind before proceeding with cleanup.
+   */
+  setLifecyclePromise(p: Promise<void>): void {
+    this.lifecyclePromise = p;
+  }
+
+  /**
+   * Wait for the start lifecycle to fully settle (including error handling
+   * and listener teardown). Resolves immediately if no lifecycle is active.
+   */
+  async waitForSettled(): Promise<void> {
+    if (this.lifecyclePromise) {
+      await this.lifecyclePromise;
+    }
+  }
+
+  // ─── PTY Interaction ───────────────────────────────────────────
+
+  /**
+   * Switch the active agent for screen display and input routing.
+   */
+  switchToAgent(agentId: string): void {
+    this.backend?.switchTo(agentId);
+  }
+
+  /**
+   * Switch to the next agent in order.
+   */
+  switchToNextAgent(): void {
+    this.backend?.switchToNext();
+  }
+
+  /**
+   * Switch to the previous agent in order.
+   */
+  switchToPreviousAgent(): void {
+    this.backend?.switchToPrevious();
+  }
+
+  /**
+   * Get the ID of the currently active agent.
+   */
+  getActiveAgentId(): string | null {
+    return this.backend?.getActiveAgentId() ?? null;
+  }
+
+  /**
+   * Get the screen snapshot for the currently active agent.
+   */
+  getActiveSnapshot(): AnsiOutput | null {
+    return this.backend?.getActiveSnapshot() ?? null;
+  }
+
+  /**
+   * Get the screen snapshot for a specific agent.
+   */
+  getAgentSnapshot(
+    agentId: string,
+    scrollOffset: number = 0,
+  ): AnsiOutput | null {
+    return this.backend?.getAgentSnapshot(agentId, scrollOffset) ?? null;
+  }
+
+  /**
+   * Get the maximum scrollback length for an agent's terminal buffer.
+   */
+  getAgentScrollbackLength(agentId: string): number {
+    return this.backend?.getAgentScrollbackLength(agentId) ?? 0;
+  }
+
+  /**
+   * Forward keyboard input to the currently active agent.
+   */
+  forwardInput(data: string): boolean {
+    return this.backend?.forwardInput(data) ?? false;
+  }
+
+  /**
+   * Resize all agent terminals.
+   */
+  resizeAgents(cols: number, rows: number): void {
+    this.terminalCols = cols;
+    this.terminalRows = rows;
+    this.backend?.resizeAll(cols, rows);
+  }
+
+  // ─── Session Lifecycle ─────────────────────────────────────────
+
+  /**
+   * Start an Arena session.
+   *
+   * @param options - Arena start options
+   * @returns Promise resolving to the session result
+   */
+  async start(options: ArenaStartOptions): Promise<ArenaSessionResult> {
+    // Validate options
+    this.validateStartOptions(options);
+
+    // Use caller-provided terminal size if available
+    if (options.cols && options.cols > 0) {
+      this.terminalCols = options.cols;
+    }
+    if (options.rows && options.rows > 0) {
+      this.terminalRows = options.rows;
+    }
+
+    this.sessionId = this.config.getSessionId();
+    this.worktreeDirName = await this.deriveWorktreeDirName(this.sessionId);
+    this.startedAt = Date.now();
+    this.sessionStatus = ArenaSessionStatus.INITIALIZING;
+    this.masterAbortController = new AbortController();
+
+    const sourceRepoPath = this.config.getWorkingDir();
+    const arenaSettings = this.config.getAgentsSettings().arena;
+
+    this.arenaConfig = {
+      sessionId: this.sessionId,
+      task: options.task,
+      models: options.models,
+      maxRoundsPerAgent:
+        options.maxRoundsPerAgent ?? arenaSettings?.maxRoundsPerAgent,
+      timeoutSeconds: options.timeoutSeconds ?? arenaSettings?.timeoutSeconds,
+      approvalMode: options.approvalMode,
+      sourceRepoPath,
+      chatHistory: options.chatHistory,
+    };
+
+    debugLogger.info(`Starting Arena session: ${this.sessionId}`);
+    debugLogger.info(`Task: ${options.task}`);
+    debugLogger.info(
+      `Models: ${options.models.map((m) => m.modelId).join(', ')}`,
+    );
+
+    // Fail fast on missing git or non-repo directory before any UI output
+    // so the user gets a clean, single error message without the
+    // "Arena started…" banner.
+    const gitCheck = await this.worktreeService.checkGitAvailable();
+    if (!gitCheck.available) {
+      throw new Error(gitCheck.error!);
+    }
+    const isRepo = await this.worktreeService.isGitRepository();
+    if (!isRepo) {
+      throw new Error(
+        'Failed to start arena: current directory is not a git repository.',
+      );
+    }
+
+    // Emit session start event
+    this.eventEmitter.emit(ArenaEventType.SESSION_START, {
+      sessionId: this.sessionId,
+      task: options.task,
+      models: options.models,
+      timestamp: Date.now(),
+    });
+
+    // Log arena session start telemetry
+    logArenaSessionStarted(
+      this.config,
+      makeArenaSessionStartedEvent({
+        arena_session_id: this.sessionId,
+        model_ids: options.models.map((m) => m.modelId),
+        task_length: options.task.length,
+      }),
+    );
+
+    try {
+      // Detect and initialize the backend.
+      // Priority: explicit option > agents.displayMode setting > auto-detect
+      const displayMode =
+        options.displayMode ??
+        (this.config.getAgentsSettings().displayMode as
+          | DisplayMode
+          | undefined);
+      await this.initializeBackend(displayMode);
+
+      // If cancelled during backend init, bail out early
+      if (this.masterAbortController?.signal.aborted) {
+        this.sessionStatus = ArenaSessionStatus.CANCELLED;
+        const result = await this.collectResults();
+        this.emitSessionEnded('cancelled');
+        return result;
+      }
+
+      // Set up worktrees for all agents
+      this.emitProgress(`Setting up environment for agents…`);
+      await this.setupWorktrees();
+
+      // If cancelled during worktree setup, bail out early
+      if (this.masterAbortController?.signal.aborted) {
+        this.sessionStatus = ArenaSessionStatus.CANCELLED;
+        const result = await this.collectResults();
+        this.emitSessionEnded('cancelled');
+        return result;
+      }
+
+      // Emit worktree info for each agent
+      const worktreeInfo = Array.from(this.agents.values())
+        .map(
+          (agent, i) =>
+            `  ${i + 1}. ${agent.model.modelId} → ${agent.worktree.path}`,
+        )
+        .join('\n');
+      this.emitProgress(`Environment ready. Agent worktrees:\n${worktreeInfo}`);
+
+      // Start all agents in parallel via PTY
+      this.emitProgress('Launching agents…');
+      this.sessionStatus = ArenaSessionStatus.RUNNING;
+      await this.runAgents();
+
+      // Mark session as idle (agents finished but still alive) unless
+      // already cancelled/timed out.
+      if (this.sessionStatus === ArenaSessionStatus.RUNNING) {
+        this.sessionStatus = ArenaSessionStatus.IDLE;
+      }
+
+      // Collect results (uses this.sessionStatus for result status)
+      const result = await this.collectResults();
+      this.cachedResult = result;
+
+      // Emit session complete event
+      this.eventEmitter.emit(ArenaEventType.SESSION_COMPLETE, {
+        sessionId: this.sessionId,
+        result,
+        timestamp: Date.now(),
+      });
+
+      this.callbacks.onArenaComplete?.(result);
+
+      // NOTE: session-ended telemetry is NOT emitted here.
+      // The session is "done running" but the user hasn't picked a winner
+      // or discarded yet.  The ended event fires from applyAgentResult()
+      // (status: 'selected') or cleanup/cleanupRuntime (status: 'discarded').
+
+      return result;
+    } catch (error) {
+      this.sessionStatus = ArenaSessionStatus.FAILED;
+
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      // Emit session error event
+      this.eventEmitter.emit(ArenaEventType.SESSION_ERROR, {
+        sessionId: this.sessionId,
+        error: errorMessage,
+        timestamp: Date.now(),
+      });
+
+      // Log arena session failed telemetry
+      this.emitSessionEnded('failed');
+
+      this.callbacks.onArenaError?.(
+        error instanceof Error ? error : new Error(errorMessage),
+      );
+
+      throw error;
+    }
+  }
+
+  /**
+   * Cancel the current Arena session.
+   */
+  async cancel(): Promise<void> {
+    if (!this.sessionId) {
+      return;
+    }
+
+    debugLogger.info(`Cancelling Arena session: ${this.sessionId}`);
+
+    // Stop polling
+    this.stopPolling();
+
+    // Abort the master controller
+    this.masterAbortController?.abort();
+
+    // Force stop all PTY processes (sends Ctrl-C)
+    this.backend?.stopAll();
+
+    // Final stats sync so telemetry reflects the latest counters.
+    // For PTY agents: read each agent's status file one last time.
+    // For in-process agents: pull counters from the interactive object.
+    await this.pollAgentStatuses().catch(() => {});
+    for (const agent of this.agents.values()) {
+      if (!isTerminalStatus(agent.status)) {
+        agent.syncStats?.();
+      }
+    }
+
+    // Update agent statuses — skip agents already in a terminal state
+    // (COMPLETED, FAILED, CANCELLED) so we don't overwrite a successful result.
+    for (const agent of this.agents.values()) {
+      if (!isTerminalStatus(agent.status)) {
+        agent.abortController.abort();
+        agent.stats.durationMs = Date.now() - agent.startedAt;
+        this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
+      }
+    }
+
+    this.sessionStatus = ArenaSessionStatus.CANCELLED;
+
+    // NOTE: session-ended telemetry is NOT emitted here.
+    // start() emits 'cancelled' when it unwinds through its early-cancel
+    // paths.  If cancel() is called after start() has already returned
+    // (all agents done, user viewing results), the ended event fires
+    // from cleanup() / cleanupRuntime() instead.
+  }
+
+  /**
+   * Clean up the Arena session (remove worktrees, kill processes, etc.).
+   */
+  async cleanup(): Promise<void> {
+    if (!this.sessionId) {
+      return;
+    }
+
+    debugLogger.info(`Cleaning up Arena session: ${this.sessionId}`);
+
+    // If no session-ended event was emitted yet, emit before tearing down.
+    // Use 'cancelled' if the session was explicitly stopped, 'discarded' if
+    // the user simply left without picking a winner.
+    this.emitSessionEnded(
+      this.sessionStatus === ArenaSessionStatus.CANCELLED
+        ? 'cancelled'
+        : 'discarded',
+    );
+
+    // Stop polling in case cleanup is called without cancel
+    this.stopPolling();
+
+    // Remove in-process event bridge listeners
+    this.teardownEventBridge();
+
+    // Clean up backend resources
+    if (this.backend) {
+      await this.backend.cleanup();
+    }
+
+    // Clean up worktrees
+    await this.worktreeService.cleanupSession(this.worktreeDirName!);
+
+    this.agents.clear();
+    this.cachedResult = null;
+    this.sessionId = undefined;
+    this.worktreeDirName = undefined;
+    this.arenaConfig = undefined;
+    this.backend = null;
+    this.sessionEndedLogged = false;
+  }
+
+  /**
+   * Clean up runtime resources (processes, backend, memory) without removing
+   * worktrees or session files on disk. Used when preserveArtifacts is enabled.
+   */
+  async cleanupRuntime(): Promise<void> {
+    if (!this.sessionId) {
+      return;
+    }
+
+    debugLogger.info(
+      `Cleaning up Arena runtime (preserving artifacts): ${this.sessionId}`,
+    );
+
+    // If no session-ended event was emitted yet, emit before tearing down.
+    this.emitSessionEnded(
+      this.sessionStatus === ArenaSessionStatus.CANCELLED
+        ? 'cancelled'
+        : 'discarded',
+    );
+
+    this.stopPolling();
+
+    // Remove in-process event bridge listeners
+    this.teardownEventBridge();
+
+    if (this.backend) {
+      await this.backend.cleanup();
+    }
+
+    this.agents.clear();
+    this.cachedResult = null;
+    this.sessionId = undefined;
+    this.worktreeDirName = undefined;
+    this.arenaConfig = undefined;
+    this.backend = null;
+    this.sessionEndedLogged = false;
+  }
+
+  /**
+   * Apply the result from a specific agent to the main working directory.
+   */
+  async applyAgentResult(
+    agentId: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return { success: false, error: `Agent ${agentId} not found` };
+    }
+
+    if (!isSuccessStatus(agent.status)) {
+      return {
+        success: false,
+        error: `Agent ${agentId} has not completed (current status: ${agent.status})`,
+      };
+    }
+
+    const applyResult = await this.worktreeService.applyWorktreeChanges(
+      agent.worktree.path,
+    );
+
+    if (applyResult.success) {
+      this.emitSessionEnded('selected', agent.model.modelId);
+    }
+
+    return applyResult;
+  }
+
+  /**
+   * Get the diff for a specific agent's changes.
+   */
+  async getAgentDiff(agentId: string): Promise<string> {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return `Agent ${agentId} not found`;
+    }
+
+    return this.worktreeService.getWorktreeDiff(agent.worktree.path);
+  }
+
+  // ─── Private: Telemetry ───────────────────────────────────────
+
+  /**
+   * Emit the `arena_session_ended` telemetry event exactly once.
+   *
+   * Called from:
+   *  - start() early-cancel paths → 'cancelled'
+   *  - start() catch block → 'failed'
+   *  - applyAgentResult() on success → 'selected' (with winner)
+   *  - cleanup() / cleanupRuntime() → 'discarded' (user left without picking)
+   */
+  private emitSessionEnded(
+    status: ArenaSessionEndedStatus,
+    winnerModelId?: string,
+  ): void {
+    if (this.sessionEndedLogged) return;
+    this.sessionEndedLogged = true;
+
+    const agents = Array.from(this.agents.values());
+    logArenaSessionEnded(
+      this.config,
+      makeArenaSessionEndedEvent({
+        arena_session_id: this.sessionId ?? '',
+        status,
+        duration_ms: this.startedAt ? Date.now() - this.startedAt : 0,
+        display_backend: this.backend?.type,
+        agent_count: agents.length,
+        completed_agents: agents.filter(
+          (a) => a.status === AgentStatus.COMPLETED,
+        ).length,
+        failed_agents: agents.filter((a) => a.status === AgentStatus.FAILED)
+          .length,
+        cancelled_agents: agents.filter(
+          (a) => a.status === AgentStatus.CANCELLED,
+        ).length,
+        winner_model_id: winnerModelId,
+      }),
+    );
+  }
+
+  // ─── Private: Progress ─────────────────────────────────────────
+
+  /**
+   * Emit a progress message via SESSION_UPDATE so the UI can display
+   * setup status.
+   */
+  private emitProgress(
+    message: string,
+    type: 'info' | 'warning' | 'success' = 'info',
+  ): void {
+    if (!this.sessionId) return;
+    this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
+      sessionId: this.sessionId,
+      type,
+      message,
+      timestamp: Date.now(),
+    });
+  }
+
+  // ─── Private: Validation ───────────────────────────────────────
+
+  private validateStartOptions(options: ArenaStartOptions): void {
+    if (!options.models || options.models.length < 2) {
+      throw new Error('Arena requires at least 2 models to compare');
+    }
+
+    if (options.models.length > ARENA_MAX_AGENTS) {
+      throw new Error(`Arena supports a maximum of ${ARENA_MAX_AGENTS} models`);
+    }
+
+    if (!options.task || options.task.trim().length === 0) {
+      throw new Error('Arena requires a task/prompt');
+    }
+
+    // Check for duplicate model IDs
+    const modelIds = options.models.map((m) => m.modelId);
+    const uniqueIds = new Set(modelIds);
+    if (uniqueIds.size !== modelIds.length) {
+      throw new Error('Arena models must have unique identifiers');
+    }
+
+    // Check for collisions after filesystem-safe normalization.
+    // safeAgentId replaces characters like / \ : to '--', so distinct
+    // model IDs (e.g. "org/model" and "org--model") can map to the same
+    // status/control file path and corrupt each other's state.
+    const safeIds = modelIds.map((id) => safeAgentId(id));
+    const uniqueSafeIds = new Set(safeIds);
+    if (uniqueSafeIds.size !== safeIds.length) {
+      const collisions = modelIds.filter(
+        (id, i) => safeIds.indexOf(safeIds[i]!) !== i,
+      );
+      throw new Error(
+        `Arena model IDs collide after path normalization: ${collisions.join(', ')}. ` +
+          'Choose model IDs that remain unique when special characters (/ \\ : etc.) are replaced.',
+      );
+    }
+  }
+
+  // ─── Private: Backend Initialization ───────────────────────────
+
+  /**
+   * Initialize the backend.
+   */
+  private async initializeBackend(displayMode?: DisplayMode): Promise<void> {
+    const { backend, warning } = await detectBackend(displayMode, this.config);
+    await backend.init();
+    this.backend = backend;
+
+    if (warning && this.sessionId) {
+      this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
+        sessionId: this.sessionId,
+        type: 'warning',
+        message: warning,
+        timestamp: Date.now(),
+      });
+    }
+
+    // Surface attach hint for external tmux sessions
+    const attachHint = backend.getAttachHint();
+    if (attachHint && this.sessionId) {
+      this.eventEmitter.emit(ArenaEventType.SESSION_UPDATE, {
+        sessionId: this.sessionId,
+        type: 'info',
+        message: `To view agent panes, run: ${attachHint}`,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  // ─── Private: Worktree Setup ───────────────────────────────────
+
+  /**
+   * Derive a short, filesystem-friendly directory name from the full session ID.
+   * Uses the first 8 hex characters of the UUID. If that path already exists,
+   * appends a numeric suffix (-2, -3, …) until an unused name is found.
+   */
+  private async deriveWorktreeDirName(sessionId: string): Promise<string> {
+    const shortId = sessionId.replaceAll('-', '').slice(0, 8);
+    let candidate = shortId;
+    let suffix = 2;
+
+    while (true) {
+      const candidatePath = path.join(this.arenaBaseDir, candidate);
+      try {
+        await fs.access(candidatePath);
+        candidate = `${shortId}-${suffix}`;
+        suffix++;
+      } catch {
+        return candidate;
+      }
+    }
+  }
+
+  private async setupWorktrees(): Promise<void> {
+    if (!this.arenaConfig) {
+      throw new Error('Arena config not initialized');
+    }
+
+    debugLogger.info('Setting up worktrees for Arena agents');
+
+    const worktreeNames = this.arenaConfig.models.map((m) => m.modelId);
+
+    const result = await this.worktreeService.setupWorktrees({
+      sessionId: this.worktreeDirName!,
+      sourceRepoPath: this.arenaConfig.sourceRepoPath,
+      worktreeNames,
+      metadata: { arenaSessionId: this.arenaConfig.sessionId },
+    });
+
+    if (!result.success) {
+      const errorMessages = result.errors
+        .map((e) => `${e.name}: ${e.error}`)
+        .join('; ');
+      throw new Error(`Failed to set up worktrees: ${errorMessages}`);
+    }
+
+    // Create agent states
+    for (let i = 0; i < this.arenaConfig.models.length; i++) {
+      const model = this.arenaConfig.models[i]!;
+      const worktreeName = worktreeNames[i]!;
+      const worktree = result.worktreesByName[worktreeName];
+
+      if (!worktree) {
+        throw new Error(
+          `No worktree created for model ${model.modelId} (name: ${worktreeName})`,
+        );
+      }
+
+      const agentId = model.modelId;
+
+      const agentState: ArenaAgentState = {
+        agentId,
+        model,
+        status: AgentStatus.INITIALIZING,
+        worktree,
+        abortController: new AbortController(),
+        agentSessionId: `${this.sessionId}#${agentId}`,
+        stats: {
+          rounds: 0,
+          totalTokens: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          durationMs: 0,
+          toolCalls: 0,
+          successfulToolCalls: 0,
+          failedToolCalls: 0,
+        },
+        startedAt: 0,
+        accumulatedText: '',
+      };
+
+      this.agents.set(agentId, agentState);
+    }
+
+    debugLogger.info(`Created ${this.agents.size} agent worktrees`);
+  }
+
+  // ─── Private: Agent Execution ──────────────────────────────────
+
+  private async runAgents(): Promise<void> {
+    if (!this.arenaConfig) {
+      throw new Error('Arena config not initialized');
+    }
+
+    debugLogger.info('Starting Arena agents sequentially via backend');
+
+    const backend = this.requireBackend();
+
+    // Wire up exit handler on the backend
+    backend.setOnAgentExit((agentId, exitCode, signal) => {
+      this.handleAgentExit(agentId, exitCode, signal);
+    });
+
+    const isInProcess = backend.type === DISPLAY_MODE.IN_PROCESS;
+
+    // Spawn agents sequentially — each spawn completes before starting the next.
+    // This creates a visual effect where panes appear one by one.
+    for (const agent of this.agents.values()) {
+      await this.spawnAgentPty(agent);
+    }
+
+    this.emitProgress('All agents are now live and working on the task.');
+
+    // For in-process mode, set up event bridges instead of file-based polling.
+    // For PTY mode, start polling agent status files.
+    if (isInProcess) {
+      this.setupInProcessEventBridge(backend as InProcessBackend);
+    } else {
+      this.startPolling();
+    }
+
+    // Set up timeout
+    const timeoutSeconds = this.arenaConfig.timeoutSeconds;
+
+    // Wait for all agents to reach IDLE or TERMINATED, or timeout.
+    // Unlike waitForAll (which waits for PTY exit), this resolves as soon
+    // as every agent has finished its first task in interactive mode.
+    const allSettled = await this.waitForAllAgentsSettled(
+      timeoutSeconds ? timeoutSeconds * 1000 : undefined,
+    );
+
+    // Stop polling when all agents are done (no-op for in-process mode)
+    if (!isInProcess) {
+      this.stopPolling();
+    }
+
+    if (!allSettled) {
+      debugLogger.info('Arena session timed out, stopping remaining agents');
+      this.sessionStatus = ArenaSessionStatus.CANCELLED;
+
+      // Terminate remaining active agents
+      for (const agent of this.agents.values()) {
+        if (!isTerminalStatus(agent.status)) {
+          backend.stopAgent(agent.agentId);
+          agent.abortController.abort();
+          agent.stats.durationMs = Date.now() - agent.startedAt;
+          this.updateAgentStatus(agent.agentId, AgentStatus.CANCELLED);
+        }
+      }
+    }
+
+    debugLogger.info('All Arena agents settled or timed out');
+  }
+
+  private async spawnAgentPty(agent: ArenaAgentState): Promise<void> {
+    if (!this.arenaConfig) {
+      return;
+    }
+
+    const backend = this.requireBackend();
+
+    const { agentId, model, worktree } = agent;
+
+    debugLogger.info(`Spawning agent PTY: ${agentId}`);
+
+    agent.startedAt = Date.now();
+    this.updateAgentStatus(agentId, AgentStatus.RUNNING);
+
+    // Emit agent start event
+    this.eventEmitter.emit(ArenaEventType.AGENT_START, {
+      sessionId: this.arenaConfig.sessionId,
+      agentId,
+      model,
+      worktreePath: worktree.path,
+      timestamp: Date.now(),
+    });
+
+    this.callbacks.onAgentStart?.(agentId, model);
+
+    // Build the CLI command to spawn the agent as a full interactive instance
+    const spawnConfig = this.buildAgentSpawnConfig(agent);
+
+    try {
+      await backend.spawnAgent(spawnConfig);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      agent.error = errorMessage;
+      this.updateAgentStatus(agentId, AgentStatus.FAILED);
+
+      this.eventEmitter.emit(ArenaEventType.AGENT_ERROR, {
+        sessionId: this.requireConfig().sessionId,
+        agentId,
+        error: errorMessage,
+        timestamp: Date.now(),
+      });
+
+      debugLogger.error(`Failed to spawn agent: ${agentId}`, error);
+    }
+  }
+
+  private requireBackend(): Backend {
+    if (!this.backend) {
+      throw new Error('Arena backend not initialized.');
+    }
+    return this.backend;
+  }
+
+  private requireConfig(): ArenaConfig {
+    if (!this.arenaConfig) {
+      throw new Error('Arena config not initialized');
+    }
+    return this.arenaConfig;
+  }
+
+  private handleAgentExit(
+    agentId: string,
+    exitCode: number | null,
+    _signal: number | null,
+  ): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return;
+    }
+
+    // Already failed/cancelled (e.g. via cancel)
+    if (isTerminalStatus(agent.status)) {
+      return;
+    }
+
+    agent.stats.durationMs = Date.now() - agent.startedAt;
+
+    if (
+      exitCode !== 0 &&
+      exitCode !== null &&
+      !agent.abortController.signal.aborted
+    ) {
+      agent.error = `Process exited with code ${exitCode}`;
+      this.eventEmitter.emit(ArenaEventType.AGENT_ERROR, {
+        sessionId: this.requireConfig().sessionId,
+        agentId,
+        error: agent.error,
+        timestamp: Date.now(),
+      });
+    }
+
+    this.updateAgentStatus(
+      agentId,
+      agent.abortController.signal.aborted
+        ? AgentStatus.CANCELLED
+        : AgentStatus.FAILED,
+    );
+    debugLogger.info(`Agent exited: ${agentId} (exit code: ${exitCode})`);
+  }
+
+  /**
+   * Build the spawn configuration for an agent subprocess.
+   *
+   * The agent is launched as a full interactive CLI instance, running in
+   * its own worktree with the specified model. The task is passed via
+   * the --prompt argument so the CLI enters interactive mode and
+   * immediately starts working on the task.
+   */
+  private buildAgentSpawnConfig(agent: ArenaAgentState): AgentSpawnConfig {
+    const { agentId, model, worktree } = agent;
+
+    // Build CLI args for spawning an interactive agent.
+    // Note: --cwd is NOT a valid CLI flag; the working directory is set
+    // via AgentSpawnConfig.cwd which becomes the PTY's cwd.
+    const args: string[] = [];
+
+    // Set the model and auth type
+    args.push('--model', model.modelId);
+    args.push('--auth-type', model.authType);
+
+    // Pass the task via --prompt-interactive (-i) so the CLI enters
+    // interactive mode AND immediately starts working on the task.
+    // (--prompt runs non-interactively and would exit after completion.)
+    if (this.arenaConfig?.task) {
+      args.push('--prompt-interactive', this.arenaConfig.task);
+    }
+
+    // Set approval mode if specified
+    if (this.arenaConfig?.approvalMode) {
+      args.push('--approval-mode', this.arenaConfig.approvalMode);
+    }
+
+    // Pass the agent's session ID so the child CLI uses it for telemetry
+    // correlation instead of generating a random UUID.
+    args.push('--session-id', agent.agentSessionId);
+
+    // Construct env vars for the agent
+    const arenaSessionDir = this.getArenaSessionDir();
+    const env: Record<string, string> = {
+      QWEN_CODE: '1',
+      ARENA_AGENT_ID: agentId,
+      ARENA_SESSION_ID: this.arenaConfig?.sessionId ?? '',
+      ARENA_SESSION_DIR: arenaSessionDir,
+    };
+
+    // If the model has auth overrides, pass them via env
+    if (model.apiKey) {
+      env['QWEN_API_KEY'] = model.apiKey;
+    }
+    if (model.baseUrl) {
+      env['QWEN_BASE_URL'] = model.baseUrl;
+    }
+
+    const spawnConfig: AgentSpawnConfig = {
+      agentId,
+      command: process.execPath, // Use the same Node.js binary
+      args: [path.resolve(process.argv[1]!), ...args], // Re-launch the CLI entry point (must be absolute path since cwd changes)
+      cwd: worktree.path,
+      env,
+      cols: this.terminalCols,
+      rows: this.terminalRows,
+      inProcess: {
+        agentName: model.modelId,
+        initialTask: this.arenaConfig?.task,
+        runtimeConfig: {
+          promptConfig: {
+            systemPrompt: getCoreSystemPrompt(
+              this.config.getUserMemory(),
+              model.modelId,
+            ),
+          },
+          modelConfig: { model: model.modelId },
+          runConfig: {
+            max_turns: this.arenaConfig?.maxRoundsPerAgent,
+            max_time_minutes: this.arenaConfig?.timeoutSeconds
+              ? Math.ceil(this.arenaConfig.timeoutSeconds / 60)
+              : undefined,
+          },
+        },
+        authOverrides: {
+          authType: model.authType,
+          apiKey: model.apiKey,
+          baseUrl: model.baseUrl,
+        },
+        chatHistory: this.arenaConfig?.chatHistory,
+      },
+    };
+
+    debugLogger.info(
+      `[buildAgentSpawnConfig] agentId=${agentId}, command=${spawnConfig.command}, cliEntry=${process.argv[1]}, resolvedEntry=${path.resolve(process.argv[1]!)}`,
+    );
+    debugLogger.info(
+      `[buildAgentSpawnConfig] args=${JSON.stringify(spawnConfig.args)}`,
+    );
+    debugLogger.info(
+      `[buildAgentSpawnConfig] cwd=${spawnConfig.cwd}, env keys=${Object.keys(env).join(',')}`,
+    );
+
+    return spawnConfig;
+  }
+
+  // ─── Private: Status & Results ─────────────────────────────────
+
+  /** Decide whether a status transition is valid. Returns the new status or null. */
+  private resolveTransition(
+    current: AgentStatus,
+    incoming: AgentStatus,
+  ): AgentStatus | null {
+    if (current === incoming) return null;
+    if (isTerminalStatus(current)) {
+      // Allow revival: COMPLETED → RUNNING (agent received new input)
+      if (
+        current === AgentStatus.COMPLETED &&
+        incoming === AgentStatus.RUNNING
+      ) {
+        return incoming;
+      }
+      return null;
+    }
+    return incoming;
+  }
+
+  private updateAgentStatus(
+    agentId: string,
+    newStatus: AgentStatus,
+    options?: { roundCancelledByUser?: boolean },
+  ): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return;
+    }
+
+    const previousStatus = agent.status;
+    agent.status = newStatus;
+
+    this.eventEmitter.emit(ArenaEventType.AGENT_STATUS_CHANGE, {
+      sessionId: this.requireConfig().sessionId,
+      agentId,
+      previousStatus,
+      newStatus,
+      timestamp: Date.now(),
+    });
+
+    const label = agent.model.modelId;
+
+    // Emit a success message when an agent finishes its initial task.
+    if (
+      this.sessionStatus === ArenaSessionStatus.RUNNING &&
+      previousStatus === AgentStatus.RUNNING &&
+      newStatus === AgentStatus.IDLE
+    ) {
+      if (options?.roundCancelledByUser) {
+        this.emitProgress(`Agent ${label} is cancelled by user.`, 'warning');
+      } else {
+        this.emitProgress(`Agent ${label} finished initial task.`, 'success');
+      }
+    }
+
+    // Emit progress messages for follow-up transitions (only after
+    // the initial task — the session is IDLE once all agents first settle).
+    if (this.sessionStatus === ArenaSessionStatus.IDLE) {
+      if (
+        previousStatus === AgentStatus.IDLE &&
+        newStatus === AgentStatus.RUNNING
+      ) {
+        this.emitProgress(`Agent ${label} is working on a follow-up task…`);
+      } else if (
+        previousStatus === AgentStatus.RUNNING &&
+        newStatus === AgentStatus.IDLE
+      ) {
+        if (options?.roundCancelledByUser) {
+          this.emitProgress(`Agent ${label} is cancelled by user.`, 'warning');
+        } else {
+          this.emitProgress(
+            `Agent ${label} finished follow-up task.`,
+            'success',
+          );
+        }
+      }
+    }
+
+    // Emit AGENT_COMPLETE when agent reaches a terminal status
+    if (isTerminalStatus(newStatus)) {
+      const result = this.buildAgentResult(agent);
+
+      this.eventEmitter.emit(ArenaEventType.AGENT_COMPLETE, {
+        sessionId: this.requireConfig().sessionId,
+        agentId,
+        result,
+        timestamp: Date.now(),
+      });
+
+      // Log arena agent completed telemetry
+      const agentTelemetryStatus =
+        newStatus === AgentStatus.COMPLETED
+          ? ('completed' as const)
+          : newStatus === AgentStatus.FAILED
+            ? ('failed' as const)
+            : ('cancelled' as const);
+      logArenaAgentCompleted(
+        this.config,
+        makeArenaAgentCompletedEvent({
+          arena_session_id: this.sessionId ?? '',
+          agent_session_id: agent.agentSessionId,
+          agent_model_id: agent.model.modelId,
+          status: agentTelemetryStatus,
+          duration_ms: agent.stats.durationMs,
+          rounds: agent.stats.rounds,
+          total_tokens: agent.stats.totalTokens,
+          input_tokens: agent.stats.inputTokens,
+          output_tokens: agent.stats.outputTokens,
+          tool_calls: agent.stats.toolCalls,
+          successful_tool_calls: agent.stats.successfulToolCalls,
+          failed_tool_calls: agent.stats.failedToolCalls,
+        }),
+      );
+
+      this.callbacks.onAgentComplete?.(result);
+    }
+  }
+
+  private buildAgentResult(agent: ArenaAgentState): ArenaAgentResult {
+    return {
+      agentId: agent.agentId,
+      model: agent.model,
+      status: agent.status,
+      worktree: agent.worktree,
+      finalText: agent.accumulatedText || undefined,
+      error: agent.error,
+      stats: { ...agent.stats },
+      startedAt: agent.startedAt,
+      endedAt: Date.now(),
+    };
+  }
+
+  // ─── Arena Session Directory ──────────────────────────────────
+
+  /**
+   * Get the arena session directory for the current session.
+   * All status and control files are stored here.
+   *
+   * Returns the absolute path to the session directory, e.g.
+   * `~/.qwen/worktrees/<sessionId>/`.  The directory contains:
+   * - `config.json` — consolidated session config + per-agent status
+   * - `agents/<safeAgentId>.json` — individual agent status files
+   * - `control/` — control signals (shutdown, cancel)
+   */
+  getArenaSessionDir(): string {
+    if (!this.arenaConfig) {
+      throw new Error('Arena config not initialized');
+    }
+    return GitWorktreeService.getSessionDir(
+      this.worktreeDirName!,
+      this.arenaBaseDir,
+    );
+  }
+
+  // ─── Private: Polling & Control Signals ──────────────────────
+
+  /**
+   * Wait for all agents to reach IDLE or TERMINATED state.
+   * Returns true if all agents settled, false if timeout was reached.
+   */
+  private waitForAllAgentsSettled(timeoutMs?: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const checkSettled = () => {
+        for (const agent of this.agents.values()) {
+          if (!isSettledStatus(agent.status)) {
+            return false;
+          }
+        }
+        return true;
+      };
+
+      if (checkSettled()) {
+        resolve(true);
+        return;
+      }
+
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs !== undefined) {
+        timeoutHandle = setTimeout(() => {
+          clearInterval(pollHandle);
+          resolve(false);
+        }, timeoutMs);
+      }
+
+      // Re-check periodically (piggybacks on the same polling interval)
+      const pollHandle = setInterval(() => {
+        if (checkSettled()) {
+          clearInterval(pollHandle);
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          resolve(true);
+        }
+      }, ARENA_POLL_INTERVAL_MS);
+    });
+  }
+
+  /**
+   * Start polling agent status files at a fixed interval.
+   */
+  private startPolling(): void {
+    if (this.pollingInterval) {
+      return;
+    }
+
+    this.pollingInterval = setInterval(() => {
+      this.pollAgentStatuses().catch((error) => {
+        debugLogger.error('Error polling agent statuses:', error);
+      });
+    }, ARENA_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Stop the polling interval.
+   */
+  private stopPolling(): void {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
+  }
+
+  /**
+   * Set up event bridges for in-process agents.
+   * Subscribes to each AgentInteractive's events to update ArenaManager state.
+   * Listeners are tracked in `eventBridgeCleanups` for teardown.
+   */
+  private setupInProcessEventBridge(backend: InProcessBackend): void {
+    for (const agent of this.agents.values()) {
+      const interactive = backend.getAgent(agent.agentId);
+      if (!interactive) continue;
+
+      const emitter = interactive.getEventEmitter();
+      if (!emitter) continue;
+
+      // AgentInteractive emits canonical AgentStatus values — no mapping needed.
+
+      const syncStats = () => {
+        const { totalToolCalls, totalDurationMs, ...rest } =
+          interactive.getStats();
+        Object.assign(agent.stats, rest, {
+          toolCalls: totalToolCalls,
+          durationMs: totalDurationMs,
+        });
+      };
+
+      agent.syncStats = syncStats;
+
+      const applyStatus = (
+        incoming: AgentStatus,
+        options?: { roundCancelledByUser?: boolean },
+      ) => {
+        const resolved = this.resolveTransition(agent.status, incoming);
+        if (!resolved) return;
+        if (resolved === AgentStatus.FAILED) {
+          agent.error =
+            interactive.getLastRoundError() || interactive.getError();
+        }
+        if (isSettledStatus(resolved)) {
+          agent.stats.durationMs = Date.now() - agent.startedAt;
+        }
+        this.updateAgentStatus(agent.agentId, resolved, options);
+      };
+
+      // Sync stats before mapping so counters are up-to-date even when
+      // the provider omits usage_metadata events.
+      const onStatusChange = (event: AgentStatusChangeEvent) => {
+        syncStats();
+        applyStatus(event.newStatus, {
+          roundCancelledByUser: event.roundCancelledByUser,
+        });
+        // Write status files so external consumers get a consistent
+        // file-based view regardless of backend mode.
+        this.flushInProcessStatusFiles().catch((err) =>
+          debugLogger.error('Failed to flush in-process status files:', err),
+        );
+      };
+
+      const onUsageMetadata = () => {
+        syncStats();
+        this.flushInProcessStatusFiles().catch((err) =>
+          debugLogger.error('Failed to flush in-process status files:', err),
+        );
+      };
+
+      emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
+      emitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
+
+      // Store cleanup functions so listeners can be removed during teardown
+      this.eventBridgeCleanups.push(() => {
+        emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
+        emitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+      });
+
+      // Reconcile: if the agent already transitioned before the bridge was
+      // attached (e.g. fast completion or createChat failure during spawn),
+      // backfill stats and apply its current status now so
+      // waitForAllAgentsSettled sees it.
+      syncStats();
+      applyStatus(interactive.getStatus());
+    }
+
+    // Flush status files once after reconciliation so that agents which
+    // already settled before the bridge was attached still get written to disk.
+    this.flushInProcessStatusFiles().catch((err) =>
+      debugLogger.error('Failed to flush in-process status files:', err),
+    );
+  }
+
+  /**
+   * Remove all event bridge listeners registered by setupInProcessEventBridge.
+   */
+  private teardownEventBridge(): void {
+    for (const cleanup of this.eventBridgeCleanups) {
+      cleanup();
+    }
+    this.eventBridgeCleanups.length = 0;
+  }
+
+  /**
+   * Read per-agent status files from `<arenaSessionDir>/agents/` directory.
+   * Updates agent stats, emits AGENT_STATS_UPDATE events, and writes a
+   * consolidated `status.json` at the arena session root.
+   */
+  private async pollAgentStatuses(): Promise<void> {
+    const sessionDir = this.getArenaSessionDir();
+    const agentsDir = path.join(sessionDir, 'agents');
+    const consolidatedAgents: Record<string, ArenaStatusFile> = {};
+
+    for (const agent of this.agents.values()) {
+      // Only poll agents that are actively working
+      if (
+        isSettledStatus(agent.status) ||
+        agent.status === AgentStatus.INITIALIZING
+      ) {
+        continue;
+      }
+
+      try {
+        const statusPath = path.join(
+          agentsDir,
+          `${safeAgentId(agent.agentId)}.json`,
+        );
+        const content = await fs.readFile(statusPath, 'utf-8');
+        const statusFile = JSON.parse(content) as ArenaStatusFile;
+
+        // Collect for consolidated file
+        consolidatedAgents[agent.agentId] = statusFile;
+
+        // Update agent stats from the status file.
+        agent.stats = {
+          ...agent.stats,
+          ...statusFile.stats,
+        };
+
+        // Detect state transitions from the sideband status file
+        const resolved = this.resolveTransition(
+          agent.status,
+          statusFile.status,
+        );
+        if (resolved) {
+          if (resolved === AgentStatus.FAILED && statusFile.error) {
+            agent.error = statusFile.error;
+          }
+          this.updateAgentStatus(agent.agentId, resolved);
+        }
+
+        this.callbacks.onAgentStatsUpdate?.(agent.agentId, statusFile.stats);
+      } catch (error: unknown) {
+        // File may not exist yet (agent hasn't written first status)
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          continue;
+        }
+        debugLogger.error(
+          `Error reading status for agent ${agent.agentId}:`,
+          error,
+        );
+      }
+    }
+
+    // Write consolidated status.json at the arena session root
+    if (Object.keys(consolidatedAgents).length > 0) {
+      await this.writeConsolidatedStatus(consolidatedAgents);
+    }
+  }
+
+  /**
+   * Merge agent status data into the arena session's config.json.
+   * Reads the existing config, adds/updates `updatedAt` and `agents`,
+   * then writes back atomically (temp file → rename).
+   */
+  private async writeConsolidatedStatus(
+    agents: Record<string, ArenaStatusFile>,
+  ): Promise<void> {
+    const sessionDir = this.getArenaSessionDir();
+    const configPath = path.join(sessionDir, 'config.json');
+
+    try {
+      // Read existing config.json written by GitWorktreeService
+      let config: ArenaConfigFile;
+      try {
+        const content = await fs.readFile(configPath, 'utf-8');
+        config = JSON.parse(content) as ArenaConfigFile;
+      } catch {
+        // If config.json doesn't exist yet, create a minimal one
+        const arenaConfig = this.requireConfig();
+        config = {
+          arenaSessionId: arenaConfig.sessionId,
+          sourceRepoPath: arenaConfig.sourceRepoPath,
+          worktreeNames: arenaConfig.models.map(
+            (m) => m.displayName || m.modelId,
+          ),
+          createdAt: this.startedAt!,
+        };
+      }
+
+      // Merge in the agent status data
+      config.updatedAt = Date.now();
+      config.agents = agents;
+
+      await atomicWriteJSON(configPath, config);
+    } catch (error) {
+      debugLogger.error(
+        'Failed to write consolidated status to config.json:',
+        error,
+      );
+    }
+  }
+
+  /**
+   * Build an ArenaStatusFile snapshot from in-memory agent state.
+   */
+  private buildStatusFile(agent: ArenaAgentState): ArenaStatusFile {
+    return {
+      agentId: agent.agentId,
+      status: agent.status,
+      updatedAt: Date.now(),
+      rounds: agent.stats.rounds,
+      stats: { ...agent.stats },
+      finalSummary: null,
+      error: agent.error ?? null,
+    };
+  }
+
+  /**
+   * Write status files for all in-process agents and update the
+   * consolidated config.json.
+   *
+   * In PTY mode these files are written by ArenaAgentClient inside each
+   * child process. In in-process mode there is no child process, so the
+   * ArenaManager writes them directly so that external consumers
+   * (e.g. an orchestrating agent) get a consistent file-based view
+   * regardless of backend.
+   */
+  private async flushInProcessStatusFiles(): Promise<void> {
+    const sessionDir = this.getArenaSessionDir();
+    const agentsDir = path.join(sessionDir, 'agents');
+    await fs.mkdir(agentsDir, { recursive: true });
+
+    const consolidatedAgents: Record<string, ArenaStatusFile> = {};
+
+    for (const agent of this.agents.values()) {
+      const statusFile = this.buildStatusFile(agent);
+      const filePath = path.join(
+        agentsDir,
+        `${safeAgentId(agent.agentId)}.json`,
+      );
+      await atomicWriteJSON(filePath, statusFile);
+      consolidatedAgents[agent.agentId] = statusFile;
+    }
+
+    if (Object.keys(consolidatedAgents).length > 0) {
+      await this.writeConsolidatedStatus(consolidatedAgents);
+    }
+  }
+
+  /**
+   * Write a control signal to the arena session's control/ directory.
+   * The child agent consumes (reads + deletes) this file.
+   */
+  async sendControlSignal(
+    agentId: string,
+    type: ArenaControlSignal['type'],
+    reason: string,
+  ): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      debugLogger.error(
+        `Cannot send control signal: agent ${agentId} not found`,
+      );
+      return;
+    }
+
+    const controlSignal: ArenaControlSignal = {
+      type,
+      reason,
+      timestamp: Date.now(),
+    };
+
+    const sessionDir = this.getArenaSessionDir();
+    const controlDir = path.join(sessionDir, 'control');
+    const controlPath = path.join(controlDir, `${safeAgentId(agentId)}.json`);
+
+    try {
+      await fs.mkdir(controlDir, { recursive: true });
+      await fs.writeFile(
+        controlPath,
+        JSON.stringify(controlSignal, null, 2),
+        'utf-8',
+      );
+      debugLogger.info(
+        `Sent ${type} control signal to agent ${agentId}: ${reason}`,
+      );
+    } catch (error) {
+      debugLogger.error(
+        `Failed to send control signal to agent ${agentId}:`,
+        error,
+      );
+    }
+  }
+
+  private async collectResults(): Promise<ArenaSessionResult> {
+    if (!this.arenaConfig) {
+      throw new Error('Arena config not initialized');
+    }
+
+    const agents: ArenaAgentResult[] = [];
+
+    for (const agent of this.agents.values()) {
+      const result = this.buildAgentResult(agent);
+
+      // Get diff for agents that finished their task (IDLE or COMPLETED)
+      if (isSuccessStatus(agent.status)) {
+        try {
+          result.diff = await this.worktreeService.getWorktreeDiff(
+            agent.worktree.path,
+          );
+        } catch (error) {
+          debugLogger.error(
+            `Failed to get diff for agent ${agent.agentId}:`,
+            error,
+          );
+        }
+      }
+
+      agents.push(result);
+    }
+
+    const endedAt = Date.now();
+
+    return {
+      sessionId: this.arenaConfig.sessionId,
+      task: this.arenaConfig.task,
+      status: this.sessionStatus,
+      agents,
+      startedAt: this.startedAt!,
+      endedAt,
+      totalDurationMs: endedAt - this.startedAt!,
+      wasRepoInitialized: false,
+    };
+  }
+}

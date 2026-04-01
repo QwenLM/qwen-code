@@ -34,14 +34,15 @@ import {
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../contentGenerator.js';
-import { isStructuredError } from '../../utils/quotaErrorDetection.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
-
-interface StructuredError {
-  status: number;
-}
+import {
+  getErrorMessage,
+  getErrorStatus,
+  getErrorType,
+} from '../../utils/errors.js';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -49,16 +50,22 @@ interface StructuredError {
 export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
+  private modalities?: InputModalities;
 
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
     generatorConfig: ContentGeneratorConfig,
   ) {
+    this.modalities = generatorConfig.modalities;
+
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
     if (generatorConfig.enableOpenAILogging) {
-      this.openaiLogger = new OpenAILogger(generatorConfig.openAILoggingDir);
+      this.openaiLogger = new OpenAILogger(
+        generatorConfig.openAILoggingDir,
+        config.getWorkingDir(),
+      );
       this.schemaCompliance = generatorConfig.schemaCompliance;
     }
   }
@@ -108,33 +115,26 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     prompt_id: string,
   ): void {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorType =
-      (error as { type?: string })?.type ||
-      (error instanceof Error ? error.name : 'unknown');
+    const errorMessage = getErrorMessage(error);
+    const errorType = getErrorType(error);
     const errorResponseId =
       (error as { requestID?: string; request_id?: string })?.requestID ||
       (error as { requestID?: string; request_id?: string })?.request_id ||
       responseId;
-    const errorStatus =
-      (error as { code?: string | number; status?: number })?.code ??
-      (error as { status?: number })?.status ??
-      (isStructuredError(error)
-        ? (error as StructuredError).status
-        : undefined);
+    const errorStatus = getErrorStatus(error);
 
     logApiError(
       this.config,
-      new ApiErrorEvent(
-        errorResponseId,
+      new ApiErrorEvent({
+        responseId: errorResponseId,
         model,
-        errorMessage,
         durationMs,
-        prompt_id,
-        this.config.getAuthType(),
+        promptId: prompt_id,
+        authType: this.config.getAuthType(),
+        errorMessage,
         errorType,
-        errorStatus,
-      ),
+        statusCode: errorStatus,
+      }),
     );
   }
 
@@ -247,6 +247,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       request.model,
       this.schemaCompliance,
     );
+    converter.setModalities(this.modalities ?? {});
     const messages = converter.convertGeminiRequestToOpenAI(request, {
       cleanOrphanToolCalls: false,
     });
