@@ -144,6 +144,8 @@ export interface UIState {
   taskStartTokens: number;
   // Prompt suggestion
   promptSuggestion: string | null;
+  /** Dismiss prompt suggestion (clears state, aborts speculation) */
+  dismissPromptSuggestion: () => void;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

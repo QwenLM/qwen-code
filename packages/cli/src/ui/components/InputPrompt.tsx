@@ -84,6 +84,8 @@ export interface InputPromptProps {
   isEmbeddedShellFocused?: boolean;
   /** Prompt suggestion text to display after response completes */
   promptSuggestion?: string | null;
+  /** Called when prompt suggestion is dismissed (user typed) */
+  onPromptSuggestionDismiss?: () => void;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -114,6 +116,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   vimHandleInput,
   isEmbeddedShellFocused,
   promptSuggestion,
+  onPromptSuggestionDismiss,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -461,6 +464,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Dismiss follow-up suggestion when user starts typing/pasting
         if (buffer.text.length === 0 && followup.state.isVisible) {
           followup.dismiss();
+          onPromptSuggestionDismiss?.();
         }
 
         // Record paste time to prevent accidental auto-submission
@@ -982,6 +986,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ) {
         followup.recordKeystroke();
         followup.dismiss();
+        onPromptSuggestionDismiss?.();
       }
       return false;
     },
@@ -1025,6 +1030,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasAgents,
       setAgentTabBarFocused,
       followup,
+      onPromptSuggestionDismiss,
     ],
   );
 

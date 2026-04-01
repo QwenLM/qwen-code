@@ -752,6 +752,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
+  // Dismiss callback — clears suggestion (triggers speculation abort via useEffect)
+  const dismissPromptSuggestion = useCallback(() => {
+    setPromptSuggestion(null);
+  }, []);
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const geminiClient = config.getGeminiClient();
 
@@ -815,8 +820,27 @@ export const AppContainer = (props: AppContainerProps) => {
             // Use result.boundary (not spec.status, which was mutated by acceptSpeculation)
             if (result.boundary) {
               addMessage(submittedValue);
+            } else {
+              // Speculation completed fully — render results in UI
+              // Add user message
+              historyManager.addItem(
+                { type: 'user' as const, text: submittedValue },
+                Date.now(),
+              );
+              // Add model response (extract text from speculated messages)
+              const modelText = result.messages
+                .filter((m) => m.role === 'model')
+                .flatMap((m) => m.parts ?? [])
+                .map((p) => p.text ?? '')
+                .filter(Boolean)
+                .join('\n');
+              if (modelText) {
+                historyManager.addItem(
+                  { type: 'gemini' as const, text: modelText },
+                  Date.now(),
+                );
+              }
             }
-            // If completed, the conversation already has the full response — don't re-send
             if (result.nextSuggestion) {
               setPromptSuggestion(result.nextSuggestion);
             }
@@ -844,6 +868,7 @@ export const AppContainer = (props: AppContainerProps) => {
       submitQuery,
       config,
       geminiClient,
+      historyManager,
     ],
   );
 
@@ -1772,6 +1797,7 @@ export const AppContainer = (props: AppContainerProps) => {
       taskStartTokens,
       // Prompt suggestion
       promptSuggestion,
+      dismissPromptSuggestion,
     }),
     [
       isThemeDialogOpen,
@@ -1877,6 +1903,7 @@ export const AppContainer = (props: AppContainerProps) => {
       taskStartTokens,
       // Prompt suggestion
       promptSuggestion,
+      dismissPromptSuggestion,
     ],
   );
 

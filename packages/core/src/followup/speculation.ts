@@ -21,7 +21,12 @@ import type { GeminiClient } from '../core/client.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
-import { getCacheSafeParams, createForkedChat } from './forkedQuery.js';
+import {
+  getCacheSafeParams,
+  createForkedChat,
+  runForkedQuery,
+} from './forkedQuery.js';
+import { getFilterReason } from './suggestionGenerator.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,7 +120,7 @@ export async function startSpeculation(
 
   // Run the speculative loop in the background
   runSpeculativeLoop(config, state, cacheSafe)
-    .then((result) => {
+    .then(async (result) => {
       if (state.status === 'running') {
         state.messages = result.messages;
         if (result.boundary) {
@@ -123,6 +128,22 @@ export async function startSpeculation(
           state.status = 'boundary';
         } else {
           state.status = 'completed';
+          // Generate pipelined suggestion for the next step
+          if (!abortController.signal.aborted) {
+            try {
+              const next = await generatePipelinedSuggestion(
+                config,
+                suggestion,
+                result.messages,
+                abortController.signal,
+              );
+              if (next && state.status === 'completed') {
+                state.pipelinedSuggestion = next;
+              }
+            } catch {
+              // Non-blocking — pipelined suggestion is optional
+            }
+          }
         }
       }
     })
@@ -443,4 +464,62 @@ function ensureToolResultPairing(messages: Content[]): Content[] {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined suggestion generation
+// ---------------------------------------------------------------------------
+
+/** Prompt for pipelined suggestion — same as SUGGESTION_PROMPT but imported indirectly */
+const PIPELINED_SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
+
+Predict what the user would type next based on the conversation so far.
+Format: 2-12 words, match the user's style. Or nothing.
+Reply with ONLY the suggestion, no quotes or explanation.`;
+
+const PIPELINED_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    suggestion: {
+      type: 'string',
+      description:
+        'The predicted next user input (2-12 words), or empty string.',
+    },
+  },
+  required: ['suggestion'],
+};
+
+/**
+ * Generate the next suggestion using the augmented context
+ * (original conversation + user's suggestion + speculated messages).
+ */
+async function generatePipelinedSuggestion(
+  config: Config,
+  suggestionText: string,
+  speculatedMessages: Content[],
+  abortSignal: AbortSignal,
+): Promise<string | null> {
+  try {
+    const result = await runForkedQuery(config, PIPELINED_SUGGESTION_PROMPT, {
+      abortSignal,
+      jsonSchema: PIPELINED_SCHEMA,
+    });
+
+    if (abortSignal.aborted) return null;
+
+    let raw: string | null = null;
+    if (result.jsonResult) {
+      const val = result.jsonResult['suggestion'];
+      raw = typeof val === 'string' ? val.trim() : null;
+    } else if (result.text) {
+      raw = result.text;
+    }
+
+    if (!raw) return null;
+    if (getFilterReason(raw)) return null;
+
+    return raw;
+  } catch {
+    return null;
+  }
 }
