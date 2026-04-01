@@ -1756,6 +1756,17 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Identitätsbestätigung：「Helfen Sie mir, meine Identität und Berechtigungen in DataWorks zu bestätigen?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Aufgabenanalyse：「Analysieren Sie die neu erstellten Knoten im Arbeitsbereich dataworks_analyze der letzten Woche und was sie tun」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Aufgabengovernance：「Finden Sie im Arbeitsbereich dataworks_analyze Knoten, die vor langer Zeit erstellt, aber nie veröffentlicht wurden」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Problembehebung：「Die Daten in dwd_is_it_software_released_df und ads_is_it_sfw_moni_key_released_recycled_df sind inkonsistent, beide haben die Quelle ods_ism_it_software_key_released_df. Prüfen Sie den Unterschied in ihrer Logik」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Problemlösung：「In der Mitarbeitertabelle my_project.ods_emp_info_d sind die Abteilungsdaten für Mitarbeiter EMP001 leer. Helfen Sie bei der Ursachenforschung und schlagen Sie Lösungen vor」',
 
   // ============================================================================
   // Custom API Key Configuration

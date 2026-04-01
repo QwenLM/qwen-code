@@ -1683,6 +1683,17 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Подтверждение личности：「Помогите подтвердить мою личность и права в DataWorks?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Анализ задач：「Проанализируйте новые узлы в рабочей области dataworks_analyze за последнюю неделю и что они делают」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Управление задачами：「В рабочей области dataworks_analyze помогите найти узлы, созданные давно, но никогда не опубликованные」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Диагностика проблем：「Данные в dwd_is_it_software_released_df и ads_is_it_sfw_moni_key_released_recycled_df несовместимы, оба имеют источник ods_ism_it_software_key_released_df. Проверьте разницу в их логике」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Исправление проблем：「В таблице сотрудников my_project.ods_emp_info_d данные отдела для сотрудника EMP001 пусты. Помогите диагностировать причину и предложите варианты исправления」',
 
   // ============================================================================
   // Custom API Key Configuration
