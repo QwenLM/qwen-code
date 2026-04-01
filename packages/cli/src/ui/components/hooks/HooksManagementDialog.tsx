@@ -113,6 +113,10 @@ export function HooksManagementDialog({
   const boxWidth = width - 4;
 
   // Check if hooks are disabled
+  // Note: This value is captured at dialog open time. If disableAllHooks
+  // changes while the dialog is open (e.g., via settings.json edit),
+  // the dialog will not react to the change until it's closed and reopened.
+  // This is intentional - the dialog represents a snapshot of the current state.
   const disableAllHooks = config?.getDisableAllHooks() ?? false;
 
   const [navigationStack, setNavigationStack] = useState<string[]>([

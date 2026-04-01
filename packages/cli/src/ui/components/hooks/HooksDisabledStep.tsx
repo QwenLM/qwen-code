@@ -15,7 +15,9 @@ interface HooksDisabledStepProps {
 export function HooksDisabledStep({
   configuredHooksCount,
 }: HooksDisabledStepProps): React.JSX.Element {
-  // Get the correct plural/singular form
+  // Note: The i18n t() function expects string parameters (Record<string, string>).
+  // Pluralization is handled manually by selecting the appropriate translation key
+  // based on the count, since the i18n system doesn't support ICU MessageFormat.
   const hooksText =
     configuredHooksCount === 1
       ? t('{{count}} configured hook', { count: String(configuredHooksCount) })
@@ -49,6 +51,9 @@ export function HooksDisabledStep({
         <Text bold color={theme.text.primary}>
           {t('When hooks are disabled:')}
         </Text>
+        {/* Note: Using middle dot (·) as bullet character. This is consistent with
+            other CLI components. If a design system evolves, consider extracting
+            to a shared constant or using a BulletList component. */}
         <Box>
           <Text color={theme.text.secondary}>
             {`  · ${t('No hook commands will execute')}`}

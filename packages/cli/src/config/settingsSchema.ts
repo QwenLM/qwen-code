@@ -1408,7 +1408,7 @@ const SETTINGS_SCHEMA = {
     type: 'boolean',
     label: 'Disable All Hooks',
     category: 'Advanced',
-    requiresRestart: true,
+    requiresRestart: true, // Future enhancement: consider supporting mid-session toggle for better UX
     default: false,
     description:
       'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',

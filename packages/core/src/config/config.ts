@@ -418,7 +418,12 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
-  /** Disable all hooks (default: false, hooks enabled) */
+  /**
+   * Disable all hooks (default: false, hooks enabled).
+   * Migration note: This replaces the deprecated hooksConfig.enabled setting.
+   * Users with old settings.json containing hooksConfig.enabled should migrate
+   * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
+   */
   disableAllHooks?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;

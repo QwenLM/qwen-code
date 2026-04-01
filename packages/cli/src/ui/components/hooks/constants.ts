@@ -185,7 +185,10 @@ export function getTranslatedSourceDisplayMap(): Record<
 
 /**
  * List of hook events to display in the UI
- * Automatically synced with HookEventName enum from core
+ * Automatically synced with HookEventName enum from core.
+ * Note: Order follows the enum definition order. If UI presentation order
+ * needs to be different (e.g., grouped by lifecycle phase), consider using
+ * an explicit sorted array instead. Current enum order is acceptable for display.
  */
 export const DISPLAY_HOOK_EVENTS: HookEventName[] =
   Object.values(HookEventName);
