@@ -32,3 +32,10 @@ export {
 } from './memoryStore.js';
 export { MEMORY_SYSTEM_PROMPT } from './memoryPrompt.js';
 export { migrateProtoMd } from './migration.js';
+export { formatAge, isStale, getStaleWarning } from './memoryAge.js';
+export {
+  scanMemories,
+  formatMemoryManifest,
+  type ScannedMemory,
+} from './memoryScan.js';
+export { extractMemories } from './memoryExtractor.js';

@@ -1277,6 +1277,17 @@ export const useGeminiStream = (
         } finally {
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
+
+          // Fire-and-forget memory extraction after each turn
+           
+          import('@qwen-code/qwen-code-core')
+            .then((core) => {
+              if (core.extractMemories && config) {
+                // Use addItem count as a proxy for message count
+                core.extractMemories(config, 10, 'project').catch(() => {});
+              }
+            })
+            .catch(() => {});
         }
       });
     },
