@@ -116,6 +116,10 @@ export async function generatePromptSuggestion(
     return { suggestion };
   } catch {
     // Gracefully degrade — don't disrupt the user experience
+    // Don't log abort as error — it's normal user behavior (started typing)
+    if (abortSignal.aborted) {
+      return { suggestion: null };
+    }
     return { suggestion: null, filterReason: 'error' };
   }
 }

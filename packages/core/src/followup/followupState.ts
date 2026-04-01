@@ -184,6 +184,11 @@ export function createFollowupController(
       timeoutId = null;
     }
 
+    // Skip if already cleared (e.g., accept already ran)
+    if (!currentState.isVisible && !currentState.suggestion) {
+      return;
+    }
+
     // Log ignored outcome if a suggestion was visible
     if (currentState.isVisible && currentState.suggestion) {
       onOutcome?.({

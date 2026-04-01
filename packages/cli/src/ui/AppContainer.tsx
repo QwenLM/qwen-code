@@ -972,9 +972,11 @@ export const AppContainer = (props: AppContainerProps) => {
       !config.getSdkMode() &&
       prevStreamingStateRef.current === StreamingState.Responding &&
       streamingState === StreamingState.Idle &&
-      // Read history inline — always fresh when streamingState triggers this effect
+      // Check both committed history and pending items for errors
+      // (API errors go to pendingGeminiHistoryItems, not historyManager.history)
       historyManager.history[historyManager.history.length - 1]?.type !==
         'error' &&
+      !pendingGeminiHistoryItems.some((item) => item.type === 'error') &&
       !shellConfirmationRequest &&
       !confirmationRequest &&
       !loopDetectionConfirmationRequest &&
