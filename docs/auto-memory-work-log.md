@@ -62,6 +62,55 @@ Completed
 
 ---
 
+## Part 6 - Auxiliary side-query foundation
+
+### Start review
+
+- Overall plan has shifted from memory-only MVP work to shared runtime infrastructure needed for model-driven recall, extraction, and future background work.
+- Parts 1 to 5 already completed the memory MVP; the next slice should be reusable outside memory.
+- Scope for this part: introduce a small, independently testable side-query foundation for structured auxiliary inference and migrate existing lightweight JSON inference call sites onto it.
+
+### Goal
+
+- Add a reusable side-query helper under a shared auxiliary module
+- Centralize structured-response schema validation for lightweight auxiliary inference
+- Migrate existing JSON-only helper call sites onto the new side-query layer
+- Add targeted tests for helper behavior and migrated call sites
+
+### Implemented
+
+- Added `packages/core/src/auxiliary/sideQuery.ts`
+- Added `packages/core/src/auxiliary/sideQuery.test.ts`
+- Updated `packages/core/src/utils/nextSpeakerChecker.ts` to use shared side-query execution
+- Updated `packages/core/src/utils/subagentGenerator.ts` to use shared side-query execution
+- Exported side-query helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Structured auxiliary inference now has a shared entrypoint that defaults model selection, prompt IDs, and schema validation.
+- Invalid structured side-query responses now fail fast through schema validation instead of each caller re-implementing checks.
+- Existing next-speaker detection and subagent generation now run through the same auxiliary inference path while preserving their caller-facing behavior.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/utils/nextSpeakerChecker.test.ts src/utils/subagentGenerator.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/core/baseLlmClient.test.ts src/utils/schemaValidator.test.ts src/utils/nextSpeakerChecker.test.ts src/utils/subagentGenerator.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally does not introduce background task scheduling or fork-agent execution yet.
+- The new helper is scoped to lightweight, single-shot structured inference and serves as the first reusable building block for later model-driven memory work.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review
