@@ -99,15 +99,66 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 name: agent-name
 description: Brief description of when and how to use this agent
 tools:
-	- tool1
-	- tool2
-	- tool3 # Optional
+  - tool1
+  - tool2
+  - tool3 # Optional
+disallowedTools:  # Optional denylist (applied before tools allowlist)
+  - write_file
+  - edit
+permissionMode: default  # Optional: default, plan, autoEdit, yolo
+modelConfig:
+  model: sonnet  # Optional: haiku, sonnet, opus, or full model ID
+runConfig:
+  max_turns: 25  # Optional
+  max_time_minutes: 10  # Optional
 ---
 
 System prompt content goes here.
 Multiple paragraphs are supported.
 You can use ${variable} templating for dynamic content.
 ```
+
+#### Tool Restrictions
+
+Two mechanisms for controlling tool access:
+
+- **`tools` (allowlist)**: Only these tools are available. If omitted, the agent inherits all tools.
+- **`disallowedTools` (denylist)**: These tools are removed from the inherited set. Applied before the allowlist.
+
+When both are specified, `disallowedTools` filters first, then `tools` resolves against the remainder.
+
+```yaml
+# Read-only agent: inherit all tools except write/edit
+disallowedTools:
+  - write_file
+  - edit
+
+# Restricted agent: only search tools
+tools:
+  - read_file
+  - grep_search
+  - glob
+```
+
+#### Permission Mode
+
+Override the session permission mode for a specific agent:
+
+- `default` — standard confirmation prompts
+- `plan` — read-only mode, no file modifications
+- `autoEdit` — auto-approve file edits
+- `yolo` — auto-approve everything
+
+If the parent session uses `bypassPermissions`, it takes precedence and cannot be overridden.
+
+#### Background Execution
+
+Agents can run in the background using `run_in_background: true` in the Agent tool call. Background agents:
+
+- Return immediately with an agent ID
+- Run concurrently while you continue working
+- Notify you when they complete (injected at the next tool boundary)
+- Results appear as mid-turn context alongside tool results
 
 #### Example Usage
 
@@ -127,6 +178,57 @@ Generated on: ${timestamp}
 Focus on creating clear, comprehensive documentation that helps both
 new contributors and end users understand the project.
 ```
+
+## Built-in Agents
+
+Proto ships with four built-in agents always available:
+
+| Agent               | Purpose                                              | Model     | Tools                     |
+| ------------------- | ---------------------------------------------------- | --------- | ------------------------- |
+| **general-purpose** | Complex multi-step tasks, code search                | Inherited | All                       |
+| **Explore**         | Fast codebase search and analysis                    | Inherited | Read-only (no Write/Edit) |
+| **verify**          | Review changes for correctness before finalizing     | Inherited | Read-only                 |
+| **coordinator**     | Orchestrate multi-agent work with task decomposition | Inherited | All + Agent tool          |
+
+The **coordinator** agent is designed for team work. It decomposes tasks, delegates to teammates via the Agent tool with `run_in_background`, and synthesizes results.
+
+## Agent Teams
+
+Proto supports multi-agent coordination through teams. Teams are configured in `.proto/teams/{name}/config.json`.
+
+### Team Commands
+
+| Command                                | Description               |
+| -------------------------------------- | ------------------------- |
+| `/team list`                           | List all configured teams |
+| `/team start <name> [member:type ...]` | Create and start a team   |
+| `/team status <name>`                  | Show team member status   |
+| `/team stop <name>`                    | Stop a running team       |
+| `/team delete <name>`                  | Delete a team config      |
+
+### Starting a Team
+
+```
+/team start research researcher:Explore implementer:general-purpose
+```
+
+If no members are specified, defaults to `lead` (coordinator) + `scout` (Explore).
+
+### Shared Task List
+
+Teammates share task visibility through the task system:
+
+- `claimTask(id, agentId)` — atomically claim and start a task
+- `getUnclaimedTasks()` — find available work
+- Tasks gain an `assignee` field for ownership tracking
+
+### Inter-Agent Messaging
+
+The TeamMailbox enables direct communication between agents:
+
+- `send(from, to, message)` — direct message
+- `broadcast(from, message)` — message all except sender
+- `receive(agentId)` — drain unread messages
 
 ## Using Subagents Effectively
 

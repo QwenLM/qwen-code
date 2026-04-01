@@ -7,10 +7,13 @@
 ### Key Features
 
 - **Multi-model**: Connect any OpenAI-compatible, Anthropic, or Gemini endpoint
-- **beads_rust task management**: SQLite-backed persistent tasks via `br` CLI
+- **beads_rust task management**: SQLite-backed persistent tasks via `br` CLI with task claiming
 - **MCP support**: Configure MCP servers in settings for tool extensions
 - **Plugin discovery**: Auto-discovers Claude Code plugins from `~/.claude/plugins/`
 - **Agentic workflow**: Rich built-in tools (Skills, SubAgents, Plan Mode)
+- **Agent teams**: Background agent spawning, shared task list, inter-agent mailbox, `/team` command
+- **Hooks system**: Command, HTTP, and prompt hook types with async execution and fine-grained `if` filtering
+- **Harness engineering**: Pre-flight baseline check, post-edit verification, 9-section compression, memory consolidation
 - **Terminal-first, IDE-friendly**: Built for developers who live in the command line
 
 ## Technology Stack
@@ -61,8 +64,10 @@ Core library containing:
 
 - **Tools**: File operations (read, write, edit, glob, grep), shell execution, web fetch, LSP integration, MCP client, task management (beads_rust)
 - **Memory**: File-per-memory system with YAML frontmatter, 4-type taxonomy (user/feedback/project/reference), auto-extraction agent, MEMORY.md index
-- **Subagents**: Task delegation to specialized agents
-- **Skills**: 16 bundled skills for agentic workflows
+- **Subagents**: Task delegation with `disallowedTools`, `permissionMode`, background execution
+- **Agent Teams**: Coordinator agent, TeamMailbox, shared task claiming, team config + lifecycle
+- **Skills**: 18 bundled skills for agentic workflows (incl. adversarial-verification, coding-agent-standards)
+- **Hooks**: Command, HTTP, prompt hook types; async execution; `if` field for arg filtering; team lifecycle events
 - **Models**: Model configuration and registry for any OpenAI-compatible API
 - **Services**: Git integration, file discovery, session management
 - **LSP Support**: Language Server Protocol integration

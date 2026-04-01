@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.0.15
+
+### Agent Teams
+
+- Background agent spawning (`run_in_background` parameter on Agent tool)
+- Shared task list with `claimTask()`, `getUnclaimedTasks()`, and assignee tracking
+- Inter-agent mailbox (`TeamMailbox`) with send, broadcast, receive, peek
+- Built-in coordinator agent with synthesis mandate and concurrent delegation
+- Team config + lifecycle: `.proto/teams/{name}/config.json` with create/read/update/stop/delete
+- `/team` slash command: list, status, start, stop, delete subcommands
+- Team lifecycle hooks: `TeammateIdle`, `TaskCreated`, `TaskCompleted`
+
+### Hooks System
+
+- HTTP hook type (`type: "http"`) with `allowedEnvVars` for secure header interpolation
+- Prompt hook type (`type: "prompt"`) with `$ARGUMENTS` placeholder and model selection
+- `async` field for fire-and-forget background hooks
+- `if` field for fine-grained tool argument filtering (permission rule syntax)
+- `toolInput` passed in hook event context for `if`-field matching
+
+### Subagents
+
+- `disallowedTools` denylist field (applied before allowlist in agent-core)
+- `permissionMode` per agent (default, plan, autoEdit, yolo)
+- Tool summary labels (`getSummaryLabel()`) on all core tools
+
+### Harness Engineering
+
+- Pre-flight baseline check at session start (git status/branch/log)
+- Post-edit verification (separate evaluator pattern)
+- 9-section compression prompt with failure recovery protocol
+- 2-turn memory extraction budget
+- `agentOnly` skill flag (hidden from `/skills` but available to agents)
+- Coding-agent-standards skill (quality gate for implementation work)
+- Adversarial verification skill (boundary testing, concurrency probes)
+
+### Infrastructure
+
+- Memory consolidation rewired for file-per-memory system (dream pass)
+- Session notes (structured checkpoint surviving compaction)
+- Mid-turn message injection between tool calls
+- QueryGuard concurrency with generation-based lock
+- useSyncExternalStore message queue (React 19 pattern)
+
 ## 0.0.14
 
 - Added plan mode support for task planning

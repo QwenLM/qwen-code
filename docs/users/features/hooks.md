@@ -57,6 +57,9 @@ The following table lists all available hook events in Qwen Code:
 | `PreCompact`         | Fired before conversation compaction        | Pre-compaction processing                       |
 | `SessionEnd`         | Fired when a session ends                   | Cleanup, reporting                              |
 | `PermissionRequest`  | Fired when permission dialogs are displayed | Permission automation, policy enforcement       |
+| `TeammateIdle`       | Fired when a background agent becomes idle  | Quality gates, continue-working feedback        |
+| `TaskCreated`        | Fired when a task is created                | Task notifications, auto-assignment             |
+| `TaskCompleted`      | Fired when a task is completed              | Progress tracking, next-step triggers           |
 
 ## Input/Output Rules
 
@@ -450,6 +453,104 @@ Event-specific fields are added based on the hook type. Below are the event-spec
   }
 }
 ```
+
+## Hook Types
+
+Proto supports three hook types:
+
+### Command Hooks
+
+Shell commands that receive event JSON on stdin and return decisions via stdout/exit code.
+
+```json
+{
+  "type": "command",
+  "command": "/path/to/script.sh",
+  "timeout": 30000,
+  "env": { "CUSTOM_VAR": "value" }
+}
+```
+
+### HTTP Hooks
+
+POST event JSON to a webhook URL. Useful for integrating with Slack, CI, or monitoring services without shell scripts.
+
+```json
+{
+  "type": "http",
+  "url": "https://hooks.example.com/proto",
+  "headers": { "Authorization": "Bearer $API_TOKEN" },
+  "allowedEnvVars": ["API_TOKEN"]
+}
+```
+
+- `allowedEnvVars`: Only these environment variables are interpolated in `url` and `headers`. All other `$VAR` references resolve to empty string.
+- Response body is parsed as JSON for structured decisions.
+- Non-2xx status codes are treated as errors.
+
+### Prompt Hooks
+
+LLM-based judgment calls. The event JSON is injected via `$ARGUMENTS` placeholder.
+
+```json
+{
+  "type": "prompt",
+  "prompt": "Is this a safe operation? Respond with JSON: {\"decision\": \"allow\"} or {\"decision\": \"deny\", \"reason\": \"why\"}. Event: $ARGUMENTS",
+  "model": "haiku"
+}
+```
+
+- `model`: `"haiku"` (default, fast), `"sonnet"`, or `"opus"`.
+- `$ARGUMENTS` is replaced with the full event JSON as a string.
+
+## Hook Modifiers
+
+### Async Hooks
+
+Add `"async": true` to run a hook in the background without blocking. Output and decisions are ignored.
+
+```json
+{
+  "type": "command",
+  "command": "send-notification.sh",
+  "async": true
+}
+```
+
+Use for logging, notifications, and telemetry where you don't need the result.
+
+### Fine-Grained Filtering with `if`
+
+The `if` field uses permission-rule syntax to filter by tool arguments, not just tool name. This avoids spawning hook processes for non-matching calls.
+
+```json
+{
+  "matcher": "bash",
+  "hooks": [
+    {
+      "type": "command",
+      "if": "Bash(git *)",
+      "command": "check-git-policy.sh"
+    }
+  ]
+}
+```
+
+Supported syntax: `ToolName(glob pattern)` where the glob matches against the tool's primary argument (command for Bash, file_path for Edit/Write, pattern for Grep).
+
+Valid only for tool events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`.
+
+## Team Lifecycle Hooks
+
+Three hook events for multi-agent coordination:
+
+| Event           | When It Fires                              | Matcher Support |
+| --------------- | ------------------------------------------ | --------------- |
+| `TeammateIdle`  | Background agent finishes and becomes idle | No              |
+| `TaskCreated`   | Task created on the shared task list       | No              |
+| `TaskCompleted` | Task marked as completed                   | No              |
+
+These events enable quality gates for agent teams. Exit code 2 on `TeammateIdle` rejects the idle state and sends feedback to continue working.
 
 ## Hook Configuration
 
