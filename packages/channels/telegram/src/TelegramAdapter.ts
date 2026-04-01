@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Telegraf } from 'telegraf';
+import { Bot } from 'grammy';
 import {
   telegramFormat,
   splitHtmlForTelegram,
@@ -16,7 +16,7 @@ import type {
 } from '@qwen-code/channel-base';
 
 export class TelegramChannel extends ChannelBase {
-  private bot: Telegraf;
+  private bot: Bot;
   private botId: number = 0;
   private botUsername: string = '';
 
@@ -27,22 +27,26 @@ export class TelegramChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    this.bot = new Telegraf(config.token);
+    this.bot = new Bot(config.token);
+  }
+
+  private getFileUrl(filePath: string): string {
+    return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
   async connect(): Promise<void> {
-    const botInfo = await this.bot.telegram.getMe();
+    const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;
     this.botUsername = botInfo.username ?? '';
     // All messages (including slash commands) go through handleInbound
     // where ChannelBase dispatches shared commands (/help, /clear, /status, etc.)
-    this.bot.on('text', async (ctx) => {
+    this.bot.on('message:text', async (ctx) => {
       const msg = ctx.message;
       const text = msg.text;
 
       const envelope = this.buildEnvelope(msg, text, msg.entities);
 
-      // Don't await — Telegraf has a 90s handler timeout that would kill long prompts
+      // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
@@ -54,7 +58,7 @@ export class TelegramChannel extends ChannelBase {
     });
 
     // Photo messages
-    this.bot.on('photo', async (ctx) => {
+    this.bot.on('message:photo', async (ctx) => {
       const msg = ctx.message;
       const envelope = this.buildEnvelope(
         msg,
@@ -67,8 +71,9 @@ export class TelegramChannel extends ChannelBase {
       if (!photo) return;
 
       try {
-        const fileUrl = await ctx.telegram.getFileLink(photo.file_id);
-        const resp = await fetch(fileUrl.href);
+        const file = await ctx.api.getFile(photo.file_id);
+        const fileUrl = this.getFileUrl(file.file_path!);
+        const resp = await fetch(fileUrl);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const buf = Buffer.from(await resp.arrayBuffer());
         envelope.imageBase64 = buf.toString('base64');
@@ -90,7 +95,7 @@ export class TelegramChannel extends ChannelBase {
     });
 
     // Document/file messages
-    this.bot.on('document', async (ctx) => {
+    this.bot.on('message:document', async (ctx) => {
       const msg = ctx.message;
       const doc = msg.document;
       const fileName = doc.file_name || `file_${Date.now()}`;
@@ -102,8 +107,9 @@ export class TelegramChannel extends ChannelBase {
       );
 
       try {
-        const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
-        const resp = await fetch(fileUrl.href);
+        const file = await ctx.api.getFile(doc.file_id);
+        const fileUrl = this.getFileUrl(file.file_path!);
+        const resp = await fetch(fileUrl);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const buf = Buffer.from(await resp.arrayBuffer());
 
@@ -141,14 +147,14 @@ export class TelegramChannel extends ChannelBase {
       });
     });
 
-    this.bot.launch({ dropPendingUpdates: true }).catch((err) => {
+    this.bot.start({ drop_pending_updates: true }).catch((err) => {
       process.stderr.write(
         `[Telegram:${this.name}] Bot launch error: ${err}\n`,
       );
     });
 
-    process.once('SIGINT', () => this.bot.stop('SIGINT'));
-    process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
+    process.once('SIGINT', () => this.bot.stop());
+    process.once('SIGTERM', () => this.bot.stop());
   }
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
@@ -160,7 +166,7 @@ export class TelegramChannel extends ChannelBase {
     if (existing) clearInterval(existing);
 
     const sendTyping = () =>
-      this.bot.telegram.sendChatAction(chatId, 'typing').catch(() => {});
+      this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
     sendTyping();
     this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
   }
@@ -178,12 +184,12 @@ export class TelegramChannel extends ChannelBase {
     const chunks = splitHtmlForTelegram(html);
     for (const chunk of chunks) {
       try {
-        await this.bot.telegram.sendMessage(chatId, chunk, {
+        await this.bot.api.sendMessage(chatId, chunk, {
           parse_mode: 'HTML',
         });
       } catch {
         // Fallback to plain text if HTML parsing fails
-        await this.bot.telegram.sendMessage(chatId, text);
+        await this.bot.api.sendMessage(chatId, text);
         return;
       }
     }
