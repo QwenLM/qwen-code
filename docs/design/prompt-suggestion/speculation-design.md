@@ -105,16 +105,16 @@ Abort:
 
 ## Tool Gate Security
 
-| Tool                           | Action   | Condition                                    |
-| ------------------------------ | -------- | -------------------------------------------- |
-| read_file, grep, glob, ls, lsp | allow    | Read paths resolved through overlay          |
-| edit, write_file               | redirect | Only in auto-edit / yolo approval mode       |
-| edit, write_file               | boundary | In default / plan approval mode              |
-| shell                          | allow    | `isShellCommandReadOnlyAST()` returns true   |
-| shell                          | boundary | Non-read-only commands                       |
-| web_fetch, web_search          | boundary | Network requests require user consent        |
-| agent, skill, memory, ask_user | boundary | Cannot interact with user during speculation |
-| Unknown / MCP tools            | boundary | Safe default                                 |
+| Tool                                                       | Action   | Condition                                    |
+| ---------------------------------------------------------- | -------- | -------------------------------------------- |
+| read_file, grep, glob, ls, lsp                             | allow    | Read paths resolved through overlay          |
+| edit, write_file                                           | redirect | Only in auto-edit / yolo approval mode       |
+| edit, write_file                                           | boundary | In default / plan approval mode              |
+| shell                                                      | allow    | `isShellCommandReadOnlyAST()` returns true   |
+| shell                                                      | boundary | Non-read-only commands                       |
+| web_fetch, web_search                                      | boundary | Network requests require user consent        |
+| agent, skill, memory, ask_user, todo_write, exit_plan_mode | boundary | Cannot interact with user during speculation |
+| Unknown / MCP tools                                        | boundary | Safe default                                 |
 
 ### Path Rewrite
 
@@ -186,7 +186,7 @@ The forked `GeminiChat` uses identical `generationConfig` (including tools) and 
 ```
 packages/core/src/followup/
 ├── followupState.ts          # Framework-agnostic state controller
-├── suggestionGenerator.ts    # LLM-based suggestion generation + 14 filter rules
+├── suggestionGenerator.ts    # LLM-based suggestion generation + 12 filter rules
 ├── forkedQuery.ts            # Cache-aware forked query infrastructure
 ├── overlayFs.ts              # Copy-on-write overlay filesystem
 ├── speculationToolGate.ts    # Tool boundary enforcement

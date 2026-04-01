@@ -18,9 +18,9 @@ A **prompt suggestion** (Next-step Suggestion / NES) is a short prediction (2-12
 │       │                                                     │
 │       ▼                                                     │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  Guard Conditions (13 checks)                       │    │
+│  │  Guard Conditions (11 categories)                    │    │
 │  │  settings, interactive, sdk, plan mode, dialogs,    │    │
-│  │  elicitation, API error, history items              │    │
+│  │  elicitation, API error                             │    │
 │  └────────────────────┬────────────────────────────────┘    │
 │                       │                                     │
 │                       ▼                                     │
@@ -34,7 +34,7 @@ A **prompt suggestion** (Next-step Suggestion / NES) is a short prediction (2-12
 │  │  (cache-aware)         (standalone fallback)        │    │
 │  │                                                     │    │
 │  │  ──── SUGGESTION_PROMPT ────                        │    │
-│  │  ──── 14 filter rules ──────                        │    │
+│  │  ──── 12 filter rules ──────                        │    │
 │  │  ──── getFilterReason() ────                        │    │
 │  └────────────────────┬────────────────────────────────┘    │
 │                       │                                     │
@@ -76,7 +76,7 @@ Format: 2-12 words, match the user's style. Or nothing.
 Reply with ONLY the suggestion, no quotes or explanation.
 ```
 
-### Filter Rules (14)
+### Filter Rules (12)
 
 | Rule               | Example blocked                                  |
 | ------------------ | ------------------------------------------------ |
@@ -95,19 +95,33 @@ Reply with ONLY the suggestion, no quotes or explanation.
 
 ### Guard Conditions
 
-| Guard                | Description                        |
-| -------------------- | ---------------------------------- |
-| Settings toggle      | `enableFollowupSuggestions`        |
-| Non-interactive      | `config.isInteractive()`           |
-| SDK mode             | `!config.getSdkMode()`             |
-| Plan mode            | `ApprovalMode.PLAN`                |
-| Confirmation dialogs | shell, general, loop detection     |
-| Permission dialog    | `isPermissionsDialogOpen`          |
-| Elicitation          | `settingInputRequests`             |
-| API error            | Last history item or pending items |
-| Early conversation   | < 2 model turns                    |
-| Cache sharing toggle | `enableCacheSharing`               |
-| Speculation toggle   | `enableSpeculation`                |
+**AppContainer useEffect (13 checks in code):**
+
+| Guard                | Check                                               |
+| -------------------- | --------------------------------------------------- |
+| Settings toggle      | `enableFollowupSuggestions`                         |
+| Non-interactive      | `config.isInteractive()`                            |
+| SDK mode             | `!config.getSdkMode()`                              |
+| Streaming transition | `Responding → Idle` (2 checks)                      |
+| API error (history)  | `historyManager.history[last]?.type !== 'error'`    |
+| API error (pending)  | `!pendingGeminiHistoryItems.some(type === 'error')` |
+| Confirmation dialogs | shell + general + loop detection (3 checks)         |
+| Permission dialog    | `isPermissionsDialogOpen`                           |
+| Elicitation          | `settingInputRequests.length === 0`                 |
+| Plan mode            | `ApprovalMode.PLAN`                                 |
+
+**Inside generatePromptSuggestion():**
+
+| Guard              | Check            |
+| ------------------ | ---------------- |
+| Early conversation | `modelTurns < 2` |
+
+**Separate feature flags (not in guard block):**
+
+| Flag                 | Controls                                                |
+| -------------------- | ------------------------------------------------------- |
+| `enableCacheSharing` | Whether to use forked query or fallback to generateJson |
+| `enableSpeculation`  | Whether to start speculation on suggestion display      |
 
 ## State Management
 

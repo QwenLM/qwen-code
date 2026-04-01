@@ -7,7 +7,7 @@
 | Component                | Status  | Lines | Description                                             |
 | ------------------------ | ------- | ----- | ------------------------------------------------------- |
 | `followupState.ts`       | ✅ Done | ~210  | Framework-agnostic controller with timer/debounce       |
-| `suggestionGenerator.ts` | ✅ Done | ~200  | LLM generation + 14 filter rules + forked query support |
+| `suggestionGenerator.ts` | ✅ Done | ~200  | LLM generation + 12 filter rules + forked query support |
 | `forkedQuery.ts`         | ✅ Done | ~230  | CacheSafeParams + createForkedChat + runForkedQuery     |
 | `overlayFs.ts`           | ✅ Done | ~140  | Copy-on-write overlay filesystem                        |
 | `speculationToolGate.ts` | ✅ Done | ~130  | Tool boundary enforcement with AST shell parser         |
@@ -40,7 +40,7 @@
 | Component               | Status  | Description          |
 | ----------------------- | ------- | -------------------- |
 | `PromptSuggestionEvent` | ✅ Done | 10 fields            |
-| `SpeculationEvent`      | ✅ Done | 8 fields             |
+| `SpeculationEvent`      | ✅ Done | 7 fields             |
 | `logPromptSuggestion()` | ✅ Done | OpenTelemetry logger |
 | `logSpeculation()`      | ✅ Done | OpenTelemetry logger |
 
@@ -49,7 +49,7 @@
 | Test File                     | Tests | Description                                                 |
 | ----------------------------- | ----- | ----------------------------------------------------------- |
 | `followupState.test.ts`       | 7     | Controller timer, debounce, accept callback, error recovery |
-| `suggestionGenerator.test.ts` | 16    | All 14 filter rules + edge cases + false positives          |
+| `suggestionGenerator.test.ts` | 16    | All 12 filter rules + edge cases + false positives          |
 | `InputPrompt.test.tsx`        | 4     | Tab, Enter+submit, Right Arrow, completion guard            |
 
 ## Audit History
@@ -70,10 +70,10 @@
 | Feature                          | Alignment | Notes                                 |
 | -------------------------------- | --------- | ------------------------------------- |
 | Prompt text                      | 100%      | Identical (brand name only)           |
-| 14 filter rules                  | 100%+     | \b word boundaries improvement        |
+| 12 filter rules                  | 100%+     | \b word boundaries improvement        |
 | UI interaction (Tab/Enter/Right) | 100%      |                                       |
 | Guard conditions                 | 100%      | 13 checks                             |
-| Telemetry                        | 100%      | 10+8 fields                           |
+| Telemetry                        | 100%      | 10+7 fields                           |
 | Cache sharing                    | ✅        | DashScope cache_control               |
 | Speculation                      | ✅        | COW overlay + tool gating             |
 | Pipelined suggestion             | ✅        | Generated after speculation completes |
