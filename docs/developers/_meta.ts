@@ -11,7 +11,6 @@ export default {
     type: 'separator',
   },
   'sdk-typescript': 'Typescript SDK',
-  'sdk-java': 'Java SDK(alpha)',
   'Dive Into Qwen Code': {
     title: 'Dive Into Qwen Code',
     type: 'separator',

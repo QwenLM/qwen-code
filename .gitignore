@@ -139,9 +139,6 @@ packages/sdk-typescript/src/**/*.js.map
 packages/sdk-typescript/test/**/*.js
 packages/sdk-typescript/test/**/*.d.ts
 packages/sdk-typescript/test/**/*.js.map
-packages/sdk-java/**/*.js
-packages/sdk-java/**/*.d.ts
-packages/sdk-java/**/*.js.map
 packages/web-templates/src/**/*.js
 packages/web-templates/src/**/*.d.ts
 packages/web-templates/src/**/*.js.map

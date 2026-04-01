@@ -27,7 +27,7 @@ proto is a fork of [Qwen Code](https://github.com/QwenLM/qwen-code) (itself fork
 | ---------------- | ------------------ | ------------------------------------------------------------------------------ |
 | Default model    | Qwen3-Coder        | Any (configurable)                                                             |
 | Task management  | In-memory JSON     | [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (SQLite + JSONL) |
-| MCP servers      | None               | Configurable via `~/.qwen/settings.json`                                       |
+| MCP servers      | None               | Configurable via `~/.proto/settings.json`                                      |
 | Plugin discovery | Qwen only          | Auto-discovers Claude Code plugins from `~/.claude/plugins/`                   |
 | Skills           | Nested superpowers | Flat bundled skills (16 skills, all discoverable)                              |
 
@@ -51,45 +51,103 @@ cargo install beads_rust
 
 ## Quick Start
 
-```bash
-# Start proto
-proto
+### 1. Configure your endpoint
 
-# One-shot mode
-proto -p "explain this codebase"
-```
-
-On first launch, run `/auth` to configure your model provider.
-
-## Configuration
-
-proto uses `~/.qwen/settings.json` for global config and `.qwen/settings.json` for per-project overrides.
-
-### Model Providers
-
-Connect any OpenAI-compatible endpoint, Anthropic, or Gemini:
+proto connects to any OpenAI-compatible API. Create `~/.proto/settings.json`:
 
 ```json
 {
   "modelProviders": {
     "openai": [
       {
-        "id": "claude-sonnet-4-6",
-        "name": "Claude Sonnet 4.6 (via gateway)",
-        "baseUrl": "http://your-gateway:4000/v1",
-        "envKey": "GATEWAY_API_KEY"
+        "id": "my-model",
+        "name": "My Model",
+        "baseUrl": "http://localhost:8000/v1",
+        "envKey": "MY_API_KEY"
       }
     ]
-  },
-  "env": {
-    "GATEWAY_API_KEY": "sk-..."
   },
   "security": {
     "auth": { "selectedType": "openai" }
   },
-  "model": { "name": "claude-sonnet-4-6" }
+  "model": { "name": "my-model" }
 }
 ```
+
+### 2. Set your API key
+
+Create `~/.proto/.env`:
+
+```
+MY_API_KEY=sk-your-key-here
+```
+
+Or export it in your shell: `export MY_API_KEY=sk-your-key-here`
+
+### 3. Run proto
+
+```bash
+proto                            # interactive mode
+proto -p "explain this codebase" # one-shot mode
+```
+
+No auth screen — proto connects directly to your endpoint.
+
+### Example: Multiple models via a gateway
+
+If you run a gateway like [LiteLLM](https://github.com/BerriAI/litellm) in front of multiple providers, register them all under `modelProviders.openai` and switch between them with `/model`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "local/qwen-122b",
+        "name": "Qwen3.5-122B (local vLLM)",
+        "baseUrl": "http://my-gateway:4000/v1",
+        "envKey": "GATEWAY_KEY",
+        "generationConfig": { "contextWindowSize": 65536 }
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "name": "Claude Sonnet 4.6",
+        "baseUrl": "http://my-gateway:4000/v1",
+        "envKey": "GATEWAY_KEY",
+        "capabilities": { "vision": true },
+        "generationConfig": { "contextWindowSize": 200000 }
+      },
+      {
+        "id": "gpt-5.4",
+        "name": "GPT-5.4",
+        "baseUrl": "http://my-gateway:4000/v1",
+        "envKey": "GATEWAY_KEY",
+        "capabilities": { "vision": true },
+        "generationConfig": { "contextWindowSize": 200000 }
+      }
+    ]
+  },
+  "security": {
+    "auth": { "selectedType": "openai" }
+  },
+  "model": { "name": "local/qwen-122b" }
+}
+```
+
+### Model config reference
+
+| Field                                | Required | Description                                                      |
+| ------------------------------------ | -------- | ---------------------------------------------------------------- |
+| `id`                                 | yes      | Model ID sent to the API (must match what your endpoint expects) |
+| `name`                               | no       | Display name in proto UI (defaults to `id`)                      |
+| `baseUrl`                            | no       | API base URL (defaults to OpenAI's)                              |
+| `envKey`                             | no       | Environment variable name for the API key                        |
+| `description`                        | no       | Shown in model picker                                            |
+| `capabilities.vision`                | no       | Enable image/vision inputs                                       |
+| `generationConfig.contextWindowSize` | no       | Context window in tokens                                         |
+
+## Configuration
+
+proto uses `~/.proto/settings.json` for global config and `.proto/settings.json` for per-project overrides.
 
 ### MCP Servers
 

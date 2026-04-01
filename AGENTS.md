@@ -31,7 +31,6 @@
 ├── packages/
 │   ├── cli/              # Command-line interface (main entry point)
 │   ├── core/             # Core backend logic and tool implementations
-│   ├── sdk-java/         # Java SDK
 │   ├── sdk-typescript/   # TypeScript SDK
 │   ├── test-utils/       # Shared testing utilities
 │   ├── vscode-ide-companion/  # VS Code extension companion
