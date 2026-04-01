@@ -180,6 +180,7 @@ export const useGeminiStream = (
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
+  const pendingCompletedToolsRef = useRef<TrackedToolCall[]>([]);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
@@ -1386,6 +1387,11 @@ export const useGeminiStream = (
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
       if (isResponding) {
+        // Queue tools that complete while the model is still streaming.
+        // They'll be processed when isResponding goes to false.
+        pendingCompletedToolsRef.current.push(
+          ...completedToolCallsFromScheduler,
+        );
         return;
       }
 
@@ -1502,6 +1508,14 @@ export const useGeminiStream = (
       config,
     ],
   );
+
+  // Drain queued tool completions that arrived while the model was streaming.
+  useEffect(() => {
+    if (!isResponding && pendingCompletedToolsRef.current.length > 0) {
+      const queued = pendingCompletedToolsRef.current.splice(0);
+      void handleCompletedTools(queued);
+    }
+  }, [isResponding, handleCompletedTools]);
 
   const pendingHistoryItems = useMemo(
     () =>
