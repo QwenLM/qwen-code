@@ -21,7 +21,8 @@ export default defineConfig({
       include: ['src/followup.ts', 'src/hooks/useFollowupSuggestions.ts'],
       outDir: 'dist',
       rollupTypes: false,
-      insertTypesEntry: true,
+      // Do not insert types entry — avoid clobbering the main build's index.d.ts
+      insertTypesEntry: false,
     }),
   ],
   build: {

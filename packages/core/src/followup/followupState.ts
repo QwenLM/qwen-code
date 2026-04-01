@@ -114,10 +114,6 @@ export function createFollowupController(
   }
 
   const setSuggestion = (text: string | null): void => {
-    if (!enabled) {
-      return;
-    }
-
     if (timeoutId) {
       clearTimeout(timeoutId);
       timeoutId = null;
@@ -125,6 +121,11 @@ export function createFollowupController(
 
     if (!text) {
       applyState(INITIAL_FOLLOWUP_STATE);
+      return;
+    }
+
+    // Only schedule new suggestions when enabled
+    if (!enabled) {
       return;
     }
 
