@@ -188,7 +188,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}
-      {item.type === 'summary' && <SummaryMessage summary={item.summary} />}
+      {itemForDisplay.type === 'summary' && (
+        <SummaryMessage summary={itemForDisplay.summary} />
+      )}
       {itemForDisplay.type === 'extensions_list' && <ExtensionsList />}
       {itemForDisplay.type === 'tools_list' && (
         <ToolsList
@@ -236,9 +238,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <BtwMessage btw={itemForDisplay.btw} />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
-        <ErrorMessage
-          text={`UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${sanitizeSensitiveText(itemForDisplay.originalPrompt)}`}
-        />
+        <Box flexDirection="column">
+          <Text color={theme.status.warning}>
+            {`✕ UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${sanitizeSensitiveText(itemForDisplay.originalPrompt)}`}
+          </Text>
+        </Box>
       )}
       {itemForDisplay.type === 'stop_hook_loop' && (
         <InfoMessage
@@ -248,7 +252,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'stop_hook_system_message' && (
         <Box flexDirection="column">
           <Text color={theme.text.primary}> ⎿ Stop says:</Text>
-          <Box marginLeft={4}>
+          <Box marginLeft={4} flexDirection="column">
             <MarkdownDisplay
               text={itemForDisplay.message}
               isPending={false}
