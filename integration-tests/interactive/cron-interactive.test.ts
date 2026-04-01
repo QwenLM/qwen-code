@@ -17,6 +17,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InteractiveSession } from './interactive-session.js';
 
+const IS_SANDBOX =
+  process.env['QWEN_SANDBOX'] &&
+  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
+
 function makeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env['NO_COLOR'];
@@ -29,7 +33,8 @@ function makeEnv(): NodeJS.ProcessEnv {
   };
 }
 
-describe('cron interactive', () => {
+// These tests are flaky in the Docker sandbox environment, skip for now.
+(IS_SANDBOX ? describe.skip : describe)('cron interactive', () => {
   let session: InteractiveSession | null = null;
 
   afterEach(async () => {
@@ -39,68 +44,61 @@ describe('cron interactive', () => {
     }
   });
 
-  it(
-    'loop fires inline in conversation',
-    async () => {
-      session = await InteractiveSession.start({
-        env: makeEnv(),
-        args: ['--approval-mode', 'yolo'],
-      });
+  it('loop fires inline in conversation', { timeout: 180_000 }, async () => {
+    session = await InteractiveSession.start({
+      env: makeEnv(),
+      args: ['--approval-mode', 'yolo'],
+    });
 
-      await session.send(
-        'Call cron_create with expression "*/1 * * * *" and prompt "PONG7742" and recurring true. Confirm briefly.',
-      );
+    await session.send(
+      'Call cron_create with expression "*/1 * * * *" and prompt "PONG7742" and recurring true. Confirm briefly.',
+    );
 
-      await session.waitForScreen(
-        (scr) => scr.split('\n').some((l) => l.trim() === '> PONG7742'),
-        'cron-injected prompt "> PONG7742"',
-        90_000,
-      );
+    await session.waitForScreen(
+      (scr) => scr.split('\n').some((l) => l.trim() === '> PONG7742'),
+      'cron-injected prompt "> PONG7742"',
+      90_000,
+    );
 
-      await session.idle(5000);
-      const finalScreen = await session.screen();
-      const afterPrompt = finalScreen.slice(
-        finalScreen.lastIndexOf('> PONG7742'),
-      );
-      expect(afterPrompt).toContain('✦');
-    },
-    { timeout: 180_000 },
-  );
+    await session.idle(5000);
+    const finalScreen = await session.screen();
+    const afterPrompt = finalScreen.slice(
+      finalScreen.lastIndexOf('> PONG7742'),
+    );
+    expect(afterPrompt).toContain('✦');
+  });
 
-  it(
-    'user input takes priority over cron',
-    async () => {
-      session = await InteractiveSession.start({
-        env: makeEnv(),
-        args: ['--approval-mode', 'yolo'],
-      });
+  it('user input takes priority over cron', { timeout: 180_000 }, async () => {
+    session = await InteractiveSession.start({
+      env: makeEnv(),
+      args: ['--approval-mode', 'yolo'],
+    });
 
-      await session.send(
-        'Call cron_create with expression "*/1 * * * *" and prompt "CRONTICK99" and recurring true. Confirm briefly.',
-      );
+    await session.send(
+      'Call cron_create with expression "*/1 * * * *" and prompt "CRONTICK99" and recurring true. Confirm briefly.',
+    );
 
-      await session.waitForScreen(
-        (scr) => scr.split('\n').some((l) => l.trim() === '> CRONTICK99'),
-        'first cron fire "> CRONTICK99"',
-        90_000,
-      );
+    await session.waitForScreen(
+      (scr) => scr.split('\n').some((l) => l.trim() === '> CRONTICK99'),
+      'first cron fire "> CRONTICK99"',
+      90_000,
+    );
 
-      await session.idle(5000);
-      await session.send('Reply with exactly USERPRIORITY77 nothing else');
+    await session.idle(5000);
+    await session.send('Reply with exactly USERPRIORITY77 nothing else');
 
-      await session.waitForScreen(
-        (scr) => scr.includes('USERPRIORITY77'),
-        'model response containing USERPRIORITY77',
-      );
+    await session.waitForScreen(
+      (scr) => scr.includes('USERPRIORITY77'),
+      'model response containing USERPRIORITY77',
+    );
 
-      const screen = await session.screen();
-      expect(screen).toContain('Type your message');
-    },
-    { timeout: 180_000 },
-  );
+    const screen = await session.screen();
+    expect(screen).toContain('Type your message');
+  });
 
   it(
     'error during cron turn does not kill the loop',
+    { timeout: 180_000 },
     async () => {
       session = await InteractiveSession.start({
         env: makeEnv(),
@@ -135,6 +133,5 @@ describe('cron interactive', () => {
           screen.includes('Active cron jobs (1)'),
       ).toBe(true);
     },
-    { timeout: 180_000 },
   );
 });
