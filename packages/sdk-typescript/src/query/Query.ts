@@ -33,8 +33,13 @@ import {
 } from '../types/protocol.js';
 import type { Transport } from '../transport/Transport.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { QueryOptions, CLIMcpServerConfig } from '../types/types.js';
+import type {
+  QueryOptions,
+  CLIMcpServerConfig,
+  HookCallback,
+} from '../types/types.js';
 import { isSdkMcpServerConfig } from '../types/types.js';
+import type { HookRegistration } from '../types/protocol.js';
 import { Stream } from '../utils/Stream.js';
 import { serializeJsonLine } from '../utils/jsonLines.js';
 import { AbortError } from '../types/errors.js';
@@ -75,6 +80,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private pendingMcpResponses: Map<string, PendingMcpResponse> = new Map();
   private sdkMcpTransports: Map<string, SdkControlServerTransport> = new Map();
   private sdkMcpServers: Map<string, McpServer> = new Map();
+  private hookCallbackMap: Map<string, HookCallback> = new Map();
   readonly initialized: Promise<void>;
   private closed = false;
   private messageRouterStarted = false;
@@ -290,9 +296,10 @@ export class Query implements AsyncIterable<SDKMessage> {
       // Get only successfully connected SDK servers for CLI
       const sdkMcpServersForCli = this.getSdkMcpServersForCli();
       const mcpServersForCli = this.getMcpServersForCli();
+      const hookRegistrations = this.buildHookRegistrations();
 
       await this.sendControlRequest(ControlRequestType.INITIALIZE, {
-        hooks: null,
+        hooks: hookRegistrations.length > 0 ? hookRegistrations : null,
         sdkMcpServers:
           Object.keys(sdkMcpServersForCli).length > 0
             ? sdkMcpServersForCli
@@ -418,6 +425,14 @@ export class Query implements AsyncIterable<SDKMessage> {
           response = await this.handleMcpMessage(
             payload.server_name,
             payload.message as unknown as JSONRPCMessage,
+          );
+          break;
+
+        case 'hook_callback':
+          response = await this.handleHookCallback(
+            payload.callback_id,
+            payload.input,
+            payload.tool_use_id,
           );
           break;
 
@@ -578,6 +593,57 @@ export class Query implements AsyncIterable<SDKMessage> {
       // which triggers handleMcpServerResponse to resolve our pending promise
       transport.handleMessage(message);
     });
+  }
+
+  /**
+   * Build HookRegistration entries from user-provided hookCallbacks.
+   * Each callback gets a unique callback_id so the CLI can route events back.
+   */
+  private buildHookRegistrations(): HookRegistration[] {
+    const registrations: HookRegistration[] = [];
+    const hookCallbacks = this.options.hookCallbacks;
+    if (!hookCallbacks) return registrations;
+
+    for (const [event, callbackOrArray] of Object.entries(hookCallbacks)) {
+      const callbacks = Array.isArray(callbackOrArray)
+        ? callbackOrArray
+        : [callbackOrArray];
+      for (const callback of callbacks) {
+        const callbackId = `sdk_${event}_${randomUUID()}`;
+        this.hookCallbackMap.set(callbackId, callback);
+        registrations.push({ event, callback_id: callbackId });
+      }
+    }
+
+    logger.debug(
+      `Registered ${registrations.length} hook callback(s) for events: ${[...new Set(registrations.map((r) => r.event))].join(', ')}`,
+    );
+    return registrations;
+  }
+
+  /**
+   * Handle an incoming hook_callback control request from the CLI.
+   * Looks up the callback by ID and invokes it with the hook payload.
+   */
+  private async handleHookCallback(
+    callbackId: string,
+    input: unknown,
+    toolUseId: string | null,
+  ): Promise<Record<string, unknown>> {
+    const callback = this.hookCallbackMap.get(callbackId);
+    if (!callback) {
+      logger.warn(`No callback registered for hook callback_id: ${callbackId}`);
+      return {};
+    }
+
+    try {
+      const result = await Promise.resolve(callback(input, toolUseId));
+      return (result ?? {}) as Record<string, unknown>;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`Hook callback error (${callbackId}):`, msg);
+      return { message: `Hook callback error: ${msg}` };
+    }
   }
 
   private handleControlResponse(response: CLIControlResponse): void {

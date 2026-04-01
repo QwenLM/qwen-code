@@ -4,10 +4,35 @@ import type {
   SubagentConfig,
   SDKMcpServerConfig,
   AuthType,
+  HookCallbackResult,
 } from './protocol.js';
 import type { SpawnInfo } from '../utils/cliPath.js';
 
 export type { PermissionMode, AuthType };
+
+/**
+ * Hook event names supported by the CLI.
+ * Each event corresponds to a lifecycle point in agent execution.
+ */
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'Stop'
+  | 'Notification'
+  | 'SubagentStop';
+
+/**
+ * Callback function invoked when a hook event fires.
+ * Called by the SDK when the CLI sends a hook_callback control request.
+ *
+ * @param input - The hook event payload (tool name, tool input, etc.)
+ * @param toolUseId - The tool use ID, if the event relates to a tool invocation
+ * @returns A HookCallbackResult controlling skip/interrupt/message behavior
+ */
+export type HookCallback = (
+  input: unknown,
+  toolUseId: string | null,
+) => Promise<HookCallbackResult> | HookCallbackResult;
 
 export type TransportOptions = {
   pathToQwenExecutable?: string;
@@ -544,6 +569,36 @@ export interface QueryOptions {
     googleSearchEngineId?: string;
     defaultProvider?: string;
   };
+
+  /**
+   * SDK-side hook callbacks for event-driven automation.
+   * When provided, the hook system is automatically enabled (no need to set `hooks: true`).
+   *
+   * Callbacks are registered with the CLI during initialization. When a hook event fires,
+   * the CLI sends a `hook_callback` control request and the SDK invokes the matching callback.
+   *
+   * @example Single callback per event
+   * ```typescript
+   * hookCallbacks: {
+   *   PreToolUse: async (input, toolUseId) => {
+   *     console.log(`Tool about to run:`, input);
+   *     return {}; // allow
+   *   },
+   *   Stop: async (input) => {
+   *     console.log('Agent stopping');
+   *     return {};
+   *   },
+   * }
+   * ```
+   *
+   * @example Multiple callbacks (executed in order, first deny wins)
+   * ```typescript
+   * hookCallbacks: {
+   *   PreToolUse: [auditLogger, securityGate],
+   * }
+   * ```
+   */
+  hookCallbacks?: Partial<Record<HookEvent, HookCallback | HookCallback[]>>;
 
   /**
    * Timeout configuration for various SDK operations.

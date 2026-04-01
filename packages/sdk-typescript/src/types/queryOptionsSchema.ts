@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CanUseTool } from './types.js';
+import type { CanUseTool, HookCallback } from './types.js';
 import type { SubagentConfig } from './protocol.js';
 
 /**
@@ -198,6 +198,21 @@ export const QueryOptionsSchema = z
         defaultProvider: z.string().optional(),
       })
       .strict()
+      .optional(),
+    hookCallbacks: z
+      .record(
+        z.string(),
+        z.union([
+          z.custom<HookCallback>((val) => typeof val === 'function', {
+            message: 'Hook callback must be a function',
+          }),
+          z.array(
+            z.custom<HookCallback>((val) => typeof val === 'function', {
+              message: 'Hook callback must be a function',
+            }),
+          ),
+        ]),
+      )
       .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
