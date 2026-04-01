@@ -588,7 +588,7 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
-  it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
+  it('should reset context file names to defaults (PROTO.md, AGENTS.md + fallbacks) when not configured', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
@@ -603,6 +603,8 @@ describe('loadCliConfig', () => {
     expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
+      'QWEN.md',
+      'CLAUDE.md',
     ]);
   });
 

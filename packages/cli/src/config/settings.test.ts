@@ -48,7 +48,6 @@ import {
   USER_SETTINGS_PATH, // This IS the mocked path.
   getSystemSettingsPath,
   getSystemDefaultsPath,
-  SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
   type Settings,
   loadEnvironment,
   SETTINGS_VERSION,
@@ -58,10 +57,10 @@ import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
-// Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
+// Use QWEN_DIR from core to match Storage.getWorkspaceSettingsPath()
 const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
   MOCK_WORKSPACE_DIR,
-  SETTINGS_DIRECTORY_NAME,
+  QWEN_DIR,
   'settings.json',
 );
 

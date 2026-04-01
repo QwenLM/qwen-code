@@ -58,7 +58,7 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
 
 export type { Settings, MemoryImportFormat };
 
-export const SETTINGS_DIRECTORY_NAME = '.qwen';
+export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
 export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
