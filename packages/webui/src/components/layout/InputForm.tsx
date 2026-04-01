@@ -31,12 +31,8 @@ import type { ContextUsage } from './ContextIndicator.js';
 interface InputFormFollowupState {
   /** Current suggestion text */
   suggestion: string | null;
-  /** All available suggestions */
-  suggestions: { length: number };
   /** Whether to show suggestion */
   isVisible: boolean;
-  /** Index of current suggestion */
-  currentIndex: number;
 }
 
 /**
@@ -141,16 +137,12 @@ export interface InputFormProps {
   placeholder?: string;
   /** Whether the current draft is eligible to submit */
   canSubmit?: boolean;
-  /** Follow-up suggestion state */
+  /** Prompt suggestion state */
   followupState?: InputFormFollowupState;
-  /** Callback to accept follow-up suggestion */
-  onAcceptFollowup?: () => void;
-  /** Callback to dismiss follow-up suggestion */
+  /** Callback to accept prompt suggestion */
+  onAcceptFollowup?: (method?: 'tab' | 'enter' | 'right') => void;
+  /** Callback to dismiss prompt suggestion */
   onDismissFollowup?: () => void;
-  /** Callback to cycle to next follow-up suggestion */
-  onNextFollowup?: () => void;
-  /** Callback to cycle to previous follow-up suggestion */
-  onPreviousFollowup?: () => void;
 }
 
 /**
@@ -213,8 +205,6 @@ export const InputForm: FC<InputFormProps> = ({
   followupState,
   onAcceptFollowup,
   onDismissFollowup,
-  onNextFollowup,
-  onPreviousFollowup,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
   const hasDraftContent =
@@ -226,18 +216,12 @@ export const InputForm: FC<InputFormProps> = ({
     !!onCompletionSelect &&
     !!onCompletionClose;
 
-  // Follow-up suggestion handling
+  // Prompt suggestion handling
   const followupSuggestion =
     followupState?.isVisible && followupState.suggestion
       ? followupState.suggestion
       : null;
   const hasFollowup = !!followupSuggestion;
-  const suggestionCount = followupState?.isVisible
-    ? followupState.suggestions.length
-    : 0;
-  const suggestionIndex = followupState?.isVisible
-    ? followupState.currentIndex + 1
-    : 0;
 
   // Compute actual placeholder
   const actualPlaceholder =
@@ -257,14 +241,14 @@ export const InputForm: FC<InputFormProps> = ({
       onCancel();
       return;
     }
-    // Tab to accept follow-up suggestion
+    // Tab to accept prompt suggestion
     if (e.key === 'Tab' && hasFollowup && !inputText && !completionActive) {
       e.preventDefault();
       e.stopPropagation();
-      onAcceptFollowup?.();
+      onAcceptFollowup?.('tab');
       return;
     }
-    // Right arrow to cycle to next suggestion (when input is empty)
+    // Right arrow to accept prompt suggestion (fills input without submitting)
     if (
       e.key === 'ArrowRight' &&
       hasFollowup &&
@@ -272,24 +256,22 @@ export const InputForm: FC<InputFormProps> = ({
       !completionActive
     ) {
       e.preventDefault();
-      onNextFollowup?.();
-      return;
-    }
-    // Left arrow to cycle to previous suggestion (when input is empty)
-    if (
-      e.key === 'ArrowLeft' &&
-      hasFollowup &&
-      !inputText &&
-      !completionActive
-    ) {
-      e.preventDefault();
-      onPreviousFollowup?.();
+      onAcceptFollowup?.('right');
       return;
     }
     // If composing (Chinese IME input), don't process Enter key
     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
       // If CompletionMenu is open, let it handle Enter key
       if (completionActive) {
+        return;
+      }
+      // Accept and submit prompt suggestion on Enter when input is empty
+      if (hasFollowup && !inputText && followupSuggestion) {
+        e.preventDefault();
+        // Synchronously set the input text so onSubmit reads the correct value
+        onInputChange(followupSuggestion);
+        onAcceptFollowup?.('enter');
+        onSubmit(e);
         return;
       }
       e.preventDefault();
@@ -347,11 +329,8 @@ export const InputForm: FC<InputFormProps> = ({
               aria-label="Message input"
               aria-multiline="true"
               data-placeholder={actualPlaceholder}
-              // Indicate when a follow-up suggestion is active
+              // Indicate when a prompt suggestion is active
               data-has-suggestion={hasFollowup ? 'true' : 'false'}
-              // Suggestion counter for multiple suggestions
-              data-suggestion-count={String(suggestionCount)}
-              data-suggestion-index={String(suggestionIndex)}
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={

@@ -41,8 +41,10 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
-  generateFollowupSuggestions,
-  type FollowupSuggestion,
+  generatePromptSuggestion,
+  logPromptSuggestion,
+  PromptSuggestionEvent,
+  ApprovalMode,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -87,7 +89,6 @@ import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
 import { useCommandMigration } from './hooks/useCommandMigration.js';
-import { extractFollowupSuggestionContext } from './followupHistory.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
@@ -738,11 +739,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const agentViewState = useAgentViewState();
 
-  // Follow-up suggestions state
-  const [followupSuggestions, setFollowupSuggestions] = useState<
-    FollowupSuggestion[]
-  >([]);
+  // Prompt suggestion state
+  const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
+  const suggestionAbortRef = useRef<AbortController | null>(null);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
@@ -944,48 +944,91 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
-  // Generate follow-up suggestions when streaming completes
+  // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
     settings.merged.ui?.enableFollowupSuggestions !== false;
 
   useEffect(() => {
-    // Clear suggestions when a new turn starts (Idle → Responding)
+    // Clear suggestion when feature is disabled at runtime
+    if (!followupSuggestionsEnabled) {
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
+    }
+
+    // Clear suggestion and abort pending generation when a new turn starts
     if (
       prevStreamingStateRef.current === StreamingState.Idle &&
       streamingState === StreamingState.Responding
     ) {
-      setFollowupSuggestions([]);
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
     }
 
-    // Skip suggestion generation if feature is disabled
-    if (!followupSuggestionsEnabled) {
-      prevStreamingStateRef.current = streamingState;
-      return;
-    }
-
-    // Only trigger when transitioning from Responding to Idle
+    // Only trigger when transitioning from Responding to Idle (and enabled)
+    // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
     if (
+      followupSuggestionsEnabled &&
+      config.isInteractive() &&
+      !config.getSdkMode() &&
       prevStreamingStateRef.current === StreamingState.Responding &&
-      streamingState === StreamingState.Idle
+      streamingState === StreamingState.Idle &&
+      // Read history inline — always fresh when streamingState triggers this effect
+      historyManager.history[historyManager.history.length - 1]?.type !==
+        'error' &&
+      !shellConfirmationRequest &&
+      !confirmationRequest &&
+      !loopDetectionConfirmationRequest &&
+      !isPermissionsDialogOpen &&
+      settingInputRequests.length === 0 &&
+      config.getApprovalMode() !== ApprovalMode.PLAN
     ) {
-      const history = historyManager.history;
-      const context = extractFollowupSuggestionContext(history);
+      const ac = new AbortController();
+      suggestionAbortRef.current = ac;
 
-      if (context) {
-        const result = generateFollowupSuggestions(context);
-        if (result.shouldShow && result.suggestions.length > 0) {
-          setFollowupSuggestions(result.suggestions);
-        } else {
-          setFollowupSuggestions([]);
-        }
-      } else {
-        setFollowupSuggestions([]);
-      }
+      // Limit history to avoid excessive cost on long conversations
+      const fullHistory = geminiClient.getHistory();
+      const conversationHistory =
+        fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      generatePromptSuggestion(config, conversationHistory, ac.signal)
+        .then((result) => {
+          if (ac.signal.aborted) return;
+          if (result.suggestion) {
+            setPromptSuggestion(result.suggestion);
+          } else if (result.filterReason) {
+            // Log suppressed suggestion for analytics
+            logPromptSuggestion(
+              config,
+              new PromptSuggestionEvent({
+                outcome: 'suppressed',
+                reason: result.filterReason,
+              }),
+            );
+          }
+        })
+        .catch(() => {
+          // Silently degrade — don't disrupt the user experience
+        });
     }
 
-    prevStreamingStateRef.current = streamingState;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
-  }, [streamingState, followupSuggestionsEnabled]);
+    // Only update prev ref when streamingState actually changes, so that
+    // dialog-dependency re-runs don't cause us to miss a Responding→Idle transition.
+    if (prevStreamingStateRef.current !== streamingState) {
+      prevStreamingStateRef.current = streamingState;
+    }
+
+    return () => {
+      suggestionAbortRef.current?.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
+  }, [
+    streamingState,
+    followupSuggestionsEnabled,
+    shellConfirmationRequest,
+    confirmationRequest,
+    loopDetectionConfirmationRequest,
+    isPermissionsDialogOpen,
+    settingInputRequests,
+  ]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
@@ -1626,8 +1669,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
-      // Follow-up suggestions
-      followupSuggestions,
+      // Prompt suggestion
+      promptSuggestion,
     }),
     [
       isThemeDialogOpen,
@@ -1731,8 +1774,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
-      // Follow-up suggestions
-      followupSuggestions,
+      // Prompt suggestion
+      promptSuggestion,
     ],
   );
 

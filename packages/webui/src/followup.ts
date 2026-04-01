@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Follow-up Suggestions Subpath Entry
+ * Prompt Suggestion Subpath Entry
  *
  * Separated from the root entry to avoid forcing all @qwen-code/webui
  * consumers to install @qwen-code/qwen-code-core as a dependency.
@@ -13,7 +13,6 @@
 
 export { useFollowupSuggestions } from './hooks/useFollowupSuggestions';
 export type {
-  FollowupSuggestion,
   FollowupState,
   UseFollowupSuggestionsOptions,
   UseFollowupSuggestionsReturn,

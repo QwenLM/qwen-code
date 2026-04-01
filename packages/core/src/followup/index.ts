@@ -3,12 +3,10 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Follow-up Suggestions Module
+ * Prompt Suggestion Module
  *
- * Exports for the follow-up suggestions feature.
+ * Exports for the prompt suggestion feature.
  */
 
-export * from './types.js';
 export * from './followupState.js';
 export * from './suggestionGenerator.js';
-export * from './ruleBasedProvider.js';

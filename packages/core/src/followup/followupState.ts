@@ -5,97 +5,28 @@
  *
  * Shared Follow-up Suggestions State Logic
  *
- * Framework-agnostic state management for follow-up suggestions,
+ * Framework-agnostic state management for prompt suggestions,
  * shared between CLI (Ink) and WebUI (React) hooks.
  */
 
-import type { FollowupSuggestion } from './types.js';
-
 /**
- * State for follow-up suggestions
+ * State for prompt suggestion display.
  */
 export interface FollowupState {
   /** Current suggestion text */
   suggestion: string | null;
-  /** All available suggestions */
-  suggestions: FollowupSuggestion[];
   /** Whether to show suggestion */
   isVisible: boolean;
-  /** Index of current suggestion (for cycling) */
-  currentIndex: number;
+  /** Timestamp when suggestion was shown (for telemetry) */
+  shownAt: number;
 }
 
 /** Initial empty state */
-export const INITIAL_FOLLOWUP_STATE: FollowupState = {
+export const INITIAL_FOLLOWUP_STATE: Readonly<FollowupState> = Object.freeze({
   suggestion: null,
-  suggestions: [],
   isVisible: false,
-  currentIndex: 0,
-};
-
-/**
- * Pure state reducers for follow-up suggestion state transitions.
- * These are safe to use inside React setState updaters.
- */
-export const followupReducers = {
-  /** Set new suggestions */
-  setSuggestions(suggestions: FollowupSuggestion[]): FollowupState {
-    if (suggestions.length > 0) {
-      return {
-        suggestion: suggestions[0].text,
-        suggestions,
-        isVisible: true,
-        currentIndex: 0,
-      };
-    }
-    return INITIAL_FOLLOWUP_STATE;
-  },
-
-  /** Clear state (dismiss / clear) */
-  clear(): FollowupState {
-    return INITIAL_FOLLOWUP_STATE;
-  },
-
-  /** Cycle to next suggestion. Returns null if no change needed. */
-  next(prev: FollowupState): FollowupState | null {
-    if (prev.suggestions.length === 0) {
-      return null;
-    }
-    const nextIndex = (prev.currentIndex + 1) % prev.suggestions.length;
-    return {
-      ...prev,
-      currentIndex: nextIndex,
-      suggestion: prev.suggestions[nextIndex].text,
-    };
-  },
-
-  /** Cycle to previous suggestion. Returns null if no change needed. */
-  previous(prev: FollowupState): FollowupState | null {
-    if (prev.suggestions.length === 0) {
-      return null;
-    }
-    const prevIndex =
-      prev.currentIndex === 0
-        ? prev.suggestions.length - 1
-        : prev.currentIndex - 1;
-    return {
-      ...prev,
-      currentIndex: prevIndex,
-      suggestion: prev.suggestions[prevIndex].text,
-    };
-  },
-
-  /** Get current suggestion text for accept. Returns null if nothing to accept. */
-  getAcceptText(state: FollowupState): string | null {
-    if (
-      state.suggestions.length === 0 ||
-      state.currentIndex >= state.suggestions.length
-    ) {
-      return null;
-    }
-    return state.suggestions[state.currentIndex].text;
-  },
-};
+  shownAt: 0,
+});
 
 // ---------------------------------------------------------------------------
 // Framework-agnostic controller
@@ -110,7 +41,7 @@ const ACCEPT_DEBOUNCE_MS = 100;
  * Options for creating a followup controller
  */
 export interface FollowupControllerOptions {
-  /** Whether the feature is enabled (checked when setting suggestions) */
+  /** Whether the feature is enabled (checked when setting suggestion) */
   enabled?: boolean;
   /** Called whenever the internal state changes */
   onStateChange: (state: FollowupState) => void;
@@ -120,6 +51,16 @@ export interface FollowupControllerOptions {
    * without requiring re-creation when the callback reference changes.
    */
   getOnAccept?: () => ((text: string) => void) | undefined;
+  /**
+   * Called when a suggestion outcome is determined (accepted, ignored, suppressed).
+   * Used for telemetry.
+   */
+  onOutcome?: (params: {
+    outcome: 'accepted' | 'ignored';
+    accept_method?: 'tab' | 'enter' | 'right';
+    time_ms: number;
+    suggestion_length: number;
+  }) => void;
 }
 
 /**
@@ -127,16 +68,12 @@ export interface FollowupControllerOptions {
  * These are stable (never change identity) and safe to call from any context.
  */
 export interface FollowupControllerActions {
-  /** Set suggestions (with delayed show). Empty array clears immediately. */
-  setSuggestions: (suggestions: FollowupSuggestion[]) => void;
+  /** Set suggestion text (with delayed show). Null clears immediately. */
+  setSuggestion: (text: string | null) => void;
   /** Accept the current suggestion and invoke onAccept callback */
-  accept: () => void;
-  /** Dismiss/clear suggestions */
+  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  /** Dismiss/clear suggestion */
   dismiss: () => void;
-  /** Cycle to next suggestion */
-  next: () => void;
-  /** Cycle to previous suggestion */
-  previous: () => void;
   /** Hard-clear all state and timers */
   clear: () => void;
   /** Clean up timers — call on unmount */
@@ -149,21 +86,17 @@ export interface FollowupControllerActions {
  * Encapsulates timer management, accept debounce, and state transitions so
  * that React hooks (CLI and WebUI) only need thin wrappers around
  * `useState` + this controller.
- *
- * @param options - Controller configuration
- * @returns Stable action functions and a cleanup function
  */
 export function createFollowupController(
   options: FollowupControllerOptions,
 ): FollowupControllerActions {
-  const { enabled = true, onStateChange, getOnAccept } = options;
+  const { enabled = true, onStateChange, getOnAccept, onOutcome } = options;
 
   let currentState: FollowupState = INITIAL_FOLLOWUP_STATE;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let accepting = false;
   let acceptTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
-  /** Apply a new state and notify the consumer */
   function applyState(next: FollowupState): void {
     currentState = next;
     onStateChange(next);
@@ -180,7 +113,7 @@ export function createFollowupController(
     }
   }
 
-  const setSuggestions = (suggestions: FollowupSuggestion[]): void => {
+  const setSuggestion = (text: string | null): void => {
     if (!enabled) {
       return;
     }
@@ -190,17 +123,17 @@ export function createFollowupController(
       timeoutId = null;
     }
 
-    if (suggestions.length === 0) {
-      applyState(followupReducers.clear());
+    if (!text) {
+      applyState(INITIAL_FOLLOWUP_STATE);
       return;
     }
 
     timeoutId = setTimeout(() => {
-      applyState(followupReducers.setSuggestions(suggestions));
+      applyState({ suggestion: text, isVisible: true, shownAt: Date.now() });
     }, SUGGESTION_DELAY_MS);
   };
 
-  const accept = (): void => {
+  const accept = (method?: 'tab' | 'enter' | 'right'): void => {
     if (accepting) {
       return;
     }
@@ -212,18 +145,22 @@ export function createFollowupController(
 
     accepting = true;
 
-    const text = followupReducers.getAcceptText(currentState);
-    if (text === null) {
+    const text = currentState.suggestion;
+    const { shownAt } = currentState;
+    if (!text) {
       accepting = false;
       return;
     }
 
-    applyState(followupReducers.clear());
+    onOutcome?.({
+      outcome: 'accepted',
+      accept_method: method,
+      time_ms: shownAt > 0 ? Date.now() - shownAt : 0,
+      suggestion_length: text.length,
+    });
 
-    // Fire the callback asynchronously to avoid side-effects in state updates.
-    // Use finally to guarantee the debounce lock is always released even if the
-    // callback throws. Errors are logged rather than swallowed so bugs in
-    // onAccept remain visible during development.
+    applyState(INITIAL_FOLLOWUP_STATE);
+
     queueMicrotask(() => {
       try {
         getOnAccept?.()?.(text);
@@ -246,32 +183,30 @@ export function createFollowupController(
       clearTimeout(timeoutId);
       timeoutId = null;
     }
-    applyState(followupReducers.clear());
-  };
 
-  const next = (): void => {
-    const nextState = followupReducers.next(currentState);
-    if (nextState) {
-      applyState(nextState);
+    // Log ignored outcome if a suggestion was visible
+    if (currentState.isVisible && currentState.suggestion) {
+      onOutcome?.({
+        outcome: 'ignored',
+        time_ms:
+          currentState.shownAt > 0 ? Date.now() - currentState.shownAt : 0,
+        suggestion_length: currentState.suggestion.length,
+      });
     }
-  };
 
-  const previous = (): void => {
-    const prevState = followupReducers.previous(currentState);
-    if (prevState) {
-      applyState(prevState);
-    }
+    applyState(INITIAL_FOLLOWUP_STATE);
   };
 
   const clear = (): void => {
     clearTimers();
     accepting = false;
-    applyState(followupReducers.clear());
+    applyState(INITIAL_FOLLOWUP_STATE);
   };
 
   const cleanup = (): void => {
     clearTimers();
+    accepting = false;
   };
 
-  return { setSuggestions, accept, dismiss, next, previous, clear, cleanup };
+  return { setSuggestion, accept, dismiss, clear, cleanup };
 }

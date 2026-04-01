@@ -3,20 +3,19 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Follow-up Suggestions Hook for CLI
+ * Prompt Suggestion Hook for CLI
  *
  * Thin React wrapper around the framework-agnostic controller from core.
  */
 
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   INITIAL_FOLLOWUP_STATE,
   createFollowupController,
+  logPromptSuggestion,
+  PromptSuggestionEvent,
 } from '@qwen-code/qwen-code-core';
-import type {
-  FollowupSuggestion,
-  FollowupState,
-} from '@qwen-code/qwen-code-core';
+import type { FollowupState, Config } from '@qwen-code/qwen-code-core';
 
 // Re-export for consumers that import from here
 export type { FollowupState } from '@qwen-code/qwen-code-core';
@@ -29,6 +28,10 @@ export interface UseFollowupSuggestionsOptions {
   enabled?: boolean;
   /** Callback when suggestion is accepted */
   onAccept?: (suggestion: string) => void;
+  /** Config for telemetry logging */
+  config?: Config;
+  /** Whether the terminal is focused (for telemetry) */
+  isFocused?: boolean;
 }
 
 /**
@@ -37,46 +40,91 @@ export interface UseFollowupSuggestionsOptions {
 export interface UseFollowupSuggestionsReturn {
   /** Current state */
   state: FollowupState;
-  /** Set suggestions directly (called by parent component) */
-  setSuggestions: (suggestions: FollowupSuggestion[]) => void;
+  /** Set suggestion text (called by parent component) */
+  setSuggestion: (text: string | null) => void;
   /** Accept the current suggestion */
-  accept: () => void;
+  accept: (method?: 'tab' | 'enter' | 'right') => void;
   /** Dismiss the current suggestion */
   dismiss: () => void;
-  /** Cycle to next suggestion */
-  next: () => void;
-  /** Cycle to previous suggestion */
-  previous: () => void;
-  /** Clear all suggestions */
+  /** Clear all state */
   clear: () => void;
+  /**
+   * Notify that the user typed while suggestion was visible.
+   * Call from the input handler on first keystroke.
+   */
+  recordKeystroke: () => void;
 }
 
 /**
- * Hook for managing follow-up suggestions in CLI.
+ * Hook for managing prompt suggestions in CLI.
  *
  * Delegates all timer/debounce/state logic to the shared
  * `createFollowupController` from core.
- *
- * @example
- * ```tsx
- * const { state, accept, dismiss, next, previous, setSuggestions } = useFollowupSuggestionsCLI({
- *   onAccept: (suggestion) => buffer.insert(suggestion),
- * });
- *
- * // After streaming completes:
- * setSuggestions([{ text: 'commit this', priority: 100 }]);
- * ```
  */
 export function useFollowupSuggestionsCLI(
   options: UseFollowupSuggestionsOptions = {},
 ): UseFollowupSuggestionsReturn {
-  const { enabled = true, onAccept } = options;
+  const { enabled = true, onAccept, config, isFocused = true } = options;
 
   const [state, setState] = useState<FollowupState>(INITIAL_FOLLOWUP_STATE);
 
-  // Keep a mutable ref so the controller always sees the latest callback
+  // Keep mutable refs so the controller always sees the latest callbacks
   const onAcceptRef = useRef(onAccept);
   onAcceptRef.current = onAccept;
+  const configRef = useRef(config);
+  configRef.current = config;
+
+  // Engagement tracking refs
+  const firstKeystrokeAtRef = useRef(0);
+  const prevShownAtRef = useRef(0);
+  const wasFocusedWhenShownRef = useRef(true);
+
+  // Track when a new suggestion appears
+  if (state.shownAt > 0 && state.shownAt !== prevShownAtRef.current) {
+    prevShownAtRef.current = state.shownAt;
+    wasFocusedWhenShownRef.current = isFocused;
+    firstKeystrokeAtRef.current = 0;
+  } else if (state.shownAt === 0) {
+    prevShownAtRef.current = 0;
+  }
+
+  const recordKeystroke = useCallback(() => {
+    if (firstKeystrokeAtRef.current === 0 && state.isVisible) {
+      firstKeystrokeAtRef.current = Date.now();
+    }
+  }, [state.isVisible]);
+
+  // Telemetry callback from controller (accept/dismiss)
+  const onOutcome = useCallback(
+    (params: {
+      outcome: 'accepted' | 'ignored';
+      accept_method?: 'tab' | 'enter' | 'right';
+      time_ms: number;
+      suggestion_length: number;
+    }) => {
+      const cfg = configRef.current;
+      if (!cfg) return;
+      logPromptSuggestion(
+        cfg,
+        new PromptSuggestionEvent({
+          outcome: params.outcome,
+          accept_method: params.accept_method,
+          ...(params.outcome === 'accepted'
+            ? { time_to_accept_ms: params.time_ms }
+            : { time_to_ignore_ms: params.time_ms }),
+          ...(firstKeystrokeAtRef.current > 0 &&
+            prevShownAtRef.current > 0 && {
+              time_to_first_keystroke_ms:
+                firstKeystrokeAtRef.current - prevShownAtRef.current,
+            }),
+          suggestion_length: params.suggestion_length,
+          similarity: params.outcome === 'accepted' ? 1.0 : 0.0,
+          was_focused_when_shown: wasFocusedWhenShownRef.current,
+        }),
+      );
+    },
+    [],
+  );
 
   // Create the controller once — it is stable across renders
   const controller = useMemo(
@@ -85,23 +133,28 @@ export function useFollowupSuggestionsCLI(
         enabled,
         onStateChange: setState,
         getOnAccept: () => onAcceptRef.current,
+        onOutcome,
       }),
-    [enabled],
+    [enabled, onOutcome],
   );
 
-  // Clean up timers on unmount
-  useEffect(() => () => controller.cleanup(), [controller]);
+  // Clear state when disabled; clean up timers on unmount
+  useEffect(() => {
+    if (!enabled) {
+      controller.clear();
+    }
+    return () => controller.cleanup();
+  }, [controller, enabled]);
 
   return useMemo(
     () => ({
       state,
-      setSuggestions: controller.setSuggestions,
+      setSuggestion: controller.setSuggestion,
       accept: controller.accept,
       dismiss: controller.dismiss,
-      next: controller.next,
-      previous: controller.previous,
       clear: controller.clear,
+      recordKeystroke,
     }),
-    [state, controller],
+    [state, controller, recordKeystroke],
   );
 }

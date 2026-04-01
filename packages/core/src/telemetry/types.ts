@@ -1062,3 +1062,44 @@ export class ExtensionDisableEvent implements BaseTelemetryEvent {
     this.setting_scope = settingScope;
   }
 }
+
+export class PromptSuggestionEvent implements BaseTelemetryEvent {
+  'event.name': 'prompt_suggestion';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'ignored' | 'suppressed';
+  prompt_id?: string;
+  accept_method?: 'tab' | 'enter' | 'right';
+  time_to_accept_ms?: number;
+  time_to_ignore_ms?: number;
+  time_to_first_keystroke_ms?: number;
+  suggestion_length?: number;
+  similarity?: number;
+  was_focused_when_shown?: boolean;
+  reason?: string;
+
+  constructor(params: {
+    outcome: 'accepted' | 'ignored' | 'suppressed';
+    prompt_id?: string;
+    accept_method?: 'tab' | 'enter' | 'right';
+    time_to_accept_ms?: number;
+    time_to_ignore_ms?: number;
+    time_to_first_keystroke_ms?: number;
+    suggestion_length?: number;
+    similarity?: number;
+    was_focused_when_shown?: boolean;
+    reason?: string;
+  }) {
+    this['event.name'] = 'prompt_suggestion';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.prompt_id = params.prompt_id ?? 'user_intent';
+    this.accept_method = params.accept_method;
+    this.time_to_accept_ms = params.time_to_accept_ms;
+    this.time_to_ignore_ms = params.time_to_ignore_ms;
+    this.time_to_first_keystroke_ms = params.time_to_first_keystroke_ms;
+    this.suggestion_length = params.suggestion_length;
+    this.similarity = params.similarity;
+    this.was_focused_when_shown = params.was_focused_when_shown;
+    this.reason = params.reason;
+  }
+}

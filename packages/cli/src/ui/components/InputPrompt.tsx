@@ -18,7 +18,7 @@ import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
-import type { FollowupSuggestion, Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -82,8 +82,8 @@ export interface InputPromptProps {
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
-  /** Follow-up suggestions to display after response completes */
-  followupSuggestions?: FollowupSuggestion[];
+  /** Prompt suggestion text to display after response completes */
+  promptSuggestion?: string | null;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -113,7 +113,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onSuggestionsVisibilityChange,
   vimHandleInput,
   isEmbeddedShellFocused,
-  followupSuggestions,
+  promptSuggestion,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -214,11 +214,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandSearchActive,
   );
 
-  // Follow-up suggestions hook
+  // Prompt suggestion hook
   const followup = useFollowupSuggestionsCLI({
     onAccept: (suggestion) => {
       buffer.insert(suggestion);
     },
+    config,
+    isFocused: isShellFocused,
   });
 
   const resetCompletionState = completion.resetCompletionState;
@@ -718,9 +720,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
-      // Handle Tab for follow-up suggestions (when buffer is empty and no completion/search active)
+      // Handle Tab for prompt suggestions (when buffer is empty and no completion/search active)
+      // Use explicit key.name === 'tab' instead of ACCEPT_SUGGESTION matcher,
+      // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
       if (
-        keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
+        key.name === 'tab' &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
         !reverseSearchActive &&
@@ -728,33 +732,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.state.isVisible &&
         followup.state.suggestion
       ) {
-        followup.accept();
+        followup.accept('tab');
         return true;
       }
 
-      // Right arrow to cycle to next follow-up suggestion (when buffer is empty)
+      // Right arrow fills suggestion into input without submitting
       if (
         key.name === 'right' &&
         !key.ctrl &&
         !key.meta &&
         buffer.text.length === 0 &&
         followup.state.isVisible &&
-        followup.state.suggestions.length > 1
+        followup.state.suggestion
       ) {
-        followup.next();
-        return true;
-      }
-
-      // Left arrow to cycle to previous follow-up suggestion (when buffer is empty)
-      if (
-        key.name === 'left' &&
-        !key.ctrl &&
-        !key.meta &&
-        buffer.text.length === 0 &&
-        followup.state.isVisible &&
-        followup.state.suggestions.length > 1
-      ) {
-        followup.previous();
+        followup.accept('right');
         return true;
       }
 
@@ -890,6 +881,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
+        // Accept and submit prompt suggestion on Enter when input is empty
+        if (
+          !buffer.text.trim() &&
+          followup.state.isVisible &&
+          followup.state.suggestion
+        ) {
+          const text = followup.state.suggestion;
+          followup.accept('enter');
+          handleSubmitAndClear(text);
+          return true;
+        }
         if (buffer.text.trim()) {
           // Check if a paste operation occurred recently to prevent accidental auto-submission.
           // Only applies when pasteWorkaround is enabled (Windows or Node < 20), where bracketed
@@ -978,6 +980,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         !key.ctrl &&
         !key.meta
       ) {
+        followup.recordKeystroke();
         followup.dismiss();
       }
       return false;
@@ -1119,13 +1122,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
 
-  // Trigger follow-up suggestions when prop changes
+  // Trigger prompt suggestion when prop changes
   useEffect(() => {
-    if (followupSuggestions) {
-      followup.setSuggestions(followupSuggestions);
-    }
+    followup.setSuggestion(promptSuggestion ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
-  }, [followupSuggestions]);
+  }, [promptSuggestion]);
 
   const showAutoAcceptStyling =
     !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;
@@ -1197,7 +1198,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         onSubmit={handleSubmitAndClear}
         onKeypress={handleInput}
         showCursor={showCursor}
-        placeholder={followup.state.suggestion || placeholder}
+        placeholder={
+          followup.state.isVisible && followup.state.suggestion
+            ? followup.state.suggestion
+            : placeholder
+        }
         prefix={prefixNode}
         borderColor={borderColor}
         isActive={!isEmbeddedShellFocused}
