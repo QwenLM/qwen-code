@@ -958,7 +958,9 @@ export const App: React.FC = () => {
       <ChatHeader
         currentSessionTitle={sessionManagement.currentSessionTitle}
         onLoadSessions={sessionManagement.handleLoadQwenSessions}
-        onNewSession={sessionManagement.handleNewQwenSession}
+        onNewSession={() =>
+          sessionManagement.handleNewQwenSession(modelInfo?.modelId ?? null)
+        }
       />
 
       <div

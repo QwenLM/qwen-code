@@ -47,6 +47,8 @@ export class WebViewProvider {
   private authState: boolean | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
+  /** Model to apply once a new editor-tab session is initialized */
+  private initialModelId: string | null = null;
   /** Reference to a WebviewView webview (sidebar/panel/secondary) when attached via attachToView */
   private attachedWebview: vscode.Webview | null = null;
   /**
@@ -763,6 +765,13 @@ export class WebViewProvider {
     await this.attemptAuthStateRestoration();
   }
 
+  setInitialModelId(modelId: string | null | undefined): void {
+    this.initialModelId =
+      typeof modelId === 'string' && modelId.trim().length > 0
+        ? modelId.trim()
+        : null;
+  }
+
   /**
    * Attempt to restore authentication state and initialize connection
    * This is called when the webview is first shown
@@ -1077,6 +1086,10 @@ export class WebViewProvider {
         sessionReady = true;
       }
 
+      if (sessionReady) {
+        await this.applyInitialModelSelection();
+      }
+
       await this.initializeEmptyConversation();
     } catch (_error) {
       const errorMsg = getErrorMessage(_error);
@@ -1092,6 +1105,24 @@ export class WebViewProvider {
     }
 
     return sessionReady;
+  }
+
+  private async applyInitialModelSelection(): Promise<void> {
+    if (!this.initialModelId) {
+      return;
+    }
+
+    const modelId = this.initialModelId;
+    this.initialModelId = null;
+
+    try {
+      await this.agentManager.setModelFromUi(modelId);
+    } catch (error) {
+      console.warn(
+        '[WebViewProvider] Failed to apply initial model selection:',
+        error,
+      );
+    }
   }
 
   /**
