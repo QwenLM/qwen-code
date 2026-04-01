@@ -55,16 +55,19 @@ User sees suggestion "commit this"
            │
            │  User presses Tab / Enter
            ▼
-┌──────────────────────────────────────────────────────────────┐
-│  acceptSpeculation()                                         │
-│                                                              │
-│  1. overlayFs.applyToReal() — copy files to real FS          │
-│  2. ensureToolResultPairing() — strip unpaired functionCalls │
-│  3. geminiClient.addHistory() — inject messages              │
-│  4. historyManager.addItem() — render as tool_group items     │
-│  5. overlayFs.cleanup() — delete temp directory              │
-│  6. Promote pipelined suggestion                             │
-└──────────────────────────────────────────────────────────────┘
+     ┌─── status === 'completed'? ───┐
+     │ YES                      NO (boundary) │
+     ▼                                ▼
+┌─────────────────────────┐  ┌────────────────────────┐
+│  acceptSpeculation()    │  │  Discard speculation    │
+│                         │  │  abort + cleanup        │
+│  1. applyToReal()       │  │  Submit query normally  │
+│  2. ensureToolPairing() │  │  (addMessage)           │
+│  3. addHistory()        │  └────────────────────────┘
+│  4. render tool_group   │
+│  5. cleanup overlay     │
+│  6. pipelined suggest   │
+└─────────────────────────┘
            │
            │  User types instead
            ▼
