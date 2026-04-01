@@ -82,6 +82,8 @@ const mockConfigInternal = {
       discoverTools: vi.fn(),
     }) as unknown as ToolRegistry,
   getDefaultFileEncoding: () => 'utf-8',
+  hasFileBeenRead: vi.fn(() => true),
+  trackFileRead: vi.fn(),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 

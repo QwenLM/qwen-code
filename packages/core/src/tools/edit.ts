@@ -379,6 +379,25 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns Result of the edit operation
    */
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    // Enforce read-before-edit: require the file to have been read first
+    // (skip for new file creation where old_string is empty)
+    if (
+      this.params.old_string !== '' &&
+      !this.config.hasFileBeenRead(this.params.file_path)
+    ) {
+      const msg =
+        `You must read ${this.params.file_path} with the ReadFile tool before editing it. ` +
+        `This ensures you have the current file contents and avoids stale edits.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: {
+          message: msg,
+          type: ToolErrorType.EDIT_PREPARATION_FAILURE,
+        },
+      };
+    }
+
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);

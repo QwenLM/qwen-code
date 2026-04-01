@@ -189,6 +189,22 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       this.params;
 
     let fileExists = await isFilefileExists(file_path);
+
+    // Enforce read-before-write for existing files
+    if (fileExists && !this.config.hasFileBeenRead(file_path)) {
+      const msg =
+        `You must read ${file_path} with the ReadFile tool before overwriting it. ` +
+        `This ensures you have the current file contents. ` +
+        `If this is a new file, it should not already exist.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: {
+          message: msg,
+          type: ToolErrorType.FILE_WRITE_FAILURE,
+        },
+      };
+    }
     let originalContent = '';
     let useBOM = false;
     let detectedEncoding: string | undefined;

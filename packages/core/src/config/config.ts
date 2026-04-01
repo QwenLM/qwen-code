@@ -542,6 +542,7 @@ export class Config {
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
+  private readonly filesReadInSession: Set<string> = new Set();
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -2077,6 +2078,22 @@ export class Config {
    */
   setFileSystemService(fileSystemService: FileSystemService): void {
     this.fileSystemService = fileSystemService;
+  }
+
+  /**
+   * Record that a file has been read in the current session.
+   * Used by read-before-edit enforcement.
+   */
+  trackFileRead(filePath: string): void {
+    this.filesReadInSession.add(filePath);
+  }
+
+  /**
+   * Check whether a file has been read in the current session.
+   * Used by Edit and WriteFile tools to enforce read-before-edit.
+   */
+  hasFileBeenRead(filePath: string): boolean {
+    return this.filesReadInSession.has(filePath);
   }
 
   getChatCompression(): ChatCompressionSettings | undefined {

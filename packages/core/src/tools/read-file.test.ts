@@ -47,6 +47,7 @@ describe('ReadFileTool', () => {
       getContentGeneratorConfig: () => ({
         modalities: { image: true, pdf: true, audio: true, video: true },
       }),
+      trackFileRead: vi.fn(),
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
