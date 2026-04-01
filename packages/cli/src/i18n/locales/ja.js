@@ -1153,6 +1153,17 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 ID確認：「DataWorksでのIDと権限を確認させていただけますか？」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 タスク分析：「dataworks_analyzeワークスペースで過去1週間に新規作成されたノードを分析し、何をしているか教えてください」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 タスクガバナンス：「dataworks_analyzeワークスペースで、作成から時間が経っているのにまだ公開されていないノードを見つけてください」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 問題特定：「dwd_is_it_software_released_dfとads_is_it_sfw_moni_key_released_recycled_dfのデータが不一致です。両方とも上流にods_ism_it_software_key_released_dfがあります。ロジックの違いを確認してください」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ 問題修正：「従業員テーブルmy_project.ods_emp_info_dで、従業員EMP001の部署データが空です。原因を調査し、修正案を提示してください」',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',

@@ -12,19 +12,40 @@ import { t } from '../../i18n/index.js';
 type Tip = string | { text: string; weight: number };
 
 const startupTips: Tip[] = [
-  'Use /compress when the conversation gets long to summarize history and free up context.',
-  'Start a fresh idea with /clear or /new; the previous session stays available in history.',
-  'Use /bug to submit issues to the maintainers when something goes off.',
-  'Switch auth type quickly with /auth.',
-  'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
-  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
-  'You can resume a previous conversation by running qwen --continue or qwen --resume.',
-  process.platform === 'win32'
-    ? 'You can switch permission mode quickly with Tab or /approval-mode.'
-    : 'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+  // 'Use /compress when the conversation gets long to summarize history and free up context.',
+  // 'Start a fresh idea with /clear or /new; the previous session stays available in history.',
+  // 'Use /bug to submit issues to the maintainers when something goes off.',
+  // 'Switch auth type quickly with /auth.',
+  // 'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
+  // 'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
+  // 'You can resume a previous conversation by running qwen --continue or qwen --resume.',
+  // process.platform === 'win32'
+  //   ? 'You can switch permission mode quickly with Tab or /approval-mode.'
+  //   : 'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+  // {
+  //   text: 'Try /insight to generate personalized insights from your chat history.',
+  //   weight: 3,
+  // },
+  // DataWorks usage examples
   {
-    text: 'Try /insight to generate personalized insights from your chat history.',
-    weight: 3,
+    text: '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
+    weight: 2,
+  },
+  {
+    text: '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
+    weight: 2,
+  },
+  {
+    text: '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
+    weight: 2,
+  },
+  {
+    text: '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
+    weight: 2,
+  },
+  {
+    text: '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
+    weight: 2,
   },
 ];
 

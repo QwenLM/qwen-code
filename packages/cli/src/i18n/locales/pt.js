@@ -1487,8 +1487,21 @@ export default {
     'Você pode retomar uma conversa anterior executando qwen --continue ou qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Você pode alternar o modo de permissão rapidamente com Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Confirmação de identidade：「Ajude-me a confirmar minha identidade e permissões no DataWorks?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Análise de tarefas：「Analise os nós recém-criados no espaço de trabalho dataworks_analyze na última semana e o que estão fazendo」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Governança de tarefas：「No espaço de trabalho dataworks_analyze, ajude-me a encontrar nós criados há muito tempo, mas nunca publicados」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Diagnóstico de problemas：「Os dados em dwd_is_it_software_released_df e ads_is_it_sfw_moni_key_released_recycled_df são inconsistentes, ambos têm a fonte ods_ism_it_software_key_released_df. Verifique a diferença na lógica deles」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Correção de problemas：「Na tabela de funcionários my_project.ods_emp_info_d, os dados do departamento para o funcionário EMP001 estão vazios. Ajude-me a investigar a causa e fornecer sugestões de correção」',
 
   // ============================================================================
   // Exit Screen / Stats
