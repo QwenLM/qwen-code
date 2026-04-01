@@ -121,7 +121,7 @@ describe('BuiltinCommandLoader', () => {
     mockConfig = {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
-      getEnableHooks: vi.fn().mockReturnValue(true),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
@@ -207,18 +207,19 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd?.name).toBe('model');
   });
 
-  it('should include hooks command when enableHooks is true', async () => {
-    const loader = new BuiltinCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(new AbortController().signal);
-    const hooksCmd = commands.find((c) => c.name === 'hooks');
-    expect(hooksCmd).toBeDefined();
-  });
+  it('should always include hooks command regardless of disableAllHooks', async () => {
+    // When disableAllHooks is false
+    const loader1 = new BuiltinCommandLoader(mockConfig);
+    const commands1 = await loader1.loadCommands(new AbortController().signal);
+    const hooksCmd1 = commands1.find((c) => c.name === 'hooks');
+    expect(hooksCmd1).toBeDefined();
 
-  it('should exclude hooks command when enableHooks is false', async () => {
-    (mockConfig.getEnableHooks as Mock).mockReturnValue(false);
-    const loader = new BuiltinCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(new AbortController().signal);
-    const hooksCmd = commands.find((c) => c.name === 'hooks');
-    expect(hooksCmd).toBeUndefined();
+    // When disableAllHooks is true - hooks command should still be available
+    // (it will show a disabled state page in the UI instead of hiding the command)
+    (mockConfig.getDisableAllHooks as Mock).mockReturnValue(true);
+    const loader2 = new BuiltinCommandLoader(mockConfig);
+    const commands2 = await loader2.loadCommands(new AbortController().signal);
+    const hooksCmd2 = commands2.find((c) => c.name === 'hooks');
+    expect(hooksCmd2).toBeDefined();
   });
 });

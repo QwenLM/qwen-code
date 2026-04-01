@@ -634,6 +634,19 @@ export default {
   'No hook config selected': 'Конфигурация хука не выбрана',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Чтобы изменить или удалить этот хук, отредактируйте settings.json напрямую или спросите Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Конфигурация хуков - Отключено',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Все хуки в данный момент отключены. У вас {{count}} не выполняются.',
+  '{{count}} configured hook': '{{count}} настроенный хук',
+  '{{count}} configured hooks': '{{count}} настроенных хуков',
+  'When hooks are disabled:': 'Когда хуки отключены:',
+  'No hook commands will execute': 'Никакие команды хуков не будут выполняться',
+  'StatusLine will not be displayed': 'StatusLine не будет отображаться',
+  'Tool operations will proceed without hook validation':
+    'Операции инструментов будут выполняться без проверки хуков',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Чтобы снова включить хуки, удалите "disableAllHooks" из settings.json или спросите Qwen Code.',
   // Hooks - Source
   Project: 'Проект',
   User: 'Пользователь',

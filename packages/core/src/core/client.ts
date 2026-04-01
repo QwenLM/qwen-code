@@ -488,7 +488,7 @@ export class GeminiClient {
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
-    const hooksEnabled = this.config.getEnableHooks();
+    const hooksEnabled = !this.config.getDisableAllHooks();
     const messageBus = this.config.getMessageBus();
     if (
       messageType !== SendMessageType.Retry &&

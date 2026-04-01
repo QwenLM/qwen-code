@@ -2423,7 +2423,7 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
@@ -2447,7 +2447,7 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
@@ -2471,7 +2471,7 @@ Other open files:
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );

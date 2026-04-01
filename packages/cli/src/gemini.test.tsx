@@ -506,8 +506,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       authType: undefined,
       maxSessionTurns: undefined,
       experimentalLsp: undefined,
-      lsp: undefined,
-      experimentalHooks: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,

@@ -507,7 +507,7 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(ApprovalMode.DEFAULT);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getEnableHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         (async function* () {

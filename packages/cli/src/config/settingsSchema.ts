@@ -1478,38 +1478,15 @@ const SETTINGS_SCHEMA = {
     },
   },
 
-  hooksConfig: {
-    type: 'object',
-    label: 'Hooks Config',
+  disableAllHooks: {
+    type: 'boolean',
+    label: 'Disable All Hooks',
     category: 'Advanced',
-    requiresRestart: false,
-    default: {},
+    requiresRestart: true,
+    default: false,
     description:
-      'Hook configurations for intercepting and customizing agent behavior.',
+      'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
     showInDialog: false,
-    properties: {
-      enabled: {
-        type: 'boolean',
-        label: 'Enable Hooks',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: true,
-        description:
-          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
-        showInDialog: false,
-      },
-      disabled: {
-        type: 'array',
-        label: 'Disabled Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [] as string[],
-        description:
-          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
   },
 
   hooks: {
