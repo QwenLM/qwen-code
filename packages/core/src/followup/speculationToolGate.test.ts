@@ -184,5 +184,57 @@ describe('speculationToolGate', () => {
 
       expect(args['command']).toBe('ls');
     });
+
+    it('rewrites path argument', async () => {
+      const filePath = join(testDir, 'dir', 'file.ts');
+      await mkdir(join(testDir, 'dir'), { recursive: true });
+      await writeFile(filePath, 'content');
+
+      const args: Record<string, unknown> = { path: filePath };
+      await rewritePathArgs(args, overlayFs);
+
+      expect(String(args['path'])).toContain('qwen-speculation');
+    });
+  });
+
+  describe('read path resolution through overlay', () => {
+    it('resolves read tool path to overlay after a write', async () => {
+      const filePath = join(testDir, 'src', 'app.ts');
+      await mkdir(join(testDir, 'src'), { recursive: true });
+      await writeFile(filePath, 'original');
+
+      // First: redirect a write (puts file in overlay)
+      await overlayFs.redirectWrite(filePath);
+
+      // Then: evaluate a read tool — path should be resolved to overlay
+      const args: Record<string, unknown> = { file_path: filePath };
+      const result = await evaluateToolCall(
+        ToolNames.READ_FILE,
+        args,
+        overlayFs,
+        ApprovalMode.DEFAULT,
+      );
+
+      expect(result.action).toBe('allow');
+      // The file_path arg should now point to the overlay
+      expect(String(args['file_path'])).toContain('qwen-speculation');
+      expect(String(args['file_path'])).not.toBe(filePath);
+    });
+
+    it('does not resolve read path when file was not written to overlay', async () => {
+      const filePath = join(testDir, 'untouched.ts');
+      await writeFile(filePath, 'content');
+
+      const args: Record<string, unknown> = { file_path: filePath };
+      await evaluateToolCall(
+        ToolNames.READ_FILE,
+        args,
+        overlayFs,
+        ApprovalMode.DEFAULT,
+      );
+
+      // Path should remain unchanged
+      expect(args['file_path']).toBe(filePath);
+    });
   });
 });

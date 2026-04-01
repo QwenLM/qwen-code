@@ -167,4 +167,146 @@ describe('createFollowupController', () => {
 
     expect(onStateChange).not.toHaveBeenCalled();
   });
+
+  it('onOutcome fires with accepted on accept', async () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const ctrl = createFollowupController({ onStateChange, onOutcome });
+
+    ctrl.setSuggestion('commit this');
+    vi.advanceTimersByTime(300);
+
+    ctrl.accept('tab');
+
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'accepted',
+        accept_method: 'tab',
+        suggestion_length: 11,
+      }),
+    );
+
+    ctrl.cleanup();
+  });
+
+  it('onOutcome fires with ignored on dismiss', () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const ctrl = createFollowupController({ onStateChange, onOutcome });
+
+    ctrl.setSuggestion('commit this');
+    vi.advanceTimersByTime(300);
+
+    ctrl.dismiss();
+
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'ignored',
+        suggestion_length: 11,
+      }),
+    );
+
+    ctrl.cleanup();
+  });
+
+  it('onOutcome error does not block state clear', () => {
+    const onStateChange = vi.fn();
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const onOutcome = vi.fn().mockImplementation(() => {
+      throw new Error('telemetry crash');
+    });
+    const ctrl = createFollowupController({ onStateChange, onOutcome });
+
+    ctrl.setSuggestion('test');
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.accept('enter');
+
+    // State should still be cleared despite onOutcome throwing
+    expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    ctrl.cleanup();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('dismiss does not fire onOutcome when already cleared', () => {
+    const onStateChange = vi.fn();
+    const onOutcome = vi.fn();
+    const ctrl = createFollowupController({ onStateChange, onOutcome });
+
+    // No suggestion set — dismiss should be a no-op
+    ctrl.dismiss();
+
+    expect(onOutcome).not.toHaveBeenCalled();
+
+    ctrl.cleanup();
+  });
+
+  it('clear resets the accepting lock', async () => {
+    const onStateChange = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+    });
+
+    ctrl.setSuggestion('first');
+    vi.advanceTimersByTime(300);
+
+    ctrl.accept();
+    // clear before debounce timeout releases lock
+    ctrl.clear();
+
+    // Set new suggestion and accept again — should work
+    ctrl.setSuggestion('second');
+    vi.advanceTimersByTime(300);
+    ctrl.accept();
+    await Promise.resolve();
+
+    expect(onAccept).toHaveBeenCalledTimes(2);
+
+    ctrl.cleanup();
+  });
+
+  it('double accept is blocked by debounce lock', async () => {
+    const onStateChange = vi.fn();
+    const onAccept = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+    });
+
+    ctrl.setSuggestion('text');
+    vi.advanceTimersByTime(300);
+
+    ctrl.accept();
+    ctrl.accept(); // second call should be blocked
+    await Promise.resolve();
+
+    expect(onAccept).toHaveBeenCalledTimes(1);
+
+    ctrl.cleanup();
+  });
+
+  it('setSuggestion replaces a pending suggestion', () => {
+    const onStateChange = vi.fn();
+    const ctrl = createFollowupController({ onStateChange });
+
+    ctrl.setSuggestion('first');
+    vi.advanceTimersByTime(150); // halfway through delay
+    ctrl.setSuggestion('second'); // replace
+    vi.advanceTimersByTime(300);
+
+    // Only 'second' should have fired
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    expect(onStateChange.mock.calls[0][0].suggestion).toBe('second');
+
+    ctrl.cleanup();
+  });
 });

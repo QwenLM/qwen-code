@@ -444,7 +444,7 @@ export async function abortSpeculation(state: SpeculationState): Promise<void> {
  * If the last model message has unpaired function calls (boundary truncation),
  * remove those function call parts to keep the history API-legal.
  */
-function ensureToolResultPairing(messages: Content[]): Content[] {
+export function ensureToolResultPairing(messages: Content[]): Content[] {
   if (messages.length === 0) return messages;
 
   const result = [...messages];
