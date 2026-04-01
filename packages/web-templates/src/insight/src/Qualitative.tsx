@@ -6,6 +6,13 @@ import { CopyButton, MarkdownText } from './Components';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
+// Translation helper - reads from window.INSIGHT_TRANSLATIONS
+function t(key: string): string {
+  if (typeof window === 'undefined') return key;
+  const translations = window.INSIGHT_TRANSLATIONS || {};
+  return translations[key] || key;
+}
+
 // -----------------------------------------------------------------------------
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
@@ -16,7 +23,7 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">At a Glance</div>
+      <div className="glance-title">{t('At a Glance')}</div>
       <div className="glance-sections">
         <div className="glance-section">
           <strong>What&apos;s working:</strong>{' '}
@@ -54,13 +61,13 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 export function NavToc() {
   return (
     <nav className="nav-toc">
-      <a href="#section-work">What You Work On</a>
-      <a href="#section-usage">How You Use Qwen Code</a>
-      <a href="#section-wins">Impressive Things</a>
-      <a href="#section-friction">Where Things Go Wrong</a>
-      <a href="#section-features">Features to Try</a>
-      <a href="#section-patterns">New Usage Patterns</a>
-      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-work">{t('Project Areas')}</a>
+      <a href="#section-usage">{t('Interaction Style')}</a>
+      <a href="#section-wins">{t('Impressive Workflows')}</a>
+      <a href="#section-friction">{t('Friction Points')}</a>
+      <a href="#section-features">{t('Improvements')}</a>
+      <a href="#section-patterns">{t('Improvements')}</a>
+      <a href="#section-horizon">{t('Future Opportunities')}</a>
     </nav>
   );
 }
@@ -87,7 +94,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        What You Work On
+        {t('Project Areas')}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -97,7 +104,7 @@ export function ProjectAreas({
               <div className="area-header">
                 <span className="area-name">{area.name}</span>
                 <span className="area-count">
-                  ~{area.session_count} sessions
+                  ~{area.session_count} {t('sessions')}
                 </span>
               </div>
               <div className="area-desc">
@@ -151,7 +158,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        How You Use Qwen Code
+        {t('Interaction Style')}
       </h2>
       <div className="narrative">
         <p>

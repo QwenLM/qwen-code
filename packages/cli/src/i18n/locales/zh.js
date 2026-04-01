@@ -770,6 +770,38 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     '根据你的聊天记录生成个性化编程洞察',
+  'Generating insights...': '正在生成洞察...',
+  'This may take a couple minutes. Sit tight!': '这可能需要几分钟。请稍候！',
+  'Starting insight generation...': '正在开始生成洞察...',
+  'Insight report generated successfully!': '洞察报告生成成功！',
+  'Opening insights in your browser: {{path}}':
+    '正在浏览器中打开洞察报告：{{path}}',
+  'Insights ready.': '洞察已准备就绪。',
+  'Failed to generate insights: {{error}}': '生成洞察失败：{{error}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    '洞察报告已生成于：{{path}}。请在浏览器中打开此文件。',
+  'Generating insights in {{language}}...': '正在生成{{language}}洞察...',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  'Qwen Code Insights': 'Qwen Code 洞察',
+  'Your personalized coding journey and patterns': '您的个性化编程之旅和模式',
+  'messages across': '条消息，共',
+  sessions: '次会话',
+  'Export Card': '导出卡片',
+  'Light Theme': '浅色主题',
+  'Dark Theme': '深色主题',
+  'No insight data available': '无可用洞察数据',
+  'At a Glance': '一览',
+  'Table of Contents': '目录',
+  'Project Areas': '项目领域',
+  'Interaction Style': '交互风格',
+  'Impressive Workflows': '令人印象深刻的流程',
+  'Friction Points': '摩擦点',
+  Improvements: '改进建议',
+  'Future Opportunities': '未来机会',
+  'Memorable Moment': '难忘时刻',
 
   // ============================================================================
   // Commands - Session History

@@ -12,16 +12,21 @@ import type {
   InsightData,
   InsightProgressCallback,
 } from '../types/StaticInsightTypes.js';
-
 import { updateSymlink, Storage, type Config } from '@qwen-code/qwen-code-core';
+import {
+  getCurrentLanguage,
+  type SupportedLanguage,
+} from '../../../i18n/index.js';
 
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private language: SupportedLanguage;
 
   constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
+    this.dataProcessor = new DataProcessor(config, getCurrentLanguage());
     this.templateRenderer = new TemplateRenderer();
+    this.language = getCurrentLanguage();
   }
 
   // Ensure the output directory exists
@@ -69,15 +74,18 @@ export class StaticInsightGenerator {
     const facetsDir = path.join(outputDir, 'facets');
     await fs.mkdir(facetsDir, { recursive: true });
 
-    // Process data
+    // Process data with language setting (already set in constructor)
     const insights: InsightData = await this.dataProcessor.generateInsights(
       baseDir,
       facetsDir,
       onProgress,
     );
 
-    // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Render HTML with language setting
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      this.language,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

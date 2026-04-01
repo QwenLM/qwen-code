@@ -8,7 +8,8 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
+import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
 import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
@@ -26,6 +27,21 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
+      const currentLang = getCurrentLanguage();
+      const langDef = SUPPORTED_LANGUAGES.find((l) => l.code === currentLang);
+      const langName = langDef?.nativeName || langDef?.fullName || currentLang;
+
+      // Show language hint
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: langName,
+          }),
+        },
+        Date.now(),
+      );
+
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');

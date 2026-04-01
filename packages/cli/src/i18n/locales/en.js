@@ -810,6 +810,43 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     'generate personalized programming insights from your chat history',
+  'Generating insights...': 'Generating insights...',
+  'This may take a couple minutes. Sit tight!':
+    'This may take a couple minutes. Sit tight!',
+  'Starting insight generation...': 'Starting insight generation...',
+  'Insight report generated successfully!':
+    'Insight report generated successfully!',
+  'Opening insights in your browser: {{path}}':
+    'Opening insights in your browser: {{path}}',
+  'Insights ready.': 'Insights ready.',
+  'Failed to generate insights: {{error}}':
+    'Failed to generate insights: {{error}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Insights generated at: {{path}}. Please open this file in your browser.',
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  'Qwen Code Insights': 'Qwen Code Insights',
+  'Your personalized coding journey and patterns':
+    'Your personalized coding journey and patterns',
+  'messages across': 'messages across',
+  sessions: 'sessions',
+  'Export Card': 'Export Card',
+  'Light Theme': 'Light Theme',
+  'Dark Theme': 'Dark Theme',
+  'No insight data available': 'No insight data available',
+  'At a Glance': 'At a Glance',
+  'Table of Contents': 'Table of Contents',
+  'Project Areas': 'Project Areas',
+  'Interaction Style': 'Interaction Style',
+  'Impressive Workflows': 'Impressive Workflows',
+  'Friction Points': 'Friction Points',
+  Improvements: 'Improvements',
+  'Future Opportunities': 'Future Opportunities',
+  'Memorable Moment': 'Memorable Moment',
 
   // ============================================================================
   // Commands - Session History

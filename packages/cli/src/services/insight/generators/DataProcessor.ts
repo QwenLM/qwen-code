@@ -34,13 +34,31 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import type { SupportedLanguage } from '../../../i18n/languages.js';
 
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
 
+// Language names for LLM prompts
+const LANGUAGE_NAMES: Record<SupportedLanguage, string> = {
+  en: 'English',
+  zh: '中文 (Chinese)',
+  ja: '日本語 (Japanese)',
+  pt: 'Português (Portuguese)',
+  ru: 'Русский (Russian)',
+  de: 'Deutsch (German)',
+};
+
 export class DataProcessor {
-  constructor(private config: Config) {}
+  private language: SupportedLanguage;
+
+  constructor(
+    private config: Config,
+    language: SupportedLanguage = 'en',
+  ) {
+    this.language = language;
+  }
 
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
@@ -193,7 +211,11 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
+    const languageInstruction =
+      this.language !== 'en'
+        ? `\n\nIMPORTANT: Please respond in ${LANGUAGE_NAMES[this.language]}. All output fields (goal descriptions, summaries, etc.) should be written in ${LANGUAGE_NAMES[this.language]}.`
+        : '';
+    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}${languageInstruction}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -283,7 +305,13 @@ export class DataProcessor {
     baseDir: string,
     facetsOutputDir?: string,
     onProgress?: InsightProgressCallback,
+    language?: SupportedLanguage,
   ): Promise<InsightData> {
+    // Update language if provided (for backwards compatibility)
+    if (language) {
+      this.language = language;
+    }
+
     if (onProgress) onProgress('Scanning chat history...', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
@@ -385,11 +413,16 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
+    const languageInstruction =
+      this.language !== 'en'
+        ? `\n\nIMPORTANT: Please respond in ${LANGUAGE_NAMES[this.language]}. All narrative content (intros, descriptions, titles, suggestions, etc.) should be written in ${LANGUAGE_NAMES[this.language]}.`
+        : '';
+
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T | undefined> => {
-      const prompt = `${promptTemplate}\n\n${commonData}`;
+      const prompt = `${promptTemplate}${languageInstruction}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),
