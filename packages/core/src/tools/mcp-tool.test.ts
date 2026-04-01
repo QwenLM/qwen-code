@@ -1269,6 +1269,8 @@ describe('DiscoveredMCPTool', () => {
           discoverToolsForServer,
           getTool,
         }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
       };
 
       const connectionError = new Error('Connection closed');
@@ -1436,6 +1438,8 @@ describe('DiscoveredMCPTool', () => {
             discoverToolsForServer,
             getTool: vi.fn().mockReturnValue(newTool),
           }),
+          getTruncateToolOutputThreshold: () => 0,
+          getTruncateToolOutputLines: () => 0,
         };
 
         const reconnectTool = new DiscoveredMCPTool(
@@ -1492,6 +1496,8 @@ describe('DiscoveredMCPTool', () => {
           discoverToolsForServer,
           getTool: vi.fn().mockReturnValue(newTool),
         }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
       };
 
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
