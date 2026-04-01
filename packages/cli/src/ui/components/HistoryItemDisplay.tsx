@@ -31,6 +31,7 @@ import {
 } from './messages/StatusMessages.js';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
+import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
@@ -245,10 +246,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'stop_hook_system_message' && (
-        <Box>
-          <Text color={theme.text.primary}>
-            {`  ⎿  Stop says: ${itemForDisplay.message}`}
-          </Text>
+        <Box flexDirection="column">
+          <Text color={theme.text.primary}> ⎿ Stop says:</Text>
+          <Box marginLeft={4}>
+            <MarkdownDisplay
+              text={itemForDisplay.message}
+              isPending={false}
+              contentWidth={contentWidth - 4}
+            />
+          </Box>
         </Box>
       )}
     </Box>
