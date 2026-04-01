@@ -128,7 +128,6 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
-  experimentalHooks: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -350,12 +349,6 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
-          default: false,
-        })
-        .option('experimental-hooks', {
-          type: 'boolean',
-          description:
-            'Enable experimental hooks feature for lifecycle event customization',
           default: false,
         })
         .option('channel', {
@@ -1121,9 +1114,7 @@ export async function loadCliConfig(
       format: outputSettingsFormat,
     },
     hooks: settings.hooks,
-    hooksConfig: settings.hooksConfig,
-    enableHooks:
-      argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
+    disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

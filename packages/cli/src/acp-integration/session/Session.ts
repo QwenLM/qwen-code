@@ -711,7 +711,7 @@ export class Session implements SessionContext {
         injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
         const messageBus = this.config.getMessageBus?.();
-        const hooksEnabled = this.config.getEnableHooks?.() ?? false;
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
         let hookHandled = false;
 
         if (hooksEnabled && messageBus) {
