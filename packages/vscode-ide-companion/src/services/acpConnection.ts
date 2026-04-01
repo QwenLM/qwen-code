@@ -55,6 +55,10 @@ export class AcpConnection {
   private fileHandler = new AcpFileHandler();
   private lastExitCode: number | null = null;
   private lastExitSignal: string | null = null;
+  /** Set to true when disconnect() is called intentionally by the extension. */
+  private intentionalDisconnect: boolean = false;
+  /** Tracks auto-reconnect attempts to prevent infinite loops. */
+  private autoReconnectAttempts: number = 0;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
@@ -86,6 +90,7 @@ export class AcpConnection {
 
     this.lastExitCode = null;
     this.lastExitSignal = null;
+    this.intentionalDisconnect = false;
     this.workingDir = workingDir;
 
     const env = { ...process.env };
@@ -181,7 +186,57 @@ export class AcpConnection {
       }
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    // Wait for readiness: resolve on first stdout data, reject on exit or timeout.
+    const READINESS_TIMEOUT_MS = 10_000;
+    await new Promise<void>((resolve, reject) => {
+      const child = this.child!;
+      let settled = false;
+
+      const cleanup = () => {
+        child.stdout?.removeListener('data', onData);
+        child.removeListener('exit', onExit);
+        clearTimeout(timer);
+      };
+
+      const onData = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const onExit = (code: number | null, signal: string | null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(
+          new Error(
+            `Qwen ACP process exited before becoming ready (exit code: ${code}, signal: ${signal})`,
+          ),
+        );
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(
+          new Error(
+            `Qwen ACP process did not become ready within ${READINESS_TIMEOUT_MS / 1000}s`,
+          ),
+        );
+      }, READINESS_TIMEOUT_MS);
+
+      child.stdout?.on('data', onData);
+      child.on('exit', onExit);
+
+      // Also handle spawn errors that occurred before this point
+      if (spawnError) {
+        settled = true;
+        cleanup();
+        reject(spawnError);
+      }
+    });
 
     if (spawnError) {
       throw spawnError;
@@ -352,10 +407,12 @@ export class AcpConnection {
       stream,
     );
 
+    // Initialize protocol via SDK with timeout
     // Race the SDK initialize against process exit so we don't hang forever
     // if the CLI crashes before responding.
     console.log('[ACP] Sending initialize request...');
-    const initResponse = await Promise.race([
+    const INITIALIZE_TIMEOUT_MS = 15_000;
+    const initPromise = Promise.race([
       this.sdkConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
@@ -367,6 +424,27 @@ export class AcpConnection {
       }),
       processExitPromise,
     ]);
+
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => {
+        reject(
+          new Error(
+            `ACP initialize handshake timed out after ${INITIALIZE_TIMEOUT_MS / 1000}s`,
+          ),
+        );
+      }, INITIALIZE_TIMEOUT_MS);
+    });
+
+    let initResponse;
+    try {
+      initResponse = await Promise.race([initPromise, timeoutPromise]);
+    } catch (error) {
+      // On timeout or init failure, kill the subprocess to avoid orphans
+      if (this.child && !this.child.killed) {
+        this.child.kill();
+      }
+      throw error;
+    }
 
     console.log('[ACP] Initialize successful');
     console.log('[ACP] Initialization response:', initResponse);
@@ -579,7 +657,79 @@ export class AcpConnection {
     return res;
   }
 
+  /**
+   * Connect with retry logic. Retries the full connect() call up to
+   * {@link maxRetries} times with exponential backoff on failure.
+   * Cleans up any partial state between attempts.
+   */
+  async connectWithRetry(
+    cliEntryPath: string,
+    workingDir: string = process.cwd(),
+    extraArgs: string[] = [],
+    maxRetries: number = 3,
+  ): Promise<void> {
+    const backoffDelays = [1000, 2000, 4000];
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          console.log(`[ACP] Spawn retry attempt ${attempt}/${maxRetries}...`);
+        }
+        await this.connect(cliEntryPath, workingDir, extraArgs);
+        // Success — reset auto-reconnect counter
+        this.autoReconnectAttempts = 0;
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.error(
+          `[ACP] Connect attempt ${attempt + 1} failed:`,
+          lastError.message,
+        );
+
+        // Clean up any partial state before retry
+        this.cleanupForRetry();
+
+        if (attempt < maxRetries) {
+          const delay =
+            backoffDelays[attempt] ?? backoffDelays[backoffDelays.length - 1];
+          console.log(`[ACP] Retrying in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw (
+      lastError ??
+      new Error(
+        `ACP connection failed after ${maxRetries + 1} attempts. The Qwen CLI subprocess could not be started.`,
+      )
+    );
+  }
+
+  /**
+   * Clean up partial state after a failed connect attempt,
+   * preparing for a clean retry.
+   */
+  private cleanupForRetry(): void {
+    if (this.child) {
+      try {
+        if (!this.child.killed) {
+          this.child.kill();
+        }
+      } catch {
+        // Ignore kill errors during cleanup
+      }
+      this.child = null;
+    }
+    this.sdkConnection = null;
+    this.sessionId = null;
+    this.lastExitCode = null;
+    this.lastExitSignal = null;
+  }
+
   disconnect(): void {
+    this.intentionalDisconnect = true;
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -592,6 +742,26 @@ export class AcpConnection {
     return (
       this.child !== null && !this.child.killed && this.child.exitCode === null
     );
+  }
+
+  /** Whether the last disconnect was intentionally triggered by the extension. */
+  get wasIntentionalDisconnect(): boolean {
+    return this.intentionalDisconnect;
+  }
+
+  /** Current auto-reconnect attempt count. */
+  get currentAutoReconnectAttempts(): number {
+    return this.autoReconnectAttempts;
+  }
+
+  /** Increment the auto-reconnect attempt counter. */
+  incrementAutoReconnectAttempts(): void {
+    this.autoReconnectAttempts++;
+  }
+
+  /** Reset the auto-reconnect attempt counter (e.g., after successful reconnection). */
+  resetAutoReconnectAttempts(): void {
+    this.autoReconnectAttempts = 0;
   }
 
   get hasActiveSession(): boolean {

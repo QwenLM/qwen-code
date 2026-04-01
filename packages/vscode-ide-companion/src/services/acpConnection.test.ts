@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
@@ -21,8 +21,11 @@ type AcpConnectionInternal = {
   sessionId: string | null;
   lastExitCode: number | null;
   lastExitSignal: string | null;
+  intentionalDisconnect: boolean;
+  autoReconnectAttempts: number;
   mapReadTextFileError: (error: unknown, filePath: string) => unknown;
   ensureConnection: () => unknown;
+  cleanupForRetry: () => void;
 };
 
 function createConnection(overrides?: Partial<AcpConnectionInternal>) {
@@ -222,5 +225,176 @@ describe('AcpConnection lastExitCode/lastExitSignal', () => {
     const conn = createConnection();
     expect(conn.lastExitCode).toBeNull();
     expect(conn.lastExitSignal).toBeNull();
+  });
+});
+
+describe('AcpConnection.connectWithRetry', () => {
+  let acpConn: AcpConnection;
+
+  beforeEach(() => {
+    acpConn = new AcpConnection();
+  });
+
+  it('succeeds on first attempt without retrying', async () => {
+    const connectSpy = vi
+      .spyOn(acpConn, 'connect')
+      .mockResolvedValueOnce(undefined);
+
+    await acpConn.connectWithRetry('/path/to/cli.js', '/workdir', [], 3);
+
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+    expect(connectSpy).toHaveBeenCalledWith('/path/to/cli.js', '/workdir', []);
+  });
+
+  it('retries on failure and succeeds on second attempt', async () => {
+    const connectSpy = vi
+      .spyOn(acpConn, 'connect')
+      .mockRejectedValueOnce(new Error('SIGTERM'))
+      .mockResolvedValueOnce(undefined);
+
+    await acpConn.connectWithRetry('/path/to/cli.js', '/workdir', [], 3);
+
+    expect(connectSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws after all retries are exhausted', async () => {
+    const error = new Error('persistent failure');
+    const connectSpy = vi.spyOn(acpConn, 'connect').mockRejectedValue(error);
+
+    await expect(
+      acpConn.connectWithRetry('/path/to/cli.js', '/workdir', [], 2),
+    ).rejects.toThrow('persistent failure');
+
+    // 1 initial + 2 retries = 3 total
+    expect(connectSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('cleans up state between retry attempts', async () => {
+    const internal = acpConn as unknown as AcpConnectionInternal;
+    const cleanupSpy = vi.spyOn(internal, 'cleanupForRetry' as never);
+
+    vi.spyOn(acpConn, 'connect')
+      .mockRejectedValueOnce(new Error('fail 1'))
+      .mockResolvedValueOnce(undefined);
+
+    await acpConn.connectWithRetry('/path/to/cli.js', '/workdir', [], 3);
+
+    // cleanupForRetry called once for the failed attempt
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets autoReconnectAttempts on successful connect', async () => {
+    const internal = acpConn as unknown as AcpConnectionInternal;
+    internal.autoReconnectAttempts = 5;
+
+    vi.spyOn(acpConn, 'connect').mockResolvedValueOnce(undefined);
+
+    await acpConn.connectWithRetry('/path/to/cli.js', '/workdir', [], 3);
+
+    expect(acpConn.currentAutoReconnectAttempts).toBe(0);
+  });
+});
+
+describe('AcpConnection.cleanupForRetry', () => {
+  it('kills zombie child process and resets state', () => {
+    const mockKill = vi.fn();
+    const conn = createConnection({
+      child: createMockChild({ kill: mockKill, killed: false }),
+      sdkConnection: { fake: true },
+      sessionId: 'test-session',
+      lastExitCode: 1,
+      lastExitSignal: 'SIGTERM',
+    });
+
+    conn.cleanupForRetry();
+
+    expect(mockKill).toHaveBeenCalledOnce();
+    expect(conn.child).toBeNull();
+    expect(conn.sdkConnection).toBeNull();
+    expect(conn.sessionId).toBeNull();
+    expect(conn.lastExitCode).toBeNull();
+    expect(conn.lastExitSignal).toBeNull();
+  });
+
+  it('handles already-killed child process gracefully', () => {
+    const conn = createConnection({
+      child: createMockChild({ killed: true }),
+      sdkConnection: { fake: true },
+      sessionId: 'test',
+    });
+
+    expect(() => conn.cleanupForRetry()).not.toThrow();
+    expect(conn.child).toBeNull();
+  });
+
+  it('handles null child process gracefully', () => {
+    const conn = createConnection({
+      child: null,
+      sdkConnection: { fake: true },
+      sessionId: 'test',
+    });
+
+    expect(() => conn.cleanupForRetry()).not.toThrow();
+  });
+});
+
+describe('AcpConnection intentionalDisconnect flag', () => {
+  it('defaults to false', () => {
+    const acpConn = new AcpConnection();
+    expect(acpConn.wasIntentionalDisconnect).toBe(false);
+  });
+
+  it('is set to true by disconnect()', () => {
+    const conn = createConnection({
+      child: createMockChild(),
+      sdkConnection: {},
+      sessionId: 'test',
+    });
+    const acpConn = conn as unknown as AcpConnection;
+
+    acpConn.disconnect();
+
+    expect(acpConn.wasIntentionalDisconnect).toBe(true);
+  });
+
+  it('is reset to false when connect() is called', async () => {
+    const internal = new AcpConnection() as unknown as AcpConnectionInternal;
+    internal.intentionalDisconnect = true;
+
+    // connect() will throw because we haven't set up a real subprocess,
+    // but the flag should be reset before the error
+    try {
+      await (internal as unknown as AcpConnection).connect(
+        '/nonexistent/cli.js',
+        '/workdir',
+      );
+    } catch {
+      // Expected to fail
+    }
+
+    expect(internal.intentionalDisconnect).toBe(false);
+  });
+});
+
+describe('AcpConnection auto-reconnect counter', () => {
+  it('defaults to 0', () => {
+    const acpConn = new AcpConnection();
+    expect(acpConn.currentAutoReconnectAttempts).toBe(0);
+  });
+
+  it('increments via incrementAutoReconnectAttempts()', () => {
+    const acpConn = new AcpConnection();
+    acpConn.incrementAutoReconnectAttempts();
+    expect(acpConn.currentAutoReconnectAttempts).toBe(1);
+    acpConn.incrementAutoReconnectAttempts();
+    expect(acpConn.currentAutoReconnectAttempts).toBe(2);
+  });
+
+  it('resets via resetAutoReconnectAttempts()', () => {
+    const acpConn = new AcpConnection();
+    acpConn.incrementAutoReconnectAttempts();
+    acpConn.incrementAutoReconnectAttempts();
+    acpConn.resetAutoReconnectAttempts();
+    expect(acpConn.currentAutoReconnectAttempts).toBe(0);
   });
 });

@@ -85,7 +85,7 @@ export class QwenConnectionHandler {
       );
     }
 
-    await connection.connect(cliEntryPath!, workingDir, extraArgs);
+    await connection.connectWithRetry(cliEntryPath!, workingDir, extraArgs);
 
     // Try to restore existing session or create new session
     // Note: Auto-restore on connect is disabled to avoid surprising loads
