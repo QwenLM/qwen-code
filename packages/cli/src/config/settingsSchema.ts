@@ -1024,6 +1024,18 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      verifyCommand: {
+        type: 'string',
+        label: 'Post-Edit Verify Command',
+        category: 'Tools',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Shell command to run after file-modifying tools (write_file, edit). ' +
+          'Failures are injected into the model context for immediate self-correction. ' +
+          'Example: "npx tsc --noEmit" or "npm run build".',
+        showInDialog: true,
+      },
       // Legacy tool permission fields – kept for backward compatibility.
       // Use permissions.{allow,ask,deny} instead.
       core: {

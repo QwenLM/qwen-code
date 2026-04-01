@@ -40,7 +40,7 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
-} from '@qwen-code/qwen-code-core';
+ hasFileEdits, runPostEditVerify } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
@@ -1535,6 +1535,30 @@ export const useGeminiStream = (
         });
       }
 
+      // Post-edit verification: if any tool modified files and a verify
+      // command is configured, run it and inject the result. The model
+      // sees build failures alongside its own tool results, enabling
+      // immediate self-correction ("separate evaluator" pattern).
+      const editedToolNames = geminiTools.map((t) => t.request.name);
+      const verifyCmd = settings?.merged?.tools?.verifyCommand as
+        | string
+        | undefined;
+      if (hasFileEdits(editedToolNames)) {
+        if (verifyCmd) {
+          const verifyResult = await runPostEditVerify(
+            config.getTargetDir(),
+            verifyCmd,
+          );
+          if (verifyResult) {
+            addItem(
+              { type: MessageType.WARNING, text: verifyResult },
+              Date.now(),
+            );
+            responsesToSend.push({ text: `\n\n${verifyResult}` });
+          }
+        }
+      }
+
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
@@ -1547,6 +1571,7 @@ export const useGeminiStream = (
       config,
       drainQueuedMessages,
       addItem,
+      settings?.merged?.tools?.verifyCommand,
     ],
   );
 
