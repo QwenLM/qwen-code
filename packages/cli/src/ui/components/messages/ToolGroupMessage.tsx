@@ -11,9 +11,11 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
+import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
 
 interface ToolGroupMessageProps {
   groupId: number;
@@ -47,6 +49,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   );
 
   const config = useConfig();
+  const { verboseMode } = useVerboseMode();
   const isShellCommand = toolCalls.some(
     (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
   );
@@ -67,6 +70,19 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
     [toolCalls],
   );
+
+  const hasConfirmingTool = toolAwaitingApproval !== undefined;
+  const showCompact =
+    !verboseMode && !hasConfirmingTool && !isEmbeddedShellFocused;
+
+  if (showCompact) {
+    return (
+      <CompactToolGroupDisplay
+        toolCalls={toolCalls}
+        contentWidth={contentWidth}
+      />
+    );
+  }
 
   let countToolCallsWithResults = 0;
   for (const tool of toolCalls) {
