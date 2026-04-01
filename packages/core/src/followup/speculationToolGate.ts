@@ -118,7 +118,7 @@ async function resolveReadPaths(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
 ): Promise<void> {
-  const pathKeys = ['file_path', 'path', 'notebook_path'];
+  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
       args[key] = overlayFs.resolveReadPath(args[key] as string);
@@ -136,7 +136,7 @@ export async function rewritePathArgs(
   overlayFs: OverlayFs,
 ): Promise<void> {
   // Common path argument names used by Edit and WriteFile tools
-  const pathKeys = ['file_path', 'path', 'notebook_path'];
+  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
   for (const key of pathKeys) {
     if (typeof args[key] === 'string') {
       args[key] = await overlayFs.redirectWrite(args[key] as string);

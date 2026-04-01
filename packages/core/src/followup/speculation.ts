@@ -209,7 +209,8 @@ async function runSpeculativeLoop(
       const response = event.value;
       const parts = response.candidates?.[0]?.content?.parts ?? [];
       for (const part of parts) {
-        if (part.text) {
+        // Skip thought/reasoning parts — only capture visible text + function calls
+        if (part.text && !(part as Record<string, unknown>)['thought']) {
           modelParts.push({ text: part.text });
         }
         if (part.functionCall && part.functionCall.name) {
