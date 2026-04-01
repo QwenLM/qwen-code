@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import type { Config } from '../config/config.js';
 import {
   BackgroundTaskDrainer,
   type DrainBackgroundTasksOptions,
@@ -28,6 +29,7 @@ export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
 export interface ScheduleManagedAutoMemoryDreamParams {
   projectRoot: string;
   sessionId: string;
+  config?: Config;
   now?: Date;
   minHoursBetweenDreams?: number;
   minSessionsBetweenDreams?: number;
@@ -167,7 +169,11 @@ export class ManagedAutoMemoryDreamRuntime {
         }
 
         try {
-          const result = await runManagedAutoMemoryDream(params.projectRoot, now);
+          const result = await runManagedAutoMemoryDream(
+            params.projectRoot,
+            now,
+            params.config,
+          );
           const nextMetadata = await readDreamMetadata(params.projectRoot);
           nextMetadata.lastDreamAt = now.toISOString();
           nextMetadata.lastDreamSessionId = params.sessionId;

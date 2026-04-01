@@ -1490,6 +1490,7 @@ hello
       expect(scheduleManagedAutoMemoryDream).toHaveBeenCalledWith({
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
+        config: mockConfig,
       });
       expect(events).toContainEqual({
         type: GeminiEventType.HookSystemMessage,

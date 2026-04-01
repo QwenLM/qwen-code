@@ -62,6 +62,58 @@ Completed
 
 ---
 
+## Part 13 - Dream agent consumer stage A
+
+### Start review
+
+- Overall plan continues from the shared background runtime and extraction-agent work toward the next real consumer: dream/consolidation.
+- Parts 10 to 12 already delivered auto dream scheduling, a reusable `BackgroundAgentRunner`, and extraction agent planning.
+- Scope for this part: let dream attempt a tool-free background-agent rewrite plan first, while preserving the existing mechanical dream path as a safe fallback.
+
+### Goal
+
+- Add a tool-free dream agent planner that returns structured topic rewrites
+- Wire managed dream to prefer agent rewrites when `Config` is available
+- Preserve the existing mechanical dream path as fallback on planner failure or absence of config
+- Add targeted tests for planner validation, agent-first dream behavior, fallback behavior, and client wiring
+
+### Implemented
+
+- Added `packages/core/src/memory/dreamAgentPlanner.ts`
+- Added `packages/core/src/memory/dreamAgentPlanner.test.ts`
+- Updated `packages/core/src/memory/dream.ts` to prefer agent-produced topic rewrites and fall back to mechanical dream
+- Updated `packages/core/src/memory/dreamScheduler.ts` to accept optional `Config` and pass it into dream execution
+- Updated `packages/core/src/core/client.ts` to pass `Config` into auto-dream scheduling
+- Updated `packages/core/src/memory/dream.test.ts` with agent-first and fallback coverage
+- Updated `packages/core/src/core/client.test.ts` with dream scheduler config coverage
+- Exported dream agent planner helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed dream can now use `BackgroundAgentRunner` as a tool-free consolidation planner that rewrites full topic bodies in JSON form.
+- If the dream agent planner fails, returns invalid output, or no `Config` is available, dream safely falls back to the existing mechanical dedupe implementation.
+- Auto dream scheduling now passes runtime config through from the main client so background dream tasks can use the new agent path.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/dreamAgentPlanner.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/background/backgroundAgentRunner.test.ts src/memory/extractionAgentPlanner.test.ts src/memory/extractAgent.test.ts src/memory/extractModel.test.ts src/memory/extract.test.ts src/memory/dreamAgentPlanner.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts src/core/client.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This stage intentionally keeps the dream agent tool-free and JSON-only, matching the low-risk rollout shape used for extraction agent stage A.
+- The existing mechanical dream remains the safety net and still supports manual `/dream` use without requiring runtime config.
+
+### Status
+
+Completed
+
+---
+
 ## Part 6 - Auxiliary side-query foundation
 
 ### Start review

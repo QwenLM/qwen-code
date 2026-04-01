@@ -471,6 +471,7 @@ export class GeminiClient {
     void scheduleManagedAutoMemoryDream({
       projectRoot: this.config.getProjectRoot(),
       sessionId: this.config.getSessionId(),
+      config: this.config,
     }).catch((error) => {
       debugLogger.warn('Failed to schedule managed auto-memory dream.', error);
     });

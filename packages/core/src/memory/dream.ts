@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs/promises';
+import type { Config } from '../config/config.js';
 import { getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
+import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
@@ -22,6 +24,19 @@ export interface AutoMemoryDreamResult {
 
 function normalizeBullet(line: string): string {
   return line.replace(/^[-*]\s+/, '').replace(/\s+/g, ' ').trim();
+}
+
+function countDuplicateBullets(body: string): number {
+  const bullets = body
+    .split('\n')
+    .filter((line) => /^[-*]\s+/.test(line.trim()))
+    .map(normalizeBullet)
+    .filter((line) => line.length > 0);
+
+  return Math.max(
+    0,
+    bullets.length - new Set(bullets.map((line) => line.toLowerCase())).size,
+  );
 }
 
 function buildDreamedBody(body: string): { body: string; dedupedEntries: number } {
@@ -61,11 +76,70 @@ async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
   }
 }
 
+async function runDreamByAgent(
+  projectRoot: string,
+  config: Config,
+): Promise<AutoMemoryDreamResult | null> {
+  const rewrites = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+  if (rewrites.length === 0) {
+    return null;
+  }
+
+  const touchedTopics = new Set<AutoMemoryType>();
+  let dedupedEntries = 0;
+
+  for (const rewrite of rewrites) {
+    const topicPath = getAutoMemoryTopicPath(projectRoot, rewrite.topic);
+    const current = await fs.readFile(topicPath, 'utf-8');
+    const parsed = parseAutoMemoryTopicDocument(topicPath, current);
+    if (!parsed) {
+      continue;
+    }
+
+    const nextBody = rewrite.body.trim();
+    dedupedEntries += Math.max(
+      0,
+      countDuplicateBullets(parsed.body) - countDuplicateBullets(nextBody),
+    );
+    if (nextBody === parsed.body.trim()) {
+      continue;
+    }
+
+    const next = current.replace(parsed.body, nextBody);
+    await fs.writeFile(topicPath, next, 'utf-8');
+    touchedTopics.add(rewrite.topic);
+  }
+
+  return {
+    touchedTopics: [...touchedTopics],
+    dedupedEntries,
+    systemMessage:
+      touchedTopics.size > 0
+        ? `Managed auto-memory dream updated: ${[...touchedTopics].map((topic) => `${topic}.md`).join(', ')}`
+        : undefined,
+  };
+}
+
 export async function runManagedAutoMemoryDream(
   projectRoot: string,
   now = new Date(),
+  config?: Config,
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
+
+  if (config) {
+    try {
+      const agentResult = await runDreamByAgent(projectRoot, config);
+      if (agentResult) {
+        if (agentResult.touchedTopics.length > 0) {
+          await bumpMetadata(projectRoot, now);
+        }
+        return agentResult;
+      }
+    } catch {
+      // Fall back to the existing mechanical dream implementation.
+    }
+  }
 
   const touchedTopics = new Set<AutoMemoryType>();
   let dedupedEntries = 0;
