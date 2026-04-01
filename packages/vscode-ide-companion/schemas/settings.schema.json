@@ -373,10 +373,10 @@
               "type": "number",
               "default": 24
             },
-            "maxMemoryLines": {
-              "description": "Maximum number of lines a memory file can have before triggering consolidation.",
+            "minMemories": {
+              "description": "Minimum number of memory files before consolidation is worthwhile.",
               "type": "number",
-              "default": 200
+              "default": 5
             },
             "scope": {
               "description": "Which memory files to consolidate: \"global\", \"project\", or \"both\".",
