@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/channel-plugin-example",
   "version": "0.14.0",
+  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,7 +24,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "^0.14.0",
+    "@qwen-code/channel-base": "file:../base",
     "ws": "^8.18.0"
   },
   "devDependencies": {
