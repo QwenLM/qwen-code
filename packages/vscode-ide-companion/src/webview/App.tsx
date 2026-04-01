@@ -22,7 +22,11 @@ import {
   shouldSendMessage,
   useMessageSubmit,
 } from './hooks/useMessageSubmit.js';
-import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
+import type {
+  AuthMethodInfo,
+  PermissionOption,
+  PermissionToolCall,
+} from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
@@ -88,9 +92,7 @@ export const App: React.FC = () => {
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [loginErrorMessage, setLoginErrorMessage] = useState<string>('');
-  const [authMethods, setAuthMethods] = useState<
-    Array<Record<string, unknown>>
-  >([]);
+  const [authMethods, setAuthMethods] = useState<AuthMethodInfo[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
@@ -362,7 +364,7 @@ export const App: React.FC = () => {
     setIsAuthenticated: (auth, methods) => {
       setIsAuthenticated(auth);
       if (methods) {
-        setAuthMethods(methods);
+        setAuthMethods(methods as AuthMethodInfo[]);
       }
       if (auth) {
         setLoginErrorMessage('');

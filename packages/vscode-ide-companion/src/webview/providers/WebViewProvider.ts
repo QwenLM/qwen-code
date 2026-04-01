@@ -982,7 +982,7 @@ export class WebViewProvider {
             await this.agentManager.authenticate(methodId, _meta);
 
             await this.agentManager.createNewSession(
-              this.agentManager.currentWorkingDir,
+              this.agentManager.workingDir,
             );
 
             console.log(

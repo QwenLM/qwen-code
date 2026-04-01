@@ -297,7 +297,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
         }`}
         onClick={() => setCurrentQuestionIndex(totalTabs - 1)}
       >
-        <span>{'Submit'}</span>
+        <span>Submit</span>
       </button>
     </div>
   );
@@ -364,7 +364,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
             }}
             onClick={onCancel}
           >
-            {'Cancel'}
+            Cancel
           </button>
         </div>
       </div>
@@ -517,7 +517,7 @@ export const AskUserQuestionDialog: FC<AskUserQuestionDialogProps> = ({
           }}
           onClick={onCancel}
         >
-          {'Cancel'}
+          Cancel
         </button>
       </div>
     </div>

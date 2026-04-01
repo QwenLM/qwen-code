@@ -9,11 +9,12 @@
 
 import type { FC } from 'react';
 import { Onboarding as BaseOnboarding } from '@qwen-code/webui';
+import type { AuthMethodInfo } from '@qwen-code/webui';
 import { generateIconUrl } from '../../utils/resourceUrl.js';
 
 interface OnboardingPageProps {
   onLogin: (methodId?: string, _meta?: Record<string, unknown>) => void;
-  authMethods?: Array<Record<string, unknown>>;
+  authMethods?: AuthMethodInfo[];
   errorMessage?: string;
 }
 
@@ -32,7 +33,6 @@ export const Onboarding: FC<OnboardingPageProps> = ({
     <BaseOnboarding
       iconUrl={iconUri}
       onGetStarted={onLogin}
-      // @ts-expect-error AuthMethodInfo is not exported from @qwen-code/webui causing type mismatch here
       authMethods={authMethods}
       errorMessage={errorMessage}
     />

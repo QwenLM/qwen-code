@@ -1,0 +1,1 @@
+2026-04-01T08:26:22.108Z [WARN] [WORKSPACE] Skipping unreadable directory: /Users/andy/workspace/projects/qwen-code/packages/cli/workspace/my-project (Directory does not exist: /Users/andy/workspace/projects/qwen-code/packages/cli/workspace/my-project)

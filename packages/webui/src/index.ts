@@ -54,7 +54,10 @@ export type {
   EditModeIconType,
 } from './components/layout/InputForm';
 export { Onboarding } from './components/layout/Onboarding';
-export type { OnboardingProps } from './components/layout/Onboarding';
+export type {
+  OnboardingProps,
+  AuthMethodInfo,
+} from './components/layout/Onboarding';
 
 // Message components
 export { default as Message } from './components/messages/Message';

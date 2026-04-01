@@ -89,8 +89,16 @@ export class QwenAgentManager {
   private sessionManager: QwenSessionManager;
   private connectionHandler: QwenConnectionHandler;
   private sessionUpdateHandler: QwenSessionUpdateHandler;
-  currentWorkingDir: string = process.cwd();
-  availableAuthMethods: Array<Record<string, unknown>> | undefined;
+  private currentWorkingDir: string = process.cwd();
+  private _availableAuthMethods: Array<Record<string, unknown>> | undefined;
+
+  get workingDir(): string {
+    return this.currentWorkingDir;
+  }
+
+  get availableAuthMethods(): Array<Record<string, unknown>> | undefined {
+    return this._availableAuthMethods;
+  }
   // When loading a past session via ACP, the CLI replays history through
   // session/update notifications. We set this flag to route message chunks
   // (user/assistant) as discrete chat messages instead of live streaming.
@@ -275,7 +283,7 @@ export class QwenAgentManager {
       try {
         const obj = (init || {}) as Record<string, unknown>;
         if (Array.isArray(obj['authMethods'])) {
-          this.availableAuthMethods = obj['authMethods'];
+          this._availableAuthMethods = obj['authMethods'];
         }
         const modes = obj['modes'] as
           | {
