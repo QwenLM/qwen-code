@@ -1064,7 +1064,7 @@ export class ExtensionDisableEvent implements BaseTelemetryEvent {
 }
 
 export class PromptSuggestionEvent implements BaseTelemetryEvent {
-  'event.name': 'prompt_suggestion';
+  'event.name': 'qwen-code.prompt_suggestion';
   'event.timestamp': string;
   outcome: 'accepted' | 'ignored' | 'suppressed';
   prompt_id?: string;
@@ -1089,7 +1089,7 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     was_focused_when_shown?: boolean;
     reason?: string;
   }) {
-    this['event.name'] = 'prompt_suggestion';
+    this['event.name'] = 'qwen-code.prompt_suggestion';
     this['event.timestamp'] = new Date().toISOString();
     this.outcome = params.outcome;
     this.prompt_id = params.prompt_id ?? 'user_intent';

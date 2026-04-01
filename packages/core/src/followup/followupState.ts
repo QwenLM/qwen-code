@@ -52,8 +52,9 @@ export interface FollowupControllerOptions {
    */
   getOnAccept?: () => ((text: string) => void) | undefined;
   /**
-   * Called when a suggestion outcome is determined (accepted, ignored, suppressed).
-   * Used for telemetry.
+   * Called when a suggestion outcome is determined (accepted or ignored).
+   * Used for telemetry. Note: 'suppressed' outcomes are logged separately
+   * at the generation site, not through this callback.
    */
   onOutcome?: (params: {
     outcome: 'accepted' | 'ignored';

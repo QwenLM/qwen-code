@@ -881,9 +881,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
-        // Accept and submit prompt suggestion on Enter when input is empty
+        // Accept and submit prompt suggestion on Enter when input is truly empty
         if (
-          !buffer.text.trim() &&
+          buffer.text.length === 0 &&
           followup.state.isVisible &&
           followup.state.suggestion
         ) {

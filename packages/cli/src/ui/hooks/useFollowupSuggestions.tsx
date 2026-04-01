@@ -79,14 +79,16 @@ export function useFollowupSuggestionsCLI(
   const prevShownAtRef = useRef(0);
   const wasFocusedWhenShownRef = useRef(true);
 
-  // Track when a new suggestion appears
-  if (state.shownAt > 0 && state.shownAt !== prevShownAtRef.current) {
-    prevShownAtRef.current = state.shownAt;
-    wasFocusedWhenShownRef.current = isFocused;
-    firstKeystrokeAtRef.current = 0;
-  } else if (state.shownAt === 0) {
-    prevShownAtRef.current = 0;
-  }
+  // Track when a new suggestion appears (in useEffect to avoid render-time side effects)
+  useEffect(() => {
+    if (state.shownAt > 0 && state.shownAt !== prevShownAtRef.current) {
+      prevShownAtRef.current = state.shownAt;
+      wasFocusedWhenShownRef.current = isFocused;
+      firstKeystrokeAtRef.current = 0;
+    } else if (state.shownAt === 0) {
+      prevShownAtRef.current = 0;
+    }
+  }, [state.shownAt, isFocused]);
 
   const recordKeystroke = useCallback(() => {
     if (firstKeystrokeAtRef.current === 0 && state.isVisible) {
