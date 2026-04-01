@@ -25,6 +25,8 @@ export interface Task {
   status: TaskStatus;
   priority?: TaskPriority;
   createdBy: string;
+  /** Agent ID that has claimed this task. Null = unclaimed. */
+  assignee?: string;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -35,6 +37,7 @@ export interface TaskFilter {
   status?: TaskStatus | TaskStatus[];
   parentTaskId?: string | null; // null = root tasks only
   createdBy?: string;
+  assignee?: string | null; // null = unclaimed only
 }
 
 // Maps between our TaskStatus and beads_rust status values.
@@ -174,6 +177,8 @@ export class TaskStore {
       status: BR_TO_STATUS[issue.status] ?? 'pending',
       priority: BR_PRIORITY_TO_OURS[issue.priority] ?? 'medium',
       createdBy: issue.assignee ?? 'agent',
+      // Assignee encoded as label: "assignee:<agentId>"
+      assignee: issue.labels?.find((l) => l.startsWith('assignee:'))?.slice(9),
       createdAt: issue.created_at
         ? new Date(issue.created_at).getTime()
         : Date.now(),
@@ -287,6 +292,14 @@ export class TaskStore {
         tasks = tasks.filter((t) => t.createdBy === filter.createdBy);
       }
 
+      if (filter?.assignee !== undefined) {
+        tasks = tasks.filter((t) =>
+          filter.assignee === null
+            ? !t.assignee
+            : t.assignee === filter.assignee,
+        );
+      }
+
       return tasks.sort((a, b) => a.createdAt - b.createdAt);
     } catch {
       return [];
@@ -387,6 +400,48 @@ export class TaskStore {
     return { ...task, output };
   }
 
+  /**
+   * Claim a task for a specific agent. Sets the assignee and moves to
+   * in_progress. Returns the updated task, or undefined if already claimed
+   * by another agent or not found.
+   */
+  claimTask(id: string, agentId: string): Task | undefined {
+    const task = this.get(id);
+    if (!task) return undefined;
+
+    // Already claimed by another agent
+    if (task.assignee && task.assignee !== agentId) return undefined;
+
+    if (this.brAvailable) {
+      try {
+        // Set assignee label
+        this.brRaw(['label', 'add', id, `assignee:${agentId}`]);
+        // Move to in_progress
+        this.br(['update', id, '--status', STATUS_TO_BR.in_progress]);
+      } catch {
+        /* non-critical */
+      }
+      return this.get(id);
+    }
+
+    // Fallback
+    const fallbackTask = this.fallbackTasks!.get(id);
+    if (!fallbackTask) return undefined;
+    fallbackTask.assignee = agentId;
+    fallbackTask.status = 'in_progress';
+    fallbackTask.updatedAt = Date.now();
+    this.saveFallback();
+    return fallbackTask;
+  }
+
+  /**
+   * Get all pending tasks that have no assignee — available for agents to claim.
+   */
+  getUnclaimedTasks(): Task[] {
+    const pendingTasks = this.list({ status: 'pending' });
+    return pendingTasks.filter((t) => !t.assignee);
+  }
+
   getSubtaskCount(id: string): number {
     return this.list({ parentTaskId: id }).length;
   }
@@ -453,6 +508,11 @@ export class TaskStore {
     }
     if (filter?.createdBy) {
       tasks = tasks.filter((t) => t.createdBy === filter.createdBy);
+    }
+    if (filter?.assignee !== undefined) {
+      tasks = tasks.filter((t) =>
+        filter.assignee === null ? !t.assignee : t.assignee === filter.assignee,
+      );
     }
     return tasks.sort((a, b) => a.createdAt - b.createdAt);
   }
