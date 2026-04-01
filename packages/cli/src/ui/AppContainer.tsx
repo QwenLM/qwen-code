@@ -698,11 +698,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<() => void>(() => {});
 
-  // Ref bridge: useGeminiStream calls drainQueuedMessages mid-turn (between
-  // tool calls), but useMessageQueue is declared after it. The ref is set
-  // after useMessageQueue returns, but drain is only called asynchronously
-  // during tool completion — so the ref is always populated by then.
-  const drainQueuedMessagesRef = useRef<() => string[]>(() => []);
+  // Queue declared before useGeminiStream so drain() can be passed directly.
+  const { messageQueue, addMessage, popLast, drain } = useMessageQueue();
 
   const {
     streamingState,
@@ -734,8 +731,23 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
-    () => drainQueuedMessagesRef.current(),
+    drain,
   );
+
+  // Idle drain: submit any messages still in the queue when the turn ends.
+  // Most messages are injected mid-turn via handleCompletedTools.drain(),
+  // but pure text turns (no tool calls) need this fallback.
+  useEffect(() => {
+    if (
+      isConfigInitialized &&
+      streamingState === StreamingState.Idle &&
+      messageQueue.length > 0
+    ) {
+      const combined = messageQueue.join('\n\n');
+      drain();
+      submitQuery(combined);
+    }
+  }, [isConfigInitialized, streamingState, messageQueue, drain, submitQuery]);
 
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
@@ -750,13 +762,6 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldBlockTab: () => hasSuggestionsVisible,
     disabled: agentViewState.activeView !== 'main',
   });
-
-  const { messageQueue, addMessage, popLast, drain } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
-  drainQueuedMessagesRef.current = drain;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

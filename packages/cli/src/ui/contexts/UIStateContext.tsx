@@ -94,7 +94,7 @@ export interface UIState {
   elapsedTime: number;
   currentLoadingPhrase: string;
   historyRemountKey: number;
-  messageQueue: string[];
+  messageQueue: readonly string[];
   showAutoAcceptIndicator: ApprovalMode;
   // Quota-related state
   currentModel: string;
