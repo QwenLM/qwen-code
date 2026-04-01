@@ -40,7 +40,11 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
- hasFileEdits, runPostEditVerify } from '@qwen-code/qwen-code-core';
+  hasFileEdits,
+  runPostEditVerify,
+  AgentTool,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
@@ -1533,6 +1537,30 @@ export const useGeminiStream = (
         responsesToSend.push({
           text: `\n\n[User message received while you were working — address if relevant, otherwise continue your current task]\n\n${combined}`,
         });
+      }
+
+      // Background agent notifications: drain completed background agents
+      // and inject their results so the model knows they finished.
+      const toolRegistry = config.getToolRegistry();
+      const agentTool = toolRegistry.getTool(ToolNames.AGENT);
+      if (agentTool && agentTool instanceof AgentTool) {
+        const completedAgents = agentTool.drainCompletedBackgroundAgents();
+        for (const entry of completedAgents) {
+          const status = entry.error ? 'failed' : 'completed';
+          const detail = entry.error
+            ? `Error: ${entry.error}`
+            : (entry.result?.slice(0, 2000) ?? '(no output)');
+          const elapsed = ((Date.now() - entry.startTime) / 1000).toFixed(1);
+          const notification = `[Background agent "${entry.agentName}" (${entry.agentId}) ${status} after ${elapsed}s]\n${detail}`;
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: `Background agent "${entry.agentName}" ${status}`,
+            },
+            Date.now(),
+          );
+          responsesToSend.push({ text: `\n\n${notification}` });
+        }
       }
 
       // Post-edit verification: if any tool modified files and a verify

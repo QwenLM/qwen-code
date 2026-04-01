@@ -41,7 +41,29 @@ export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type: string;
+  run_in_background?: boolean;
 }
+
+/**
+ * Entry for a background agent tracked by AgentTool.
+ */
+export interface BackgroundAgentEntry {
+  agentId: string;
+  agentName: string;
+  description: string;
+  startTime: number;
+  completed: boolean;
+  result?: string;
+  error?: string;
+}
+
+/**
+ * Callback invoked when a background agent completes.
+ * The CLI layer sets this to inject notifications into the message queue.
+ */
+export type BackgroundAgentCompleteCallback = (
+  entry: BackgroundAgentEntry,
+) => void;
 
 const debugLogger = createDebugLogger('AGENT');
 
@@ -57,6 +79,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();
   private readonly removeChangeListener: () => void;
+
+  /** Background agents launched with run_in_background=true. */
+  private readonly backgroundAgents = new Map<string, BackgroundAgentEntry>();
+  /** Callback invoked when a background agent completes. */
+  private onBackgroundComplete: BackgroundAgentCompleteCallback | null = null;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -74,6 +101,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         subagent_type: {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
+        },
+        run_in_background: {
+          type: 'boolean',
+          description:
+            'Set to true to run this agent in the background. You will be notified when it completes. Use this when you have other work to do in parallel and do not need the result immediately.',
         },
       },
       required: ['description', 'prompt', 'subagent_type'],
@@ -102,6 +134,35 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
 
   dispose(): void {
     this.removeChangeListener();
+  }
+
+  /**
+   * Register a callback to be invoked when a background agent completes.
+   * The CLI layer uses this to inject notifications into the message queue.
+   */
+  setOnBackgroundComplete(callback: BackgroundAgentCompleteCallback): void {
+    this.onBackgroundComplete = callback;
+  }
+
+  /**
+   * Get all background agents (running and completed).
+   */
+  getBackgroundAgents(): ReadonlyMap<string, BackgroundAgentEntry> {
+    return this.backgroundAgents;
+  }
+
+  /**
+   * Drain completed background agent entries, returning and removing them.
+   */
+  drainCompletedBackgroundAgents(): BackgroundAgentEntry[] {
+    const completed: BackgroundAgentEntry[] = [];
+    for (const [id, entry] of this.backgroundAgents) {
+      if (entry.completed) {
+        completed.push(entry);
+        this.backgroundAgents.delete(id);
+      }
+    }
+    return completed;
   }
 
   /**
@@ -158,6 +219,8 @@ Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
 - Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+- You can run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT poll or check on it. Continue with other work or respond to the user instead.
+- Use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - The agent's outputs should generally be trusted
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
@@ -262,7 +325,13 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
   }
 
   protected createInvocation(params: AgentParams) {
-    return new AgentToolInvocation(this.config, this.subagentManager, params);
+    return new AgentToolInvocation(
+      this.config,
+      this.subagentManager,
+      params,
+      this.backgroundAgents,
+      this.onBackgroundComplete,
+    );
   }
 
   getAvailableSubagentNames(): string[] {
@@ -279,6 +348,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
+    private readonly backgroundAgents: Map<string, BackgroundAgentEntry>,
+    private readonly onBackgroundComplete: BackgroundAgentCompleteCallback | null,
   ) {
     super(params);
   }
@@ -557,7 +628,40 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       }
 
-      // Execute the subagent (blocking)
+      // Background execution: start agent and return immediately
+      if (this.params.run_in_background) {
+        const entry: BackgroundAgentEntry = {
+          agentId,
+          agentName: subagentConfig.name,
+          description: this.params.description,
+          startTime: Date.now(),
+          completed: false,
+        };
+        this.backgroundAgents.set(agentId, entry);
+
+        // Fire and forget — execution runs independently
+        subagent
+          .execute(contextState, signal)
+          .then(() => {
+            entry.completed = true;
+            entry.result = subagent.getFinalText();
+            this.onBackgroundComplete?.(entry);
+          })
+          .catch((err: unknown) => {
+            entry.completed = true;
+            entry.error = err instanceof Error ? err.message : String(err);
+            this.onBackgroundComplete?.(entry);
+          });
+
+        this.updateDisplay({ status: 'running' }, updateOutput);
+
+        return {
+          llmContent: `Background agent "${subagentConfig.name}" started with ID: ${agentId}. You will be notified when it completes — continue with other work.`,
+          returnDisplay: this.currentDisplay!,
+        };
+      }
+
+      // Foreground execution: block until the subagent finishes
       await subagent.execute(contextState, signal);
 
       // Fire SubagentStop hook after execution and handle block decisions
