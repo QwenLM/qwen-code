@@ -233,3 +233,75 @@ Grant only the tools the agent needs. Read-only agents should not have `write_fi
 ### Proactive delegation
 
 Include "use proactively" in the description to encourage automatic delegation without explicit user request.
+
+## SDK subagent configuration
+
+When using the [TypeScript SDK](../reference/sdk-api.md), pass subagent configurations directly via the `agents` option. The primary agent decides when to invoke each subagent based on its `description`.
+
+```typescript
+import { query, type SubagentConfig } from '@qwen-code/sdk';
+
+const reviewer: SubagentConfig = {
+  name: 'code-reviewer',
+  description:
+    'Reviews code for bugs, security issues, and performance problems',
+  systemPrompt: `You are a code reviewer. Review diffs for:
+- Logic errors and edge cases
+- Security vulnerabilities
+- Performance regressions
+Output a structured review with severity levels.`,
+  level: 'session',
+  tools: ['Read', 'Glob', 'Grep', 'Bash'],
+  modelConfig: { model: 'claude-sonnet-4-6' },
+};
+
+const conversation = query({
+  prompt: 'Review the changes in the current branch',
+  options: { agents: [reviewer] },
+});
+```
+
+### SubagentConfig fields
+
+| Field                        | Required | Type        | Description                                        |
+| ---------------------------- | -------- | ----------- | -------------------------------------------------- |
+| `name`                       | Yes      | `string`    | Unique identifier                                  |
+| `description`                | Yes      | `string`    | When to delegate to this agent                     |
+| `systemPrompt`               | Yes      | `string`    | System prompt for the subagent                     |
+| `level`                      | Yes      | `'session'` | Subagent scope (currently only `'session'`)        |
+| `tools`                      | No       | `string[]`  | Allowlist of permitted tools. Omit to inherit all. |
+| `modelConfig.model`          | No       | `string`    | Model ID or alias (`haiku`, `sonnet`, `opus`)      |
+| `modelConfig.temp`           | No       | `number`    | Temperature (0-2)                                  |
+| `runConfig.max_turns`        | No       | `number`    | Maximum agentic turns                              |
+| `runConfig.max_time_minutes` | No       | `number`    | Maximum execution time in minutes                  |
+| `color`                      | No       | `string`    | Display color                                      |
+
+### Multiple subagents with different models
+
+```typescript
+const architect: SubagentConfig = {
+  name: 'architect',
+  description: 'Designs system architecture and makes high-level decisions',
+  systemPrompt: 'You are a senior architect...',
+  level: 'session',
+  modelConfig: { model: 'claude-opus-4-6' },
+};
+
+const implementer: SubagentConfig = {
+  name: 'implementer',
+  description: 'Implements code changes based on specifications',
+  systemPrompt: 'You implement code changes...',
+  level: 'session',
+  tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'],
+  modelConfig: { model: 'claude-sonnet-4-6' },
+};
+
+const conversation = query({
+  prompt: 'Design and implement the caching layer',
+  options: { agents: [architect, implementer] },
+});
+```
+
+SDK-configured subagents have the highest priority in the [storage hierarchy](#storage-hierarchy) (session level). They override project or user agents with the same name.
+
+See the [SDK subagent examples](../../developers/examples/sdk-agents.md) for more patterns.

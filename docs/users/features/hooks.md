@@ -261,6 +261,75 @@ Empty string `""` or `"*"` matches all.
 - Default timeout: 60 seconds.
 - Max output: 1 MB per hook.
 
+## SDK hook callbacks
+
+When using the [TypeScript SDK](../reference/sdk-api.md), register hook callbacks directly in code instead of writing shell scripts or HTTP endpoints. The SDK registers callbacks with the CLI during initialization and invokes them when hook events fire.
+
+```typescript
+import { query, type HookCallback } from '@qwen-code/sdk';
+
+const auditLogger: HookCallback = async (input, toolUseId) => {
+  const data = input as { tool_name?: string };
+  console.log(`[audit] ${data.tool_name} (${toolUseId})`);
+  return {};
+};
+
+const securityGate: HookCallback = async (input) => {
+  const data = input as {
+    tool_name?: string;
+    tool_input?: Record<string, unknown>;
+  };
+  if (data.tool_name === 'Bash') {
+    const cmd = String(data.tool_input?.command ?? '');
+    if (cmd.includes('rm -rf') || cmd.includes('sudo')) {
+      return { shouldSkip: true, message: 'Blocked: destructive command' };
+    }
+  }
+  return {};
+};
+
+const conversation = query({
+  prompt: 'Refactor the auth module',
+  options: {
+    hookCallbacks: {
+      PreToolUse: [auditLogger, securityGate],
+      PostToolUse: async (input) => {
+        const data = input as { tool_output?: string };
+        if (data.tool_output?.includes('FATAL')) {
+          return { shouldInterrupt: true, message: 'Fatal error detected' };
+        }
+        return {};
+      },
+    },
+  },
+});
+```
+
+### Callback return values
+
+| Field             | Type      | Effect                                                          |
+| ----------------- | --------- | --------------------------------------------------------------- |
+| `shouldSkip`      | `boolean` | Skip this tool call entirely. Only meaningful for `PreToolUse`. |
+| `shouldInterrupt` | `boolean` | Stop the agent immediately.                                     |
+| `suppressOutput`  | `boolean` | Suppress the tool's output from the conversation.               |
+| `message`         | `string`  | Feedback string sent to the agent.                              |
+
+Returning `{}` lets the tool proceed normally.
+
+### Supported SDK events
+
+| Event          | When it fires                   |
+| -------------- | ------------------------------- |
+| `PreToolUse`   | Before a tool executes          |
+| `PostToolUse`  | After a tool returns its result |
+| `Stop`         | When the agent is about to stop |
+| `Notification` | On agent notifications          |
+| `SubagentStop` | When a subagent finishes        |
+
+When multiple callbacks are registered for one event (as an array), they execute in order. The first `shouldSkip` or `shouldInterrupt` result short-circuits the rest.
+
+See the [SDK hooks examples](../../developers/examples/sdk-hooks.md) for more patterns.
+
 ## Environment variables
 
 Command hooks inherit `process.env` plus:
