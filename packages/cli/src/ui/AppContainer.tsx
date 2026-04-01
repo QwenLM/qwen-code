@@ -454,7 +454,10 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [historyManager.history, logger]);
 
   const refreshStatic = useCallback(() => {
+    // Wrap in synchronized update to prevent flicker during clear + redraw
+    stdout.write('\x1b[?2026h');
     stdout.write(ansiEscapes.clearTerminal);
+    stdout.write('\x1b[?2026l');
     setHistoryRemountKey((prev) => prev + 1);
   }, [setHistoryRemountKey, stdout]);
 
@@ -1449,7 +1452,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== paddedTitle) {
       lastTitleRef.current = paddedTitle;
-      stdout.write(`\x1b]2;${paddedTitle}\x07`);
+      stdout.write(`\x1b[?2026h\x1b]2;${paddedTitle}\x07\x1b[?2026l`);
     }
     // Note: We don't need to reset the window title on exit because proto is already doing that elsewhere
   }, [
