@@ -47,6 +47,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
 import { AgentTool } from '../tools/agent.js';
+import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Telemetry
 import {
@@ -612,6 +613,15 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (messageType === SendMessageType.UserQuery) {
       const systemReminders = [];
+      const relevantAutoMemoryPrompt =
+        await buildRelevantAutoMemoryPromptForQuery(
+          this.config.getProjectRoot(),
+          partToString(request),
+        );
+
+      if (relevantAutoMemoryPrompt) {
+        systemReminders.push(relevantAutoMemoryPrompt);
+      }
 
       // add subagent system reminder if there are subagents
       const hasAgentTool = this.config

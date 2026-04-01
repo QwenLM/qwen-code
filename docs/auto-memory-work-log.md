@@ -165,3 +165,55 @@ Completed
 ### Status
 
 Completed
+
+---
+
+## Part 3 - Relevant managed auto-memory recall
+
+### Start review
+
+- Overall plan remains: storage → managed index integration → relevant recall → extraction → dream and commands.
+- Parts 1 and 2 already established the managed `.qwen/memory/` scaffold and appended `MEMORY.md` into `userMemory` safely.
+- Scope for this part: add low-risk, query-sensitive relevant recall from managed topic files without changing legacy hierarchical memory discovery or `save_memory` semantics.
+
+### Goal
+
+- Scan managed auto-memory topic files into structured documents
+- Select relevant managed memory for a user query
+- Inject the relevant memory block into the per-request reminder path
+- Add tests for scanning, recall selection, and client integration
+
+### Implemented
+
+- Added `packages/core/src/memory/scan.ts`
+- Added `packages/core/src/memory/scan.test.ts`
+- Added `packages/core/src/memory/recall.ts`
+- Added `packages/core/src/memory/recall.test.ts`
+- Updated `packages/core/src/core/client.ts` to prepend relevant managed auto-memory for `UserQuery`
+- Updated `packages/core/src/core/client.test.ts` with recall prompt injection coverage
+- Exported the new scan/recall helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed topic files are parsed into structured recall candidates with title/frontmatter/body support.
+- User queries now receive a dedicated `Relevant Managed Auto-Memory` reminder block when matching managed topic content exists.
+- If no managed topic files exist or no relevant content is found, request behavior remains unchanged.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/scan.test.ts src/memory/recall.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/config/config.test.ts src/core/prompts.test.ts src/utils/memoryDiscovery.test.ts src/memory/prompt.test.ts src/memory/store.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part uses heuristic recall selection for a safe first integration point.
+- The recall prompt is injected through the existing request reminder path, minimizing surface-area risk.
+- Extraction and dream/consolidation are intentionally deferred to later parts.
+
+### Status
+
+Completed

@@ -38,6 +38,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -90,6 +91,9 @@ vi.mock('./turn', async (importOriginal) => {
 
 vi.mock('../config/config.js');
 vi.mock('./prompts');
+vi.mock('../memory/recall.js', () => ({
+  buildRelevantAutoMemoryPromptForQuery: vi.fn().mockResolvedValue(''),
+}));
 vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
@@ -1290,6 +1294,46 @@ hello
         role: 'user',
         parts: expectedRequest,
       });
+    });
+
+    it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
+      vi.mocked(buildRelevantAutoMemoryPromptForQuery).mockResolvedValue(
+        '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+      );
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(buildRelevantAutoMemoryPromptForQuery).toHaveBeenCalledWith(
+        '/test/project/root',
+        'Please answer tersely',
+      );
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+          'Please answer tersely',
+        ]),
+        expect.any(AbortSignal),
+      );
     });
 
     it('should add context if ideMode is enabled and there are open files but no active file', async () => {
