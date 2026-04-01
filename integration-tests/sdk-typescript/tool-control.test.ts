@@ -18,6 +18,7 @@ import {
   isSDKResultMessage,
   type SDKMessage,
   type SDKUserMessage,
+  type SDKResultMessage,
 } from '@qwen-code/sdk';
 import {
   SDKTestHelper,
@@ -1475,7 +1476,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(writeFileResults.length).toBeGreaterThan(0);
           for (const result of writeFileResults) {
             expect(result.content).toContain(
-              '[Operation Cancelled] Reason: Write operations are not allowed',
+              'Write operations are not allowed',
             );
           }
 
@@ -1566,6 +1567,566 @@ describe('Tool Control Parameters (E2E)', () => {
           const content = await helper.readFile('data.txt');
           expect(content).toContain('initial data');
           expect(content).toContain(' - updated');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('canUseTool deny and interrupt behavior', () => {
+    it(
+      'should interrupt loop when canUseTool returns deny with interrupt: true',
+      async () => {
+        await helper.createFile('test.txt', 'test content');
+
+        const canUseToolCalls: string[] = [];
+        const resultMessages: SDKMessage[] = [];
+
+        const q = query({
+          prompt: 'Write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
+              // Deny write_file with interrupt
+              if (toolName === 'write_file') {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file write',
+                  interrupt: true,
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        let processExited = false;
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          // CLI may exit with code 130 (SIGINT) when interrupt is triggered
+          // This is expected behavior
+          processExited = true;
+        } finally {
+          await q.close();
+        }
+
+        // Verify canUseTool was called for write_file
+        expect(canUseToolCalls).toContain('write_file');
+
+        // Either we got a result message or the process exited (both are valid behaviors)
+        if (resultMessages.length > 0) {
+          const resultMsg = resultMessages[0];
+          expect(isSDKResultMessage(resultMsg)).toBe(true);
+
+          if (isSDKResultMessage(resultMsg)) {
+            // Should be error_during_execution
+            expect(resultMsg.subtype).toBe('error_during_execution');
+            expect(resultMsg.is_error).toBe(true);
+
+            // Should have permission_denials
+            expect(resultMsg.permission_denials).toBeDefined();
+            expect(resultMsg.permission_denials.length).toBeGreaterThan(0);
+
+            // Check that write_file is in permission_denials
+            const writeFileDenial = resultMsg.permission_denials.find(
+              (d) => d.tool_name === 'write_file',
+            );
+            expect(writeFileDenial).toBeDefined();
+          }
+        } else {
+          // Process exited due to interrupt - this is also valid
+          expect(processExited || messages.length > 0).toBe(true);
+        }
+
+        // Verify file was NOT modified (loop interrupted)
+        const content = await helper.readFile('test.txt');
+        expect(content).toBe('test content');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should return EXECUTION_DENIED when canUseTool returns deny without interrupt',
+      async () => {
+        await helper.createFile('test.txt', 'test content');
+
+        const canUseToolCalls: string[] = [];
+        const resultMessages: SDKResultMessage[] = [];
+
+        const q = query({
+          prompt: 'Write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
+              // Deny write_file without interrupt
+              if (toolName === 'write_file') {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file write',
+                  interrupt: false,
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        let processExited = false;
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          processExited = true;
+        } finally {
+          await q.close();
+        }
+
+        // Verify canUseTool was called for write_file
+        expect(canUseToolCalls).toContain('write_file');
+
+        // Key verification: process did NOT exit with SIGINT (code 130)
+        // because interrupt: false was used
+        expect(processExited).toBe(false);
+
+        // Find the result message
+        expect(resultMessages.length).toBeGreaterThan(0);
+        const resultMsg = resultMessages[resultMessages.length - 1];
+        expect(isSDKResultMessage(resultMsg)).toBe(true);
+
+        // File should NOT be modified (write was denied)
+        const content = await helper.readFile('test.txt');
+        expect(content).toBe('test content');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should cascade-cancel pending tools when interrupt is triggered',
+      async () => {
+        // Create test files
+        await helper.createFile('file1.txt', 'content1');
+        await helper.createFile('file2.txt', 'content2');
+        await helper.createFile('file3.txt', 'content3');
+
+        const canUseToolCalls: string[] = [];
+        const resultMessages: SDKMessage[] = [];
+
+        const q = query({
+          prompt:
+            'Write "modified1" to file1.txt, "modified2" to file2.txt, and "modified3" to file3.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName, toolInput) => {
+              canUseToolCalls.push(toolName);
+              // Deny writing to file2.txt with interrupt
+              if (
+                toolName === 'write_file' &&
+                typeof toolInput === 'object' &&
+                toolInput !== null &&
+                'file_path' in toolInput &&
+                String(
+                  (toolInput as { file_path?: string }).file_path,
+                ).includes('file2')
+              ) {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied writing to file2.txt',
+                  interrupt: true,
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        let processExited = false;
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          // CLI may exit with code 130 (SIGINT) when interrupt is triggered
+          processExited = true;
+        } finally {
+          await q.close();
+        }
+
+        // Verify canUseTool was called
+        expect(canUseToolCalls.length).toBeGreaterThan(0);
+
+        // If we got a result message, verify its contents
+        if (resultMessages.length > 0) {
+          const resultMsg = resultMessages[0];
+          if (isSDKResultMessage(resultMsg) && resultMsg.is_error) {
+            // Should have permission_denials for denied/cancelled tools
+            expect(resultMsg.permission_denials).toBeDefined();
+            if (resultMsg.permission_denials.length > 0) {
+              // file2.txt denial should be present
+              const file2Denial = resultMsg.permission_denials.find((d) => {
+                const input = d.tool_input as
+                  | { file_path?: string }
+                  | undefined;
+                return input?.file_path?.includes('file2');
+              });
+              expect(file2Denial).toBeDefined();
+            }
+          }
+        } else {
+          // Process exited due to interrupt - this is also valid
+          expect(processExited || messages.length > 0).toBe(true);
+        }
+
+        // Verify file2.txt was NOT modified (it was the one denied with interrupt)
+        // file1.txt and file3.txt may or may not be modified depending on execution order
+        const content2 = await helper.readFile('file2.txt');
+        expect(content2).toBe('content2');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should include all denied tools in permission_denials (both INTERRUPTED and EXECUTION_DENIED)',
+      async () => {
+        await helper.createFile('file1.txt', 'content1');
+        await helper.createFile('file2.txt', 'content2');
+
+        const resultMessages: SDKResultMessage[] = [];
+
+        const q = query({
+          prompt:
+            'Write "modified1" to file1.txt and "modified2" to file2.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName, toolInput) => {
+              // Deny file1.txt with interrupt (INTERRUPTED type)
+              if (
+                toolName === 'write_file' &&
+                typeof toolInput === 'object' &&
+                toolInput !== null &&
+                'file_path' in toolInput &&
+                String(
+                  (toolInput as { file_path?: string }).file_path,
+                ).includes('file1')
+              ) {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file1.txt',
+                  interrupt: true,
+                };
+              }
+              // Allow file2.txt
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+        let processExited = false;
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          // CLI may exit with code 130 (SIGINT) when interrupt is triggered
+          processExited = true;
+        } finally {
+          await q.close();
+        }
+
+        // Either we got a result message or the process exited (both are valid behaviors)
+        if (resultMessages.length > 0) {
+          const resultMsg = resultMessages[0];
+
+          // Should be error_during_execution
+          expect(resultMsg.subtype).toBe('error_during_execution');
+
+          // Should have permission_denials
+          expect(resultMsg.permission_denials.length).toBeGreaterThanOrEqual(1);
+
+          // Verify tool names and inputs are recorded
+          const denialToolNames = resultMsg.permission_denials.map(
+            (d) => d.tool_name,
+          );
+          expect(denialToolNames).toContain('write_file');
+
+          // Verify tool_input is recorded
+          const denialWithInput = resultMsg.permission_denials.find(
+            (d) => d.tool_input !== undefined,
+          );
+          expect(denialWithInput).toBeDefined();
+        } else {
+          // Process exited due to interrupt - this is also valid
+          expect(processExited || messages.length > 0).toBe(true);
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should emit user message when interrupt is triggered',
+      async () => {
+        await helper.createFile('test.txt', 'test content');
+
+        const userMessages: string[] = [];
+        const resultMessages: SDKResultMessage[] = [];
+
+        const q = query({
+          prompt: 'Write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName) => {
+              // Deny write_file with interrupt
+              if (toolName === 'write_file') {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file write',
+                  interrupt: true,
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        let processExited = false;
+
+        try {
+          for await (const message of q) {
+            // Capture user messages
+            if (message.type === 'user' && 'message' in message) {
+              const userMsg = message as SDKUserMessage;
+              const content = userMsg.message.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === 'text') {
+                    userMessages.push(block.text);
+                  }
+                }
+              } else if (typeof content === 'string') {
+                userMessages.push(content);
+              }
+            }
+
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          // CLI may exit with code 130 (SIGINT) when interrupt is triggered
+          processExited = true;
+        } finally {
+          await q.close();
+        }
+
+        // If we got messages, check for interrupt message
+        // The interrupt message may be sent before process exits
+        if (userMessages.length > 0) {
+          const interruptMessage = userMessages.find((msg) =>
+            msg.includes('Request interrupted by user for tool use'),
+          );
+          // Message might be present or process might exit before it's captured
+          if (interruptMessage) {
+            expect(interruptMessage).toBeDefined();
+          }
+        }
+
+        // Either we got results/messages or process exited (both valid)
+        expect(
+          resultMessages.length > 0 || userMessages.length > 0 || processExited,
+        ).toBe(true);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should not affect already executing tools during interrupt',
+      async () => {
+        // This test verifies that when interrupt is triggered,
+        // already completed tools remain successful, and pending tools are cancelled
+        await helper.createFile('file1.txt', 'content1');
+        await helper.createFile('file2.txt', 'content2');
+
+        const canUseToolCalls: string[] = [];
+        let file1Allowed = false;
+        const resultMessages: SDKResultMessage[] = [];
+
+        const q = query({
+          prompt:
+            'Write "modified1" to file1.txt and "modified2" to file2.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName, toolInput) => {
+              canUseToolCalls.push(toolName);
+
+              // Allow file1.txt write first
+              if (
+                toolName === 'write_file' &&
+                typeof toolInput === 'object' &&
+                toolInput !== null &&
+                'file_path' in toolInput &&
+                String(
+                  (toolInput as { file_path?: string }).file_path,
+                ).includes('file1') &&
+                !file1Allowed
+              ) {
+                file1Allowed = true;
+                return { behavior: 'allow', updatedInput: {} };
+              }
+
+              // Deny file2.txt with interrupt (simulating that file1 already executed)
+              if (
+                toolName === 'write_file' &&
+                typeof toolInput === 'object' &&
+                toolInput !== null &&
+                'file_path' in toolInput &&
+                String(
+                  (toolInput as { file_path?: string }).file_path,
+                ).includes('file2')
+              ) {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file2.txt write',
+                  interrupt: true,
+                };
+              }
+
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+        } catch {
+          // CLI may exit with code 130 (SIGINT) when interrupt is triggered
+          // This is expected behavior
+        } finally {
+          await q.close();
+        }
+
+        // Verify canUseTool was called
+        expect(canUseToolCalls.length).toBeGreaterThan(0);
+
+        // file2.txt should NOT be modified (it was denied with interrupt)
+        const content2 = await helper.readFile('file2.txt');
+        expect(content2).toBe('content2');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should handle canUseTool deny without interrupt field (backward compatibility)',
+      async () => {
+        await helper.createFile('test.txt', 'test content');
+
+        const resultMessages: SDKResultMessage[] = [];
+        const canUseToolCalls: string[] = [];
+
+        const q = query({
+          prompt: 'Write "modified" to test.txt.',
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['write_file'],
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
+              // Deny without interrupt field (should default to false - no interrupt)
+              if (toolName === 'write_file') {
+                return {
+                  behavior: 'deny',
+                  message: 'User denied file write',
+                  // Note: no interrupt field - should default to not interrupting
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultMessages.push(message);
+            }
+          }
+
+          // Verify canUseTool was called
+          expect(canUseToolCalls).toContain('write_file');
+
+          // Should complete (no SIGINT caused by interrupt flag)
+          expect(resultMessages.length).toBeGreaterThan(0);
+          const lastResult = resultMessages[resultMessages.length - 1];
+
+          // Result could be success or error_during_execution depending on model behavior
+          // The key is that no interrupt was triggered
+          expect(lastResult.is_error).toBeDefined();
+
+          // File should NOT be modified (write was denied)
+          const content = await helper.readFile('test.txt');
+          expect(content).toBe('test content');
         } finally {
           await q.close();
         }

@@ -65,6 +65,7 @@ export interface ResultOptions {
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
+  readonly permission_denials?: CLIPermissionDenial[];
 }
 
 /**
@@ -1114,7 +1115,9 @@ export abstract class BaseJsonOutputAdapter {
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
         usage,
-        permission_denials: [...this.permissionDenials],
+        permission_denials: [
+          ...(options.permission_denials ?? this.permissionDenials),
+        ],
         error: { message: errorMessage },
       };
     } else {
@@ -1130,7 +1133,9 @@ export abstract class BaseJsonOutputAdapter {
         num_turns: options.numTurns,
         result: resultText,
         usage,
-        permission_denials: [...this.permissionDenials],
+        permission_denials: [
+          ...(options.permission_denials ?? this.permissionDenials),
+        ],
       };
 
       if (options.stats) {
