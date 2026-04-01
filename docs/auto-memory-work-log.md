@@ -114,6 +114,55 @@ Completed
 
 ---
 
+## Part 14 - Dynamic MEMORY index rewrite
+
+### Start review
+
+- Overall plan now shifts from initial dream-agent adoption to the next high-value consistency gap: keeping `MEMORY.md` aligned with real topic-file state.
+- Part 13 already delivered agent-first dream planning, but the managed index was still largely scaffold-shaped and not rebuilt after extraction or dream.
+- Scope for this part: add a mechanical dynamic index builder, regenerate `MEMORY.md` after topic mutations, and keep the index compact for both prompt loading and manual review.
+
+### Goal
+
+- Add a reusable managed index builder that summarizes topic documents into short hooks
+- Rebuild `MEMORY.md` automatically after extraction and dream touch topic files
+- Keep the default scaffold index in the same compact dynamic format
+- Add targeted tests for hook extraction, index formatting, and extract/dream integration
+
+### Implemented
+
+- Added `packages/core/src/memory/indexer.ts`
+- Added `packages/core/src/memory/indexer.test.ts`
+- Updated `packages/core/src/memory/store.ts` so the default scaffold index uses the dynamic index format
+- Updated `packages/core/src/memory/extract.ts` to rebuild `MEMORY.md` after successful topic patch application
+- Updated `packages/core/src/memory/dream.ts` to rebuild `MEMORY.md` after agent or mechanical consolidation
+- Updated `packages/core/src/memory/extract.test.ts` and `packages/core/src/memory/dream.test.ts` with index rewrite coverage
+- Exported index helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- `MEMORY.md` is now a compact, dynamic topic index that lists durable entry counts and short hooks derived from topic bullets.
+- Extraction and dream now keep the managed index synchronized with topic-file mutations instead of leaving the scaffold stale.
+- Manual review and prompt loading now see a more representative managed memory landing page without needing a model-generated summary step.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/indexer.test.ts src/memory/store.test.ts src/memory/extract.test.ts src/memory/dream.test.ts src/memory/prompt.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This stage intentionally keeps index generation mechanical by using the first few unique topic bullets as hooks.
+- A later stage can upgrade the index from mechanical hooks to model-generated summaries if needed.
+
+### Status
+
+Completed
+
+---
+
 ## Part 6 - Auxiliary side-query foundation
 
 ### Start review

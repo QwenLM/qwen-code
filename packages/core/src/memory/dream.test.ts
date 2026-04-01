@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryIndexPath, getAutoMemoryTopicPath } from './paths.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -64,10 +64,12 @@ describe('managed auto-memory dream', () => {
       getAutoMemoryTopicPath(projectRoot, 'user'),
       'utf-8',
     );
+    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
 
     expect(result.touchedTopics).toContain('user');
     expect(result.dedupedEntries).toBe(1);
     expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
+    expect(index.match(/User prefers terse responses\./g)).toHaveLength(1);
   });
 
   it('restores the empty placeholder when no bullet entries remain', async () => {

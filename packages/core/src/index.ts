@@ -123,6 +123,7 @@ export * from './background/backgroundAgentRunner.js';
 export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
+export * from './memory/indexer.js';
 export * from './memory/prompt.js';
 export * from './memory/state.js';
 export * from './memory/extractionAgentPlanner.js';

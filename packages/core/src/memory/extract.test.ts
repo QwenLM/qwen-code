@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryExtractCursorPath, getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryExtractCursorPath, getAutoMemoryIndexPath, getAutoMemoryTopicPath } from './paths.js';
 import {
   applyExtractedMemoryPatches,
   buildTranscriptMessages,
@@ -80,9 +80,12 @@ describe('auto-memory extraction', () => {
 
     const userTopic = await fs.readFile(getAutoMemoryTopicPath(projectRoot, 'user'), 'utf-8');
     const referenceTopic = await fs.readFile(getAutoMemoryTopicPath(projectRoot, 'reference'), 'utf-8');
+    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
 
     expect(userTopic).toContain('- I prefer terse responses.');
     expect(referenceTopic).toContain('grafana.internal/d/api-latency');
+    expect(index).toContain('I prefer terse responses.');
+    expect(index).toContain('grafana.internal/d/api-latency');
   });
 
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {

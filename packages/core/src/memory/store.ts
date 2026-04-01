@@ -20,6 +20,7 @@ import {
   type AutoMemoryMetadata,
   type AutoMemoryType,
 } from './types.js';
+import { buildManagedAutoMemoryIndex } from './indexer.js';
 
 const TOPIC_DESCRIPTIONS: Record<AutoMemoryType, string> = {
   user: 'User profile, preferences, background, and stable collaboration context.',
@@ -64,18 +65,15 @@ export function createDefaultAutoMemoryExtractCursor(
 }
 
 export function createDefaultAutoMemoryIndex(): string {
-  const lines = [
-    '# Managed Auto-Memory Index',
-    '',
-    'This index is maintained by Qwen Code. Keep entries concise and store durable details in topic files.',
-    '',
-    ...AUTO_MEMORY_TYPES.map(
-      (type) =>
-        `- [${buildTopicTitle(type)}](${type}.md) — ${TOPIC_DESCRIPTIONS[type]}`,
-    ),
-    '',
-  ];
-  return lines.join('\n');
+  return buildManagedAutoMemoryIndex(
+    AUTO_MEMORY_TYPES.map((type) => ({
+      type,
+      filePath: `${type}.md`,
+      title: buildTopicTitle(type),
+      description: TOPIC_DESCRIPTIONS[type],
+      body: '_No entries yet._',
+    })),
+  );
 }
 
 export function createDefaultAutoMemoryTopic(type: AutoMemoryType): string {

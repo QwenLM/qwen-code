@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import { getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
+import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
@@ -133,6 +134,7 @@ export async function runManagedAutoMemoryDream(
       if (agentResult) {
         if (agentResult.touchedTopics.length > 0) {
           await bumpMetadata(projectRoot, now);
+          await rebuildManagedAutoMemoryIndex(projectRoot);
         }
         return agentResult;
       }
@@ -165,6 +167,7 @@ export async function runManagedAutoMemoryDream(
 
   if (touchedTopics.size > 0) {
     await bumpMetadata(projectRoot, now);
+    await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
   return {

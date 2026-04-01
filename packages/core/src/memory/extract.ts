@@ -14,6 +14,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
 import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
+import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -354,6 +355,7 @@ export async function applyExtractedMemoryPatches(
 
   if (touchedTopics.size > 0) {
     await bumpMetadata(projectRoot, now);
+    await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
   return [...touchedTopics];
