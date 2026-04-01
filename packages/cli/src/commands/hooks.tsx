@@ -12,7 +12,7 @@ const debugLogger = createDebugLogger('HOOKS_UI');
 export const hooksCommand: CommandModule = {
   command: 'hooks',
   aliases: ['hook'],
-  describe: 'Manage Qwen Code hooks (use /hooks in interactive mode).',
+  describe: 'Manage proto hooks (use /hooks in interactive mode).',
   builder: (yargs) => yargs.version(false).help(false),
   handler: () => {
     // In CLI mode, this command is not interactive.

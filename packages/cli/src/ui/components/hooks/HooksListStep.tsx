@@ -59,7 +59,7 @@ export function HooksListStep({
       <Box marginBottom={1}>
         <Text color={theme.text.secondary}>
           {t(
-            'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+            'This menu is read-only. To add or modify hooks, edit settings.json directly or ask proto.',
           )}
         </Text>
       </Box>

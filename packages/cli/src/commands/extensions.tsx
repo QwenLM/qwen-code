@@ -17,7 +17,7 @@ import { settingsCommand } from './extensions/settings.js';
 
 export const extensionsCommand: CommandModule = {
   command: 'extensions <command>',
-  describe: 'Manage Qwen Code extensions.',
+  describe: 'Manage proto extensions.',
   builder: (yargs) =>
     yargs
       .command(installCommand)

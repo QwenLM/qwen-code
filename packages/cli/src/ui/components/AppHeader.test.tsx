@@ -82,12 +82,12 @@ describe('<AppHeader />', () => {
     );
     // When screen reader is enabled, header is not rendered
     expect(lastFrame()).not.toContain('/projects/qwen-code');
-    expect(lastFrame()).not.toContain('Qwen Code');
+    expect(lastFrame()).not.toContain('proto');
   });
 
   it('shows the header with all info when banner is visible', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
-    expect(lastFrame()).toContain('>_ Qwen Code');
+    expect(lastFrame()).toContain('>_ proto');
     expect(lastFrame()).toContain('gemini-pro');
     expect(lastFrame()).toContain('/projects/qwen-code');
   });

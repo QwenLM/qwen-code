@@ -68,7 +68,7 @@
     "baseline-browser-mapping": "^2.9.19"
   },
   "bin": {
-    "quad": "dist/cli.js"
+    "proto": "dist/cli.js"
   },
   "files": [
     "dist/",

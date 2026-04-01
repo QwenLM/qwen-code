@@ -53,7 +53,7 @@ function getOpenUrlsCommands(readmeUrl: string): string[] {
   return commands;
 }
 
-// Add Qwen Code specific entries to .gitignore file
+// Add proto specific entries to .gitignore file
 export async function updateGitignore(gitRepoRoot: string): Promise<void> {
   const gitignoreEntries = ['.qwen/', 'gha-creds-*.json'];
 

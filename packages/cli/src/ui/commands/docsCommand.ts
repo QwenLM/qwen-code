@@ -17,7 +17,7 @@ import { t, getCurrentLanguage } from '../../i18n/index.js';
 export const docsCommand: SlashCommand = {
   name: 'docs',
   get description() {
-    return t('open full Qwen Code documentation in your browser');
+    return t('open full proto documentation in your browser');
   },
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext): Promise<void> => {

@@ -1144,6 +1144,7 @@ export class Config {
       this.taskStore = new TaskStore(
         Storage.getRuntimeBaseDir(),
         this.getSessionId(),
+        this.targetDir,
       );
     }
     return this.taskStore;

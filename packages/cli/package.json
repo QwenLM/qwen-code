@@ -10,7 +10,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "quad": "dist/index.js"
+    "proto": "dist/index.js"
   },
   "exports": {
     ".": {

@@ -11,7 +11,7 @@ import { t } from '../../i18n/index.js';
 export const settingsCommand: SlashCommand = {
   name: 'settings',
   get description() {
-    return t('View and edit Qwen Code settings');
+    return t('View and edit proto settings');
   },
   kind: CommandKind.BUILT_IN,
   action: (_context, _args): OpenDialogActionReturn => ({

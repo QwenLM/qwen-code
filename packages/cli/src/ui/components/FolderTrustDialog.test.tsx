@@ -40,7 +40,7 @@ describe('FolderTrustDialog', () => {
 
     expect(lastFrame()).toContain('Do you trust this folder?');
     expect(lastFrame()).toContain(
-      'Trusting a folder allows Qwen Code to execute commands it suggests.',
+      'Trusting a folder allows proto to execute commands it suggests.',
     );
   });
 
@@ -75,7 +75,7 @@ describe('FolderTrustDialog', () => {
       <FolderTrustDialog onSelect={vi.fn()} isRestarting={true} />,
     );
 
-    expect(lastFrame()).toContain(' Qwen Code is restarting');
+    expect(lastFrame()).toContain(' proto is restarting');
   });
 
   it('should call relaunchApp when isRestarting is true', async () => {

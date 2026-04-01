@@ -155,7 +155,7 @@ export class Storage {
 
     // Also load commands from installed Claude Code plugins.
     // Reads ~/.claude/plugins/installed_plugins.json and adds each plugin's
-    // commands/ directory so quad transparently inherits Claude Code plugins.
+    // commands/ directory so proto transparently inherits Claude Code plugins.
     try {
       const pluginsManifest = path.join(
         homeDir,

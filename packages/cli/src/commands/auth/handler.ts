@@ -416,12 +416,12 @@ export async function showAuthStatus(): Promise<void> {
       );
       writeStdoutLine(
         t(
-          '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
+          '  proto auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
         ),
       );
       writeStdoutLine(t('Or simply run:'));
       writeStdoutLine(
-        t('  qwen auth                - Interactive authentication setup\n'),
+        t('  proto auth                - Interactive authentication setup\n'),
       );
       process.exit(0);
     }
@@ -480,7 +480,7 @@ export async function showAuthStatus(): Promise<void> {
         writeStdoutLine(
           t('  Issue: API key not found in environment or settings\n'),
         );
-        writeStdoutLine(t('  Run `qwen auth coding-plan` to re-configure.\n'));
+        writeStdoutLine(t('  Run `proto auth coding-plan` to re-configure.\n'));
       }
     } else {
       writeStdoutLine(

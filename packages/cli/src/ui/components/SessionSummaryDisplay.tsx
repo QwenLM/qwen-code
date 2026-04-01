@@ -41,7 +41,7 @@ export const SessionSummaryDisplay: React.FC<SessionSummaryDisplayProps> = ({
           <Text color={theme.text.secondary}>
             {t('To continue this session, run')}{' '}
             <Text color={theme.text.accent}>
-              qwen --resume {stats.sessionId}
+              proto --resume {stats.sessionId}
             </Text>
           </Text>
         </Box>

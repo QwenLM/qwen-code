@@ -208,7 +208,7 @@ export class TestRig {
   /**
    * The command and args to use to invoke Qwen Code CLI. Allows us to switch
    * between using the bundled gemini.js (the default) and using the installed
-   * 'quad' (used to verify npm bundles).
+   * 'proto' (used to verify npm bundles).
    */
   private _getCommandAndArgs(extraInitialArgs: string[] = []): {
     command: string;
@@ -216,7 +216,7 @@ export class TestRig {
   } {
     const isNpmReleaseTest =
       process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
-    const command = isNpmReleaseTest ? 'quad' : 'node';
+    const command = isNpmReleaseTest ? 'proto' : 'node';
     const initialArgs = isNpmReleaseTest
       ? ['--no-chat-recording', ...extraInitialArgs]
       : [this.bundlePath, '--no-chat-recording', ...extraInitialArgs];

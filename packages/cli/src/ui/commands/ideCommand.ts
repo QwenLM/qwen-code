@@ -148,7 +148,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
           type: 'message',
           messageType: 'error',
           content: t(
-            'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
+            'IDE integration is not supported in your current environment. To use this feature, run proto in one of these supported IDEs: VS Code or VS Code forks.',
           ),
         }) as const,
     };

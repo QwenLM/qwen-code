@@ -28,5 +28,5 @@ exports[`<SessionSummaryDisplay /> > renders the summary display with a title 1`
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
-To continue this session, run qwen --resume test-session-id-12345"
+To continue this session, run proto --resume test-session-id-12345"
 `;

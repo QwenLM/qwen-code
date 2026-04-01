@@ -97,7 +97,7 @@ describe('initCommand', () => {
       expect.objectContaining({
         type: 'submit_prompt',
         content: expect.stringContaining(
-          'You are Qwen Code, an interactive CLI agent',
+          'You are proto, an interactive CLI agent',
         ),
       }),
     );
@@ -143,7 +143,7 @@ describe('initCommand', () => {
       expect.objectContaining({
         type: 'submit_prompt',
         content: expect.stringContaining(
-          'You are Qwen Code, an interactive CLI agent',
+          'You are proto, an interactive CLI agent',
         ),
       }),
     );

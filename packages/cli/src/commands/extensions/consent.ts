@@ -155,7 +155,7 @@ export function extensionConsentString(
   if (originSource !== 'QwenCode') {
     output.push(
       t(
-        'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.',
+        'You are installing an extension from {{originSource}}. Some features may not work perfectly with proto.',
         { originSource },
       ),
     );

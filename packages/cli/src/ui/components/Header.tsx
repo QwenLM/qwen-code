@@ -134,10 +134,10 @@ export const Header: React.FC<HeaderProps> = ({
         flexGrow={showLogo ? 0 : 1}
         width={showLogo ? availableInfoPanelWidth : undefined}
       >
-        {/* Title line: >_ quad (v{version}) */}
+        {/* Title line: >_ proto (v{version}) */}
         <Text>
           <Text bold color={theme.text.accent}>
-            &gt;_ quad
+            &gt;_ proto
           </Text>
           <Text color={theme.text.secondary}> (v{version})</Text>
         </Text>

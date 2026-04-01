@@ -19,7 +19,7 @@ describe('extensions command', () => {
   });
 
   it('should have a description', () => {
-    expect(extensionsCommand.describe).toBe('Manage Qwen Code extensions.');
+    expect(extensionsCommand.describe).toBe('Manage proto extensions.');
   });
 
   it('should require a subcommand', () => {

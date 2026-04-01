@@ -41,7 +41,7 @@ vi.mock('../../semantic-colors.js', () => ({
 describe('HookConfigDetailStep', () => {
   const createMockHookEvent = (): HookEventDisplayInfo => ({
     event: HookEventName.Stop,
-    shortDescription: 'Right before Qwen Code concludes its response',
+    shortDescription: 'Right before proto concludes its response',
     description: '',
     exitCodes: [
       { code: 0, description: 'stdout/stderr not shown' },

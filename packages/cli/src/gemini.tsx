@@ -346,7 +346,7 @@ export async function main() {
   }
 
   // We are now past the logic handling potentially launching a child process
-  // to run Qwen Code. It is now safe to perform expensive initialization that
+  // to run proto. It is now safe to perform expensive initialization that
   // may have side effects.
 
   // Initialize output language file before config loads to ensure it's included in context

@@ -144,7 +144,7 @@ class QwenAgent implements Agent {
       protocolVersion: PROTOCOL_VERSION,
       agentInfo: {
         name: 'qwen-code',
-        title: 'Qwen Code',
+        title: 'proto',
         version,
       },
       authMethods,
@@ -406,7 +406,7 @@ class QwenAgent implements Agent {
     if (!selectedType) {
       throw RequestError.authRequired(
         { authMethods: this.pickAuthMethodsForAuthRequired() },
-        'Use Qwen Code CLI to authenticate first.',
+        'Use proto CLI to authenticate first.',
       );
     }
 
