@@ -356,6 +356,22 @@ export async function loadServerHierarchicalMemory(
     }
   }
 
+  // Discover session notes (structured checkpoint for work continuity)
+  const { getSessionNotesPath } = await import('../services/sessionNotes.js');
+  const sessionNotesPath = getSessionNotesPath(currentWorkingDirectory);
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const content = await readFile(sessionNotesPath, 'utf-8');
+    // Only include if it has real content (not just the template headings)
+    if (content.includes('\n') && content.length > 300) {
+      if (!filePaths.includes(sessionNotesPath)) {
+        filePaths.push(sessionNotesPath);
+      }
+    }
+  } catch {
+    // No session notes yet — that's fine
+  }
+
   if (filePaths.length === 0) {
     logger.debug('No context files found in hierarchy.');
     return { memoryContent: '', fileCount: 0 };

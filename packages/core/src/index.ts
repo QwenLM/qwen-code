@@ -119,6 +119,7 @@ export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 export * from './services/baselineCheck.js';
 export * from './services/postEditVerify.js';
+export * from './services/sessionNotes.js';
 
 // ============================================================================
 // IDE Support
