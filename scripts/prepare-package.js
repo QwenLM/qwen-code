@@ -150,7 +150,7 @@ const distPackageJson = {
   name: rootPackageJson.name,
   version: rootPackageJson.version,
   description:
-    rootPackageJson.description || 'Qwen Code - AI-powered coding assistant',
+    rootPackageJson.description || 'proto - AI-powered coding agent',
   repository: rootPackageJson.repository,
   type: 'module',
   main: 'cli.js',

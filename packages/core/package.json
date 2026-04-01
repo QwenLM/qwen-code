@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
   "version": "0.13.2",
-  "description": "Qwen Code Core",
+  "description": "proto core",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"

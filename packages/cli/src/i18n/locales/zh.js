@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Chinese translations for Qwen Code CLI
+// Chinese translations for proto CLI
 
 export default {
   // ============================================================================
@@ -80,16 +80,16 @@ export default {
   'For a full list of shortcuts, see {{docPath}}':
     '完整快捷键列表，请参阅 {{docPath}}',
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
-  'for help on Qwen Code': '获取 Qwen Code 帮助',
+  'for help on proto': '获取 proto 帮助',
   'show version info': '显示版本信息',
   'submit a bug report': '提交错误报告',
-  'About Qwen Code': '关于 Qwen Code',
+  'About proto': '关于 proto',
   Status: '状态',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
-  'Qwen Code': 'Qwen Code',
+  proto: 'proto',
   Runtime: '运行环境',
   OS: '操作系统',
   Auth: '认证',
@@ -114,10 +114,10 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     '分析项目并创建定制的 QWEN.md 文件',
-  'List available Qwen Code tools. Usage: /tools [desc]':
-    '列出可用的 Qwen Code 工具。用法：/tools [desc]',
+  'List available proto tools. Usage: /tools [desc]':
+    '列出可用的 proto 工具。用法：/tools [desc]',
   'List available skills.': '列出可用技能。',
-  'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
+  'Available proto CLI tools:': '可用的 proto CLI 工具：',
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的审批模式',
@@ -140,8 +140,8 @@ export default {
   'Clear conversation history and free up context': '清除对话历史并释放上下文',
   'Compresses the context by replacing it with a summary.':
     '通过摘要替换来压缩上下文',
-  'open full Qwen Code documentation in your browser':
-    '在浏览器中打开完整的 Qwen Code 文档',
+  'open full proto documentation in your browser':
+    '在浏览器中打开完整的 proto 文档',
   'Configuration not available.': '配置不可用',
   'change the auth method': '更改认证方法',
   'Configure authentication information for login': '配置登录认证信息',
@@ -226,7 +226,7 @@ export default {
   // Agents - Creation Wizard Steps
   'Step {{n}}: Choose Location': '步骤 {{n}}: 选择位置',
   'Step {{n}}: Choose Generation Method': '步骤 {{n}}: 选择生成方式',
-  'Generate with Qwen Code (Recommended)': '使用 Qwen Code 生成（推荐）',
+  'Generate with proto (Recommended)': '使用 proto 生成（推荐）',
   'Manual Creation': '手动创建',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
     '描述此子智能体应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
@@ -343,10 +343,10 @@ export default {
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
-  'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
+  'View and edit proto settings': '查看和编辑 proto 设置',
   Settings: '设置',
-  'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
-    '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
+  'To see changes, proto must be restarted. Press r to exit and apply changes now.':
+    '要查看更改，必须重启 proto。按 r 退出并立即应用更改。',
   'The command "/{{command}}" is not supported in non-interactive mode.':
     '不支持在非交互模式下使用命令 "/{{command}}"。',
   // ============================================================================
@@ -492,8 +492,8 @@ export default {
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
-  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
-    '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with proto.':
+    '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 proto。',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref 和 --auto-update 不适用于市场扩展。',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -595,8 +595,8 @@ export default {
     '安装 {{ideName}} 所需的 IDE 配套工具',
   'enable IDE integration': '启用 IDE 集成',
   'disable IDE integration': '禁用 IDE 集成',
-  'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
-    '您当前环境不支持 IDE 集成。要使用此功能，请在以下支持的 IDE 之一中运行 Qwen Code：VS Code 或 VS Code 分支版本。',
+  'IDE integration is not supported in your current environment. To use this feature, run proto in one of these supported IDEs: VS Code or VS Code forks.':
+    '您当前环境不支持 IDE 集成。要使用此功能，请在以下支持的 IDE 之一中运行 proto：VS Code 或 VS Code 分支版本。',
   'Set up GitHub Actions': '设置 GitHub Actions',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
     '配置终端按键绑定以支持多行输入（VS Code、Cursor、Windsurf、Trae）',
@@ -628,7 +628,7 @@ export default {
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
-  'Manage Qwen Code hooks': '管理 Qwen Code Hook',
+  'Manage proto hooks': '管理 proto Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
   'Enable a disabled hook': '启用已禁用的 Hook',
   'Disable an active hook': '禁用已启用的 Hook',
@@ -642,8 +642,8 @@ export default {
   'No hook events found.': '未找到 Hook 事件。',
   '{{count}} hook configured': '{{count}} 个 Hook 已配置',
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
-  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
-    '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask proto.':
+    '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 proto。',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -679,7 +679,7 @@ export default {
   'When notifications are sent': '发送通知时',
   'When the user submits a prompt': '用户提交提示时',
   'When a new session is started': '新会话开始时',
-  'Right before Qwen Code concludes its response': 'Qwen Code 结束响应之前',
+  'Right before proto concludes its response': 'proto 结束响应之前',
   'When a subagent (Agent tool call) is started':
     '子智能体（Agent 工具调用）启动时',
   'Right before a subagent concludes its response': '子智能体结束响应之前',
@@ -1310,12 +1310,10 @@ export default {
   Ask: '询问',
   Deny: '拒绝',
   Workspace: '工作区',
-  "Qwen Code won't ask before using allowed tools.":
-    'Qwen Code 使用已允许的工具前不会询问。',
-  'Qwen Code will ask before using these tools.':
-    'Qwen Code 使用这些工具前会先询问。',
-  'Qwen Code is not allowed to use denied tools.':
-    'Qwen Code 不允许使用被拒绝的工具。',
+  "proto won't ask before using allowed tools.":
+    'proto 使用已允许的工具前不会询问。',
+  'proto will ask before using these tools.': 'proto 使用这些工具前会先询问。',
+  'proto is not allowed to use denied tools.': 'proto 不允许使用被拒绝的工具。',
   'Manage trusted directories for this workspace.':
     '管理此工作区的受信任目录。',
   'Any use of the {{tool}} tool': '{{tool}} 工具的任何使用',
@@ -1353,10 +1351,10 @@ export default {
   // Workspace directory management
   'Add directory…': '添加目录…',
   'Add directory to workspace': '添加工作区目录',
-  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
-    'Qwen Code 可以读取工作区中的文件，并在自动接受编辑模式开启时进行编辑。',
-  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
-    'Qwen Code 将能够读取此目录中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'proto can read files in the workspace, and make edits when auto-accept edits is on.':
+    'proto 可以读取工作区中的文件，并在自动接受编辑模式开启时进行编辑。',
+  'proto will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'proto 将能够读取此目录中的文件，并在自动接受编辑模式开启时进行编辑。',
   'Enter the path to the directory:': '输入目录路径：',
   'Enter directory path…': '输入目录路径…',
   'Tab to complete · Enter to add · Esc to cancel':
@@ -1440,8 +1438,8 @@ export default {
   'Use /bug to submit issues to the maintainers when something goes off.':
     '遇到问题时，用 /bug 将问题提交给维护者。',
   'Switch auth type quickly with /auth.': '用 /auth 快速切换认证方式。',
-  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
-    '在 Qwen Code 中使用 ! 可运行任意 shell 命令（例如 !ls）。',
+  'You can run any shell commands from proto using ! (e.g. !ls).':
+    '在 proto 中使用 ! 可运行任意 shell 命令（例如 !ls）。',
   'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
     '输入 / 打开命令弹窗；按 Tab 自动补全斜杠命令和保存的提示词。',
   'You can resume a previous conversation by running qwen --continue or qwen --resume.':
@@ -1456,7 +1454,7 @@ export default {
   // ============================================================================
   // Exit Screen / Stats
   // ============================================================================
-  'Agent powering down. Goodbye!': 'Qwen Code 正在关闭，再见！',
+  'Agent powering down. Goodbye!': 'proto 正在关闭，再见！',
   'To continue this session, run': '要继续此会话，请运行',
   'Interaction Summary': '交互摘要',
   'Session ID:': '会话 ID：',
