@@ -17,7 +17,7 @@ import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
  * Prompt for suggestion generation.
  * Instructs the model to predict the user's next input.
  */
-const SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
+export const SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
 
 FIRST: Look at the user's recent messages and original request.
 

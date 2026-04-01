@@ -127,10 +127,15 @@ export function createForkedChat(
       ? params.history.slice(-maxHistoryEntries)
       : params.history;
 
+  // params.generationConfig and params.history are already deep-cloned snapshots
+  // from saveCacheSafeParams (which clones generationConfig) and getHistory(true)
+  // (which structuredClones the history). Slice creates a new array but shares
+  // Content references — GeminiChat only reads history, never mutates entries,
+  // so sharing is safe and avoids a redundant deep clone.
   return new GeminiChat(
     config,
-    structuredClone(params.generationConfig),
-    structuredClone(history),
+    { ...params.generationConfig }, // shallow copy to prevent mutation of the cached snapshot
+    [...history], // shallow copy — entries are read-only
     undefined, // no chatRecordingService
     undefined, // no telemetryService
   );

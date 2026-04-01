@@ -26,7 +26,7 @@ import {
   createForkedChat,
   runForkedQuery,
 } from './forkedQuery.js';
-import { getFilterReason } from './suggestionGenerator.js';
+import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -471,12 +471,8 @@ function ensureToolResultPairing(messages: Content[]): Content[] {
 // Pipelined suggestion generation
 // ---------------------------------------------------------------------------
 
-/** Prompt for pipelined suggestion — same as SUGGESTION_PROMPT but imported indirectly */
-const PIPELINED_SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
-
-Predict what the user would type next based on the conversation so far.
-Format: 2-12 words, match the user's style. Or nothing.
-Reply with ONLY the suggestion, no quotes or explanation.`;
+// Reuses SUGGESTION_PROMPT from suggestionGenerator.ts (imported above)
+// to ensure pipelined suggestions have the same quality as initial suggestions.
 
 const PIPELINED_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -513,7 +509,7 @@ async function generatePipelinedSuggestion(
     const augmentedPrompt = `The user just said: "${suggestionText}"
 The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
-${PIPELINED_SUGGESTION_PROMPT}`;
+${SUGGESTION_PROMPT}`;
 
     const result = await runForkedQuery(config, augmentedPrompt, {
       abortSignal,

@@ -808,7 +808,8 @@ export const AppContainer = (props: AppContainerProps) => {
               config,
               new SpeculationEvent({
                 outcome: 'accepted',
-                turns_used: spec.messages.length,
+                turns_used: spec.messages.filter((m) => m.role === 'model')
+                  .length,
                 files_written: result.filesApplied.length,
                 tool_use_count: spec.toolUseCount,
                 duration_ms: Date.now() - spec.startTime,
