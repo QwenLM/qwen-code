@@ -148,10 +148,40 @@ export class Storage {
 
   static getUserCommandsDirs(): string[] {
     const homeDir = os.homedir();
-    return [
+    const dirs = [
       path.join(homeDir, QWEN_DIR, 'commands'),
       path.join(homeDir, CLAUDE_DIR, 'commands'),
     ];
+
+    // Also load commands from installed Claude Code plugins.
+    // Reads ~/.claude/plugins/installed_plugins.json and adds each plugin's
+    // commands/ directory so quad transparently inherits Claude Code plugins.
+    try {
+      const pluginsManifest = path.join(
+        homeDir,
+        CLAUDE_DIR,
+        'plugins',
+        'installed_plugins.json',
+      );
+      const raw = fs.readFileSync(pluginsManifest, 'utf-8');
+      const manifest = JSON.parse(raw) as {
+        plugins?: Record<
+          string,
+          Array<{ installPath: string; scope?: string }>
+        >;
+      };
+      for (const entries of Object.values(manifest.plugins ?? {})) {
+        // Use the first (most recently installed) entry per plugin
+        const entry = entries[0];
+        if (entry?.installPath) {
+          dirs.push(path.join(entry.installPath, 'commands'));
+        }
+      }
+    } catch {
+      // No Claude Code plugins installed, or manifest unreadable — skip silently
+    }
+
+    return dirs;
   }
 
   static getGlobalMemoryFilePath(): string {
