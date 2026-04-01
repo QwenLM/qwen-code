@@ -87,7 +87,7 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem } from '../hooks/index.js';
+import { HookSystem, createHookOutput } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -826,6 +826,7 @@ export class Config {
 
             // Execute the appropriate hook based on eventName
             let result;
+            let stopHookCount: number | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -835,13 +836,18 @@ export class Config {
                   signal,
                 );
                 break;
-              case 'Stop':
-                result = await hookSystem.fireStopEvent(
+              case 'Stop': {
+                const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
                   signal,
                 );
+                result = stopResult.finalOutput
+                  ? createHookOutput('Stop', stopResult.finalOutput)
+                  : undefined;
+                stopHookCount = stopResult.allOutputs.length;
                 break;
+              }
               case 'PreToolUse': {
                 result = await hookSystem.firePreToolUseEvent(
                   (input['tool_name'] as string) || '',
@@ -929,6 +935,8 @@ export class Config {
               correlationId: request.correlationId,
               success: true,
               output: result,
+              // Include stop hook count for Stop events
+              stopHookCount,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);

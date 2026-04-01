@@ -972,6 +972,53 @@ export const useGeminiStream = (
     });
   }, [handleLoopDetectionConfirmation]);
 
+  const handleUserPromptSubmitBlockedEvent = useCallback(
+    (
+      value: { reason: string; originalPrompt: string },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'user_prompt_submit_blocked',
+          reason: value.reason,
+          originalPrompt: value.originalPrompt,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
+  const handleStopHookLoopEvent = useCallback(
+    (
+      value: {
+        iterationCount: number;
+        reasons: string[];
+        stopHookCount: number;
+      },
+      userMessageTimestamp: number,
+    ) => {
+      if (pendingHistoryItemRef.current) {
+        addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        setPendingHistoryItem(null);
+      }
+      addItem(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: value.iterationCount,
+          reasons: value.reasons,
+          stopHookCount: value.stopHookCount,
+        } as HistoryItemWithoutId,
+        userMessageTimestamp,
+      );
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
   const processGeminiStreamEvents = useCallback(
     async (
       stream: AsyncIterable<GeminiEvent>,
@@ -1053,13 +1100,23 @@ export const useGeminiStream = (
             }
             break;
           case ServerGeminiEventType.HookSystemMessage:
-            // Display system message from hooks (e.g., Ralph Loop iteration info)
-            // This is handled as a content event to show in the UI
-            geminiMessageBuffer = handleContentEvent(
-              event.value + '\n',
-              geminiMessageBuffer,
+            // Display system message from Stop hooks with "Stop says:" prefix
+            addItem(
+              {
+                type: 'stop_hook_system_message',
+                message: event.value,
+              } as HistoryItemWithoutId,
               userMessageTimestamp,
             );
+            break;
+          case ServerGeminiEventType.UserPromptSubmitBlocked:
+            handleUserPromptSubmitBlockedEvent(
+              event.value,
+              userMessageTimestamp,
+            );
+            break;
+          case ServerGeminiEventType.StopHookLoop:
+            handleStopHookLoopEvent(event.value, userMessageTimestamp);
             break;
           default: {
             // enforces exhaustive switch-case
@@ -1089,6 +1146,9 @@ export const useGeminiStream = (
       setThought,
       pendingHistoryItemRef,
       setPendingHistoryItem,
+      handleUserPromptSubmitBlockedEvent,
+      handleStopHookLoopEvent,
+      addItem,
     ],
   );
 
