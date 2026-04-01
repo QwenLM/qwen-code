@@ -752,9 +752,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
-  // Dismiss callback — clears suggestion (triggers speculation abort via useEffect)
+  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
   const dismissPromptSuggestion = useCallback(() => {
     setPromptSuggestion(null);
+    suggestionAbortRef.current?.abort();
+    suggestionAbortRef.current = null;
   }, []);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
@@ -799,9 +801,9 @@ export const AppContainer = (props: AppContainerProps) => {
       if (
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
-        (spec.status === 'completed' || spec.status === 'boundary')
+        spec.status === 'completed'
       ) {
-        // Accept speculation: inject messages and apply files
+        // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, geminiClient)
           .then((result) => {
             logSpeculation(
@@ -817,16 +819,13 @@ export const AppContainer = (props: AppContainerProps) => {
                 had_pipelined_suggestion: !!result.nextSuggestion,
               }),
             );
-            // If boundary was hit, the main loop continues from where speculation stopped
-            // Use result.boundary (not spec.status, which was mutated by acceptSpeculation)
-            if (result.boundary) {
-              addMessage(submittedValue);
-            } else {
-              // Speculation completed fully — render results in UI
+            // Speculation completed fully (no boundary) — render results in UI
+            {
               const now = Date.now();
 
               // Render each speculated message as the appropriate HistoryItem
-              for (const msg of result.messages) {
+              for (let mi = 0; mi < result.messages.length; mi++) {
+                const msg = result.messages[mi];
                 if (msg.role === 'user' && msg.parts) {
                   // Check if this is a tool result (functionResponse) or user text
                   const hasText = msg.parts.some(
@@ -862,8 +861,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
                   if (toolCalls.length > 0) {
                     // Find matching tool results from the next message
-                    const nextMsg =
-                      result.messages[result.messages.indexOf(msg) + 1];
+                    const nextMsg = result.messages[mi + 1];
                     const toolResults =
                       nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
 

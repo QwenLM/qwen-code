@@ -98,9 +98,14 @@ export async function startSpeculation(
 
   const abortController = new AbortController();
 
+  // If parent was already aborted, skip starting speculation entirely
+  if (parentSignal?.aborted) {
+    abortController.abort();
+  }
+
   // Link to parent signal with cleanup to prevent memory leak (#20)
   let parentAbortHandler: (() => void) | undefined;
-  if (parentSignal) {
+  if (parentSignal && !parentSignal.aborted) {
     parentAbortHandler = () => abortController.abort();
     parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
   }
