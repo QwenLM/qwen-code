@@ -204,6 +204,8 @@ describe('useGeminiStream', () => {
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
       getArenaAgentClient: vi.fn(() => null),
+      isCronEnabled: vi.fn(() => false),
+      getCronScheduler: vi.fn(() => null),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);

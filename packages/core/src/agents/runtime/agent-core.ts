@@ -58,6 +58,7 @@ import type {
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { AgentTool } from '../../tools/agent.js';
+import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 
@@ -273,6 +274,15 @@ export class AgentCore {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     const toolsList: FunctionDeclaration[] = [];
 
+    // Tools excluded from subagents: AgentTool (prevent recursion) and
+    // cron tools (session-scoped, should only be used by the main session).
+    const excludedFromSubagents = new Set<string>([
+      AgentTool.Name,
+      ToolNames.CRON_CREATE,
+      ToolNames.CRON_LIST,
+      ToolNames.CRON_DELETE,
+    ]);
+
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -286,11 +296,13 @@ export class AgentCore {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()
-            .filter((t) => t.name !== AgentTool.Name),
+            .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
         toolsList.push(
-          ...toolRegistry.getFunctionDeclarationsFiltered(asStrings),
+          ...toolRegistry.getFunctionDeclarationsFiltered(
+            asStrings.filter((name) => !excludedFromSubagents.has(name)),
+          ),
         );
       }
       toolsList.push(...onlyInlineDecls);
@@ -299,7 +311,7 @@ export class AgentCore {
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations()
-          .filter((t) => t.name !== AgentTool.Name),
+          .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
     }
 

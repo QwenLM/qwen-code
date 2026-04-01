@@ -31,6 +31,9 @@ export const ToolNames = {
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
+  CRON_CREATE: 'cron_create',
+  CRON_LIST: 'cron_list',
+  CRON_DELETE: 'cron_delete',
 } as const;
 
 /**
@@ -60,6 +63,9 @@ export const ToolDisplayNames = {
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
+  CRON_CREATE: 'CronCreate',
+  CRON_LIST: 'CronList',
+  CRON_DELETE: 'CronDelete',
 } as const;
 
 // Migration from old tool names to new tool names

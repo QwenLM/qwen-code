@@ -1658,9 +1658,20 @@ const SETTINGS_SCHEMA = {
     category: 'Experimental',
     requiresRestart: true,
     default: {},
-    description: 'Setting to enable experimental features',
+    description: 'Settings to enable experimental features.',
     showInDialog: false,
-    properties: {},
+    properties: {
+      cron: {
+        type: 'boolean',
+        label: 'Enable Cron/Loop Tools',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+    },
   },
 } as const satisfies SettingsSchema;
 
