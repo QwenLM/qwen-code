@@ -152,12 +152,17 @@ export function createFollowupController(
       return;
     }
 
-    onOutcome?.({
-      outcome: 'accepted',
-      accept_method: method,
-      time_ms: shownAt > 0 ? Date.now() - shownAt : 0,
-      suggestion_length: text.length,
-    });
+    try {
+      onOutcome?.({
+        outcome: 'accepted',
+        accept_method: method,
+        time_ms: shownAt > 0 ? Date.now() - shownAt : 0,
+        suggestion_length: text.length,
+      });
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-console
+      console.error('[followup] onOutcome callback threw:', e);
+    }
 
     applyState(INITIAL_FOLLOWUP_STATE);
 
@@ -191,12 +196,17 @@ export function createFollowupController(
 
     // Log ignored outcome if a suggestion was visible
     if (currentState.isVisible && currentState.suggestion) {
-      onOutcome?.({
-        outcome: 'ignored',
-        time_ms:
-          currentState.shownAt > 0 ? Date.now() - currentState.shownAt : 0,
-        suggestion_length: currentState.suggestion.length,
-      });
+      try {
+        onOutcome?.({
+          outcome: 'ignored',
+          time_ms:
+            currentState.shownAt > 0 ? Date.now() - currentState.shownAt : 0,
+          suggestion_length: currentState.suggestion.length,
+        });
+      } catch (e: unknown) {
+        // eslint-disable-next-line no-console
+        console.error('[followup] onOutcome callback threw:', e);
+      }
     }
 
     applyState(INITIAL_FOLLOWUP_STATE);

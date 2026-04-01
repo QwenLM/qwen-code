@@ -103,8 +103,11 @@ export interface InputFormProps {
   onCompositionEnd: () => void;
   /** Key down callback */
   onKeyDown: (e: React.KeyboardEvent) => void;
-  /** Submit callback */
-  onSubmit: (e: React.FormEvent) => void;
+  /** Submit callback. When explicitText is provided, submit that value instead of reading from input state. */
+  onSubmit: (
+    e: React.FormEvent | React.KeyboardEvent,
+    explicitText?: string,
+  ) => void;
   /** Cancel callback */
   onCancel: () => void;
   /** Toggle edit mode callback */
@@ -268,10 +271,10 @@ export const InputForm: FC<InputFormProps> = ({
       // Accept and submit prompt suggestion on Enter when input is empty
       if (hasFollowup && !inputText && followupSuggestion) {
         e.preventDefault();
-        // Synchronously set the input text so onSubmit reads the correct value
-        onInputChange(followupSuggestion);
         onAcceptFollowup?.('enter');
-        onSubmit(e);
+        // Pass suggestion text explicitly — onInputChange is async (React setState)
+        // so onSubmit cannot rely on reading inputText from the closure.
+        onSubmit(e, followupSuggestion);
         return;
       }
       e.preventDefault();
