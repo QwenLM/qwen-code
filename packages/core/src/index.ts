@@ -117,6 +117,7 @@ export * from './services/gitWorktreeService.js';
 export * from './services/memory-consolidation.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+export * from './services/baselineCheck.js';
 
 // ============================================================================
 // IDE Support

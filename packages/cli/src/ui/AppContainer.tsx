@@ -42,6 +42,8 @@ import {
   SessionEndReason,
   SessionStartSource,
   type PermissionMode,
+  runBaselineCheck,
+  formatBaseline,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -291,6 +293,33 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       await config.initialize();
       setConfigInitialized(true);
+
+      // Pre-flight baseline check: establish project state before the
+      // agent touches anything. Surfaces dirty working trees, recent
+      // commits, and optional verification command results.
+      const projectRoot = config.getProjectRoot?.() ?? config.getTargetDir();
+      if (projectRoot) {
+        runBaselineCheck(projectRoot)
+          .then((result) => {
+            const formatted = formatBaseline(result);
+            historyManager.addItem(
+              { type: MessageType.INFO, text: formatted },
+              Date.now(),
+            );
+            if (result.isDirty) {
+              historyManager.addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Working tree has ${result.dirtyFiles.length} uncommitted change(s). The agent may build on top of unstaged work.`,
+                },
+                Date.now(),
+              );
+            }
+          })
+          .catch(() => {
+            // Not a git repo or git not available — skip silently
+          });
+      }
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
