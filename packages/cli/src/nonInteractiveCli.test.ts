@@ -144,6 +144,8 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      isCronEnabled: vi.fn().mockReturnValue(false),
+      getCronScheduler: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {
