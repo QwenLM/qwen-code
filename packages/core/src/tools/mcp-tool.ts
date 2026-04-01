@@ -111,7 +111,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
-  private static readonly allowlist: Set<string> = new Set();
   private static readonly MAX_RECONNECT_RETRIES = 3;
 
   constructor(
