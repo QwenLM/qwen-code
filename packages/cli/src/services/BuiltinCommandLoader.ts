@@ -24,6 +24,7 @@ import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
+import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -82,6 +83,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       editorCommand,
       exportCommand,
       extensionsCommand,
+      forgetCommand,
       helpCommand,
       ...(this.config?.getEnableHooks() ? [hooksCommand] : []),
       await ideCommand(),

@@ -18,6 +18,7 @@ import {
   AUTO_MEMORY_TYPES,
   getErrorMessage,
   getManagedAutoMemoryStatus,
+  forgetManagedAutoMemoryEntries,
   loadServerHierarchicalMemory,
   QWEN_DIR,
   scheduleAutoMemoryExtract,
@@ -36,6 +37,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       return String(error);
     }),
     getManagedAutoMemoryStatus: vi.fn(),
+    forgetManagedAutoMemoryEntries: vi.fn(),
     loadServerHierarchicalMemory: vi.fn(),
     scheduleAutoMemoryExtract: vi.fn(),
   };
@@ -54,12 +56,13 @@ vi.mock('node:fs/promises', () => {
 const mockLoadServerHierarchicalMemory = loadServerHierarchicalMemory as Mock;
 const mockScheduleAutoMemoryExtract = scheduleAutoMemoryExtract as Mock;
 const mockGetManagedAutoMemoryStatus = getManagedAutoMemoryStatus as Mock;
+const mockForgetManagedAutoMemoryEntries = forgetManagedAutoMemoryEntries as Mock;
 const mockReadFile = readFile as unknown as Mock;
 
 describe('memoryCommand', () => {
   let mockContext: CommandContext;
 
-  const getSubCommand = (name: 'show' | 'add' | 'refresh' | 'status' | 'tasks' | 'inspect'): SlashCommand => {
+  const getSubCommand = (name: 'show' | 'add' | 'refresh' | 'status' | 'tasks' | 'inspect' | 'forget'): SlashCommand => {
     const subCommand = memoryCommand.subCommands?.find(
       (cmd) => cmd.name === name,
     );
@@ -495,6 +498,54 @@ describe('memoryCommand', () => {
         {
           type: MessageType.INFO,
           text: 'Managed auto-memory updated: user.md',
+        },
+        expect.any(Number),
+      );
+    });
+  });
+
+  describe('/memory forget', () => {
+    let forgetCommand: SlashCommand;
+
+    beforeEach(() => {
+      forgetCommand = getSubCommand('forget');
+      mockForgetManagedAutoMemoryEntries.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          },
+        },
+      });
+    });
+
+    it('returns usage error when no args are provided', async () => {
+      const result = await forgetCommand.action?.(mockContext, '   ');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Usage: /memory forget <memory text to remove>',
+      });
+    });
+
+    it('forgets matching managed memory entries', async () => {
+      mockForgetManagedAutoMemoryEntries.mockResolvedValue({
+        query: 'terse',
+        removedEntries: [{ topic: 'user', summary: 'User prefers terse responses.' }],
+        touchedTopics: ['user'],
+        systemMessage: 'Managed auto-memory forgot 1 entry from user.md',
+      });
+
+      await forgetCommand.action?.(mockContext, 'terse');
+
+      expect(mockForgetManagedAutoMemoryEntries).toHaveBeenCalledWith(
+        '/test/project',
+        'terse',
+      );
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Managed auto-memory forgot 1 entry from user.md',
         },
         expect.any(Number),
       );

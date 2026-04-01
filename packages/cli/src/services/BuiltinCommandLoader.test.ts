@@ -93,6 +93,13 @@ vi.mock('../ui/commands/editorCommand.js', () => ({ editorCommand: {} }));
 vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
 }));
+vi.mock('../ui/commands/forgetCommand.js', () => ({
+  forgetCommand: {
+    name: 'forget',
+    description: 'Forget command',
+    kind: 'built-in',
+  },
+}));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
 vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
@@ -201,6 +208,9 @@ describe('BuiltinCommandLoader', () => {
 
     const dreamCmd = commands.find((c) => c.name === 'dream');
     expect(dreamCmd).toBeDefined();
+
+    const forgetCmd = commands.find((c) => c.name === 'forget');
+    expect(forgetCmd).toBeDefined();
 
     const rememberCmd = commands.find((c) => c.name === 'remember');
     expect(rememberCmd).toBeDefined();

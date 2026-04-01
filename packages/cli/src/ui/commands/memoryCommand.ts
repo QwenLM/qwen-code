@@ -8,6 +8,7 @@ import {
   AUTO_MEMORY_TYPES,
   getErrorMessage,
   getManagedAutoMemoryStatus,
+  forgetManagedAutoMemoryEntries,
   getAutoMemoryTopicPath,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
@@ -373,6 +374,49 @@ export const memoryCommand: SlashCommand = {
         );
 
         return;
+      },
+    },
+    {
+      name: 'forget',
+      get description() {
+        return t('Remove matching entries from managed auto-memory.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context, args) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        const query = args.trim();
+        if (!query) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Usage: /memory forget <memory text to remove>'),
+          };
+        }
+
+        const result = await forgetManagedAutoMemoryEntries(
+          config.getProjectRoot(),
+          query,
+        );
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text:
+              result.systemMessage ??
+              t('No managed auto-memory entries matched: {{query}}', {
+                query,
+              }),
+          },
+          Date.now(),
+        );
       },
     },
     {

@@ -213,6 +213,56 @@ Completed
 
 ---
 
+## Part 16 - Forget loop closure
+
+### Start review
+
+- Overall plan now advances from observing managed memory to actively governing it with both add and remove flows.
+- Part 15 already exposed richer status and inspect commands, but the system still had no explicit way to remove stale or unwanted managed entries.
+- Scope for this part: add a safe managed-memory forget path, keep topic/index state synchronized after deletion, and expose that capability through built-in CLI commands.
+
+### Goal
+
+- Add managed auto-memory search/delete helpers for explicit forget requests
+- Regenerate `MEMORY.md` after removals and restore placeholders when a topic becomes empty
+- Add `/forget` plus `/memory forget` command entrypoints with user-visible feedback
+- Add targeted tests for forget matching, topic/index updates, and command registration
+
+### Implemented
+
+- Added `packages/core/src/memory/forget.ts`
+- Added `packages/core/src/memory/forget.test.ts`
+- Exported forget helpers from `packages/core/src/index.ts`
+- Added `packages/cli/src/ui/commands/forgetCommand.ts`
+- Added `packages/cli/src/ui/commands/forgetCommand.test.ts`
+- Updated `packages/cli/src/ui/commands/memoryCommand.ts` with `/memory forget`
+- Updated `packages/cli/src/ui/commands/memoryCommand.test.ts` with forget coverage
+- Updated `packages/cli/src/services/BuiltinCommandLoader.ts` and `packages/cli/src/services/BuiltinCommandLoader.test.ts` to register `/forget`
+
+### Functional verification
+
+- Managed memory now supports explicit forget operations by searching topic bullets and removing matching entries.
+- Topic files restore `_No entries yet._` when all durable entries for a topic are removed.
+- `MEMORY.md` stays synchronized after forget operations, so governance and prompt-loading still see the current state.
+- Users can now invoke forget through either `/forget` or `/memory forget` and receive direct feedback.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/forget.test.ts src/memory/indexer.test.ts src/memory/status.test.ts`
+  - `npm exec --workspace=packages/cli -- vitest run src/ui/commands/forgetCommand.test.ts src/ui/commands/memoryCommand.test.ts src/services/BuiltinCommandLoader.test.ts`
+
+### Notes
+
+- This stage keeps forget matching mechanical by using case-insensitive substring matching over durable bullet entries.
+- A later stage can layer model-assisted candidate selection or interactive confirmation on top of the same host-side deletion path.
+
+### Status
+
+Completed
+
+---
+
 ## Part 6 - Auxiliary side-query foundation
 
 ### Start review
