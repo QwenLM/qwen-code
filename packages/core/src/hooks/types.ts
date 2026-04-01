@@ -42,6 +42,10 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // Team lifecycle hooks
+  TeammateIdle = 'TeammateIdle',
+  TaskCreated = 'TaskCreated',
+  TaskCompleted = 'TaskCompleted',
 }
 
 /**
@@ -720,6 +724,73 @@ export interface SubagentStopInput extends HookInput {
 export interface SubagentStopOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'SubagentStop';
+    additionalContext?: string;
+  };
+}
+
+// ─── Team Lifecycle Hooks ────────────────────────────────────
+
+/**
+ * TeammateIdle hook input — fired when a background agent finishes
+ * its task and becomes idle.
+ */
+export interface TeammateIdleInput extends HookInput {
+  agent_id: string;
+  agent_name: string;
+  result_summary: string;
+  success: boolean;
+}
+
+/**
+ * TeammateIdle hook output.
+ * Exit code 2 = reject idle (send feedback to continue working).
+ */
+export interface TeammateIdleOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TeammateIdle';
+    additionalContext?: string;
+    /** Feedback to send back to the agent if rejecting idle. */
+    feedback?: string;
+  };
+}
+
+/**
+ * TaskCreated hook input — fired when a task is created on the
+ * shared task list.
+ */
+export interface TaskCreatedInput extends HookInput {
+  task_id: string;
+  task_title: string;
+  task_description?: string;
+  created_by: string;
+}
+
+/**
+ * TaskCreated hook output.
+ */
+export interface TaskCreatedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TaskCreated';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * TaskCompleted hook input — fired when a task is marked as completed.
+ */
+export interface TaskCompletedInput extends HookInput {
+  task_id: string;
+  task_title: string;
+  completed_by: string;
+  output?: string;
+}
+
+/**
+ * TaskCompleted hook output.
+ */
+export interface TaskCompletedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TaskCompleted';
     additionalContext?: string;
   };
 }

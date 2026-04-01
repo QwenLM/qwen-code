@@ -315,6 +315,74 @@ export class HookSystem {
       : undefined;
   }
 
+  // ─── Team Lifecycle Hooks ────────────────────────────────────
+
+  /**
+   * Fire a TeammateIdle event
+   */
+  async fireTeammateIdleEvent(
+    agentId: string,
+    agentName: string,
+    resultSummary: string,
+    success: boolean,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireTeammateIdleEvent(
+      agentId,
+      agentName,
+      resultSummary,
+      success,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('TeammateIdle', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a TaskCreated event
+   */
+  async fireTaskCreatedEvent(
+    taskId: string,
+    taskTitle: string,
+    taskDescription: string | undefined,
+    createdBy: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireTaskCreatedEvent(
+      taskId,
+      taskTitle,
+      taskDescription,
+      createdBy,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('TaskCreated', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a TaskCompleted event
+   */
+  async fireTaskCompletedEvent(
+    taskId: string,
+    taskTitle: string,
+    completedBy: string,
+    output?: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireTaskCompletedEvent(
+      taskId,
+      taskTitle,
+      completedBy,
+      output,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('TaskCompleted', result.finalOutput)
+      : undefined;
+  }
+
   /**
    * Fire a PermissionRequest event
    */

@@ -31,6 +31,9 @@ import type {
   PermissionSuggestion,
   SubagentStartInput,
   SubagentStopInput,
+  TeammateIdleInput,
+  TaskCreatedInput,
+  TaskCompletedInput,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -392,6 +395,71 @@ export class HookEventHandler {
       },
       signal,
     );
+  }
+
+  // ─── Team Lifecycle Hook Handlers ─────────────────────────────
+
+  /**
+   * Fire a TeammateIdle event - called when a background agent
+   * finishes and becomes idle.
+   */
+  async fireTeammateIdleEvent(
+    agentId: string,
+    agentName: string,
+    resultSummary: string,
+    success: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TeammateIdleInput = {
+      ...this.createBaseInput(HookEventName.TeammateIdle),
+      agent_id: agentId,
+      agent_name: agentName,
+      result_summary: resultSummary,
+      success,
+    };
+    return this.executeHooks(HookEventName.TeammateIdle, input, {}, signal);
+  }
+
+  /**
+   * Fire a TaskCreated event - called when a task is created on
+   * the shared task list.
+   */
+  async fireTaskCreatedEvent(
+    taskId: string,
+    taskTitle: string,
+    taskDescription: string | undefined,
+    createdBy: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TaskCreatedInput = {
+      ...this.createBaseInput(HookEventName.TaskCreated),
+      task_id: taskId,
+      task_title: taskTitle,
+      task_description: taskDescription,
+      created_by: createdBy,
+    };
+    return this.executeHooks(HookEventName.TaskCreated, input, {}, signal);
+  }
+
+  /**
+   * Fire a TaskCompleted event - called when a task is marked
+   * as completed.
+   */
+  async fireTaskCompletedEvent(
+    taskId: string,
+    taskTitle: string,
+    completedBy: string,
+    output?: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TaskCompletedInput = {
+      ...this.createBaseInput(HookEventName.TaskCompleted),
+      task_id: taskId,
+      task_title: taskTitle,
+      completed_by: completedBy,
+      output,
+    };
+    return this.executeHooks(HookEventName.TaskCompleted, input, {}, signal);
   }
 
   /**
