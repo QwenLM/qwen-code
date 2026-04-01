@@ -44,6 +44,9 @@ export interface AutoMemoryMetadata {
   version: typeof AUTO_MEMORY_SCHEMA_VERSION;
   createdAt: string;
   updatedAt: string;
+  lastDreamAt?: string;
+  lastDreamSessionId?: string;
+  recentSessionIdsSinceDream?: string[];
 }
 
 export interface AutoMemoryExtractCursor {

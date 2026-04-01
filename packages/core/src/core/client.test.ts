@@ -39,6 +39,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { scheduleAutoMemoryExtract } from '../memory/extract.js';
+import { scheduleManagedAutoMemoryDream } from '../memory/dreamScheduler.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -97,6 +98,12 @@ vi.mock('../memory/extract.js', () => ({
     patches: [],
     touchedTopics: [],
     cursor: { updatedAt: new Date(0).toISOString() },
+  }),
+}));
+vi.mock('../memory/dreamScheduler.js', () => ({
+  scheduleManagedAutoMemoryDream: vi.fn().mockResolvedValue({
+    status: 'skipped',
+    skippedReason: 'min_sessions',
   }),
 }));
 vi.mock('../memory/recall.js', () => ({
@@ -296,6 +303,10 @@ describe('Gemini Client (client.ts)', () => {
       patches: [],
       touchedTopics: [],
       cursor: { updatedAt: new Date(0).toISOString() },
+    });
+    vi.mocked(scheduleManagedAutoMemoryDream).mockResolvedValue({
+      status: 'skipped',
+      skippedReason: 'min_sessions',
     });
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
@@ -1475,6 +1486,10 @@ hello
         sessionId: 'test-session-id',
         history: recordedHistory,
         config: mockConfig,
+      });
+      expect(scheduleManagedAutoMemoryDream).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
       });
       expect(events).toContainEqual({
         type: GeminiEventType.HookSystemMessage,

@@ -262,6 +262,56 @@ Completed
 
 ---
 
+## Part 10 - Auto dream scheduling stage A
+
+### Start review
+
+- Overall plan now applies the new background runtime to the first real consumer: managed auto-memory dream.
+- Part 9 already delivered the shared registry/scheduler/drainer layer, so this slice focuses on wiring mechanical dream into that runtime with minimal gating.
+- Scope for this part: schedule mechanical dream in the background after user-query extraction, add consolidation lock and persisted dream gating metadata, but do not yet introduce model-driven dream rewriting or background agents.
+
+### Goal
+
+- Add a managed auto-memory dream scheduler built on the shared background runtime
+- Add minimal persisted gating for dream cadence and same-session suppression
+- Reuse the existing mechanical dream implementation as the task body
+- Add targeted tests for gating, locking, scheduling, and client integration
+
+### Implemented
+
+- Added `packages/core/src/memory/dreamScheduler.ts`
+- Added `packages/core/src/memory/dreamScheduler.test.ts`
+- Extended `AutoMemoryMetadata` with dream scheduling fields
+- Updated `packages/core/src/core/client.ts` to fire-and-forget dream scheduling after managed extraction
+- Updated `packages/core/src/core/client.test.ts` to cover dream scheduling integration
+- Exported dream scheduler helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Managed auto-memory dream can now be scheduled as a background task using the shared task registry, scheduler, and drainer.
+- Dream scheduling persists minimal gating state in metadata, including `lastDreamAt`, `lastDreamSessionId`, and distinct sessions seen since the last dream.
+- A consolidation lock now prevents concurrent dream execution for the same project, while the existing mechanical dream logic remains the execution core.
+- User-query completion now asynchronously attempts dream scheduling without blocking the main response path.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/dreamScheduler.test.ts src/memory/dream.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/background/taskRegistry.test.ts src/background/taskDrainer.test.ts src/background/taskScheduler.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extractionPlanner.test.ts src/memory/extract.test.ts src/memory/extractModel.test.ts src/memory/dream.test.ts src/memory/dreamScheduler.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally keeps dream execution mechanical and background-only; task visualization and model-driven dream agents remain for later phases.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review

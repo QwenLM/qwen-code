@@ -48,6 +48,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 // Tools
 import { AgentTool } from '../tools/agent.js';
 import { scheduleAutoMemoryExtract } from '../memory/extract.js';
+import { scheduleManagedAutoMemoryDream } from '../memory/dreamScheduler.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Telemetry
@@ -465,6 +466,13 @@ export class GeminiClient {
       sessionId: this.config.getSessionId(),
       history: this.getHistory(),
       config: this.config,
+    });
+
+    void scheduleManagedAutoMemoryDream({
+      projectRoot: this.config.getProjectRoot(),
+      sessionId: this.config.getSessionId(),
+    }).catch((error) => {
+      debugLogger.warn('Failed to schedule managed auto-memory dream.', error);
     });
 
     if (result?.systemMessage) {

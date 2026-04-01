@@ -127,6 +127,7 @@ export * from './memory/state.js';
 export * from './memory/extractionPlanner.js';
 export * from './memory/extract.js';
 export * from './memory/dream.js';
+export * from './memory/dreamScheduler.js';
 export * from './memory/scan.js';
 export * from './memory/relevanceSelector.js';
 export * from './memory/recall.js';
