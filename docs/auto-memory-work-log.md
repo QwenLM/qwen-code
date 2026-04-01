@@ -273,3 +273,65 @@ Completed
 
 Completed
 
+---
+
+## Part 5 - Dream and command entrypoints
+
+### Start review
+
+- Overall plan remains: storage → managed index integration → relevant recall → extraction → dream and commands.
+- Parts 1 to 4 already provide the managed scaffold, prompt integration, recall, and turn-end extraction.
+- Scope for this part: add a safe managed auto-memory dream/consolidation primitive plus basic `/memory`, `/dream`, and `/remember` command entrypoints in the CLI.
+
+### Goal
+
+- Add a managed auto-memory dream/consolidation function
+- Enhance `/memory` with managed status and manual extraction entrypoints
+- Add `/dream` and `/remember` built-in commands
+- Register the new commands and add tests for command behavior and loader coverage
+
+### Implemented
+
+- Added `packages/core/src/memory/dream.ts`
+- Added `packages/core/src/memory/dream.test.ts`
+- Exported dream helpers from `packages/core/src/index.ts`
+- Enhanced `packages/cli/src/ui/commands/memoryCommand.ts` with `status` and `extract-now`
+- Added `packages/cli/src/ui/commands/dreamCommand.ts`
+- Added `packages/cli/src/ui/commands/rememberCommand.ts`
+- Added tests in `packages/cli/src/ui/commands/memoryCommand.test.ts`
+- Added `packages/cli/src/ui/commands/dreamCommand.test.ts`
+- Added `packages/cli/src/ui/commands/rememberCommand.test.ts`
+- Updated `packages/cli/src/services/BuiltinCommandLoader.ts` and `packages/cli/src/services/BuiltinCommandLoader.test.ts`
+- Added CLI i18n strings in `packages/cli/src/i18n/locales/en.js` and `packages/cli/src/i18n/locales/zh.js`
+
+### Functional verification
+
+- Managed dream now deduplicates topic-file bullet entries, restores the empty placeholder when needed, and updates metadata best-effort.
+- `/memory status` shows the managed memory root, extract cursor summary, and per-topic entry counts.
+- `/memory extract-now` manually runs managed extraction for the current session transcript and reports the outcome.
+- `/dream` manually runs managed consolidation and reports changed topic files plus deduplication count.
+- `/remember` provides a direct built-in entrypoint for `save_memory`, including optional project/global scope selection.
+- New commands are registered in the built-in command loader.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/dream.test.ts`
+  - `npm exec --workspace=packages/cli -- vitest run src/ui/commands/memoryCommand.test.ts src/ui/commands/dreamCommand.test.ts src/ui/commands/rememberCommand.test.ts src/services/BuiltinCommandLoader.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/config/config.test.ts src/core/prompts.test.ts src/utils/memoryDiscovery.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/recall.test.ts src/memory/scan.test.ts src/memory/state.test.ts src/memory/extract.test.ts src/memory/dream.test.ts src/core/client.test.ts`
+  - `npm exec --workspace=packages/cli -- vitest run src/ui/commands/memoryCommand.test.ts src/ui/commands/dreamCommand.test.ts src/ui/commands/rememberCommand.test.ts src/services/BuiltinCommandLoader.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+  - `npm run generate && npm run build --workspace=packages/web-templates && npm run typecheck --workspace=packages/cli`
+
+### Notes
+
+- This dream implementation is intentionally mechanical and low-risk; it deduplicates and normalizes managed memory rather than invoking a separate consolidation agent.
+- `/memory` enhancement is kept minimal for MVP: status inspection and manual extraction trigger.
+- The full staged implementation plan is now complete.
+
+### Status
+
+Completed
+

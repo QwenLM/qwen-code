@@ -5,10 +5,16 @@
  */
 
 import {
+  AUTO_MEMORY_TYPES,
   getErrorMessage,
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryRoot,
+  getAutoMemoryTopicPath,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  parseAutoMemoryTopicDocument,
   QWEN_DIR,
+  scheduleAutoMemoryExtract,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
 import os from 'node:os';
@@ -17,6 +23,55 @@ import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+
+async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
+  const root = getAutoMemoryRoot(projectRoot);
+
+  let cursorSummary = t('No extraction cursor found yet.');
+  try {
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { sessionId?: string; processedOffset?: number; updatedAt?: string };
+    cursorSummary = t(
+      'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+      {
+        sessionId: cursor.sessionId || 'n/a',
+        offset: String(cursor.processedOffset ?? 0),
+        updatedAt: cursor.updatedAt || 'n/a',
+      },
+    );
+  } catch {
+    // Keep default summary.
+  }
+
+  const topicSummaries = await Promise.all(
+    AUTO_MEMORY_TYPES.map(async (topic) => {
+      try {
+        const content = await fs.readFile(
+          getAutoMemoryTopicPath(projectRoot, topic),
+          'utf-8',
+        );
+        const parsed = parseAutoMemoryTopicDocument(
+          getAutoMemoryTopicPath(projectRoot, topic),
+          content,
+        );
+        const entryCount = parsed?.body
+          .split('\n')
+          .filter((line) => /^[-*]\s+/.test(line.trim())).length;
+        return `- ${topic}.md: ${entryCount ?? 0} entries`;
+      } catch {
+        return `- ${topic}.md: 0 entries`;
+      }
+    }),
+  );
+
+  return [
+    t('Managed auto-memory root: {{root}}', { root }),
+    cursorSummary,
+    t('Managed auto-memory topics:'),
+    ...topicSummaries,
+  ].join('\n');
+}
 
 /**
  * Read all existing memory files from the configured filenames in a directory.
@@ -150,6 +205,80 @@ export const memoryCommand: SlashCommand = {
           },
         },
       ],
+    },
+    {
+      name: 'status',
+      get description() {
+        return t('Show managed auto-memory status.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        const status = await buildManagedMemoryStatus(config.getProjectRoot());
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: status,
+          },
+          Date.now(),
+        );
+
+        return;
+      },
+    },
+    {
+      name: 'extract-now',
+      get description() {
+        return t('Run managed auto-memory extraction for the current session.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        const geminiClient = config.getGeminiClient();
+        if (!geminiClient) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('No chat client available to extract memory.'),
+          };
+        }
+
+        const result = await scheduleAutoMemoryExtract({
+          projectRoot: config.getProjectRoot(),
+          sessionId: config.getSessionId(),
+          history: geminiClient.getChat().getHistory(),
+        });
+
+        const text = result.skippedReason === 'already_running'
+          ? t('Managed auto-memory extraction is already running.')
+          : result.systemMessage || t('Managed auto-memory extraction found no new durable memories.');
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text,
+          },
+          Date.now(),
+        );
+
+        return;
+      },
     },
     {
       name: 'add',

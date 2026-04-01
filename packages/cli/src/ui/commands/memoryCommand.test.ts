@@ -15,9 +15,13 @@ import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  AUTO_MEMORY_TYPES,
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryTopicPath,
   getErrorMessage,
   loadServerHierarchicalMemory,
   QWEN_DIR,
+  scheduleAutoMemoryExtract,
   setGeminiMdFilename,
   type FileDiscoveryService,
   type LoadServerHierarchicalMemoryResponse,
@@ -33,6 +37,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       return String(error);
     }),
     loadServerHierarchicalMemory: vi.fn(),
+    scheduleAutoMemoryExtract: vi.fn(),
   };
 });
 
@@ -47,6 +52,7 @@ vi.mock('node:fs/promises', () => {
 });
 
 const mockLoadServerHierarchicalMemory = loadServerHierarchicalMemory as Mock;
+const mockScheduleAutoMemoryExtract = scheduleAutoMemoryExtract as Mock;
 const mockReadFile = readFile as unknown as Mock;
 
 describe('memoryCommand', () => {
@@ -277,6 +283,114 @@ describe('memoryCommand', () => {
       const addItemCall = (mockContext.ui.addItem as Mock).mock.calls[0][0];
       expect(addItemCall.text).toContain('global qwen memory');
       expect(addItemCall.text).toContain('global agents memory');
+    });
+  });
+
+  describe('/memory status', () => {
+    let statusCommand: SlashCommand;
+
+    beforeEach(() => {
+      statusCommand = memoryCommand.subCommands?.find(
+        (cmd) => cmd.name === 'status',
+      ) as SlashCommand;
+      mockReadFile.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          },
+        },
+      });
+    });
+
+    it('shows managed auto-memory root, cursor and topic counts', async () => {
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath === getAutoMemoryExtractCursorPath('/test/project')) {
+          return JSON.stringify({
+            sessionId: 'session-1',
+            processedOffset: 3,
+            updatedAt: '2026-04-01T00:00:00.000Z',
+          });
+        }
+
+        for (const topic of AUTO_MEMORY_TYPES) {
+          if (filePath === getAutoMemoryTopicPath('/test/project', topic)) {
+            return [
+              '---',
+              `type: ${topic}`,
+              `title: ${topic}`,
+              'description: topic',
+              '---',
+              '',
+              `# ${topic}`,
+              '',
+              '- one',
+              '- two',
+            ].join('\n');
+          }
+        }
+
+        throw new Error('ENOENT');
+      });
+
+      await statusCommand.action?.(mockContext, '');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Managed auto-memory root: /test/project/.qwen/memory'),
+        }),
+        expect.any(Number),
+      );
+      const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
+      expect(text).toContain('Cursor: session=session-1, offset=3');
+      expect(text).toContain('- user.md: 2 entries');
+    });
+  });
+
+  describe('/memory extract-now', () => {
+    let extractCommand: SlashCommand;
+
+    beforeEach(() => {
+      extractCommand = memoryCommand.subCommands?.find(
+        (cmd) => cmd.name === 'extract-now',
+      ) as SlashCommand;
+      mockScheduleAutoMemoryExtract.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+            getSessionId: vi.fn().mockReturnValue('session-1'),
+            getGeminiClient: vi.fn().mockReturnValue({
+              getChat: vi.fn().mockReturnValue({
+                getHistory: vi.fn().mockReturnValue([
+                  { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+                ]),
+              }),
+            }),
+          },
+        },
+      });
+    });
+
+    it('runs extraction and shows the returned system message', async () => {
+      mockScheduleAutoMemoryExtract.mockResolvedValue({
+        patches: [],
+        touchedTopics: ['user'],
+        cursor: { updatedAt: '2026-04-01T00:00:00.000Z' },
+        systemMessage: 'Managed auto-memory updated: user.md',
+      });
+
+      await extractCommand.action?.(mockContext, '');
+
+      expect(mockScheduleAutoMemoryExtract).toHaveBeenCalled();
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Managed auto-memory updated: user.md',
+        },
+        expect.any(Number),
+      );
     });
   });
 
