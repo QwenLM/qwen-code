@@ -1544,6 +1544,8 @@ export default {
     '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
   '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
     '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
 
   // ============================================================================
   // Exit Screen / Stats

@@ -69,7 +69,8 @@ export default {
   'Initializing...': '正在初始化...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
-  'Type your message or @path/to/file': '输入您的消息, 比如:帮我确认下在 DataWorks 的身份和常用工作空间？',
+  'Type your message or @path/to/file':
+    '输入您的消息, 比如:帮我确认下在 DataWorks 的身份和常用工作空间？',
   '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
@@ -1463,6 +1464,8 @@ export default {
     '🔍 问题定位："现在发现 dwd_is_it_software_released_df 和 ads_is_it_sfw_moni_key_released_recycled_df 的数据不一致，他们上游都是 ods_ism_it_software_key_released_df。帮我看一下他们的逻辑有什么不一样？"',
   '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
     '🛠️ 问题修复："员工信息表 my_project.ods_emp_info_d 中，工号 EMP001 的部门数据为空。请帮我排查原因并提供修复建议。"',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    '当前为 Beta 版本，个人开发环境实例删除后，历史会话记录将无法恢复。',
 
   // ============================================================================
   // Exit Screen / Stats

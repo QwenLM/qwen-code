@@ -1502,6 +1502,8 @@ export default {
     '🔍 Diagnóstico de problemas：「Os dados em dwd_is_it_software_released_df e ads_is_it_sfw_moni_key_released_recycled_df são inconsistentes, ambos têm a fonte ods_ism_it_software_key_released_df. Verifique a diferença na lógica deles」',
   '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
     '🛠️ Correção de problemas：「Na tabela de funcionários my_project.ods_emp_info_d, os dados do departamento para o funcionário EMP001 estão vazios. Ajude-me a investigar a causa e fornecer sugestões de correção」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Esta é uma versão Beta. O histórico de conversas será perdido após a exclusão da instância do ambiente de desenvolvimento pessoal.',
 
   // ============================================================================
   // Exit Screen / Stats

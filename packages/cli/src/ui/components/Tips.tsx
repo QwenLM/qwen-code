@@ -73,10 +73,16 @@ export const Tips: React.FC = () => {
   const selectedTip = useMemo(() => selectWeightedTip(startupTips), []);
 
   return (
-    <Box marginLeft={2} marginRight={2}>
+    <Box flexDirection="column" marginLeft={2} marginRight={2}>
       <Text color={theme.text.secondary}>
         {t('Tips: ')}
         {t(selectedTip)}
+      </Text>
+      <Text> </Text>
+      <Text color={theme.text.secondary}>
+        {t(
+          'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
+        )}
       </Text>
     </Box>
   );

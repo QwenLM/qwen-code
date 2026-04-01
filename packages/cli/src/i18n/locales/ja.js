@@ -1164,6 +1164,8 @@ export default {
     '🔍 問題特定：「dwd_is_it_software_released_dfとads_is_it_sfw_moni_key_released_recycled_dfのデータが不一致です。両方とも上流にods_ism_it_software_key_released_dfがあります。ロジックの違いを確認してください」',
   '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
     '🛠️ 問題修正：「従業員テーブルmy_project.ods_emp_info_dで、従業員EMP001の部署データが空です。原因を調査し、修正案を提示してください」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Beta版です。個人開発環境インスタンスが削除されると、チャット履歴は失われます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',

@@ -1767,6 +1767,8 @@ export default {
     '🔍 Problembehebung：「Die Daten in dwd_is_it_software_released_df und ads_is_it_sfw_moni_key_released_recycled_df sind inkonsistent, beide haben die Quelle ods_ism_it_software_key_released_df. Prüfen Sie den Unterschied in ihrer Logik」',
   '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
     '🛠️ Problemlösung：「In der Mitarbeitertabelle my_project.ods_emp_info_d sind die Abteilungsdaten für Mitarbeiter EMP001 leer. Helfen Sie bei der Ursachenforschung und schlagen Sie Lösungen vor」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Dies ist eine Beta-Version. Der Chatverlauf geht verloren, wenn die persönliche Entwicklungsumgebungsinstanz gelöscht wird.',
 
   // ============================================================================
   // Custom API Key Configuration
