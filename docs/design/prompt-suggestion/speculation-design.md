@@ -61,7 +61,7 @@ User sees suggestion "commit this"
 │  1. overlayFs.applyToReal() — copy files to real FS          │
 │  2. ensureToolResultPairing() — strip unpaired functionCalls │
 │  3. geminiClient.addHistory() — inject messages              │
-│  4. historyManager.addItem() — render in UI                  │
+│  4. historyManager.addItem() — render as tool_group items     │
 │  5. overlayFs.cleanup() — delete temp directory              │
 │  6. Promote pipelined suggestion                             │
 └──────────────────────────────────────────────────────────────┘
@@ -144,6 +144,22 @@ Context: original conversation + "commit this" + speculated messages
 
 This enables Tab-Tab-Tab workflows where each acceptance immediately shows the next step.
 
+The pipelined suggestion reuses the exported `SUGGESTION_PROMPT` constant from `suggestionGenerator.ts` (not a local copy) to ensure consistent quality with initial suggestions.
+
+## Model Override
+
+`startSpeculation` accepts an optional `options.model` parameter, threaded through `runSpeculativeLoop` and `generatePipelinedSuggestion` to `runForkedQuery`. Configured via the `speculationModel` setting (empty = use main model). Allows using a cheaper/faster model (e.g., `qwen-turbo`) for speculation to reduce cost and latency.
+
+## UI Rendering
+
+When speculation completes, `acceptSpeculation` renders results via `historyManager.addItem()`:
+
+- **User messages**: rendered as `type: 'user'` items
+- **Model text**: rendered as `type: 'gemini'` items
+- **Tool calls**: rendered as `type: 'tool_group'` items with structured `IndividualToolCallDisplay` entries (tool name, argument description, result text, status)
+
+This shows the user the full speculation output including tool call details, not just plain text.
+
 ## Forked Query (Cache Sharing)
 
 ### CacheSafeParams
@@ -159,7 +175,7 @@ interface CacheSafeParams {
 
 - Saved after each successful main turn in `GeminiClient.sendMessageStream()`
 - Cleared on `startChat()` / `resetChat()` to prevent cross-session leakage
-- History truncated to 40 entries before deep clone to reduce overhead
+- History truncated to 40 entries; `createForkedChat` uses shallow copies (params are already deep-cloned snapshots)
 - Version detection via `JSON.stringify` comparison of systemInstruction + tools
 
 ### Cache Mechanism

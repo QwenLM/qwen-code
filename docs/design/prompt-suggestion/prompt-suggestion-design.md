@@ -188,10 +188,11 @@ The Tab handler uses `key.name === 'tab'` explicitly (not `ACCEPT_SUGGESTION` ma
 | boundary_type            | string                  | What stopped speculation  |
 | had_pipelined_suggestion | boolean                 | Next suggestion generated |
 
-## Feature Flags
+## Feature Flags and Settings
 
-| Flag                        | Default | Description                          |
-| --------------------------- | ------- | ------------------------------------ |
-| `enableFollowupSuggestions` | true    | Master toggle for prompt suggestions |
-| `enableCacheSharing`        | false   | Use cache-aware forked queries       |
-| `enableSpeculation`         | false   | Predictive execution engine          |
+| Setting                     | Type    | Default | Description                                    |
+| --------------------------- | ------- | ------- | ---------------------------------------------- |
+| `enableFollowupSuggestions` | boolean | true    | Master toggle for prompt suggestions           |
+| `enableCacheSharing`        | boolean | false   | Use cache-aware forked queries                 |
+| `enableSpeculation`         | boolean | false   | Predictive execution engine                    |
+| `speculationModel`          | string  | ""      | Model for speculation (empty = use main model) |

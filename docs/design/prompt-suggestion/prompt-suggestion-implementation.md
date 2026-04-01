@@ -4,14 +4,14 @@
 
 ## Core Module (`packages/core/src/followup/`)
 
-| Component                | Status  | Lines | Description                                             |
-| ------------------------ | ------- | ----- | ------------------------------------------------------- |
-| `followupState.ts`       | ✅ Done | ~210  | Framework-agnostic controller with timer/debounce       |
-| `suggestionGenerator.ts` | ✅ Done | ~200  | LLM generation + 12 filter rules + forked query support |
-| `forkedQuery.ts`         | ✅ Done | ~230  | CacheSafeParams + createForkedChat + runForkedQuery     |
-| `overlayFs.ts`           | ✅ Done | ~140  | Copy-on-write overlay filesystem                        |
-| `speculationToolGate.ts` | ✅ Done | ~130  | Tool boundary enforcement with AST shell parser         |
-| `speculation.ts`         | ✅ Done | ~510  | Full speculation engine with pipelined suggestion       |
+| Component                | Status  | Lines | Description                                                   |
+| ------------------------ | ------- | ----- | ------------------------------------------------------------- |
+| `followupState.ts`       | ✅ Done | ~230  | Framework-agnostic controller with timer/debounce             |
+| `suggestionGenerator.ts` | ✅ Done | ~260  | LLM generation + 12 filter rules + forked query support       |
+| `forkedQuery.ts`         | ✅ Done | ~240  | CacheSafeParams + createForkedChat + runForkedQuery           |
+| `overlayFs.ts`           | ✅ Done | ~140  | Copy-on-write overlay filesystem                              |
+| `speculationToolGate.ts` | ✅ Done | ~150  | Tool boundary enforcement with AST shell parser               |
+| `speculation.ts`         | ✅ Done | ~540  | Speculation engine with pipelined suggestion + model override |
 
 ## CLI Integration (`packages/cli/`)
 
@@ -22,7 +22,7 @@
 | `Composer.tsx`               | ✅ Done | Props threading                                            |
 | `UIStateContext.tsx`         | ✅ Done | promptSuggestion + dismissPromptSuggestion                 |
 | `useFollowupSuggestions.tsx` | ✅ Done | React hook with telemetry + keystroke tracking             |
-| `settingsSchema.ts`          | ✅ Done | 3 feature flags                                            |
+| `settingsSchema.ts`          | ✅ Done | 3 feature flags + speculationModel setting                 |
 | `settings.schema.json`       | ✅ Done | VSCode settings schema                                     |
 
 ## WebUI Integration (`packages/webui/`)
