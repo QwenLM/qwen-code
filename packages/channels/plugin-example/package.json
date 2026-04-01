@@ -19,7 +19,8 @@
     "qwen-channel-plugin-example-server": "dist/start-server.js"
   },
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
