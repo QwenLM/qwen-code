@@ -32,6 +32,24 @@ export interface FlowStep {
   /** Explicit screenshot: full scrollback buffer long image (standalone capture when no type) */
   captureFull?: string;
   /**
+   * Explicit sleep before executing this step (milliseconds).
+   *
+   * The runner's built-in idle detection (`idle(2000, 60000)`) works well for
+   * synchronous streaming, but cannot anticipate async responses that arrive
+   * after output has already stabilized (e.g., a /btw side-question whose API
+   * response is serialized behind a main streaming task). In such cases, the
+   * idle detector triggers too early and the async response is missed.
+   *
+   * Use `sleep` to bridge that gap — it inserts a fixed delay before the step
+   * runs, giving async operations time to complete. Optional; omitting it (or
+   * setting it to 0) has no effect on existing scenarios.
+   *
+   * @example
+   * // Wait 20s for a /btw response before capturing the result
+   * { sleep: 20000, capture: 'btw-answered.png' }
+   */
+  sleep?: number;
+  /**
    * Streaming capture: capture multiple screenshots during execution at intervals.
    * Useful for demonstrating real-time output like progress bars.
    */
@@ -158,6 +176,11 @@ export async function runScenario(
     for (let i = 0; i < config.flow.length; i++) {
       const step = config.flow[i];
       const label = `[${i + 1}/${config.flow.length}]`;
+
+      if (step.sleep && step.sleep > 0) {
+        console.log(`  ${label} 💤 sleep: ${step.sleep}ms`);
+        await sleep(step.sleep);
+      }
 
       if (step.type) {
         const display =
