@@ -35,9 +35,10 @@ export class HookPlanner {
     }
 
     // Filter hooks by matcher - pass eventName for explicit dispatch
-    const matchingEntries = hookEntries.filter((entry) =>
-      this.matchesContext(entry, eventName, context),
-    );
+    // Then filter by `if` field for fine-grained tool arg matching
+    const matchingEntries = hookEntries
+      .filter((entry) => this.matchesContext(entry, eventName, context))
+      .filter((entry) => this.matchesIfCondition(entry, context));
 
     if (matchingEntries.length === 0) {
       return null;
@@ -201,6 +202,50 @@ export class HookPlanner {
   }
 
   /**
+   * Check if a hook entry's `if` condition matches the context.
+   * The `if` field uses permission-rule syntax: "ToolName(glob pattern)".
+   * Example: "Bash(git *)", "Edit(*.ts)".
+   * Only applies to tool events — other events always pass.
+   */
+  private matchesIfCondition(
+    entry: HookRegistryEntry,
+    context?: HookEventContext,
+  ): boolean {
+    const ifCondition = entry.config.if;
+    if (!ifCondition || !context?.toolName) return true;
+
+    // Parse "ToolName(argPattern)" syntax
+    const match = ifCondition.match(/^(\w+)\((.+)\)$/);
+    if (!match) {
+      // No parentheses — treat as simple tool name match
+      return context.toolName === ifCondition;
+    }
+
+    const [, toolName, argPattern] = match;
+    if (toolName !== context.toolName) return false;
+
+    // Convert glob pattern to regex for matching against tool input
+    const input = context.toolInput;
+    if (!input) return false;
+
+    // Match against the primary string argument (command for Bash, file_path for Edit/Write)
+    const primaryArg =
+      (input['command'] as string) ??
+      (input['file_path'] as string) ??
+      (input['pattern'] as string) ??
+      '';
+
+    try {
+      const globRegex = new RegExp(
+        '^' + argPattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$',
+      );
+      return globRegex.test(primaryArg);
+    } catch {
+      return primaryArg.includes(argPattern);
+    }
+  }
+
+  /**
    * Deduplicate identical hook configurations
    */
   private deduplicateHooks(entries: HookRegistryEntry[]): HookRegistryEntry[] {
@@ -225,6 +270,8 @@ export class HookPlanner {
  */
 export interface HookEventContext {
   toolName?: string;
+  /** Tool input arguments — used by `if` field for fine-grained matching. */
+  toolInput?: Record<string, unknown>;
   trigger?: string;
   notificationType?: string;
   /** Agent type for SubagentStart/SubagentStop matcher filtering */

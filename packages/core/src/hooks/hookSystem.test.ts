@@ -23,7 +23,9 @@ import {
   PreCompactTrigger,
   NotificationType,
   type PermissionSuggestion,
+  type HookConfig,
 } from './types.js';
+import type { HookRegistryEntry } from './hookRegistry.js';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
 import type { HookOutput } from './types.js';
@@ -166,13 +168,13 @@ describe('HookSystem', () => {
 
   describe('getAllHooks', () => {
     it('should return all registered hooks', () => {
-      const mockHooks = [
+      const mockHooks: HookRegistryEntry[] = [
         {
           config: {
             type: HookType.Command,
             command: 'echo test',
             source: HooksConfigSource.Project,
-          },
+          } as HookConfig,
           source: HooksConfigSource.Project,
           eventName: HookEventName.PreToolUse,
           enabled: true,

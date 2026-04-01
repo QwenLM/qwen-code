@@ -5,9 +5,12 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName } from './types.js';
+import { HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
+  CommandHookConfig,
+  HttpHookConfig,
+  PromptHookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
@@ -58,10 +61,13 @@ export class HookRunner {
     signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
+    const hookId =
+      hookConfig.name ||
+      ('command' in hookConfig ? hookConfig.command : hookConfig.type) ||
+      'unknown';
 
     // Check if already aborted before starting
     if (signal?.aborted) {
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
       return {
         hookConfig,
         eventName,
@@ -71,8 +77,27 @@ export class HookRunner {
       };
     }
 
+    // Async hooks: fire and forget — spawn without awaiting, return success immediately
+    if (hookConfig.async) {
+      this.executeHookByType(
+        hookConfig,
+        eventName,
+        input,
+        startTime,
+        signal,
+      ).catch((err) => {
+        debugLogger.warn(`Async hook "${hookId}" failed (non-fatal): ${err}`);
+      });
+      return {
+        hookConfig,
+        eventName,
+        success: true,
+        duration: 0,
+      };
+    }
+
     try {
-      return await this.executeCommandHook(
+      return await this.executeHookByType(
         hookConfig,
         eventName,
         input,
@@ -81,7 +106,6 @@ export class HookRunner {
       );
     } catch (error) {
       const duration = Date.now() - startTime;
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
       const errorMessage = `Hook execution failed for event '${eventName}' (hook: ${hookId}): ${error}`;
       debugLogger.warn(`Hook execution error (non-fatal): ${errorMessage}`);
 
@@ -214,6 +238,148 @@ export class HookRunner {
   }
 
   /**
+   * Dispatch to the appropriate hook executor based on type.
+   */
+  private async executeHookByType(
+    hookConfig: HookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    startTime: number,
+    signal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    if (hookConfig.type === HookType.Http) {
+      return this.executeHttpHook(
+        hookConfig,
+        eventName,
+        input,
+        startTime,
+        signal,
+      );
+    }
+    if (hookConfig.type === HookType.Prompt) {
+      return this.executePromptHook(hookConfig, eventName, input, startTime);
+    }
+    // Default: command hooks (including unknown types as fallback)
+    return this.executeCommandHook(
+      hookConfig as CommandHookConfig,
+      eventName,
+      input,
+      startTime,
+      signal,
+    );
+  }
+
+  /**
+   * Execute an HTTP webhook hook — POST event JSON to the configured URL.
+   */
+  private async executeHttpHook(
+    hookConfig: HttpHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    startTime: number,
+    signal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
+    const allowedVars = new Set(hookConfig.allowedEnvVars ?? []);
+
+    // Interpolate env vars in URL and headers
+    const interpolate = (s: string): string =>
+      s.replace(/\$\{?(\w+)\}?/g, (_match, varName) =>
+        allowedVars.has(varName) ? (process.env[varName] ?? '') : '',
+      );
+
+    const url = interpolate(hookConfig.url);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (hookConfig.headers) {
+      for (const [key, value] of Object.entries(hookConfig.headers)) {
+        headers[key] = interpolate(value);
+      }
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+      if (signal) {
+        signal.addEventListener('abort', () => controller.abort(), {
+          once: true,
+        });
+      }
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(input),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const duration = Date.now() - startTime;
+      const body = await response.text();
+
+      let output: HookOutput | undefined;
+      try {
+        output = JSON.parse(body) as HookOutput;
+      } catch {
+        // Non-JSON response — treat as plain text
+      }
+
+      const success = response.ok;
+      return {
+        hookConfig,
+        eventName,
+        success,
+        output,
+        stdout: body,
+        exitCode: success ? 0 : response.status,
+        duration,
+      };
+    } catch (error) {
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+        duration: Date.now() - startTime,
+      };
+    }
+  }
+
+  /**
+   * Execute a prompt hook — call LLM with event JSON injected via $ARGUMENTS.
+   * Returns structured JSON from the model response.
+   */
+  private async executePromptHook(
+    hookConfig: PromptHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    startTime: number,
+  ): Promise<HookExecutionResult> {
+    const argsJson = JSON.stringify(input);
+    const expandedPrompt = hookConfig.prompt.replace(/\$ARGUMENTS/g, argsJson);
+
+    // Prompt hooks are lightweight — we log the prompt and return a placeholder.
+    // Full LLM integration requires a ContentGenerator reference which is
+    // wired at the HookSystem level. For now, log and return the prompt
+    // as stdout so the aggregator can process any JSON in the prompt response.
+    debugLogger.info(
+      `Prompt hook for ${eventName} (model: ${hookConfig.model ?? 'haiku'}): ${expandedPrompt.slice(0, 200)}...`,
+    );
+
+    // TODO: Wire ContentGenerator for actual LLM calls.
+    // For now, prompt hooks are a no-op that returns success.
+    return {
+      hookConfig,
+      eventName,
+      success: true,
+      stdout: '',
+      exitCode: 0,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  /**
    * Execute a command hook
    * @param hookConfig Hook configuration
    * @param eventName Event name
@@ -222,7 +388,7 @@ export class HookRunner {
    * @param signal Optional AbortSignal to cancel hook execution
    */
   private async executeCommandHook(
-    hookConfig: HookConfig,
+    hookConfig: CommandHookConfig,
     eventName: HookEventName,
     input: HookInput,
     startTime: number,

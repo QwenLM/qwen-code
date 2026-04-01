@@ -43,8 +43,7 @@ function isValidHookConfig(config: unknown): config is HookConfig {
     typeof config === 'object' &&
     config !== null &&
     'type' in config &&
-    'command' in config &&
-    typeof (config as HookConfig).command === 'string'
+    typeof (config as Record<string, unknown>)['type'] === 'string'
   );
 }
 

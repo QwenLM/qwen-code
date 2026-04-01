@@ -54,19 +54,55 @@ export enum HookEventName {
 export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
 
 /**
- * Hook configuration entry
+ * Common fields shared by all hook configurations.
  */
-export interface CommandHookConfig {
-  type: HookType.Command;
-  command: string;
+interface BaseHookConfig {
   name?: string;
   description?: string;
   timeout?: number;
   source?: HooksConfigSource;
+  /** Run hook in background without blocking. Output/decisions ignored. */
+  async?: boolean;
+  /**
+   * Fine-grained filter using permission rule syntax.
+   * Only fires hook when tool args match. Example: "Bash(git *)", "Edit(*.ts)".
+   * Valid only for tool events (PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest).
+   */
+  if?: string;
+}
+
+/**
+ * Hook configuration entry — command type
+ */
+export interface CommandHookConfig extends BaseHookConfig {
+  type: HookType.Command;
+  command: string;
   env?: Record<string, string>;
 }
 
-export type HookConfig = CommandHookConfig;
+/**
+ * Hook configuration entry — HTTP webhook type
+ */
+export interface HttpHookConfig extends BaseHookConfig {
+  type: HookType.Http;
+  url: string;
+  headers?: Record<string, string>;
+  /** Env vars allowed in URL and header interpolation. */
+  allowedEnvVars?: string[];
+}
+
+/**
+ * Hook configuration entry — prompt (LLM) type
+ */
+export interface PromptHookConfig extends BaseHookConfig {
+  type: HookType.Prompt;
+  /** Prompt text. $ARGUMENTS is replaced with event JSON. */
+  prompt: string;
+  /** Model to use: 'haiku' (default), 'sonnet', 'opus'. */
+  model?: string;
+}
+
+export type HookConfig = CommandHookConfig | HttpHookConfig | PromptHookConfig;
 
 /**
  * Hook definition with matcher
@@ -82,6 +118,8 @@ export interface HookDefinition {
  */
 export enum HookType {
   Command = 'command',
+  Http = 'http',
+  Prompt = 'prompt',
 }
 
 /**
@@ -89,7 +127,17 @@ export enum HookType {
  */
 export function getHookKey(hook: HookConfig): string {
   const name = hook.name ?? '';
-  return name ? `${name}:${hook.command}` : hook.command;
+  let identifier: string;
+  if (hook.type === HookType.Command) {
+    identifier = hook.command;
+  } else if (hook.type === HookType.Http) {
+    identifier = hook.url;
+  } else if (hook.type === HookType.Prompt) {
+    identifier = hook.prompt.slice(0, 50);
+  } else {
+    identifier = String((hook as { type: string }).type);
+  }
+  return name ? `${name}:${identifier}` : identifier;
 }
 
 /**

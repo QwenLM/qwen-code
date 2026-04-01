@@ -46,10 +46,17 @@ export interface SubagentConfig {
   description: string;
 
   /**
-   * Optional list of tool names that this subagent is allowed to use.
+   * Optional allowlist of tool names that this subagent may use.
    * If omitted, the subagent inherits all available tools.
    */
   tools?: string[];
+
+  /**
+   * Optional denylist of tool names to exclude from the inherited set.
+   * Applied before the `tools` allowlist. If both are specified,
+   * disallowedTools is applied first, then tools filters the remainder.
+   */
+  disallowedTools?: string[];
 
   /**
    * System prompt content that defines the subagent's behavior.
@@ -91,6 +98,13 @@ export interface SubagentConfig {
    * For extension-level subagents: the name of the providing extension
    */
   extensionName?: string;
+
+  /**
+   * Optional permission mode override for this agent.
+   * Values: 'default', 'plan', 'autoEdit', 'yolo'.
+   * If parent uses bypassPermissions, it takes precedence.
+   */
+  permissionMode?: string;
 }
 
 /**

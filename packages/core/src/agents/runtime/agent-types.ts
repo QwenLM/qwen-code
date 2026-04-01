@@ -72,6 +72,12 @@ export interface ToolConfig {
    * that the agent is permitted to use.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional denylist of tool names to exclude from the inherited set.
+   * Applied during prepareTools() after the allowlist is resolved.
+   */
+  disallowedTools?: string[];
 }
 
 /**

@@ -175,12 +175,13 @@ export class HookEventHandler {
       tool_use_id: toolUseId,
     };
 
-    // Pass tool name as context for matcher filtering
+    // Pass tool name and input as context for matcher + if filtering
     return this.executeHooks(
       HookEventName.PreToolUse,
       input,
       {
         toolName,
+        toolInput,
       },
       signal,
     );
@@ -207,12 +208,13 @@ export class HookEventHandler {
       tool_use_id: toolUseId,
     };
 
-    // Pass tool name as context for matcher filtering
+    // Pass tool name and input as context for matcher + if filtering
     return this.executeHooks(
       HookEventName.PostToolUse,
       input,
       {
         toolName,
+        toolInput,
       },
       signal,
     );
@@ -241,12 +243,13 @@ export class HookEventHandler {
       is_interrupt: isInterrupt,
     };
 
-    // Pass tool name as context for matcher filtering
+    // Pass tool name and input as context for matcher + if filtering
     return this.executeHooks(
       HookEventName.PostToolUseFailure,
       input,
       {
         toolName,
+        toolInput,
       },
       signal,
     );

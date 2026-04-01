@@ -568,7 +568,13 @@ export class SubagentManager {
       frontmatter['tools'] = config.tools;
     }
 
-    // No outputs section
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      frontmatter['disallowedTools'] = config.disallowedTools;
+    }
+
+    if (config.permissionMode) {
+      frontmatter['permissionMode'] = config.permissionMode;
+    }
 
     if (config.modelConfig) {
       frontmatter['modelConfig'] = config.modelConfig;
@@ -655,14 +661,28 @@ export class SubagentManager {
       ...config.runConfig,
     };
 
-    // Build tool configuration if tools are specified
+    // Build tool configuration: disallowedTools applied first, then tools allowlist.
+    // If only disallowedTools is set, we pass a special marker so agent-core
+    // can filter them from the inherited tool set.
     let toolConfig: ToolConfig | undefined;
     if (config.tools && config.tools.length > 0) {
-      // Transform tools array to ensure all entries are tool names (not display names)
       const toolNames = this.transformToToolNames(config.tools);
       toolConfig = {
         tools: toolNames,
       };
+    }
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      const denyNames = this.transformToToolNames(config.disallowedTools);
+      if (!toolConfig) {
+        // Inherit all tools but exclude denied ones — use wildcard + denylist
+        toolConfig = { tools: ['*'], disallowedTools: denyNames };
+      } else {
+        // Both allowlist and denylist: filter denied from allowed
+        toolConfig.tools = toolConfig.tools.filter(
+          (t) => typeof t !== 'string' || !denyNames.includes(t),
+        );
+        toolConfig.disallowedTools = denyNames;
+      }
     }
 
     return {
@@ -956,6 +976,9 @@ function parseSubagentContent(
 
     // Extract optional fields
     const tools = frontmatter['tools'] as string[] | undefined;
+    const disallowedTools = frontmatter['disallowedTools'] as
+      | string[]
+      | undefined;
     const modelConfig = frontmatter['modelConfig'] as
       | Record<string, unknown>
       | undefined;
@@ -963,17 +986,20 @@ function parseSubagentContent(
       | Record<string, unknown>
       | undefined;
     const color = frontmatter['color'] as string | undefined;
+    const permissionMode = frontmatter['permissionMode'] as string | undefined;
 
     const config: SubagentConfig = {
       name,
       description,
       tools,
+      disallowedTools,
       systemPrompt: systemPrompt.trim(),
       filePath,
       modelConfig: modelConfig as Partial<ModelConfig>,
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,
+      permissionMode,
     };
 
     // Validate the parsed configuration

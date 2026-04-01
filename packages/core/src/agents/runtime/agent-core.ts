@@ -303,6 +303,12 @@ export class AgentCore {
       );
     }
 
+    // Apply denylist: remove any tools in disallowedTools
+    if (this.toolConfig?.disallowedTools?.length) {
+      const denySet = new Set(this.toolConfig.disallowedTools);
+      return toolsList.filter((t) => !t.name || !denySet.has(t.name));
+    }
+
     return toolsList;
   }
 

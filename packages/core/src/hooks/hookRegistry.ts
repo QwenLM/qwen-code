@@ -127,7 +127,13 @@ export class HookRegistry {
   private getHookName(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    return entry.config.name || entry.config.command || 'unknown-command';
+    const identifier =
+      'command' in entry.config
+        ? entry.config.command
+        : 'url' in entry.config
+          ? entry.config.url
+          : entry.config.type;
+    return entry.config.name || identifier || 'unknown-hook';
   }
 
   /**
@@ -308,16 +314,31 @@ please review the project settings (.proto/settings.json) and remove them.`;
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
-    if (!config.type || !['command', 'plugin'].includes(config.type)) {
+    const validTypes = ['command', 'http', 'prompt', 'plugin'];
+    if (!config.type || !validTypes.includes(config.type)) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
       );
       return false;
     }
 
-    if (config.type === 'command' && !config.command) {
+    if (config.type === 'command' && !('command' in config && config.command)) {
       debugLogger.warn(
         `Command hook ${eventName} from ${source} missing command field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'http' && !('url' in config && config.url)) {
+      debugLogger.warn(
+        `HTTP hook ${eventName} from ${source} missing url field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'prompt' && !('prompt' in config && config.prompt)) {
+      debugLogger.warn(
+        `Prompt hook ${eventName} from ${source} missing prompt field`,
       );
       return false;
     }

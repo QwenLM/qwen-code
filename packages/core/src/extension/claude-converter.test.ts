@@ -504,9 +504,14 @@ describe('convertClaudePluginPackage', () => {
     expect(result.config.hooks).toBeDefined();
     expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
     // Check that the variable was substituted
-    expect(result.config.hooks!['PostToolUse']![0].hooks![0].command).toBe(
-      `${pluginSourceDir}/scripts/post-install.sh`,
-    );
+    expect(
+      (
+        result.config.hooks!['PostToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });

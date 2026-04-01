@@ -43,13 +43,21 @@ describe('substituteHookVariables', () => {
       ],
     };
 
-    const result = substituteHookVariables(hooks, basePath);
+    const result = substituteHookVariables(
+      hooks as Parameters<typeof substituteHookVariables>[0],
+      basePath,
+    );
 
     expect(result).toBeDefined();
     expect(result!['PreToolUse']).toHaveLength(1);
-    expect(result!['PreToolUse']![0].hooks![0].command).toBe(
-      '/path/to/plugin/scripts/setup.sh',
-    );
+    expect(
+      (
+        result!['PreToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('/path/to/plugin/scripts/setup.sh');
   });
 
   it('should handle multiple hooks with variables', () => {
@@ -78,16 +86,29 @@ describe('substituteHookVariables', () => {
       ],
     };
 
-    const result = substituteHookVariables(hooks, basePath);
+    const result = substituteHookVariables(
+      hooks as Parameters<typeof substituteHookVariables>[0],
+      basePath,
+    );
 
     expect(result).toBeDefined();
     expect(result!['PostToolUse']).toHaveLength(2);
-    expect(result!['PostToolUse']![0].hooks![0].command).toBe(
-      '/project/plugins/my-plugin/bin/init.sh',
-    );
-    expect(result!['PostToolUse']![1].hooks![0].command).toBe(
-      'chmod +x /project/plugins/my-plugin/bin/executable.sh',
-    );
+    expect(
+      (
+        result!['PostToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('/project/plugins/my-plugin/bin/init.sh');
+    expect(
+      (
+        result!['PostToolUse']![1].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('chmod +x /project/plugins/my-plugin/bin/executable.sh');
   });
 
   it('should handle multiple event types with hooks', () => {
@@ -122,17 +143,30 @@ describe('substituteHookVariables', () => {
       ],
     };
 
-    const result = substituteHookVariables(hooks, basePath);
+    const result = substituteHookVariables(
+      hooks as Parameters<typeof substituteHookVariables>[0],
+      basePath,
+    );
 
     expect(result).toBeDefined();
     expect(result!['PreToolUse']).toHaveLength(1);
-    expect(result!['PreToolUse']![0].hooks![0].command).toBe(
-      '/home/user/.qwen/extensions/my-extension/scripts/pre-start.sh',
-    );
+    expect(
+      (
+        result!['PreToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('/home/user/.qwen/extensions/my-extension/scripts/pre-start.sh');
     expect(result!['UserPromptSubmit']).toHaveLength(1);
-    expect(result!['UserPromptSubmit']![0].hooks![0].command).toBe(
-      '/home/user/.qwen/extensions/my-extension/setup/install.py',
-    );
+    expect(
+      (
+        result!['UserPromptSubmit']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('/home/user/.qwen/extensions/my-extension/setup/install.py');
   });
 
   it('should not modify non-command hooks', () => {
@@ -158,16 +192,29 @@ describe('substituteHookVariables', () => {
       ],
     };
 
-    const result = substituteHookVariables(hooks, basePath);
+    const result = substituteHookVariables(
+      hooks as Parameters<typeof substituteHookVariables>[0],
+      basePath,
+    );
 
     expect(result).toBeDefined();
     expect(result!['SessionStart']).toHaveLength(1);
-    expect(result!['SessionStart']![0].hooks![0].command).toBe(
-      '/path/to/extension/scripts/run.sh',
-    );
-    expect(result!['SessionStart']![0].hooks![1].command).toBe(
-      '${CLAUDE_PLUGIN_ROOT}/not-affected',
-    ); // Non-command type won't be processed
+    expect(
+      (
+        result!['SessionStart']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('/path/to/extension/scripts/run.sh');
+    expect(
+      (
+        result!['SessionStart']![0].hooks![1] as unknown as Record<
+          string,
+          unknown
+        >
+      )['command'],
+    ).toBe('${CLAUDE_PLUGIN_ROOT}/not-affected'); // Non-command type won't be processed
   });
 
   it('should return undefined when hooks is undefined', () => {
@@ -194,11 +241,18 @@ describe('substituteHookVariables', () => {
       ],
     };
 
-    const result = substituteHookVariables(hooks, basePath);
+    const result = substituteHookVariables(
+      hooks as Parameters<typeof substituteHookVariables>[0],
+      basePath,
+    );
 
     expect(result).toBeDefined();
     expect(result).toEqual(hooks); // Should be equal but not the same object (deep clone)
-    expect(result!['Stop']![0].hooks![0].command).toBe('echo "hello world"');
+    expect(
+      (result!['Stop']![0].hooks![0] as unknown as Record<string, unknown>)[
+        'command'
+      ],
+    ).toBe('echo "hello world"');
   });
 });
 

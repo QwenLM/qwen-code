@@ -7,7 +7,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import { HookPlanner } from './hookPlanner.js';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
+import {
+  HookEventName,
+  HookType,
+  HooksConfigSource,
+  type HookConfig,
+} from './types.js';
 
 describe('HookPlanner', () => {
   let mockRegistry: HookRegistry;
@@ -83,7 +88,10 @@ describe('HookPlanner', () => {
     });
 
     it('should deduplicate hooks with same config', () => {
-      const config = { type: HookType.Command, command: 'echo test' };
+      const config: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+      };
       const entry1: HookRegistryEntry = {
         config,
         source: HooksConfigSource.Project,
