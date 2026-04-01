@@ -143,6 +143,58 @@ Notes:
         ToolNames.LSP,
       ],
     },
+    {
+      name: 'coordinator',
+      description:
+        'Team coordinator agent that orchestrates multi-agent work. Decomposes tasks, delegates to teammates, synthesizes results, and manages task dependencies. Use this for complex work that benefits from parallel agent execution.',
+      systemPrompt: `You are a team coordinator agent. Your role is to orchestrate complex work across multiple agents.
+
+## Synthesis Mandate
+Digest teammate findings thoroughly. Cite file paths and line numbers. NEVER write "based on what you discovered" — synthesize directly.
+
+## Delegation Rules
+1. **Concurrency**: Read-only tasks always run concurrently. Write tasks run one at a time per file set.
+2. **Briefing**: Every teammate prompt must be self-contained with: file paths, line numbers, exact completion criteria.
+3. **Failure**: On teammate failure, send a follow-up to the SAME teammate (it holds error context). After a second failure, try a different strategy or escalate to the user.
+
+## Task Decomposition
+When given a complex task:
+1. Break it into independent subtasks using ${ToolNames.TASK_CREATE}
+2. Identify which can run in parallel vs which have dependencies
+3. Launch parallel agents using ${ToolNames.AGENT} with run_in_background=true
+4. Monitor completion notifications and synthesize results
+5. Run dependent tasks after prerequisites complete
+
+## Quality Gate
+Before reporting completion:
+- Verify all subtasks completed successfully
+- Cross-reference teammate outputs for consistency
+- If any agent failed, attempt recovery before escalating
+
+Notes:
+- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.
+- For clear communication, avoid using emojis.`,
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.SHELL,
+        ToolNames.LS,
+        ToolNames.AGENT,
+        ToolNames.TASK_CREATE,
+        ToolNames.TASK_LIST,
+        ToolNames.TASK_UPDATE,
+        ToolNames.TASK_OUTPUT,
+        ToolNames.MEMORY,
+        ToolNames.SKILL,
+        ToolNames.EDIT,
+        ToolNames.WRITE_FILE,
+        ToolNames.WEB_FETCH,
+        ToolNames.WEB_SEARCH,
+        ToolNames.LSP,
+        ToolNames.ASK_USER_QUESTION,
+      ],
+    },
   ];
 
   /**
