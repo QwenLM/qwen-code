@@ -1,0 +1,29 @@
+diff --git a/node_modules/ink/.bun-tag-b1cdbafe2b5d5571 b/.bun-tag-b1cdbafe2b5d5571
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/build/reconciler.js b/build/reconciler.js
+index dbcad54d70b0870a469eb5767bae375f6804eb36..aff240e0b8f54a35e496a818fe27c3d85eab58f0 100644
+--- a/build/reconciler.js
++++ b/build/reconciler.js
+@@ -13,20 +13,7 @@ if (process.env['DEV'] === 'true') {
+         await import('./devtools.js');
+     }
+     catch (error) {
+-        if (error.code === 'ERR_MODULE_NOT_FOUND') {
+-            console.warn(`
+-The environment variable DEV is set to true, so Ink tried to import \`react-devtools-core\`,
+-but this failed as it was not installed. Debugging with React Devtools requires it.
+-
+-To install use this command:
+-
+-$ npm install --save-dev react-devtools-core
+-				`.trim() + '\n');
+-        }
+-        else {
+-            // eslint-disable-next-line @typescript-eslint/only-throw-error
+-            throw error;
+-        }
++        // Silently ignore devtools failures (missing module, Bun compatibility, etc.)
+     }
+ }
+ const diff = (before, after) => {

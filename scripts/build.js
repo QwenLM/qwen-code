@@ -27,11 +27,11 @@ const root = join(__dirname, '..');
 
 // npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
-  execSync('npm install', { stdio: 'inherit', cwd: root });
+  execSync('bun install', { stdio: 'inherit', cwd: root });
 }
 
 // build all workspaces/packages in dependency order
-execSync('npm run generate', { stdio: 'inherit', cwd: root });
+execSync('bun run generate', { stdio: 'inherit', cwd: root });
 
 // Build in dependency order:
 // 1. test-utils (no internal dependencies)
@@ -52,7 +52,7 @@ const buildOrder = [
 ];
 
 for (const workspace of buildOrder) {
-  execSync(`npm run build --workspace=${workspace}`, {
+  execSync(`bun run --filter=./${workspace} build`, {
     stdio: 'inherit',
     cwd: root,
   });
@@ -60,7 +60,7 @@ for (const workspace of buildOrder) {
   // After cli is built, generate the JSON Schema for settings
   // so the vscode-ide-companion extension can provide IntelliSense
   if (workspace === 'packages/cli') {
-    execSync('npx tsx scripts/generate-settings-schema.ts', {
+    execSync('bun run generate:settings-schema', {
       stdio: 'inherit',
       cwd: root,
     });
