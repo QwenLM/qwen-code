@@ -39,6 +39,7 @@ import {
   downloadFromGitHubRelease,
   parseGitHubRepoForReleases,
 } from './github.js';
+import { downloadFromNpmRegistry } from './npm.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
@@ -872,6 +873,11 @@ export class ExtensionManager {
             installMetadata.type = 'git';
           }
         }
+        localSourcePath = tempDir;
+      } else if (installMetadata.type === 'npm') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        const result = await downloadFromNpmRegistry(installMetadata, tempDir);
+        installMetadata.releaseTag = result.version;
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
