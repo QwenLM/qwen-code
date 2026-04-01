@@ -1146,6 +1146,8 @@ export function checkArgumentSafety(args: string): {
 const CONPTY_MIN_WINDOWS_BUILD = 19042;
 
 export function shouldDefaultToNodePty(): boolean {
+  // Bun's native addon support is incomplete; node-pty causes EAGAIN errors
+  if ('Bun' in globalThis) return false;
   if (os.platform() !== 'win32') return true;
   const build = parseInt(os.release().split('.')[2] ?? '', 10);
   return !isNaN(build) && build >= CONPTY_MIN_WINDOWS_BUILD;
