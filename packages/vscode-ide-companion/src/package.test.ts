@@ -22,6 +22,6 @@ describe('package.json command metadata', () => {
       (item) => item.command === 'qwen-code.focusChat',
     );
 
-    expect(command?.title).toBe('Qwen Code: Focus Chat View');
+    expect(command?.title).toBe('proto: Focus Chat View');
   });
 });
