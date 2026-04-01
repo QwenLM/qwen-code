@@ -119,6 +119,8 @@ export interface HookExecutionResponse {
   success: boolean;
   output?: Record<string, unknown>;
   error?: Error;
+  /** Number of stop hooks that were executed */
+  stopHookCount?: number;
 }
 
 export type Message =

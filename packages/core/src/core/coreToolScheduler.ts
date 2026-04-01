@@ -903,6 +903,7 @@ export class CoreToolScheduler {
           // it must bypass both YOLO auto-approve and plan-mode blocking.
           const isAskUserQuestionTool =
             reqInfo.name === ToolNames.ASK_USER_QUESTION;
+          let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
           if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
             this.setToolCallOutcome(
@@ -910,29 +911,32 @@ export class CoreToolScheduler {
               ToolConfirmationOutcome.ProceedAlways,
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
-          } else if (
-            isPlanMode &&
-            !isExitPlanModeTool &&
-            !isAskUserQuestionTool
-          ) {
-            this.setStatusInternal(reqInfo.callId, 'error', {
-              callId: reqInfo.callId,
-              responseParts: convertToFunctionResponse(
-                reqInfo.name,
-                reqInfo.callId,
-                getPlanModeSystemReminder(),
-              ),
-              resultDisplay: 'Plan mode blocked a non-read-only tool call.',
-              error: undefined,
-              errorType: undefined,
-            });
           } else {
-            // Get confirmation details from the tool
-            const confirmationDetails =
+            confirmationDetails =
               await invocation.getConfirmationDetails(signal);
 
             // ── Centralised rule injection ──────────────────────────────────
             injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+            if (
+              isPlanMode &&
+              !isExitPlanModeTool &&
+              !isAskUserQuestionTool &&
+              confirmationDetails.type !== 'info'
+            ) {
+              this.setStatusInternal(reqInfo.callId, 'error', {
+                callId: reqInfo.callId,
+                responseParts: convertToFunctionResponse(
+                  reqInfo.name,
+                  reqInfo.callId,
+                  getPlanModeSystemReminder(),
+                ),
+                resultDisplay: 'Plan mode blocked a non-read-only tool call.',
+                error: undefined,
+                errorType: undefined,
+              });
+              continue;
+            }
 
             // AUTO_EDIT mode: auto-approve edit-like and info tools
             if (
@@ -990,14 +994,14 @@ export class CoreToolScheduler {
                 if (resolution.status === 'accepted') {
                   this.handleConfirmationResponse(
                     reqInfo.callId,
-                    confirmationDetails.onConfirm,
+                    confirmationDetails!.onConfirm,
                     ToolConfirmationOutcome.ProceedOnce,
                     signal,
                   );
                 } else {
                   this.handleConfirmationResponse(
                     reqInfo.callId,
-                    confirmationDetails.onConfirm,
+                    confirmationDetails!.onConfirm,
                     ToolConfirmationOutcome.Cancel,
                     signal,
                   );
@@ -1009,7 +1013,7 @@ export class CoreToolScheduler {
             const messageBus = this.config.getMessageBus() as
               | MessageBus
               | undefined;
-            const hooksEnabled = this.config.getEnableHooks();
+            const hooksEnabled = !this.config.getDisableAllHooks();
 
             if (hooksEnabled && messageBus) {
               const permissionMode = String(this.config.getApprovalMode());
@@ -1326,7 +1330,7 @@ export class CoreToolScheduler {
 
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
-    const hooksEnabled = this.config.getEnableHooks();
+    const hooksEnabled = !this.config.getDisableAllHooks();
 
     // PreToolUse Hook
     if (hooksEnabled && messageBus) {

@@ -361,6 +361,36 @@ export type HistoryItemBtw = HistoryItemBase & {
   btw: BtwProps;
 };
 
+/**
+ * UserPromptSubmit hook blocked event.
+ * Displayed when a UserPromptSubmit hook blocks the user's prompt.
+ */
+export type HistoryItemUserPromptSubmitBlocked = HistoryItemBase & {
+  type: 'user_prompt_submit_blocked';
+  reason: string;
+  originalPrompt: string;
+};
+
+/**
+ * Stop hook loop event.
+ * Displayed when Stop hooks create a loop, forcing the agent to continue.
+ */
+export type HistoryItemStopHookLoop = HistoryItemBase & {
+  type: 'stop_hook_loop';
+  iterationCount: number;
+  reasons: string[];
+  stopHookCount: number;
+};
+
+/**
+ * Stop hook system message.
+ * Displayed when Stop hooks return a systemMessage to show to the user.
+ */
+export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
+  type: 'stop_hook_system_message';
+  message: string;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -395,7 +425,10 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaAgentComplete
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
-  | HistoryItemBtw;
+  | HistoryItemBtw
+  | HistoryItemUserPromptSubmitBlocked
+  | HistoryItemStopHookLoop
+  | HistoryItemStopHookSystemMessage;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 

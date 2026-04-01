@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import * as https from 'node:https';
 import { stat } from 'node:fs/promises';
 import { parseGitHubRepoForReleases } from './github.js';
+import { isScopedNpmPackage } from './npm.js';
 
 export interface MarketplaceInstallOptions {
   marketplaceUrl: string;
@@ -248,6 +249,13 @@ export async function parseInstallSource(
     } catch {
       // Not a valid GitHub URL or failed to fetch, continue without marketplace config
     }
+  } else if (isScopedNpmPackage(repo)) {
+    // Priority 3: Scoped npm package (@scope/name, optionally @version)
+    installMetadata = {
+      source: repo,
+      type: 'npm',
+      pluginName,
+    };
   } else if (isOwnerRepoFormat(repo)) {
     // Priority 3: owner/repo format - convert to GitHub URL
     repoSource = convertOwnerRepoToGitHubUrl(repo);

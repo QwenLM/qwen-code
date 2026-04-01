@@ -623,6 +623,19 @@ export default {
   'No hook config selected': 'Keine Hook-Konfiguration ausgewählt',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Um diesen Hook zu ändern oder zu entfernen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook-Konfiguration - Deaktiviert',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Alle Hooks sind derzeit deaktiviert. Sie haben {{count}} die nicht ausgeführt werden.',
+  '{{count}} configured hook': '{{count}} konfigurierter Hook',
+  '{{count}} configured hooks': '{{count}} konfigurierte Hooks',
+  'When hooks are disabled:': 'Wenn Hooks deaktiviert sind:',
+  'No hook commands will execute': 'Keine Hook-Befehle werden ausgeführt',
+  'StatusLine will not be displayed': 'StatusLine wird nicht angezeigt',
+  'Tool operations will proceed without hook validation':
+    'Tool-Operationen werden ohne Hook-Validierung fortgesetzt',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Um Hooks wieder zu aktivieren, entfernen Sie "disableAllHooks" aus settings.json oder fragen Sie Qwen Code.',
   // Hooks - Source
   Project: 'Projekt',
   User: 'Benutzer',

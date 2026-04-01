@@ -627,7 +627,11 @@ describe('getShellConfiguration', () => {
       it('should return bash configuration when MSYSTEM starts with MINGW', () => {
         process.env['MSYSTEM'] = 'MINGW64';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        // executable should be bash.exe path (either 'bash' or full path like 'C:\...\bash.exe')
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
@@ -635,7 +639,10 @@ describe('getShellConfiguration', () => {
       it('should return bash configuration when MSYSTEM starts with MSYS', () => {
         process.env['MSYSTEM'] = 'MSYS';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
@@ -644,7 +651,10 @@ describe('getShellConfiguration', () => {
         delete process.env['MSYSTEM'];
         process.env['TERM'] = 'xterm-256color-msys';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
@@ -653,7 +663,10 @@ describe('getShellConfiguration', () => {
         delete process.env['MSYSTEM'];
         process.env['TERM'] = 'xterm-256color-cygwin';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
@@ -662,7 +675,10 @@ describe('getShellConfiguration', () => {
         process.env['MSYSTEM'] = 'MINGW64';
         process.env['TERM'] = 'xterm';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
@@ -680,7 +696,10 @@ describe('getShellConfiguration', () => {
       it('should return bash when MSYSTEM is MINGW32', () => {
         process.env['MSYSTEM'] = 'MINGW32';
         const config = getShellConfiguration();
-        expect(config.executable).toBe('bash');
+        expect(
+          config.executable.endsWith('bash.exe') ||
+            config.executable === 'bash',
+        ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });

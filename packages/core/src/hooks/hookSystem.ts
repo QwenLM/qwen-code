@@ -7,7 +7,7 @@
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
-import { HookAggregator } from './hookAggregator.js';
+import { HookAggregator, type AggregatedHookResult } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
@@ -22,6 +22,7 @@ import type {
   PreCompactTrigger,
   NotificationType,
   PermissionSuggestion,
+  HookEventName,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -87,6 +88,17 @@ export class HookSystem {
     return this.hookRegistry.getAllHooks();
   }
 
+  /**
+   * Check if there are any enabled hooks registered for a specific event.
+   * This is a fast-path check to avoid expensive MessageBus round-trips
+   * when no hooks are configured for a given event.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return (
+      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
+    );
+  }
+
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
@@ -104,15 +116,12 @@ export class HookSystem {
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
     signal?: AbortSignal,
-  ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireStopEvent(
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
       signal,
     );
-    return result.finalOutput
-      ? createHookOutput('Stop', result.finalOutput)
-      : undefined;
   }
 
   async fireSessionStartEvent(
