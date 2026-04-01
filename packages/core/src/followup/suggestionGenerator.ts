@@ -11,6 +11,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
 
 /**
  * Prompt for suggestion generation.
@@ -87,21 +88,12 @@ export async function generatePromptSuggestion(
   }
 
   try {
-    const contents: Content[] = [
-      ...conversationHistory,
-      { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
-    ];
+    // Try cache-aware forked query first (shares main conversation's prefix)
+    const cacheSafe = getCacheSafeParams();
+    const raw = cacheSafe
+      ? await generateViaForkedQuery(config, abortSignal)
+      : await generateViaBaseLlm(config, conversationHistory, abortSignal);
 
-    const result = await config.getBaseLlmClient().generateJson({
-      contents,
-      schema: SUGGESTION_SCHEMA,
-      model: config.getModel(),
-      abortSignal,
-      promptId: 'prompt_suggestion',
-      maxAttempts: 2,
-    });
-
-    const raw = result['suggestion'];
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
@@ -115,13 +107,65 @@ export async function generatePromptSuggestion(
 
     return { suggestion };
   } catch {
-    // Gracefully degrade — don't disrupt the user experience
-    // Don't log abort as error — it's normal user behavior (started typing)
     if (abortSignal.aborted) {
       return { suggestion: null };
     }
     return { suggestion: null, filterReason: 'error' };
   }
+}
+
+/** Generate suggestion via cache-aware forked query */
+async function generateViaForkedQuery(
+  config: Config,
+  abortSignal: AbortSignal,
+): Promise<string | null> {
+  const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
+    abortSignal,
+    jsonSchema: SUGGESTION_SCHEMA,
+  });
+
+  if (result.jsonResult) {
+    const raw = result.jsonResult['suggestion'];
+    return typeof raw === 'string' ? raw : null;
+  }
+
+  // Fallback: try parsing text as JSON
+  if (result.text) {
+    try {
+      const parsed = JSON.parse(result.text) as Record<string, unknown>;
+      const raw = parsed['suggestion'];
+      return typeof raw === 'string' ? raw : null;
+    } catch {
+      // Model returned plain text — use it directly
+      return result.text;
+    }
+  }
+
+  return null;
+}
+
+/** Fallback: generate via standalone BaseLlmClient.generateJson */
+async function generateViaBaseLlm(
+  config: Config,
+  conversationHistory: Content[],
+  abortSignal: AbortSignal,
+): Promise<string | null> {
+  const contents: Content[] = [
+    ...conversationHistory,
+    { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
+  ];
+
+  const result = await config.getBaseLlmClient().generateJson({
+    contents,
+    schema: SUGGESTION_SCHEMA,
+    model: config.getModel(),
+    abortSignal,
+    promptId: 'prompt_suggestion',
+    maxAttempts: 2,
+  });
+
+  const raw = result['suggestion'];
+  return typeof raw === 'string' ? raw : null;
 }
 
 /** Single-word suggestions allowed through the too_few_words filter */

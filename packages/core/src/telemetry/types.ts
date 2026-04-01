@@ -1103,3 +1103,35 @@ export class PromptSuggestionEvent implements BaseTelemetryEvent {
     this.reason = params.reason;
   }
 }
+
+export class SpeculationEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.speculation';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'aborted' | 'failed';
+  turns_used: number;
+  files_written: number;
+  tool_use_count: number;
+  duration_ms: number;
+  boundary_type?: string;
+  had_pipelined_suggestion: boolean;
+
+  constructor(params: {
+    outcome: 'accepted' | 'aborted' | 'failed';
+    turns_used: number;
+    files_written: number;
+    tool_use_count: number;
+    duration_ms: number;
+    boundary_type?: string;
+    had_pipelined_suggestion: boolean;
+  }) {
+    this['event.name'] = 'qwen-code.speculation';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.turns_used = params.turns_used;
+    this.files_written = params.files_written;
+    this.tool_use_count = params.tool_use_count;
+    this.duration_ms = params.duration_ms;
+    this.boundary_type = params.boundary_type;
+    this.had_pipelined_suggestion = params.had_pipelined_suggestion;
+  }
+}

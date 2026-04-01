@@ -511,6 +511,26 @@ const SETTINGS_SCHEMA = {
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
       },
+      enableCacheSharing: {
+        type: 'boolean',
+        label: 'Enable Cache Sharing for Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
+        showInDialog: false,
+      },
+      enableSpeculation: {
+        type: 'boolean',
+        label: 'Enable Speculative Execution',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',

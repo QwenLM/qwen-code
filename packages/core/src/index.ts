@@ -169,6 +169,7 @@ export {
   logIdeConnection,
   logModelSlashCommand,
   logPromptSuggestion,
+  logSpeculation,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -180,6 +181,7 @@ export {
   IdeConnectionType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
+  SpeculationEvent,
 } from './telemetry/types.js';
 
 // ============================================================================

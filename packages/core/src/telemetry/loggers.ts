@@ -45,6 +45,7 @@ import {
   EVENT_ARENA_AGENT_COMPLETED,
   EVENT_ARENA_SESSION_ENDED,
   EVENT_PROMPT_SUGGESTION,
+  EVENT_SPECULATION,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -103,6 +104,7 @@ import type {
   ArenaAgentCompletedEvent,
   ArenaSessionEndedEvent,
   PromptSuggestionEvent,
+  SpeculationEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
@@ -1115,6 +1117,33 @@ export function logPromptSuggestion(
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `Prompt suggestion: ${event.outcome}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logSpeculation(config: Config, event: SpeculationEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_SPECULATION,
+    'event.timestamp': event['event.timestamp'],
+    outcome: event.outcome,
+    turns_used: event.turns_used,
+    files_written: event.files_written,
+    tool_use_count: event.tool_use_count,
+    duration_ms: event.duration_ms,
+    had_pipelined_suggestion: event.had_pipelined_suggestion,
+  };
+
+  if (event.boundary_type) {
+    attributes['boundary_type'] = event.boundary_type;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Speculation: ${event.outcome}.`,
     attributes,
   };
   logger.emit(logRecord);

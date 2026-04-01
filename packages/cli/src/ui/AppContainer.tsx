@@ -44,6 +44,13 @@ import {
   generatePromptSuggestion,
   logPromptSuggestion,
   PromptSuggestionEvent,
+  logSpeculation,
+  SpeculationEvent,
+  startSpeculation,
+  acceptSpeculation,
+  abortSpeculation,
+  type SpeculationState,
+  IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -742,9 +749,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
+  const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
   const suggestionAbortRef = useRef<AbortController | null>(null);
 
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
+  const geminiClient = config.getGeminiClient();
+
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
@@ -778,9 +788,63 @@ export const AppContainer = (props: AppContainerProps) => {
         void submitQuery(submittedValue);
         return;
       }
+
+      // Check if speculation has results for this submission
+      const spec = speculationRef.current;
+      if (
+        spec.status !== 'idle' &&
+        spec.suggestion === submittedValue &&
+        (spec.status === 'completed' || spec.status === 'boundary')
+      ) {
+        // Accept speculation: inject messages and apply files
+        acceptSpeculation(spec, geminiClient)
+          .then((result) => {
+            logSpeculation(
+              config,
+              new SpeculationEvent({
+                outcome: 'accepted',
+                turns_used: spec.messages.length,
+                files_written: result.filesApplied.length,
+                tool_use_count: spec.toolUseCount,
+                duration_ms: Date.now() - spec.startTime,
+                boundary_type: spec.boundary?.type,
+                had_pipelined_suggestion: !!result.nextSuggestion,
+              }),
+            );
+            // If boundary was hit, the main loop continues from where speculation stopped
+            // Use result.boundary (not spec.status, which was mutated by acceptSpeculation)
+            if (result.boundary) {
+              addMessage(submittedValue);
+            }
+            // If completed, the conversation already has the full response — don't re-send
+            if (result.nextSuggestion) {
+              setPromptSuggestion(result.nextSuggestion);
+            }
+          })
+          .catch(() => {
+            // Fallback: submit normally
+            addMessage(submittedValue);
+          });
+        speculationRef.current = IDLE_SPECULATION;
+        return;
+      }
+
+      // Abort any running speculation since we're submitting something different
+      if (spec.status === 'running') {
+        abortSpeculation(spec).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+
       addMessage(submittedValue);
     },
-    [addMessage, agentViewState, streamingState, submitQuery],
+    [
+      addMessage,
+      agentViewState,
+      streamingState,
+      submitQuery,
+      config,
+      geminiClient,
+    ],
   );
 
   const handleArenaModelsSelected = useCallback(
@@ -903,7 +967,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
-  const geminiClient = config.getGeminiClient();
 
   useEffect(() => {
     if (activePtyId) {
@@ -953,15 +1016,23 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!followupSuggestionsEnabled) {
       suggestionAbortRef.current?.abort();
       setPromptSuggestion(null);
+      if (speculationRef.current.status === 'running') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
     }
 
-    // Clear suggestion and abort pending generation when a new turn starts
+    // Clear suggestion and abort pending generation/speculation when a new turn starts
     if (
       prevStreamingStateRef.current === StreamingState.Idle &&
       streamingState === StreamingState.Responding
     ) {
       suggestionAbortRef.current?.abort();
       setPromptSuggestion(null);
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
     }
 
     // Only trigger when transitioning from Responding to Idle (and enabled)
@@ -996,6 +1067,16 @@ export const AppContainer = (props: AppContainerProps) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
+            // Start speculation if enabled (runs in background)
+            if (settings.merged.ui?.enableSpeculation) {
+              startSpeculation(config, result.suggestion, ac.signal)
+                .then((state) => {
+                  speculationRef.current = state;
+                })
+                .catch(() => {
+                  // Speculation failure is non-blocking
+                });
+            }
           } else if (result.filterReason) {
             // Log suppressed suggestion for analytics
             logPromptSuggestion(
@@ -1020,6 +1101,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
     return () => {
       suggestionAbortRef.current?.abort();
+      // Cleanup speculation on unmount (#21)
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
   }, [
@@ -1031,6 +1117,17 @@ export const AppContainer = (props: AppContainerProps) => {
     isPermissionsDialogOpen,
     settingInputRequests,
   ]);
+
+  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, etc.)
+  // Note: user-initiated dismiss (typing a character) only clears the followup hook's
+  // internal state, not promptSuggestion. Speculation continues briefly until the next
+  // turn starts and suggestionAbortRef (the parentSignal) is aborted.
+  useEffect(() => {
+    if (!promptSuggestion && speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
+  }, [promptSuggestion]);
 
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);

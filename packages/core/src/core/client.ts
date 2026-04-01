@@ -55,6 +55,9 @@ import {
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
+// Forked query cache
+import { saveCacheSafeParams } from '../followup/forkedQuery.js';
+
 // Utilities
 import {
   getDirectoryContextString,
@@ -795,6 +798,20 @@ export class GeminiClient {
     // Report cancelled to arena when user cancelled mid-stream
     if (signal?.aborted && arenaAgentClient) {
       await arenaAgentClient.reportCancelled();
+    }
+
+    // Save cache-safe params on successful completion (non-abort) for forked queries
+    if (!signal?.aborted && this.isInitialized()) {
+      try {
+        const chat = this.getChat();
+        saveCacheSafeParams(
+          chat.getGenerationConfig(),
+          chat.getHistory(true),
+          this.config.getModel(),
+        );
+      } catch {
+        // Best-effort — don't block the main flow
+      }
     }
 
     return turn;

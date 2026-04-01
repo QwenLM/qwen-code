@@ -41,6 +41,7 @@ export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 
 // Prompt Suggestion Events
 export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
+export const EVENT_SPECULATION = 'qwen-code.speculation';
 
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
