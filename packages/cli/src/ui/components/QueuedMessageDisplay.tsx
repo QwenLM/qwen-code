@@ -28,7 +28,7 @@ export const QueuedMessageDisplay = ({
         <Text color="yellow" bold>
           {label}
         </Text>
-        <Text dimColor> — will send when current turn finishes</Text>
+        <Text dimColor> — will be seen at next tool call</Text>
       </Box>
       {messageQueue
         .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { StreamingState } from '../types.js';
 
 export interface UseMessageQueueOptions {
@@ -18,16 +18,17 @@ export interface UseMessageQueueReturn {
   addMessage: (message: string) => void;
   clearQueue: () => void;
   popLast: () => string | undefined;
+  drain: () => string[];
   getQueuedMessagesText: () => string;
 }
 
 /**
  * Hook for managing message queuing during streaming responses.
- * Allows users to queue messages while the AI is responding and automatically
- * sends them when streaming completes.
  *
- * Messages are batched: if multiple arrive during a single turn they are
- * combined with double-newlines and submitted as one turn.
+ * Messages queued while the agent is working are injected mid-turn (between
+ * tool calls) so the model sees them immediately and can decide whether to
+ * act on them or continue its current task. Any messages still in the queue
+ * when the turn finishes are submitted as a new turn.
  */
 export function useMessageQueue({
   isConfigInitialized,
@@ -35,6 +36,9 @@ export function useMessageQueue({
   submitQuery,
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  // Ref mirror so drain() can read synchronously without stale closures
+  const queueRef = useRef<string[]>([]);
+  queueRef.current = messageQueue;
 
   // Add a message to the queue
   const addMessage = useCallback((message: string) => {
@@ -64,22 +68,36 @@ export function useMessageQueue({
     return popped;
   }, []);
 
+  /**
+   * Atomically drain all queued messages, returning them and clearing the
+   * queue. Called by handleCompletedTools to inject messages mid-turn
+   * alongside tool results.
+   */
+  const drain = useCallback((): string[] => {
+    const messages = [...queueRef.current];
+    if (messages.length > 0) {
+      setMessageQueue([]);
+    }
+    return messages;
+  }, []);
+
   // Get all queued messages as a single text string
   const getQueuedMessagesText = useCallback(() => {
     if (messageQueue.length === 0) return '';
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
-  // Process queued messages when streaming becomes idle
+  // Fallback: submit any remaining queued messages when streaming becomes
+  // idle. Most messages will have already been injected mid-turn by
+  // handleCompletedTools.drain(), but if the turn ends without any tool
+  // calls (pure text response), this catches them.
   useEffect(() => {
     if (
       isConfigInitialized &&
       streamingState === StreamingState.Idle &&
       messageQueue.length > 0
     ) {
-      // Combine all messages with double newlines for clarity
       const combinedMessage = messageQueue.join('\n\n');
-      // Clear the queue and submit
       setMessageQueue([]);
       submitQuery(combinedMessage);
     }
@@ -90,6 +108,7 @@ export function useMessageQueue({
     addMessage,
     clearQueue,
     popLast,
+    drain,
     getQueuedMessagesText,
   };
 }

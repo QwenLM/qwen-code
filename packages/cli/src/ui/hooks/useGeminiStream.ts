@@ -173,6 +173,7 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
+  drainQueuedMessages: () => string[],
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1520,6 +1521,20 @@ export const useGeminiStream = (
         return;
       }
 
+      // Mid-turn injection: drain any queued user messages and include
+      // them alongside tool results so the model sees them immediately
+      // and can decide whether to act on them or continue current work.
+      const injectedMessages = drainQueuedMessages();
+      if (injectedMessages.length > 0) {
+        const combined = injectedMessages.join('\n\n');
+        // Show the injected messages in the UI as user input
+        addItem({ type: MessageType.USER, text: combined }, Date.now());
+        // Append as a text part alongside the tool results
+        responsesToSend.push({
+          text: `\n\n[User message received while you were working — address if relevant, otherwise continue your current task]\n\n${combined}`,
+        });
+      }
+
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
@@ -1530,6 +1545,8 @@ export const useGeminiStream = (
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
       config,
+      drainQueuedMessages,
+      addItem,
     ],
   );
 

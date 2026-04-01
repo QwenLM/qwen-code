@@ -698,6 +698,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<() => void>(() => {});
 
+  // Ref bridge: useGeminiStream calls drainQueuedMessages mid-turn (between
+  // tool calls), but useMessageQueue is declared after it. The ref is set
+  // after useMessageQueue returns, but drain is only called asynchronously
+  // during tool completion — so the ref is always populated by then.
+  const drainQueuedMessagesRef = useRef<() => string[]>(() => []);
+
   const {
     streamingState,
     submitQuery,
@@ -728,6 +734,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    () => drainQueuedMessagesRef.current(),
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -744,11 +751,12 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, popLast } = useMessageQueue({
+  const { messageQueue, addMessage, popLast, drain } = useMessageQueue({
     isConfigInitialized,
     streamingState,
     submitQuery,
   });
+  drainQueuedMessagesRef.current = drain;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
