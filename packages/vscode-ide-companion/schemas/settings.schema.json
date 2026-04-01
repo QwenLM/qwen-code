@@ -444,6 +444,10 @@
             }
           }
         },
+        "verifyCommand": {
+          "description": "Shell command to run after file-modifying tools (write_file, edit). Failures are injected into the model context for immediate self-correction. Example: \"npx tsc --noEmit\" or \"npm run build\".",
+          "type": "string"
+        },
         "core": {
           "description": "Deprecated. Use permissions.allow instead.",
           "type": "array",
