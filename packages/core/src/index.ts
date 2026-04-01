@@ -115,6 +115,9 @@ export * from './services/shellExecutionService.js';
 // ============================================================================
 
 export * from './auxiliary/sideQuery.js';
+export * from './background/taskRegistry.js';
+export * from './background/taskDrainer.js';
+export * from './background/taskScheduler.js';
 
 export * from './memory/types.js';
 export * from './memory/paths.js';

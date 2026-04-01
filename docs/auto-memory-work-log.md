@@ -212,6 +212,56 @@ Completed
 
 ---
 
+## Part 9 - Background task runtime foundation
+
+### Start review
+
+- Overall plan now shifts from side-query consumers to the next shared runtime layer needed for auto-dream and future fork-agent execution.
+- Parts 6 to 8 already delivered the auxiliary inference layer plus memory recall/extraction consumers.
+- Scope for this part: add a minimal background task runtime foundation with registry, scheduler, and drainer primitives, but do not yet wire automatic dream scheduling onto it.
+
+### Goal
+
+- Add a reusable background task registry with status updates and snapshots
+- Add a scheduler that can run tracked tasks with simple dedupe behavior
+- Add a drainer that waits for in-flight background work with timeout protection
+- Add targeted tests for lifecycle updates, dedupe handling, and drain behavior
+
+### Implemented
+
+- Added `packages/core/src/background/taskRegistry.ts`
+- Added `packages/core/src/background/taskDrainer.ts`
+- Added `packages/core/src/background/taskScheduler.ts`
+- Added `packages/core/src/background/taskRegistry.test.ts`
+- Added `packages/core/src/background/taskDrainer.test.ts`
+- Added `packages/core/src/background/taskScheduler.test.ts`
+- Exported background runtime helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Background work now has a shared registry for task snapshots, updates, and subscriptions.
+- Background tasks can be scheduled through a common scheduler with simple dedupe-key skipping.
+- In-flight background work can be tracked and drained with timeout protection before shutdown.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/background/taskRegistry.test.ts src/background/taskDrainer.test.ts src/background/taskScheduler.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/background/taskRegistry.test.ts src/background/taskDrainer.test.ts src/background/taskScheduler.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extractionPlanner.test.ts src/memory/extract.test.ts src/memory/extractModel.test.ts src/memory/dream.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally does not yet hook memory dream or extraction into the new background runtime.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review
