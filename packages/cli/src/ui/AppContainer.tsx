@@ -744,12 +744,11 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const { messageQueue, addMessage, popLast } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -802,23 +801,24 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    const lastUserMessage = userMessages.at(-1);
-    let textToSet = lastUserMessage || '';
-
-    const queuedText = getQueuedMessagesText();
-    if (queuedText) {
-      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
-      clearQueue();
+    // Pop one message from the queue at a time instead of dumping all.
+    // Each ESC press removes the most recent queued message and puts it
+    // back in the input buffer so the user can edit or discard it.
+    const popped = popLast();
+    if (popped) {
+      buffer.setText(popped);
+      return;
     }
 
-    if (textToSet) {
-      buffer.setText(textToSet);
+    // No queued messages — restore last user message to the input buffer
+    const lastUserMessage = userMessages.at(-1);
+    if (lastUserMessage) {
+      buffer.setText(lastUserMessage);
     }
   }, [
     buffer,
     userMessages,
-    getQueuedMessagesText,
-    clearQueue,
+    popLast,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);

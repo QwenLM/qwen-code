@@ -17,6 +17,7 @@ export interface UseMessageQueueReturn {
   messageQueue: string[];
   addMessage: (message: string) => void;
   clearQueue: () => void;
+  popLast: () => string | undefined;
   getQueuedMessagesText: () => string;
 }
 
@@ -24,6 +25,9 @@ export interface UseMessageQueueReturn {
  * Hook for managing message queuing during streaming responses.
  * Allows users to queue messages while the AI is responding and automatically
  * sends them when streaming completes.
+ *
+ * Messages are batched: if multiple arrive during a single turn they are
+ * combined with double-newlines and submitted as one turn.
  */
 export function useMessageQueue({
   isConfigInitialized,
@@ -43,6 +47,21 @@ export function useMessageQueue({
   // Clear the entire queue
   const clearQueue = useCallback(() => {
     setMessageQueue([]);
+  }, []);
+
+  /**
+   * Remove and return the last queued message. Used by the cancel handler
+   * to pop one message at a time back into the input buffer instead of
+   * dumping the entire queue at once.
+   */
+  const popLast = useCallback((): string | undefined => {
+    let popped: string | undefined;
+    setMessageQueue((prev) => {
+      if (prev.length === 0) return prev;
+      popped = prev[prev.length - 1];
+      return prev.slice(0, -1);
+    });
+    return popped;
   }, []);
 
   // Get all queued messages as a single text string
@@ -70,6 +89,7 @@ export function useMessageQueue({
     messageQueue,
     addMessage,
     clearQueue,
+    popLast,
     getQueuedMessagesText,
   };
 }

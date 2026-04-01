@@ -19,26 +19,34 @@ export const QueuedMessageDisplay = ({
     return null;
   }
 
+  const count = messageQueue.length;
+  const label = count === 1 ? '1 message queued' : `${count} messages queued`;
+
   return (
     <Box flexDirection="column" marginTop={1}>
+      <Box paddingLeft={2}>
+        <Text color="yellow" bold>
+          {label}
+        </Text>
+        <Text dimColor> — will send when current turn finishes</Text>
+      </Box>
       {messageQueue
         .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)
         .map((message, index) => {
           const preview = message.replace(/\s+/g, ' ');
 
           return (
-            <Box key={index} paddingLeft={2} width="100%">
+            <Box key={index} paddingLeft={4} width="100%">
               <Text dimColor wrap="truncate">
-                {preview}
+                {index + 1}. {preview}
               </Text>
             </Box>
           );
         })}
-      {messageQueue.length > MAX_DISPLAYED_QUEUED_MESSAGES && (
-        <Box paddingLeft={2}>
+      {count > MAX_DISPLAYED_QUEUED_MESSAGES && (
+        <Box paddingLeft={4}>
           <Text dimColor>
-            ... (+
-            {messageQueue.length - MAX_DISPLAYED_QUEUED_MESSAGES} more)
+            ... (+{count - MAX_DISPLAYED_QUEUED_MESSAGES} more)
           </Text>
         </Box>
       )}

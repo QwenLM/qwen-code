@@ -74,6 +74,7 @@ import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import { QueryGuard } from '../utils/QueryGuard.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -176,7 +177,7 @@ export const useGeminiStream = (
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const turnCancelledRef = useRef(false);
-  const isSubmittingQueryRef = useRef(false);
+  const queryGuardRef = useRef(new QueryGuard());
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
@@ -432,7 +433,7 @@ export const useGeminiStream = (
       return;
     }
     turnCancelledRef.current = true;
-    isSubmittingQueryRef.current = false;
+    queryGuardRef.current.forceEnd();
     abortControllerRef.current?.abort();
 
     // Report cancellation to arena status reporter (if in arena mode).
@@ -1107,26 +1108,31 @@ export const useGeminiStream = (
         typeof query === 'string' &&
         isBtwCommand(query);
 
-      // Prevent concurrent executions of submitQuery, but allow continuations
-      // which are part of the same logical flow (tool responses)
-      if (
-        isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
-        return;
+      // Tool results and btw bypass the guard — they're part of the
+      // current logical flow, not a new user-initiated query.
+      const bypassGuard =
+        submitType === SendMessageType.ToolResult ||
+        allowConcurrentBtwDuringResponse;
+
+      // Use QueryGuard to prevent concurrent queries. tryStart() returns
+      // a generation number on success, or null if already running.
+      let generation: number | null = null;
+      if (!bypassGuard) {
+        generation = queryGuardRef.current.tryStart();
+        if (generation === null) {
+          return; // Another query is already running
+        }
       }
 
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      )
+        !bypassGuard
+      ) {
+        // Release the guard — we're not actually going to run
+        if (generation !== null) queryGuardRef.current.end(generation);
         return;
-
-      // Set the flag to indicate we're now executing
-      isSubmittingQueryRef.current = true;
+      }
 
       const userMessageTimestamp = Date.now();
 
@@ -1174,7 +1180,7 @@ export const useGeminiStream = (
               );
 
         if (!shouldProceed || queryToSend === null) {
-          isSubmittingQueryRef.current = false;
+          if (generation !== null) queryGuardRef.current.end(generation);
           return;
         }
 
@@ -1239,7 +1245,9 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
-            isSubmittingQueryRef.current = false;
+            // forceEnd() already called by cancelOngoingRequest, but
+            // safe-end here too for the non-cancel codepath
+            if (generation !== null) queryGuardRef.current.end(generation);
             return;
           }
 
@@ -1276,10 +1284,13 @@ export const useGeminiStream = (
           }
         } finally {
           setIsResponding(false);
-          isSubmittingQueryRef.current = false;
+          // Generation-safe end: if forceEnd() was called during cancel,
+          // this becomes a no-op (stale generation). Otherwise it cleanly
+          // releases the guard for the queue drain to pick up.
+          if (generation !== null) queryGuardRef.current.end(generation);
 
           // Fire-and-forget memory extraction after each turn
-           
+
           import('@qwen-code/qwen-code-core')
             .then((core) => {
               if (core.extractMemories && config) {
