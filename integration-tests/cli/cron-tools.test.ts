@@ -11,6 +11,10 @@ import {
   validateModelOutput,
 } from '../test-helper.js';
 
+const IS_SANDBOX =
+  process.env['QWEN_SANDBOX'] &&
+  process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
+
 describe('cron-tools', () => {
   let rig: TestRig;
 
@@ -36,19 +40,24 @@ describe('cron-tools', () => {
     expect(result.toLowerCase()).toContain('yes');
   });
 
-  it('should have cron tools registered when enabled via env var', async () => {
-    rig = new TestRig();
-    await rig.setup('cron-tools-env-var');
+  // Env vars set in the test process are not forwarded into Docker containers,
+  // so this test cannot pass in sandbox mode.
+  (IS_SANDBOX ? it.skip : it)(
+    'should have cron tools registered when enabled via env var',
+    async () => {
+      rig = new TestRig();
+      await rig.setup('cron-tools-env-var');
 
-    process.env['QWEN_CODE_ENABLE_CRON'] = '1';
+      process.env['QWEN_CODE_ENABLE_CRON'] = '1';
 
-    const result = await rig.run(
-      'Do you have access to tools called cron_create, cron_list, and cron_delete? Reply with just "yes" or "no".',
-    );
+      const result = await rig.run(
+        'Do you have access to tools called cron_create, cron_list, and cron_delete? Reply with just "yes" or "no".',
+      );
 
-    validateModelOutput(result, null, 'cron tools via env var');
-    expect(result.toLowerCase()).toContain('yes');
-  });
+      validateModelOutput(result, null, 'cron tools via env var');
+      expect(result.toLowerCase()).toContain('yes');
+    },
+  );
 
   it('should NOT have cron tools by default', async () => {
     rig = new TestRig();
