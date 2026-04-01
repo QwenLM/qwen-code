@@ -115,3 +115,53 @@ Completed
 ### Status
 
 Completed
+
+---
+
+## Part 2 - Managed auto-memory index prompt integration
+
+### Start review
+
+- Overall plan remains: storage first, then controlled prompt integration, then recall/extract/dream.
+- Part 1 already established a safe on-disk scaffold under `.qwen/memory/`.
+- Scope for this part: load the managed `MEMORY.md` index into prompt memory without changing existing `QWEN.md` / `AGENTS.md` discovery behavior.
+
+### Goal
+
+- Add managed auto-memory prompt formatting helpers
+- Append managed auto-memory index after hierarchical memory when present
+- Preserve legacy behavior when no managed index exists
+- Add tests for prompt formatting and config integration
+
+### Implemented
+
+- Added `packages/core/src/memory/prompt.ts`
+- Added `packages/core/src/memory/prompt.test.ts`
+- Updated `Config.refreshHierarchicalMemory()` to append managed auto-memory index content
+- Added config tests for merge and legacy fallback behavior
+- Exported the new prompt helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- If `.qwen/memory/MEMORY.md` exists, it is appended to `userMemory` as a dedicated `Managed Auto-Memory` block.
+- If managed auto-memory does not exist, `userMemory` remains exactly the same as before.
+- Oversized managed indexes are truncated to a safe prompt budget.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/prompt.test.ts src/config/config.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/core/prompts.test.ts src/utils/memoryDiscovery.test.ts src/memory/store.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part only integrates the managed memory index, not relevant recall.
+- Existing hierarchical memory file discovery is unchanged.
+- Existing `save_memory` behavior is unchanged.
+
+### Status
+
+Completed

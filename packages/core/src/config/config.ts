@@ -129,6 +129,8 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { appendManagedAutoMemoryToUserMemory } from '../memory/prompt.js';
 
 import {
   ModelsConfig,
@@ -991,7 +993,15 @@ export class Config {
       this.isTrustedFolder(),
       this.getImportFormat(),
     );
-    this.setUserMemory(memoryContent);
+    const managedAutoMemoryIndex = await readAutoMemoryIndex(
+      this.getProjectRoot(),
+    );
+    this.setUserMemory(
+      appendManagedAutoMemoryToUserMemory(
+        memoryContent,
+        managedAutoMemoryIndex,
+      ),
+    );
     this.setGeminiMdFileCount(fileCount);
   }
 

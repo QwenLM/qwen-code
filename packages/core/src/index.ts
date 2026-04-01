@@ -117,6 +117,7 @@ export * from './services/shellExecutionService.js';
 export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
+export * from './memory/prompt.js';
 
 // ============================================================================
 // IDE Support

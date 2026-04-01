@@ -38,6 +38,8 @@ import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -80,6 +82,10 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi
     .fn()
     .mockResolvedValue({ memoryContent: '', fileCount: 0 }),
+}));
+
+vi.mock('../memory/store.js', () => ({
+  readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
@@ -556,6 +562,40 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithoutMemory);
 
     expect(config.getUserMemory()).toBe('');
+  });
+
+  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+    const config = new Config(baseParams);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(
+      '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).toContain('## Managed Auto-Memory');
+    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should preserve legacy behavior when no managed auto-memory index exists', async () => {
+    const config = new Config(baseParams);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toBe(
+      '--- Context from: QWEN.md ---\nProject rules',
+    );
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
