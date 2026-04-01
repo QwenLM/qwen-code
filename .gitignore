@@ -159,3 +159,9 @@ packages/*/src/**/__snapshots__/*.js.snap
 
 # beads_rust task management (local state, not source)
 .beads/
+
+# proto agent memory (local state, not source)
+.proto/
+
+# git worktrees directory (local, not source)
+.worktrees/
