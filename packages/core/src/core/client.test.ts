@@ -39,7 +39,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { scheduleAutoMemoryExtract } from '../memory/extract.js';
-import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
+import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -100,7 +100,11 @@ vi.mock('../memory/extract.js', () => ({
   }),
 }));
 vi.mock('../memory/recall.js', () => ({
-  buildRelevantAutoMemoryPromptForQuery: vi.fn().mockResolvedValue(''),
+  resolveRelevantAutoMemoryPromptForQuery: vi.fn().mockResolvedValue({
+    prompt: '',
+    selectedDocs: [],
+    strategy: 'none',
+  }),
 }));
 vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
@@ -283,6 +287,16 @@ describe('Gemini Client (client.ts)', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
+    vi.mocked(resolveRelevantAutoMemoryPromptForQuery).mockResolvedValue({
+      prompt: '',
+      selectedDocs: [],
+      strategy: 'none',
+    });
+    vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
+      patches: [],
+      touchedTopics: [],
+      cursor: { updatedAt: new Date(0).toISOString() },
+    });
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
@@ -1305,9 +1319,19 @@ hello
     });
 
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
-      vi.mocked(buildRelevantAutoMemoryPromptForQuery).mockResolvedValue(
-        '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
-      );
+      vi.mocked(resolveRelevantAutoMemoryPromptForQuery).mockResolvedValue({
+        prompt: '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+        selectedDocs: [
+          {
+            type: 'user',
+            filePath: '/test/project/root/.qwen/memory/user.md',
+            title: 'User Memory',
+            description: 'User preferences',
+            body: '- User prefers terse responses.',
+          },
+        ],
+        strategy: 'model',
+      });
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -1330,9 +1354,13 @@ hello
         // consume stream
       }
 
-      expect(buildRelevantAutoMemoryPromptForQuery).toHaveBeenCalledWith(
+      expect(resolveRelevantAutoMemoryPromptForQuery).toHaveBeenCalledWith(
         '/test/project/root',
         'Please answer tersely',
+        expect.objectContaining({
+          config: mockConfig,
+          excludedFilePaths: expect.any(Set),
+        }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
@@ -1341,6 +1369,67 @@ hello
           'Please answer tersely',
         ]),
         expect.any(AbortSignal),
+      );
+    });
+
+    it('should track surfaced managed memory paths across user queries', async () => {
+      vi.mocked(resolveRelevantAutoMemoryPromptForQuery)
+        .mockResolvedValueOnce({
+          prompt: '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+          selectedDocs: [
+            {
+              type: 'user',
+              filePath: '/test/project/root/.qwen/memory/user.md',
+              title: 'User Memory',
+              description: 'User preferences',
+              body: '- User prefers terse responses.',
+            },
+          ],
+          strategy: 'model',
+        })
+        .mockResolvedValueOnce({
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const first = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory-1',
+      );
+      for await (const _ of first) {
+        // consume stream
+      }
+
+      const second = client.sendMessageStream(
+        [{ text: 'Keep it short again' }],
+        new AbortController().signal,
+        'prompt-id-memory-2',
+      );
+      for await (const _ of second) {
+        // consume stream
+      }
+
+      expect(resolveRelevantAutoMemoryPromptForQuery).toHaveBeenNthCalledWith(
+        2,
+        '/test/project/root',
+        'Keep it short again',
+        expect.objectContaining({
+          excludedFilePaths: new Set(['/test/project/root/.qwen/memory/user.md']),
+        }),
       );
     });
 

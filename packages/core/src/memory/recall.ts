@@ -5,13 +5,17 @@
  */
 
 import * as path from 'node:path';
+import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   scanAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
+import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 
 const MAX_RELEVANT_DOCS = 3;
 const MAX_DOC_BODY_CHARS = 1_200;
+const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
 
 const TYPE_KEYWORDS: Record<string, string[]> = {
   user: ['user', 'preference', 'preferences', 'background', 'role', 'terse'],
@@ -117,11 +121,91 @@ export function buildRelevantAutoMemoryPrompt(
   ].join('\n');
 }
 
+export interface ResolveRelevantAutoMemoryPromptOptions {
+  config?: Config;
+  excludedFilePaths?: Iterable<string>;
+  limit?: number;
+}
+
+export interface RelevantAutoMemoryPromptResult {
+  prompt: string;
+  selectedDocs: ScannedAutoMemoryDocument[];
+  strategy: 'none' | 'heuristic' | 'model';
+}
+
+function filterExcludedAutoMemoryDocuments(
+  docs: ScannedAutoMemoryDocument[],
+  excludedFilePaths?: Iterable<string>,
+): ScannedAutoMemoryDocument[] {
+  if (!excludedFilePaths) {
+    return docs;
+  }
+
+  const excluded = new Set(excludedFilePaths);
+  if (excluded.size === 0) {
+    return docs;
+  }
+
+  return docs.filter((doc) => !excluded.has(doc.filePath));
+}
+
+export async function resolveRelevantAutoMemoryPromptForQuery(
+  projectRoot: string,
+  query: string,
+  options: ResolveRelevantAutoMemoryPromptOptions = {},
+): Promise<RelevantAutoMemoryPromptResult> {
+  const docs = filterExcludedAutoMemoryDocuments(
+    await scanAutoMemoryTopicDocuments(projectRoot),
+    options.excludedFilePaths,
+  );
+  const limit = options.limit ?? MAX_RELEVANT_DOCS;
+
+  if (query.trim().length === 0 || docs.length === 0 || limit <= 0) {
+    return {
+      prompt: '',
+      selectedDocs: [],
+      strategy: 'none',
+    };
+  }
+
+  if (options.config) {
+    try {
+      const selectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
+        options.config,
+        query,
+        docs,
+        limit,
+      );
+      return {
+        prompt: buildRelevantAutoMemoryPrompt(selectedDocs),
+        selectedDocs,
+        strategy: selectedDocs.length > 0 ? 'model' : 'none',
+      };
+    } catch (error) {
+      debugLogger.warn(
+        'Model-driven auto-memory recall failed; falling back to heuristic selection.',
+        error,
+      );
+    }
+  }
+
+  const selectedDocs = selectRelevantAutoMemoryDocuments(query, docs, limit);
+  return {
+    prompt: buildRelevantAutoMemoryPrompt(selectedDocs),
+    selectedDocs,
+    strategy: selectedDocs.length > 0 ? 'heuristic' : 'none',
+  };
+}
+
 export async function buildRelevantAutoMemoryPromptForQuery(
   projectRoot: string,
   query: string,
+  options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<string> {
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-  const selected = selectRelevantAutoMemoryDocuments(query, docs);
-  return buildRelevantAutoMemoryPrompt(selected);
+  const result = await resolveRelevantAutoMemoryPromptForQuery(
+    projectRoot,
+    query,
+    options,
+  );
+  return result.prompt;
 }

@@ -48,7 +48,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 // Tools
 import { AgentTool } from '../tools/agent.js';
 import { scheduleAutoMemoryExtract } from '../memory/extract.js';
-import { buildRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
+import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Telemetry
 import {
@@ -103,6 +103,7 @@ export interface SendMessageOptions {
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -188,6 +189,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    this.surfacedRelevantAutoMemoryPaths.clear();
     await this.startChat();
   }
 
@@ -635,14 +637,22 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (messageType === SendMessageType.UserQuery) {
       const systemReminders = [];
-      const relevantAutoMemoryPrompt =
-        await buildRelevantAutoMemoryPromptForQuery(
+      const relevantAutoMemory =
+        await resolveRelevantAutoMemoryPromptForQuery(
           this.config.getProjectRoot(),
           partToString(request),
+          {
+            config: this.config,
+            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+          },
         );
+      const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
 
       if (relevantAutoMemoryPrompt) {
         systemReminders.push(relevantAutoMemoryPrompt);
+        for (const doc of relevantAutoMemory.selectedDocs) {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
       }
 
       // add subagent system reminder if there are subagents

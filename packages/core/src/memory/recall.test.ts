@@ -4,12 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRelevantAutoMemoryPrompt,
+  resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
+import type { Config } from '../config/config.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
+
+vi.mock('./scan.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./scan.js')>();
+  return {
+    ...actual,
+    scanAutoMemoryTopicDocuments: vi.fn(),
+  };
+});
+
+vi.mock('./relevanceSelector.js', () => ({
+  selectRelevantAutoMemoryDocumentsByModel: vi.fn(),
+}));
 
 const docs: ScannedAutoMemoryDocument[] = [
   {
@@ -36,6 +52,10 @@ const docs: ScannedAutoMemoryDocument[] = [
 ];
 
 describe('auto-memory relevant recall', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('selects the most relevant documents for a query', () => {
     const selected = selectRelevantAutoMemoryDocuments(
       'check the dashboard reference for latency',
@@ -56,5 +76,48 @@ describe('auto-memory relevant recall', () => {
     expect(prompt).toContain('## Relevant Managed Auto-Memory');
     expect(prompt).toContain('Reference Memory (reference.md)');
     expect(prompt).toContain('User Memory (user.md)');
+  });
+
+  it('uses model-driven selection when config is provided', async () => {
+    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0],
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the dashboard reference for latency',
+      {
+        config: {} as Config,
+      },
+    );
+
+    expect(result.strategy).toBe('model');
+    expect(result.selectedDocs).toEqual([docs[0]]);
+    expect(result.prompt).toContain('Reference Memory (reference.md)');
+  });
+
+  it('falls back to heuristic selection when model-driven selection fails', async () => {
+    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector failed'),
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the dashboard reference for latency',
+      {
+        config: {} as Config,
+        excludedFilePaths: ['/tmp/user.md'],
+      },
+    );
+
+    expect(result.strategy).toBe('heuristic');
+    expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
+      '/tmp/reference.md',
+    );
+    expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
+      '/tmp/user.md',
+    );
   });
 });

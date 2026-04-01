@@ -111,6 +111,57 @@ Completed
 
 ---
 
+## Part 7 - Model-driven recall selection
+
+### Start review
+
+- Overall plan now moves from shared side-query infrastructure to the first memory consumer on top of it.
+- Part 6 already established a reusable auxiliary inference path, so the next slice should validate that platform with a real memory workflow.
+- Scope for this part: upgrade relevant auto-memory recall from heuristic-only ranking to model-driven side-query selection with safe heuristic fallback and session-level surfacing dedupe.
+
+### Goal
+
+- Add a model-driven managed memory recall selector based on side-query
+- Keep heuristic recall as a safe fallback path
+- Avoid repeatedly surfacing the same managed memory files within one session
+- Add targeted tests for selector behavior, fallback behavior, and client integration
+
+### Implemented
+
+- Added `packages/core/src/memory/relevanceSelector.ts`
+- Added `packages/core/src/memory/relevanceSelector.test.ts`
+- Updated `packages/core/src/memory/recall.ts` with model-driven resolution and excluded-file filtering
+- Updated `packages/core/src/memory/recall.test.ts` with model/fallback coverage
+- Updated `packages/core/src/core/client.ts` to track surfaced managed memory files per session
+- Updated `packages/core/src/core/client.test.ts` to cover the new recall integration path
+- Exported relevance selector helpers from `packages/core/src/index.ts`
+
+### Functional verification
+
+- Relevant auto-memory recall can now ask a lightweight side-query to choose the most relevant topic files from scanned memory candidates.
+- If the model selector fails or returns invalid paths, recall safely falls back to the existing heuristic selector.
+- Files already surfaced in the current session are excluded from later recall passes, reducing repeated prompt injection.
+
+### Test verification
+
+- Passed targeted tests:
+  - `npm exec --workspace=packages/core -- vitest run src/memory/relevanceSelector.test.ts src/memory/recall.test.ts src/core/client.test.ts`
+- Passed regression tests:
+  - `npm exec --workspace=packages/core -- vitest run src/auxiliary/sideQuery.test.ts src/core/baseLlmClient.test.ts src/core/client.test.ts src/utils/schemaValidator.test.ts src/memory/store.test.ts src/memory/prompt.test.ts src/memory/scan.test.ts src/memory/recall.test.ts src/memory/relevanceSelector.test.ts src/memory/state.test.ts src/memory/extract.test.ts src/memory/dream.test.ts`
+- Passed typecheck:
+  - `npm run typecheck --workspace=packages/core`
+
+### Notes
+
+- This part intentionally upgrades only recall selection; extraction and dream remain unchanged.
+- Session-level surfacing dedupe is in-memory for the active client process and does not yet persist across restarts.
+
+### Status
+
+Completed
+
+---
+
 ## Part 1 - Managed auto-memory storage scaffold
 
 ### Start review
