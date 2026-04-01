@@ -288,16 +288,18 @@ async function runSpeculativeLoop(
       // Keep already-executed tool responses, strip unexecuted function calls
       // from model message, and add the partial responses we do have (#18)
       if (functionResponses.length > 0) {
-        // Some tools were executed before boundary — keep their call+response pairs
-        const executedNames = new Set(
-          functionResponses
-            .filter((p) => p.functionResponse)
-            .map((p) => p.functionResponse!.name),
-        );
-        const keptModelParts = modelParts.filter(
-          (p) =>
-            !p.functionCall || executedNames.has(p.functionCall.name ?? ''),
-        );
+        // Some tools were executed before boundary — keep only the first N
+        // functionCall parts (matching functionResponses.length) by order,
+        // not by name, to handle duplicate tool names correctly.
+        let keptFunctionCalls = 0;
+        const keptModelParts = modelParts.filter((p) => {
+          if (!p.functionCall) return true;
+          if (keptFunctionCalls < functionResponses.length) {
+            keptFunctionCalls++;
+            return true;
+          }
+          return false;
+        });
         if (keptModelParts.length > 0) {
           messages[messages.length - 1] = {
             role: 'model',
