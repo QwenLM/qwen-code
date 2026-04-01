@@ -201,14 +201,18 @@ export class AcpConnection {
       };
 
       const onData = () => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
         settled = true;
         cleanup();
         resolve();
       };
 
       const onExit = (code: number | null, signal: string | null) => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
         settled = true;
         cleanup();
         reject(
@@ -219,7 +223,9 @@ export class AcpConnection {
       };
 
       const timer = setTimeout(() => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
         settled = true;
         cleanup();
         reject(
