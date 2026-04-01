@@ -407,7 +407,10 @@ export async function main() {
     const initializationResult = await initializeApp(config, settings);
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
+      await runExitCleanup();
+      process.exit(0);
     }
 
     let input = config.getQuestion();
