@@ -1062,7 +1062,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      generatePromptSuggestion(config, conversationHistory, ac.signal)
+      generatePromptSuggestion(config, conversationHistory, ac.signal, {
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+      })
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {

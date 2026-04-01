@@ -78,6 +78,7 @@ export async function generatePromptSuggestion(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
+  options?: { enableCacheSharing?: boolean },
 ): Promise<{ suggestion: string | null; filterReason?: string }> {
   // Don't suggest in very early conversations
   const modelTurns = conversationHistory.filter(
@@ -88,8 +89,8 @@ export async function generatePromptSuggestion(
   }
 
   try {
-    // Try cache-aware forked query first (shares main conversation's prefix)
-    const cacheSafe = getCacheSafeParams();
+    // Try cache-aware forked query if enabled and params available
+    const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
     const raw = cacheSafe
       ? await generateViaForkedQuery(config, abortSignal)
       : await generateViaBaseLlm(config, conversationHistory, abortSignal);

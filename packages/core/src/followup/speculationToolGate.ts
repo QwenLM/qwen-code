@@ -32,8 +32,8 @@ const SAFE_READ_ONLY_TOOLS = new Set<string>([
   ToolNames.GLOB,
   ToolNames.LS,
   ToolNames.LSP,
-  ToolNames.WEB_SEARCH,
-  ToolNames.WEB_FETCH,
+  // web_fetch and web_search excluded — they require user confirmation
+  // for external network requests, which speculation bypasses
 ]);
 
 /** Tools that produce file writes — must be redirected to overlay */
@@ -47,6 +47,8 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.MEMORY,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
 ]);
 
 /**
@@ -64,8 +66,10 @@ export async function evaluateToolCall(
   overlayFs: OverlayFs,
   approvalMode: ApprovalMode,
 ): Promise<ToolGateResult> {
-  // Safe read-only tools — always allow
+  // Safe read-only tools — allow, but resolve paths through overlay
   if (SAFE_READ_ONLY_TOOLS.has(toolName)) {
+    // Rewrite read paths to overlay if file was previously written there
+    await resolveReadPaths(args, overlayFs);
     return { action: 'allow' };
   }
 
@@ -103,6 +107,24 @@ export async function evaluateToolCall(
 
   // Unknown tools (including MCP/discovered) — boundary for safety
   return { action: 'boundary', reason: `unknown_tool:${toolName}` };
+}
+
+/**
+ * Resolve read path arguments through the overlay filesystem.
+ * If a file was previously written to the overlay, redirect reads there.
+ * Mutates the args object in place.
+ */
+async function resolveReadPaths(
+  args: Record<string, unknown>,
+  overlayFs: OverlayFs,
+): Promise<void> {
+  const pathKeys = ['file_path', 'path', 'notebook_path'];
+  for (const key of pathKeys) {
+    if (typeof args[key] === 'string') {
+      args[key] = overlayFs.resolveReadPath(args[key] as string);
+      return;
+    }
+  }
 }
 
 /**

@@ -176,7 +176,7 @@ async function main() {
     platform: 'browser',
     outfile: 'dist/webview.js',
     // @qwen-code/qwen-code-core is a peer dependency of @qwen-code/webui.
-    // Since webui v0.13.0 marks it as external in its own vite build, the
+    // Since @qwen-code/webui marks it as external in its own Vite build, the
     // browser bundle must also mark it external to avoid bundling Node.js-only
     // modules (undici, @grpc/grpc-js, fs, stream, etc.) into the webview.
     external: ['@qwen-code/qwen-code-core'],
