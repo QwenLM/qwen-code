@@ -870,6 +870,10 @@ describe('DiscoveredMCPTool', () => {
     const mockConfigWithTruncation = {
       getTruncateToolOutputThreshold: () => THRESHOLD,
       getTruncateToolOutputLines: () => TRUNCATE_LINES,
+      getToolTruncationLimits: () => ({
+        threshold: THRESHOLD,
+        lines: TRUNCATE_LINES,
+      }),
       getUsageStatisticsEnabled: () => false,
       storage: {
         getProjectTempDir: () => '/tmp/test-project',

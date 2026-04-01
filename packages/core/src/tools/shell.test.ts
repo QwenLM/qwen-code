@@ -64,6 +64,9 @@ describe('ShellTool', () => {
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
+      getToolTruncationLimits: vi
+        .fn()
+        .mockReturnValue({ threshold: 0, lines: 0 }),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({

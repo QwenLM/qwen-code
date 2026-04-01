@@ -164,9 +164,10 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
-      const charLimit = this.config.getTruncateToolOutputThreshold();
+      const limits = this.config.getToolTruncationLimits('grep_search');
+      const charLimit = limits.threshold;
       const lineLimit = Math.min(
-        this.config.getTruncateToolOutputLines(),
+        limits.lines,
         this.params.limit ?? Number.POSITIVE_INFINITY,
       );
 
