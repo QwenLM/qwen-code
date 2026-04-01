@@ -29,8 +29,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const logger = createDebugLogger('MEMORY_EXTRACTOR');
 
 const CURSOR_FILE = '.cursor';
-const MAX_EXTRACTOR_TURNS = 5;
-const MAX_EXTRACTOR_MINUTES = 2;
+const MAX_EXTRACTOR_TURNS = 2;
+const MAX_EXTRACTOR_MINUTES = 1;
 
 /**
  * System prompt for the memory extraction agent.
@@ -40,38 +40,26 @@ function buildExtractionPrompt(
   existingMemories: string,
   memoryDir: string,
 ): string {
-  return `You are a memory extraction agent for proto. Analyze the most recent ~${newMessageCount} messages in the conversation above and extract any facts worth persisting to long-term memory.
+  return `You are a memory extraction agent. Analyze the last ~${newMessageCount} messages and persist useful facts to ${memoryDir}.
 
-## Available Tools
-- read_file: Read existing memory files
-- write_file: Create/update memory files in ${memoryDir}
-- glob: List files in the memory directory
+## Strict 2-Turn Budget
+- **Turn 1:** Issue ALL read_file and glob calls in parallel to gather existing memory state.
+- **Turn 2:** Issue ALL write_file calls in parallel to create/update memories. Then stop.
+Do NOT interleave reads and writes. Do NOT use more than 2 turns.
 
-## Turn Budget
-You have at most ${MAX_EXTRACTOR_TURNS} turns. Efficient strategy:
-- Turn 1: Read existing memory files (if any) to avoid duplicates
-- Turn 2: Write new memory files for any facts worth saving
-Do not interleave reads and writes across many turns.
+## What to Extract (from last ~${newMessageCount} messages ONLY)
+Do NOT investigate source code or verify facts. Only record what was discussed.
 
-## What to Extract
-Only extract from the last ~${newMessageCount} messages. Do NOT investigate source code or verify facts — just record what was discussed.
-
-**Save when:**
+Save when:
 - User explicitly asks to remember something
 - User states a preference, role, or personal fact (type: user)
 - User corrects your approach or confirms a non-obvious method (type: feedback)
 - A deadline, decision, or project-specific fact is mentioned (type: project)
 - An external system or resource URL is referenced (type: reference)
 
-**Do NOT save:**
-- Code patterns, architecture, or file paths (derivable from code)
-- Git history or debugging solutions (in the repo)
-- Anything already in PROTO.md or AGENTS.md
-- Ephemeral task details or current conversation context
+Do NOT save: code patterns derivable from reading code, git history, debugging solutions already in the repo, anything in PROTO.md/AGENTS.md, ephemeral task details.
 
 ## Memory File Format
-Each memory file must have YAML frontmatter:
-
 \`\`\`markdown
 ---
 name: short-kebab-name
@@ -82,12 +70,12 @@ type: user|feedback|project|reference
 The actual memory content here.
 \`\`\`
 
-Save files as \`{type}_{name}.md\` in ${memoryDir}.
+Save as \`{type}_{name}.md\` in ${memoryDir}.
 
 ## Existing Memories
 ${existingMemories}
 
-Check this list before creating a new memory. If a similar memory already exists, update it instead of creating a duplicate. If nothing is worth saving, do nothing and end.`;
+Check before creating. Update existing if similar. If nothing worth saving, stop immediately.`;
 }
 
 /**
