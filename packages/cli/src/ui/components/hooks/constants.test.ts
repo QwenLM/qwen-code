@@ -163,6 +163,7 @@ describe('hooks constants', () => {
   describe('DISPLAY_HOOK_EVENTS', () => {
     it('should contain all expected hook events', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.Stop);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.StopFailure);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUseFailure);
@@ -173,11 +174,12 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStart);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SubagentStop);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionRequest);
     });
 
-    it('should have 12 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(12);
+    it('should have 14 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(14);
     });
   });
 
