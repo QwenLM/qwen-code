@@ -13,6 +13,8 @@ import {
   getShellConfiguration,
   isCommandAllowed,
   isCommandNeedsPermission,
+  isRunningInGitBash,
+  isRunningInMSYS2,
   stripShellWrapper,
 } from './shell-utils.js';
 import type { Config } from '../config/config.js';
@@ -636,27 +638,31 @@ describe('getShellConfiguration', () => {
         expect(config.shell).toBe('bash');
       });
 
-      it('should return bash configuration when MSYSTEM starts with MSYS', () => {
+      it('should return cmd.exe configuration when MSYSTEM is MSYS (MSYS2 environment)', () => {
         process.env['MSYSTEM'] = 'MSYS';
+        delete process.env['ComSpec'];
         const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expect(config.executable).toBe('cmd.exe');
+        expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
+        expect(config.shell).toBe('cmd');
       });
 
-      it('should return bash configuration when TERM includes msys', () => {
-        delete process.env['MSYSTEM'];
-        process.env['TERM'] = 'xterm-256color-msys';
+      it('should return cmd.exe configuration when MSYSTEM is UCRT64', () => {
+        process.env['MSYSTEM'] = 'UCRT64';
+        delete process.env['ComSpec'];
         const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expect(config.executable).toBe('cmd.exe');
+        expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
+        expect(config.shell).toBe('cmd');
+      });
+
+      it('should return cmd.exe configuration when MSYSTEM is CLANG64', () => {
+        process.env['MSYSTEM'] = 'CLANG64';
+        delete process.env['ComSpec'];
+        const config = getShellConfiguration();
+        expect(config.executable).toBe('cmd.exe');
+        expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
+        expect(config.shell).toBe('cmd');
       });
 
       it('should return bash configuration when TERM includes cygwin', () => {
@@ -704,6 +710,113 @@ describe('getShellConfiguration', () => {
         expect(config.shell).toBe('bash');
       });
     });
+  });
+});
+
+describe('isRunningInMSYS2', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('should return true when MSYSTEM is MSYS', () => {
+    process.env['MSYSTEM'] = 'MSYS';
+    expect(isRunningInMSYS2()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM is UCRT64', () => {
+    process.env['MSYSTEM'] = 'UCRT64';
+    expect(isRunningInMSYS2()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM is CLANG64', () => {
+    process.env['MSYSTEM'] = 'CLANG64';
+    expect(isRunningInMSYS2()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM starts with UCRT', () => {
+    process.env['MSYSTEM'] = 'UCRT123';
+    expect(isRunningInMSYS2()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM starts with CLANG', () => {
+    process.env['MSYSTEM'] = 'CLANG123';
+    expect(isRunningInMSYS2()).toBe(true);
+  });
+
+  it('should return false when MSYSTEM is MINGW64', () => {
+    process.env['MSYSTEM'] = 'MINGW64';
+    expect(isRunningInMSYS2()).toBe(false);
+  });
+
+  it('should return false when MSYSTEM is undefined', () => {
+    delete process.env['MSYSTEM'];
+    expect(isRunningInMSYS2()).toBe(false);
+  });
+
+  it('should return false when MSYSTEM is UNKNOWN', () => {
+    process.env['MSYSTEM'] = 'UNKNOWN';
+    expect(isRunningInMSYS2()).toBe(false);
+  });
+});
+
+describe('isRunningInGitBash', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('should return true when MSYSTEM is MINGW64', () => {
+    process.env['MSYSTEM'] = 'MINGW64';
+    expect(isRunningInGitBash()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM is MINGW32', () => {
+    process.env['MSYSTEM'] = 'MINGW32';
+    expect(isRunningInGitBash()).toBe(true);
+  });
+
+  it('should return true when MSYSTEM starts with MINGW', () => {
+    process.env['MSYSTEM'] = 'MINGW123';
+    expect(isRunningInGitBash()).toBe(true);
+  });
+
+  it('should return true when TERM includes cygwin', () => {
+    delete process.env['MSYSTEM'];
+    process.env['TERM'] = 'xterm-256color-cygwin';
+    expect(isRunningInGitBash()).toBe(true);
+  });
+
+  it('should return false when MSYSTEM is UCRT64', () => {
+    process.env['MSYSTEM'] = 'UCRT64';
+    expect(isRunningInGitBash()).toBe(false);
+  });
+
+  it('should return false when MSYSTEM is MSYS', () => {
+    process.env['MSYSTEM'] = 'MSYS';
+    expect(isRunningInGitBash()).toBe(false);
+  });
+
+  it('should return false when MSYSTEM and TERM do not indicate Git Bash', () => {
+    process.env['MSYSTEM'] = 'UNKNOWN';
+    process.env['TERM'] = 'xterm';
+    expect(isRunningInGitBash()).toBe(false);
+  });
+
+  it('should return false when MSYSTEM and TERM are undefined', () => {
+    delete process.env['MSYSTEM'];
+    delete process.env['TERM'];
+    expect(isRunningInGitBash()).toBe(false);
   });
 });
 

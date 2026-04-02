@@ -13,7 +13,10 @@ import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import {
+  getShellConfiguration,
+  isRunningInMSYS2,
+} from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -341,7 +344,9 @@ export class ShellExecutionService {
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
   ): Promise<ShellExecutionHandle> {
-    if (shouldUseNodePty) {
+    // MSYS2 bash is incompatible with Windows ConPTY (causes crashes)
+    // Fallback to child_process in MSYS2 environments
+    if (shouldUseNodePty && !isRunningInMSYS2()) {
       const ptyInfo = await getPty();
       if (ptyInfo) {
         try {

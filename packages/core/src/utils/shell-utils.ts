@@ -113,17 +113,21 @@ function findGitBashPath(): string {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
-    // Detect Git Bash / MSYS2 / MinTTY environments
-    // These environments should use bash instead of cmd/PowerShell
-    const msystem = process.env['MSYSTEM'];
-    const term = process.env['TERM'] || '';
-    const isGitBash =
-      msystem?.startsWith('MINGW') ||
-      msystem?.startsWith('MSYS') ||
-      term.includes('msys') ||
-      term.includes('cygwin');
+    // MSYS2 environments (UCRT64, CLANG64, MSYS, etc.)
+    // Use system default shell (cmd.exe or PowerShell) to avoid crashes
+    // because MSYS2 bash is incompatible with Windows ConPTY
+    if (isRunningInMSYS2()) {
+      const comSpec = process.env['ComSpec'] || 'cmd.exe';
+      return {
+        executable: comSpec,
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      };
+    }
 
-    if (isGitBash) {
+    // Git Bash environments (MINGW64, MINGW32, etc.)
+    // Use findGitBashPath() to locate Git Bash correctly
+    if (isRunningInGitBash()) {
       return {
         executable: findGitBashPath(),
         argsPrefix: ['-c'],
@@ -131,6 +135,7 @@ export function getShellConfiguration(): ShellConfiguration {
       };
     }
 
+    // Other Windows environments - use system default shell
     const comSpec = process.env['ComSpec'] || 'cmd.exe';
     const executable = comSpec.toLowerCase();
 
@@ -168,6 +173,29 @@ export function getShellConfiguration(): ShellConfiguration {
  * Export the platform detection constant for use in process management (e.g., killing processes).
  */
 export const isWindows = () => os.platform() === 'win32';
+
+/**
+ * 检测当前是否运行在 MSYS2 环境中
+ * @returns true if running under MSYS2 (UCRT64, CLANG64, MSYS, etc.)
+ */
+export function isRunningInMSYS2(): boolean {
+  const msystem = process.env['MSYSTEM'];
+  return Boolean(
+    msystem === 'MSYS' ||
+      msystem?.startsWith('UCRT') ||
+      msystem?.startsWith('CLANG'),
+  );
+}
+
+/**
+ * 检测当前是否运行在 Git Bash 环境中
+ * @returns true if running under Git Bash (MINGW64, MINGW32, etc.)
+ */
+export function isRunningInGitBash(): boolean {
+  const msystem = process.env['MSYSTEM'];
+  const term = process.env['TERM'] || '';
+  return Boolean(msystem?.startsWith('MINGW') || term.includes('cygwin'));
+}
 
 /**
  * Escapes a string so that it can be safely used as a single argument

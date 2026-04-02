@@ -77,6 +77,7 @@ vi.mock('../utils/terminalSerializer.js', () => ({
 }));
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
+  isRunningInMSYS2: vi.fn().mockReturnValue(false),
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
   getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
