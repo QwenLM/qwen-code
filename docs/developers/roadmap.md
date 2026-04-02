@@ -22,7 +22,7 @@
 | Unified WebUI           | `V0.9.0`  | Shared WebUI component library for VSCode/CLI           | User Experience                 | 2     |
 | Export Chat             | `V0.8.0`  | Export sessions to Markdown/HTML/JSON/JSONL             | User Experience                 | 2     |
 | Extension System        | `V0.8.0`  | Full extension management with slash commands           | Building Open Capabilities      | 2     |
-| LSP Support             | `V0.7.0`  | Experimental LSP service (`--experimental-lsp`)         | Coding Workflow                 | 2     |
+| LSP Support             | `V0.14.0` | GA LSP service (auto-detects `.lsp.json`)               | Coding Workflow                 | 2     |
 | Anthropic Provider      | `V0.7.0`  | Anthropic API provider support                          | User Experience                 | 2     |
 | User Feedback Dialog    | `V0.7.0`  | In-app feedback collection with fatigue mechanism       | Administrative Capabilities     | 2     |
 | Concurrent Runner       | `V0.6.0`  | Batch CLI execution with Git integration                | Coding Workflow                 | 2     |

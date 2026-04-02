@@ -15,13 +15,23 @@ LSP support in Qwen Code works by connecting to language servers that understand
 
 ## Quick Start
 
-LSP is an experimental feature in Qwen Code. To enable it, use the `--experimental-lsp` command line flag:
+LSP auto-enables when a `.lsp.json` file exists in your project root. You can also enable it explicitly:
 
 ```bash
-qwen --experimental-lsp
+proto --lsp
 ```
 
-LSP servers are configuration-driven. You must define them in `.lsp.json` (or via extensions) for Qwen Code to start them.
+Or in `~/.proto/settings.json`:
+
+```json
+{
+  "general": {
+    "lsp": true
+  }
+}
+```
+
+LSP servers are configuration-driven. Define them in `.lsp.json` (or via extensions) for proto to start them.
 
 ### Prerequisites
 
@@ -342,7 +352,7 @@ You can override trust requirements for specific servers in their configuration:
 2. **Check the PATH**: Ensure the server binary is in your system PATH
 3. **Check workspace trust**: The workspace must be trusted for LSP
 4. **Check logs**: Look for error messages in the console output
-5. **Verify --experimental-lsp flag**: Make sure you're using the flag when starting Qwen Code
+5. **Verify LSP is enabled**: Check that `.lsp.json` exists or `--lsp` flag is set
 
 ### Slow Performance
 
@@ -360,7 +370,7 @@ You can override trust requirements for specific servers in their configuration:
 Enable debug logging to see LSP communication:
 
 ```bash
-DEBUG=lsp* qwen --experimental-lsp
+DEBUG=lsp* proto --lsp
 ```
 
 Or check the LSP debugging guide at `packages/cli/LSP_DEBUGGING_GUIDE.md`.
@@ -398,11 +408,7 @@ Claude Code LSP plugins can also supply `lspServers` in `plugin.json` (or a refe
 
 ### Q: How do I enable LSP?
 
-Use the `--experimental-lsp` flag when starting Qwen Code:
-
-```bash
-qwen --experimental-lsp
-```
+Place a `.lsp.json` in your project root — LSP auto-enables. Or run `proto --lsp`, or set `general.lsp: true` in settings.
 
 ### Q: How do I know which language servers are running?
 
@@ -444,4 +450,4 @@ for await (const message of conversation) {
 }
 ```
 
-The SDK passes `--experimental-lsp` to the CLI process. Language servers are configured via `.lsp.json` or installed LSP plugins, the same as CLI usage. The `SDKLspDiagnosticEvent` surfaces diagnostics in the message stream so your application can react to type errors, missing imports, and other issues.
+The SDK passes `--lsp` to the CLI process. Language servers are configured via `.lsp.json` or installed LSP plugins, the same as CLI usage. The `SDKLspDiagnosticEvent` surfaces diagnostics in the message stream so your application can react to type errors, missing imports, and other issues.
