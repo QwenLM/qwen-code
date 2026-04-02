@@ -486,14 +486,18 @@ export const loopCommand: SlashCommand = {
         (settings?.['loopMaxConcurrent'] as number) ?? DEFAULT_MAX_LOOPS;
       let restored = 0;
       let firstPrompt: string | null = null;
+      let firstRestoredId: string | null = null;
       for (const task of persisted.tasks) {
         if (manager.getActiveCount() >= maxLoops) break;
         // Restore with persisted iteration count so --max loops don't reset
-        manager.start(
+        const restoredId = manager.start(
           { ...task.config, id: task.id, resumeIteration: task.iteration },
           true,
         );
-        if (!firstPrompt) firstPrompt = task.config.prompt;
+        if (!firstPrompt) {
+          firstPrompt = task.config.prompt;
+          firstRestoredId = restoredId;
+        }
         restored++;
       }
 
@@ -510,9 +514,10 @@ export const loopCommand: SlashCommand = {
         Date.now(),
       );
 
-      // Only submit the prompt if the first restored loop got the streaming slot.
+      // Only submit if the first restored loop actually got the streaming slot.
       const waitingId = manager.getWaitingLoopId();
-      if (firstPrompt && waitingId) {
+      if (firstPrompt && waitingId && waitingId === firstRestoredId) {
+        manager.startSafetyTimer();
         return {
           type: 'submit_prompt' as const,
           content: [{ text: firstPrompt }],
@@ -646,6 +651,9 @@ export const loopCommand: SlashCommand = {
     // Only submit the prompt if this loop got the streaming slot.
     // If the slot was busy, the loop will fire via its timer instead.
     if (manager.getWaitingLoopId() === loopIdResult) {
+      // Start safety timer for the first iteration (the iteration callback
+      // isn't invoked for skip-first-iteration, so we start it here).
+      manager.startSafetyTimer();
       return {
         type: 'submit_prompt' as const,
         content: [{ text: parsed.prompt }],
