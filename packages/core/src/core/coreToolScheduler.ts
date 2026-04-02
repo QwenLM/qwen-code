@@ -65,6 +65,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import { PermissionDenialTracker } from '../services/permissionDenialTracker.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -339,6 +340,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private permissionDenialTracker = new PermissionDenialTracker();
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private requestQueue: Array<{
@@ -711,7 +713,11 @@ export class CoreToolScheduler {
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
             : '';
-          const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+          const permissionErrorMessage =
+            this.permissionDenialTracker.recordDenial(
+              reqInfo.name,
+              `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`,
+            );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -735,7 +741,11 @@ export class CoreToolScheduler {
                 excludedTool.toLowerCase().trim() === normalizedToolName,
             );
             if (excludedMatch) {
-              const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
+              const permissionErrorMessage =
+                this.permissionDenialTracker.recordDenial(
+                  reqInfo.name,
+                  `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`,
+                );
               newToolCalls.push({
                 status: 'error',
                 request: reqInfo,
@@ -885,6 +895,10 @@ export class CoreToolScheduler {
                 : '';
               denyMessage = `Tool "${reqInfo.name}" is denied by permission rules.${ruleInfo}`;
             }
+            denyMessage = this.permissionDenialTracker.recordDenial(
+              reqInfo.name,
+              denyMessage,
+            );
             this.setStatusInternal(
               reqInfo.callId,
               'error',
@@ -961,7 +975,10 @@ export class CoreToolScheduler {
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
             if (shouldAutoDeny) {
-              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+              const errorMessage = this.permissionDenialTracker.recordDenial(
+                reqInfo.name,
+                `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`,
+              );
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -1057,15 +1074,17 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     ToolConfirmationOutcome.Cancel,
                   );
+                  const hookDenyMsg = this.permissionDenialTracker.recordDenial(
+                    reqInfo.name,
+                    hookResult.denyMessage ||
+                      `Permission denied by hook for "${reqInfo.name}"`,
+                  );
                   this.setStatusInternal(
                     reqInfo.callId,
                     'error',
                     createErrorResponse(
                       reqInfo,
-                      new Error(
-                        hookResult.denyMessage ||
-                          `Permission denied by hook for "${reqInfo.name}"`,
-                      ),
+                      new Error(hookDenyMsg),
                       ToolErrorType.EXECUTION_DENIED,
                     ),
                   );
@@ -1346,8 +1365,10 @@ export class CoreToolScheduler {
 
       if (!preHookResult.shouldProceed) {
         // Hook blocked the execution
-        const blockMessage =
-          preHookResult.blockReason || 'Tool execution blocked by hook';
+        const blockMessage = this.permissionDenialTracker.recordDenial(
+          toolName,
+          preHookResult.blockReason || 'Tool execution blocked by hook',
+        );
         const errorResponse = createErrorResponse(
           scheduledCall.request,
           new Error(blockMessage),
@@ -1466,8 +1487,10 @@ export class CoreToolScheduler {
 
           // Check if hook requested to stop execution
           if (postHookResult.shouldStop) {
-            const stopMessage =
-              postHookResult.stopReason || 'Execution stopped by hook';
+            const stopMessage = this.permissionDenialTracker.recordDenial(
+              toolName,
+              postHookResult.stopReason || 'Execution stopped by hook',
+            );
             const errorResponse = createErrorResponse(
               scheduledCall.request,
               new Error(stopMessage),
