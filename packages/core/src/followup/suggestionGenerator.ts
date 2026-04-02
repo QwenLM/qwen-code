@@ -137,7 +137,7 @@ async function generateViaForkedQuery(
   const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
     abortSignal,
     jsonSchema: SUGGESTION_SCHEMA,
-    model: modelOverride,
+    model,
   });
   const durationMs = Date.now() - startTime;
 
