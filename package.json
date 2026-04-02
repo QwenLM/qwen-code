@@ -57,7 +57,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
     "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
-    "prepare": "husky && npm run build && npm run bundle",
+    "prepare": "(husky || true) && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
