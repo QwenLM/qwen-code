@@ -95,6 +95,11 @@
           "type": "boolean",
           "default": true
         },
+        "lsp": {
+          "description": "Enable Language Server Protocol for code intelligence (goToDefinition, diagnostics, hover, etc.). Auto-enabled when .lsp.json exists in the project root.",
+          "type": "boolean",
+          "default": false
+        },
         "defaultFileEncoding": {
           "description": "Default encoding for new files. Use \"utf-8\" (default) for UTF-8 without BOM, or \"utf-8-bom\" for UTF-8 with BOM. Only change this if your project specifically requires BOM. Options: utf-8, utf-8-bom",
           "enum": [
