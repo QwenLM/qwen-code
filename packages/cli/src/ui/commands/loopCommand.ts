@@ -112,13 +112,17 @@ function parseLoopArgs(args: string): ParsedArgs {
     startIndex += 2;
   }
 
-  // --max N
-  if (tokens[startIndex] === '--max' && startIndex + 1 < tokens.length) {
-    const maxVal = parseInt(tokens[startIndex + 1], 10);
-    if (!isNaN(maxVal) && maxVal > 0) {
-      maxIterations = maxVal;
-      startIndex += 2;
+  // --max N — require valid positive integer; treat missing/invalid as error (empty prompt → usage)
+  if (tokens[startIndex] === '--max') {
+    if (startIndex + 1 >= tokens.length) {
+      return { intervalMs, maxIterations: 0, prompt: '', loopId }; // triggers usage error
     }
+    const maxVal = parseInt(tokens[startIndex + 1], 10);
+    if (isNaN(maxVal) || maxVal <= 0) {
+      return { intervalMs, maxIterations: 0, prompt: '', loopId }; // triggers usage error
+    }
+    maxIterations = maxVal;
+    startIndex += 2;
   }
 
   let prompt = tokens.slice(startIndex).join(' ');

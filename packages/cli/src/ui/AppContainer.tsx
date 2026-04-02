@@ -953,9 +953,8 @@ export const AppContainer = (props: AppContainerProps) => {
       (prompt: string, iteration: number, loopId: string) => {
         const state = loopManager.getState(loopId);
         const interval = formatInterval(state?.config.intervalMs ?? 0);
-        const maxInfo = state?.config.maxIterations
-          ? `/${state.config.maxIterations}`
-          : '';
+        const maxIterations = state?.config.maxIterations;
+        const maxInfo = maxIterations ? `/${maxIterations}` : '';
         const label = state?.config.label ?? loopId;
         historyManagerRef.current.addItem(
           {
@@ -1017,7 +1016,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Release lock on unmount so other sessions can take over
       void releaseLock(qwenDir, `session-${process.pid}`);
       lm.stop();
-      lm.setIterationCallback(() => {});
+      lm.setIterationCallback(null);
     };
   }, []);
 

@@ -27,16 +27,39 @@ function isValidTask(t: unknown): t is PersistedLoopState {
   if (t === null || typeof t !== 'object') return false;
   const p = t as Record<string, unknown>;
   if (typeof p['id'] !== 'string') return false;
-  if (typeof p['iteration'] !== 'number') return false;
-  if (typeof p['startedAt'] !== 'number') return false;
-  if (typeof p['createdAt'] !== 'number') return false;
+  if (
+    typeof p['iteration'] !== 'number' ||
+    !Number.isFinite(p['iteration'] as number)
+  )
+    return false;
+  if (
+    typeof p['startedAt'] !== 'number' ||
+    !Number.isFinite(p['startedAt'] as number)
+  )
+    return false;
+  if (
+    typeof p['createdAt'] !== 'number' ||
+    !Number.isFinite(p['createdAt'] as number)
+  )
+    return false;
+  // nextFireAt must be number (finite) or null
+  if (
+    p['nextFireAt'] !== null &&
+    (typeof p['nextFireAt'] !== 'number' ||
+      !Number.isFinite(p['nextFireAt'] as number))
+  )
+    return false;
 
   const cfg = p['config'];
   if (cfg === null || typeof cfg !== 'object') return false;
   const c = cfg as Record<string, unknown>;
   if (typeof c['prompt'] !== 'string' || (c['prompt'] as string).length === 0)
     return false;
-  if (typeof c['intervalMs'] !== 'number') return false;
+  if (
+    typeof c['intervalMs'] !== 'number' ||
+    !Number.isFinite(c['intervalMs'] as number)
+  )
+    return false;
   if (
     (c['intervalMs'] as number) < MIN_INTERVAL_MS ||
     (c['intervalMs'] as number) > MAX_INTERVAL_MS
@@ -44,6 +67,7 @@ function isValidTask(t: unknown): t is PersistedLoopState {
     return false;
   if (
     typeof c['maxIterations'] !== 'number' ||
+    !Number.isFinite(c['maxIterations'] as number) ||
     (c['maxIterations'] as number) < 0
   )
     return false;

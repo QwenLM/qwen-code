@@ -182,7 +182,7 @@ export class LoopManager {
 
   // -- Callback registration -----------------------------------------------
 
-  setIterationCallback(callback: LoopIterationCallback): void {
+  setIterationCallback(callback: LoopIterationCallback | null): void {
     this.onIteration = callback;
   }
 
@@ -196,6 +196,28 @@ export class LoopManager {
    * If `config.id` is provided, it coexists with other loops.
    */
   start(config: LoopConfig, skipFirstIteration = false): string {
+    if (!this.onIteration) {
+      throw new Error(
+        'Cannot start loop: no iteration callback registered. Call setIterationCallback() first.',
+      );
+    }
+    if (
+      !Number.isFinite(config.intervalMs) ||
+      config.intervalMs < MIN_INTERVAL_MS ||
+      config.intervalMs > MAX_INTERVAL_MS
+    ) {
+      throw new Error(
+        `intervalMs must be between ${MIN_INTERVAL_MS} and ${MAX_INTERVAL_MS}`,
+      );
+    }
+    if (
+      !Number.isFinite(config.maxIterations) ||
+      config.maxIterations < 0 ||
+      !Number.isInteger(config.maxIterations)
+    ) {
+      throw new Error('maxIterations must be a non-negative integer');
+    }
+
     const id = config.id ?? generateLoopId();
 
     // Legacy (unnamed) path: replace the previous default loop
@@ -495,7 +517,7 @@ export class LoopManager {
       (t) =>
         t.nextFireAt !== null &&
         t.nextFireAt < now &&
-        (t.config.expiresAt === undefined || t.config.expiresAt > now),
+        (!t.config.expiresAt || t.config.expiresAt > now),
     );
   }
 
@@ -572,10 +594,10 @@ export class LoopManager {
     state.nextFireAt = targetTime;
 
     if (intervalMs <= MAX_SINGLE_TIMEOUT_MS) {
-      state.timerId = setTimeout(
-        () => this.executeIteration(loopId),
-        intervalMs,
-      );
+      state.timerId = setTimeout(() => {
+        state.timerId = null;
+        this.executeIteration(loopId);
+      }, intervalMs);
     } else {
       const check = () => {
         const s = this.tasks.get(loopId);
