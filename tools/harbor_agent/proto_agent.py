@@ -325,12 +325,15 @@ class ProtoAgent(BaseInstalledAgent):
             if "ANTHROPIC_BASE_URL" not in env:
                 env["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
 
+        # Build model flag — pass explicitly to avoid env var confusion between auth types
+        model_flag = f"--model {model}" if model else ""
+
         try:
             await self.exec_as_agent(
                 environment,
                 command=(
                     ". ~/.nvm/nvm.sh; "
-                    f"proto --yolo {auth_flag} --prompt={escaped_instruction} "
+                    f"proto --yolo {auth_flag} {model_flag} --prompt={escaped_instruction} "
                     f"2>&1 | stdbuf -oL tee /logs/agent/proto.txt"
                 ),
                 env=env,
