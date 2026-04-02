@@ -66,6 +66,7 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
   return {
     getContentGeneratorConfig: () => configContent,
     getAuthType: () => configContent.authType as AuthType | undefined,
+    getWorkingDir: () => process.cwd(),
   } as Config;
 };
 

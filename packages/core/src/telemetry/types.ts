@@ -802,6 +802,53 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * Hook call telemetry event
+ */
+export class HookCallEvent implements BaseTelemetryEvent {
+  'event.name': string;
+  'event.timestamp': string;
+  hook_event_name: string;
+  hook_type: 'command';
+  hook_name: string;
+  hook_input: Record<string, unknown>;
+  hook_output?: Record<string, unknown>;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_ms: number;
+  success: boolean;
+  error?: string;
+
+  constructor(
+    hookEventName: string,
+    hookType: 'command',
+    hookName: string,
+    hookInput: Record<string, unknown>,
+    durationMs: number,
+    success: boolean,
+    hookOutput?: Record<string, unknown>,
+    exitCode?: number,
+    stdout?: string,
+    stderr?: string,
+    error?: string,
+  ) {
+    this['event.name'] = 'hook_call';
+    this['event.timestamp'] = new Date().toISOString();
+    this.hook_event_name = hookEventName;
+    this.hook_type = hookType;
+    this.hook_name = hookName;
+    this.hook_input = hookInput;
+    this.hook_output = hookOutput;
+    this.exit_code = exitCode;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.duration_ms = durationMs;
+    this.success = success;
+    this.error = error;
+  }
+}
+
 export class SkillLaunchEvent implements BaseTelemetryEvent {
   'event.name': 'skill_launch';
   'event.timestamp': string;
@@ -877,6 +924,7 @@ export type TelemetryEvent =
   | ToolOutputTruncatedEvent
   | ModelSlashCommandEvent
   | AuthEvent
+  | HookCallEvent
   | SkillLaunchEvent
   | UserFeedbackEvent
   | ArenaSessionStartedEvent

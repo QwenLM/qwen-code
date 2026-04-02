@@ -92,10 +92,17 @@ export enum SendMessageType {
   ToolResult = 'toolResult',
   Retry = 'retry',
   Hook = 'hook',
+  /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
+  Cron = 'cron',
 }
 
 export interface SendMessageOptions {
   type: SendMessageType;
+  /** Track stop hook iterations to prevent infinite loops and display loop info */
+  stopHookState?: {
+    iterationCount: number;
+    reasons: string[];
+  };
 }
 
 export class GeminiClient {
@@ -463,9 +470,15 @@ export class GeminiClient {
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
-    const hooksEnabled = this.config.getEnableHooks();
+    const hooksEnabled = !this.config.getDisableAllHooks();
     const messageBus = this.config.getMessageBus();
-    if (messageType !== SendMessageType.Retry && hooksEnabled && messageBus) {
+    if (
+      messageType !== SendMessageType.Retry &&
+      messageType !== SendMessageType.Cron &&
+      hooksEnabled &&
+      messageBus &&
+      this.config.hasHooksForEvent('UserPromptSubmit')
+    ) {
       const promptText = partToString(request);
       const response = await messageBus.request<
         HookExecutionRequest,
@@ -489,11 +502,10 @@ export class GeminiClient {
         hookOutput?.shouldStopExecution()
       ) {
         yield {
-          type: GeminiEventType.Error,
+          type: GeminiEventType.UserPromptSubmitBlocked,
           value: {
-            error: new Error(
-              `UserPromptSubmit hook blocked processing: ${hookOutput.getEffectiveReason()}`,
-            ),
+            reason: hookOutput.getEffectiveReason(),
+            originalPrompt: promptText,
           },
         };
         return new Turn(this.getChat(), prompt_id);
@@ -507,7 +519,10 @@ export class GeminiClient {
       }
     }
 
-    if (messageType === SendMessageType.UserQuery) {
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron
+    ) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
 
@@ -605,7 +620,10 @@ export class GeminiClient {
 
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (messageType === SendMessageType.UserQuery) {
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron
+    ) {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
@@ -675,14 +693,15 @@ export class GeminiClient {
         return turn;
       }
     }
-    // Fire Stop hook through MessageBus (only if hooks are enabled)
+    // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
     // This must be done before any early returns to ensure hooks are always triggered
     if (
       hooksEnabled &&
       messageBus &&
       !turn.pendingToolCalls.length &&
       signal &&
-      !signal.aborted
+      !signal.aborted &&
+      this.config.hasHooksForEvent('Stop')
     ) {
       // Get response text from the chat history
       const history = this.getHistory();
@@ -741,12 +760,42 @@ export class GeminiClient {
         }
 
         const continueReason = stopOutput.getEffectiveReason();
+
+        // Track stop hook iterations
+        const currentIterationCount =
+          (options?.stopHookState?.iterationCount ?? 0) + 1;
+        const currentReasons = [
+          ...(options?.stopHookState?.reasons ?? []),
+          continueReason,
+        ];
+
+        // Emit StopHookLoop event for iterations after the first one.
+        // The first iteration (currentIterationCount === 1) is the initial request,
+        // so there's no prior stop hook execution to report. We only emit this event
+        // when stop hooks have been executed multiple times (loop detected).
+        if (currentIterationCount > 1) {
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
+        }
+
         const continueRequest = [{ text: continueReason }];
         return yield* this.sendMessageStream(
           continueRequest,
           signal,
           prompt_id,
-          { type: SendMessageType.Hook },
+          {
+            type: SendMessageType.Hook,
+            stopHookState: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+            },
+          },
           boundedTurns - 1,
         );
       }

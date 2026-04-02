@@ -132,9 +132,16 @@ export class AcpConnection {
 
   private async setupChildProcessHandlers(): Promise<void> {
     let spawnError: Error | null = null;
+    const stderrChunks: string[] = [];
+
+    let rejectOnExit: ((error: Error) => void) | null = null;
+    const processExitPromise = new Promise<never>((_resolve, reject) => {
+      rejectOnExit = reject;
+    });
 
     this.child!.stderr?.on('data', (data: Buffer) => {
       const message = data.toString();
+      stderrChunks.push(message);
       if (
         message.toLowerCase().includes('error') &&
         !message.includes('Loaded cached')
@@ -155,6 +162,17 @@ export class AcpConnection {
       );
       this.lastExitCode = code;
       this.lastExitSignal = signal;
+
+      const stderrOutput = stderrChunks.join('').trim();
+      const stderrSuffix = stderrOutput
+        ? `\nCLI stderr: ${stderrOutput.slice(-500)}`
+        : '';
+      rejectOnExit?.(
+        new Error(
+          `Qwen ACP process exited unexpectedly (exit code: ${code}, signal: ${signal})${stderrSuffix}`,
+        ),
+      );
+
       if (this.child) {
         this.sdkConnection = null;
         this.sessionId = null;
@@ -172,8 +190,12 @@ export class AcpConnection {
     if (!this.child || this.child.killed) {
       const code = this.lastExitCode ?? this.child?.exitCode ?? null;
       const signal = this.lastExitSignal;
+      const stderrOutput = stderrChunks.join('').trim();
+      const stderrSuffix = stderrOutput
+        ? `\nCLI stderr: ${stderrOutput.slice(-500)}`
+        : '';
       throw new Error(
-        `Qwen ACP process failed to start (exit code: ${code}, signal: ${signal})`,
+        `Qwen ACP process failed to start (exit code: ${code}, signal: ${signal})${stderrSuffix}`,
       );
     }
 
@@ -330,17 +352,21 @@ export class AcpConnection {
       stream,
     );
 
-    // Initialize protocol via SDK
+    // Race the SDK initialize against process exit so we don't hang forever
+    // if the CLI crashes before responding.
     console.log('[ACP] Sending initialize request...');
-    const initResponse = await this.sdkConnection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: {
-          readTextFile: true,
-          writeTextFile: true,
+    const initResponse = await Promise.race([
+      this.sdkConnection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true,
+          },
         },
-      },
-    });
+      }),
+      processExitPromise,
+    ]);
 
     console.log('[ACP] Initialize successful');
     console.log('[ACP] Initialization response:', initResponse);

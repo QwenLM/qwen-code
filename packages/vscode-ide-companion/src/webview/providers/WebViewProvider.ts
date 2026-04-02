@@ -76,6 +76,8 @@ export class WebViewProvider {
         this.pendingAskUserQuestionResolve = null;
         this.pendingAskUserQuestionRequest = null;
       }
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
     this.messageHandler = new MessageHandler(
@@ -256,25 +258,6 @@ export class WebViewProvider {
 
     this.agentManager.onPermissionRequest(
       async (request: RequestPermissionRequest) => {
-        // Auto-approve in auto/yolo mode (no UI, no diff)
-        if (this.isAutoMode()) {
-          const options = request.options || [];
-          const pick = (substr: string) =>
-            options.find((o) =>
-              (o.optionId || '').toLowerCase().includes(substr),
-            )?.optionId;
-          const pickByKind = (k: string) =>
-            options.find((o) => (o.kind || '').toLowerCase().includes(k))
-              ?.optionId;
-          const optionId =
-            pick('allow_once') ||
-            pickByKind('allow') ||
-            pick('proceed') ||
-            options[0]?.optionId ||
-            'allow_once';
-          return optionId;
-        }
-
         // Send permission request to WebView
         this.sendMessageToWebView({
           type: 'permissionRequest',
@@ -597,6 +580,8 @@ export class WebViewProvider {
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
       this.attachedWebview = null;
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
 

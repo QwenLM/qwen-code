@@ -17,6 +17,7 @@ export default {
     type: 'separator',
   },
 
+  'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
 
   examples: {

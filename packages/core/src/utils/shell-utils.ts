@@ -7,6 +7,7 @@
 import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
+import path from 'node:path';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -38,6 +39,70 @@ export interface ShellConfiguration {
   shell: ShellType;
 }
 
+let cachedBashPath: string | undefined;
+
+/**
+ * Attempts to find the Git Bash executable path on Windows.
+ * Checks common installation locations and PATH.
+ * @returns The path to bash.exe if found, or 'bash' as fallback.
+ */
+function findGitBashPath(): string {
+  // Return cached result if available
+  if (cachedBashPath) {
+    return cachedBashPath;
+  }
+
+  // Search in PATH directories
+  const pathEnv = process.env['PATH'] || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    const bashPath = path.join(dir, 'bash.exe');
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Check common Git Bash installation locations
+  const commonPaths = [
+    path.join('C:', 'Program Files', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join(
+      process.env['ProgramFiles'] || path.join('C:', 'Program Files'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+    path.join(
+      process.env['ProgramFiles(x86)'] ||
+        path.join('C:', 'Program Files (x86)'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+  ];
+
+  for (const bashPath of commonPaths) {
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Fallback to 'bash' and let the system handle it
+  cachedBashPath = 'bash';
+  return 'bash';
+}
+
 /**
  * Determines the appropriate shell configuration for the current platform.
  *
@@ -48,6 +113,24 @@ export interface ShellConfiguration {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
+    // Detect Git Bash / MSYS2 / MinTTY environments
+    // These environments should use bash instead of cmd/PowerShell
+    const msystem = process.env['MSYSTEM'];
+    const term = process.env['TERM'] || '';
+    const isGitBash =
+      msystem?.startsWith('MINGW') ||
+      msystem?.startsWith('MSYS') ||
+      term.includes('msys') ||
+      term.includes('cygwin');
+
+    if (isGitBash) {
+      return {
+        executable: findGitBashPath(),
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      };
+    }
+
     const comSpec = process.env['ComSpec'] || 'cmd.exe';
     const executable = comSpec.toLowerCase();
 
@@ -652,16 +735,16 @@ export function detectCommandSubstitution(command: string): boolean {
  *   presence activates "Default Deny" mode.
  * @returns An object detailing which commands are not allowed.
  */
-export function checkCommandPermissions(
+export async function checkCommandPermissions(
   command: string,
   config: Config,
   sessionAllowlist?: Set<string>,
-): {
+): Promise<{
   allAllowed: boolean;
   disallowedCommands: string[];
   blockReason?: string;
   isHardDenial?: boolean;
-} {
+}> {
   // Disallow command substitution for security.
   if (detectCommandSubstitution(command)) {
     return {
@@ -699,7 +782,7 @@ export function checkCommandPermissions(
         if (isSessionAllowed) continue;
       }
 
-      const decision = pm.isCommandAllowed(cmd);
+      const decision = await pm.isCommandAllowed(cmd);
 
       if (decision === 'deny') {
         return {
@@ -892,14 +975,18 @@ export function execCommand(
             reject(error);
           } else {
             resolve({
-              stdout: stdout ?? '',
-              stderr: stderr ?? '',
+              stdout: String(stdout ?? ''),
+              stderr: String(stderr ?? ''),
               code: typeof error.code === 'number' ? error.code : 1,
             });
           }
           return;
         }
-        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: 0 });
+        resolve({
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+          code: 0,
+        });
       },
     );
     child.on('error', reject);
@@ -972,12 +1059,15 @@ export function isCommandAvailable(command: string): {
   return { available: path !== null, error };
 }
 
-export function isCommandAllowed(
+export async function isCommandAllowed(
   command: string,
   config: Config,
-): { allowed: boolean; reason?: string } {
+): Promise<{ allowed: boolean; reason?: string }> {
   // By not providing a sessionAllowlist, we invoke "default allow" behavior.
-  const { allAllowed, blockReason } = checkCommandPermissions(command, config);
+  const { allAllowed, blockReason } = await checkCommandPermissions(
+    command,
+    config,
+  );
   if (allAllowed) {
     return { allowed: true };
   }

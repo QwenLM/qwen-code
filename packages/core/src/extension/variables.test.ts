@@ -263,6 +263,34 @@ describe('performVariableReplacement', () => {
     expect(result).not.toContain('```!');
   });
 
+  it('should replace .claude with .qwen in markdown files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const mdContent = [
+      '---',
+      'description: "Cancel active loop"',
+      '---',
+      '',
+      '# Cancel',
+      '',
+      'Check if `.claude/loop.local.md` exists.',
+      'Remove the file: `rm .claude/loop.local.md`',
+      'Path: `$HOME/.claude/cache`',
+      'Local: `./.claude/local`',
+    ].join('\n');
+    fs.writeFileSync(path.join(extDir, 'cancel.md'), mdContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'cancel.md'), 'utf-8');
+    expect(result).toContain('.qwen/loop.local.md');
+    expect(result).toContain('rm .qwen/loop.local.md');
+    expect(result).toContain('$HOME/.qwen/cache');
+    expect(result).toContain('./.qwen/local');
+    expect(result).not.toContain('.claude/');
+  });
+
   it('should replace "role":"assistant" with "type":"assistant" in shell scripts', () => {
     const extDir = path.join(testDir, 'ext');
     fs.mkdirSync(extDir, { recursive: true });

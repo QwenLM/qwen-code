@@ -65,6 +65,7 @@ describe('HookSystem', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       setHookEnabled: vi.fn(),
       getAllHooks: vi.fn().mockReturnValue([]),
+      getHooksForEvent: vi.fn().mockReturnValue([]),
     } as unknown as HookRegistry;
 
     mockHookRunner = {
@@ -186,8 +187,54 @@ describe('HookSystem', () => {
     });
   });
 
+  describe('hasHooksForEvent', () => {
+    it('should return false when no hooks are registered for the event', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      expect(hookSystem.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
+
+    it('should return true when hooks are registered for the event', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
+        {
+          config: {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.Stop,
+          enabled: true,
+        },
+      ]);
+
+      expect(hookSystem.hasHooksForEvent('Stop')).toBe(true);
+    });
+
+    it('should check the correct event name for UserPromptSubmit', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('UserPromptSubmit');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptSubmit',
+      );
+    });
+
+    it('should check the correct event name for SessionEnd', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('SessionEnd');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'SessionEnd',
+      );
+    });
+  });
+
   describe('fireStopEvent', () => {
-    it('should fire stop event and return output', async () => {
+    it('should fire stop event and return AggregatedHookResult', async () => {
       const mockResult = {
         success: true,
         allOutputs: [],
@@ -209,7 +256,7 @@ describe('HookSystem', () => {
         'last message',
         undefined,
       );
-      expect(result).toBeDefined();
+      expect(result).toEqual(mockResult);
     });
 
     it('should use default parameters when not provided', async () => {
@@ -233,7 +280,7 @@ describe('HookSystem', () => {
       );
     });
 
-    it('should return undefined when no final output', async () => {
+    it('should return AggregatedHookResult even when no final output', async () => {
       const mockResult = {
         success: true,
         allOutputs: [],
@@ -247,7 +294,8 @@ describe('HookSystem', () => {
 
       const result = await hookSystem.fireStopEvent();
 
-      expect(result).toBeUndefined();
+      expect(result).toEqual(mockResult);
+      expect(result.finalOutput).toBeUndefined();
     });
   });
 
