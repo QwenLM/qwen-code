@@ -57,6 +57,7 @@ import {
 } from './permission-helpers.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import {
   isModifiableDeclarativeTool,
   modifyWithEditor,
@@ -1476,6 +1477,19 @@ export class CoreToolScheduler {
             this.setStatusInternal(callId, 'error', errorResponse);
             return;
           }
+        }
+
+        // Universal tool result budgeting: truncate large string results and
+        // persist full output to disk. Tools that already self-truncate (shell,
+        // MCP) will pass through harmlessly since their output is already under
+        // the threshold.
+        if (typeof content === 'string') {
+          const truncated = await truncateToolOutput(
+            this.config,
+            toolName,
+            content,
+          );
+          content = truncated.content;
         }
 
         const response = convertToFunctionResponse(toolName, callId, content);
