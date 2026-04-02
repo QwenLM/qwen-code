@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { render } from 'ink-testing-library';
+import { renderWithProviders } from '../../../test-utils/render.js';
 import { BtwMessage } from './BtwMessage.js';
 
 describe('BtwMessage', () => {
@@ -16,7 +16,7 @@ describe('BtwMessage', () => {
   });
 
   it('renders the side question and answer', () => {
-    const { lastFrame } = render(
+    const { lastFrame } = renderWithProviders(
       <BtwMessage
         btw={{
           question: 'side question',

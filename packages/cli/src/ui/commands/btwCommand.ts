@@ -14,6 +14,7 @@ import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 import type { GeminiClient } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 
 function makeBtwPromptId(sessionId: string): string {
   return `${sessionId}########btw-${Date.now()}`;
@@ -24,6 +25,24 @@ function formatBtwError(error: unknown): string {
     error:
       error instanceof Error ? error.message : String(error || 'Unknown error'),
   });
+}
+
+// Keep only the most recent history turns to limit token usage for side
+// questions. Each "turn" is a user+model pair, so MAX_BTW_HISTORY_TURNS of 10
+// means up to 20 Content entries (enough context without sending the full chat).
+const MAX_BTW_HISTORY_TURNS = 10;
+
+function trimHistory(history: Content[]): Content[] {
+  if (history.length <= MAX_BTW_HISTORY_TURNS * 2) {
+    return history;
+  }
+  // Slice from the end, ensuring we start on a 'user' message so the
+  // alternating user/model pattern is preserved.
+  const sliced = history.slice(-(MAX_BTW_HISTORY_TURNS * 2));
+  if (sliced[0]?.role === 'model' && sliced.length > 1) {
+    return sliced.slice(1);
+  }
+  return sliced;
 }
 
 /**
@@ -37,7 +56,7 @@ async function askBtw(
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<string> {
-  const history = geminiClient.getHistory();
+  const history = trimHistory(geminiClient.getHistory());
 
   // Enhanced system prompt inspired by Claude Code's side question design:
   // - Emphasizes direct answering without tools
