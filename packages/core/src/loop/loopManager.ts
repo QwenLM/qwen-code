@@ -558,7 +558,10 @@ export class LoopManager {
 
     // Another loop is currently using the streaming slot — retry shortly
     if (this.activeResponseLoopId && this.activeResponseLoopId !== loopId) {
-      state.timerId = setTimeout(() => this.executeIteration(loopId), 1_000);
+      state.timerId = setTimeout(() => {
+        state.timerId = null;
+        this.executeIteration(loopId);
+      }, 1_000);
       return;
     }
 
@@ -610,6 +613,7 @@ export class LoopManager {
         const remaining = targetTime - Date.now();
         if (remaining <= 0) {
           s.nextFireAt = null;
+          s.timerId = null;
           this.executeIteration(loopId);
         } else {
           const nextCheck = Math.min(remaining, 30_000);

@@ -116,6 +116,9 @@ export async function persistLoopStates(
   qwenDir: string,
 ): Promise<void> {
   if (states.length === 0) {
+    // Wait for any in-flight write to finish before clearing,
+    // so it doesn't recreate the file after unlink.
+    if (pendingWrite) await pendingWrite;
     await clearPersistedLoopState(qwenDir);
     return;
   }
