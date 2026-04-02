@@ -4,6 +4,7 @@ jobs/
 # API keys and secrets
 .env
 .env~
+.infisical.json
 
 # gemini-cli settings
 # We want to keep the .gemini in the root of the repo and ignore any .gemini
