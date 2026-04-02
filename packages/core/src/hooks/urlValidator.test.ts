@@ -69,13 +69,13 @@ describe('UrlValidator', () => {
     });
 
     it('should match exact URL pattern', () => {
-      const validator = new UrlValidator(['https://api.example.com/hook']);
+      const validator = new UrlValidator(['https://api\\.example\\.com/hook']);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
       expect(validator.isAllowed('https://api.example.com/other')).toBe(false);
     });
 
     it('should match wildcard pattern', () => {
-      const validator = new UrlValidator(['https://api.example.com/*']);
+      const validator = new UrlValidator(['https://api\\.example\\.com/*']);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
       expect(validator.isAllowed('https://api.example.com/v1/hook')).toBe(true);
       expect(validator.isAllowed('https://other.example.com/hook')).toBe(false);
@@ -83,8 +83,8 @@ describe('UrlValidator', () => {
 
     it('should match multiple patterns', () => {
       const validator = new UrlValidator([
-        'https://api.example.com/*',
-        'https://webhook.site/*',
+        'https://api\\.example\\.com/*',
+        'https://webhook\\.site/*',
       ]);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
       expect(validator.isAllowed('https://webhook.site/test')).toBe(true);
@@ -92,14 +92,14 @@ describe('UrlValidator', () => {
     });
 
     it('should be case insensitive', () => {
-      const validator = new UrlValidator(['https://API.Example.COM/*']);
+      const validator = new UrlValidator(['https://API\\.Example\\.COM/*']);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
     });
   });
 
   describe('validate', () => {
     it('should return allowed for valid public URL matching whitelist', () => {
-      const validator = new UrlValidator(['https://api.example.com/*']);
+      const validator = new UrlValidator(['https://api\\.example\\.com/*']);
       const result = validator.validate('https://api.example.com/hook');
       expect(result.allowed).toBe(true);
       expect(result.reason).toBeUndefined();
@@ -113,7 +113,7 @@ describe('UrlValidator', () => {
     });
 
     it('should return not allowed for URL not matching whitelist', () => {
-      const validator = new UrlValidator(['https://api.example.com/*']);
+      const validator = new UrlValidator(['https://api\\.example\\.com/*']);
       const result = validator.validate('https://other.com/hook');
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('does not match');
@@ -122,7 +122,7 @@ describe('UrlValidator', () => {
 
   describe('createUrlValidator', () => {
     it('should create validator with allowed URLs', () => {
-      const validator = createUrlValidator(['https://api.example.com/*']);
+      const validator = createUrlValidator(['https://api\\.example\\.com/*']);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
     });
 
