@@ -381,17 +381,15 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager.addItem],
   );
 
-  // Watch for model changes (e.g., user switches model via /model)
+  // Watch for model changes (e.g., user switches model via /model).
+  // Skip the initial check to avoid a re-render during Ink's first render pass.
   useEffect(() => {
-    const checkModelChange = () => {
+    const interval = setInterval(() => {
       const model = getCurrentModel();
       if (model !== currentModel) {
         setCurrentModel(model);
       }
-    };
-
-    checkModelChange();
-    const interval = setInterval(checkModelChange, 1000); // Check every second
+    }, 1000);
 
     return () => clearInterval(interval);
   }, [config, currentModel, getCurrentModel]);
