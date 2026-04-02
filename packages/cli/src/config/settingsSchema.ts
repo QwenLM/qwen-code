@@ -358,6 +358,16 @@ const SETTINGS_SCHEMA = {
           'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
         showInDialog: false,
       },
+      lsp: {
+        type: 'boolean',
+        label: 'LSP Code Intelligence',
+        category: 'General',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable Language Server Protocol for code intelligence (goToDefinition, diagnostics, hover, etc.). Auto-enabled when .lsp.json exists in the project root.',
+        showInDialog: true,
+      },
       defaultFileEncoding: {
         type: 'enum',
         label: 'Default File Encoding',

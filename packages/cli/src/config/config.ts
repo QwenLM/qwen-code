@@ -128,6 +128,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  lsp: boolean | undefined;
   experimentalHooks: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -348,9 +349,14 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('experimental-lsp', {
           type: 'boolean',
+          description: 'Deprecated: use --lsp instead. This flag is ignored.',
+          hidden: true,
+        })
+        .option('lsp', {
+          type: 'boolean',
           description:
-            'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
-          default: false,
+            'Enable LSP (Language Server Protocol) for code intelligence (goToDefinition, diagnostics, etc.)',
+          default: undefined,
         })
         .option('experimental-hooks', {
           type: 'boolean',
@@ -752,8 +758,14 @@ export async function loadCliConfig(
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
-  // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = argv.experimentalLsp === true;
+  // LSP configuration: enabled via --lsp flag, settings, or auto-detected from .lsp.json
+  const lspEnabled =
+    argv.lsp === true ||
+    argv.experimentalLsp === true ||
+    settings.general?.lsp === true ||
+    (argv.lsp !== false &&
+      settings.general?.lsp !== false &&
+      fs.existsSync(path.join(cwd, '.lsp.json')));
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =

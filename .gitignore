@@ -166,3 +166,4 @@ packages/*/src/**/__snapshots__/*.js.snap
 
 # git worktrees directory (local, not source)
 .worktrees/
+.lsp.json

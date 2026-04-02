@@ -300,7 +300,7 @@ export class ProcessTransport implements Transport {
     }
 
     if (this.options.lsp) {
-      args.push('--experimental-lsp');
+      args.push('--lsp');
     }
 
     if (this.options.webSearch) {

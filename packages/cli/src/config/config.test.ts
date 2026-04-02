@@ -676,13 +676,13 @@ describe('loadCliConfig', () => {
   });
 
   it('should initialize native LSP service when enabled', async () => {
-    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    process.argv = ['node', 'script.js', '--lsp'];
     const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv);
 
-    // LSP is enabled via --experimental-lsp flag
+    // LSP is enabled via --lsp flag
     expect(config.isLspEnabled()).toBe(true);
     expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
     const lspInstance = getLastLspInstance();
