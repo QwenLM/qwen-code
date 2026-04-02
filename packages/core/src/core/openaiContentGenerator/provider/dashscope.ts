@@ -150,9 +150,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0.3,
-    };
+    return {};
   }
 
   /**

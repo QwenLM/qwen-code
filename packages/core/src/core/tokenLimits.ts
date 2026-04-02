@@ -104,7 +104,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // Commercial API models (1,000,000 context)
   [/^qwen3-coder-plus/, LIMITS['1m']],
   [/^qwen3-coder-flash/, LIMITS['1m']],
-  [/^qwen3\.5-plus/, LIMITS['1m']],
+  [/^qwen3\.\d/, LIMITS['1m']],
   [/^qwen-plus-latest$/, LIMITS['1m']],
   [/^qwen-flash-latest$/, LIMITS['1m']],
   [/^coder-model$/, LIMITS['1m']],
@@ -164,10 +164,9 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
-  [/^qwen3\.5/, LIMITS['64k']],
+  [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen3-max/, LIMITS['64k']],
-  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],
