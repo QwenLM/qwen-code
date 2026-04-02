@@ -70,15 +70,23 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   embeddedShellFocused,
   availableTerminalHeightGemini,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
-
+  const { verboseMode } = useVerboseMode();
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
-  const { verboseMode } = useVerboseMode();
+
+  const isCompactSpacing =
+    !verboseMode &&
+    (item.type === 'tool_group' ||
+      item.type === 'gemini' ||
+      item.type === 'gemini_thought');
+
+  const marginTop =
+    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
+      ? 0
+      : isCompactSpacing
+        ? 0
+        : 1;
 
   return (
     <Box

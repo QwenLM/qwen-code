@@ -46,6 +46,7 @@ import type {
   HistoryItem,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
+  IndividualToolCallDisplay,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -133,6 +134,7 @@ function checkImageFormatsSupport(parts: PartListUnion): {
 
 enum StreamProcessingStatus {
   Completed,
+  CompletedWithToolCalls,
   UserCancelled,
   Error,
 }
@@ -197,6 +199,14 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  // Accumulate completed tool displays within a turn instead of committing
+  // each batch separately, so all tool calls between two model outputs
+  // merge into a single tool_group in the UI.
+  const [
+    completedToolDisplaysForTurn,
+    completedToolDisplaysForTurnRef,
+    setCompletedToolDisplaysForTurn,
+  ] = useStateAndRef<IndividualToolCallDisplay[]>([]);
   const {
     startNewPrompt,
     getPromptCount,
@@ -216,13 +226,16 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
-          // Add the final state of these tools to the history for display.
-          addItem(
-            mapTrackedToolCallsToDisplay(
-              completedToolCallsFromScheduler as TrackedToolCall[],
-            ),
-            Date.now(),
+          // Accumulate completed tool displays instead of committing each
+          // batch separately.  They are flushed as a single merged
+          // tool_group when the model starts outputting text.
+          const display = mapTrackedToolCallsToDisplay(
+            completedToolCallsFromScheduler as TrackedToolCall[],
           );
+          setCompletedToolDisplaysForTurn((prev) => [
+            ...prev,
+            ...display.tools,
+          ]);
 
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
@@ -235,11 +248,17 @@ export const useGeminiStream = (
       onEditorClose,
     );
 
-  const pendingToolCallGroupDisplay = useMemo(
-    () =>
-      toolCalls.length ? mapTrackedToolCallsToDisplay(toolCalls) : undefined,
-    [toolCalls],
-  );
+  const pendingToolCallGroupDisplay = useMemo(() => {
+    const currentTools = toolCalls.length
+      ? mapTrackedToolCallsToDisplay(toolCalls).tools
+      : [];
+    const allTools = [...completedToolDisplaysForTurn, ...currentTools];
+    if (allTools.length === 0) return undefined;
+    return {
+      type: 'tool_group' as const,
+      tools: allTools,
+    } as HistoryItemToolGroup;
+  }, [toolCalls, completedToolDisplaysForTurn]);
 
   const activeToolPtyId = useMemo(() => {
     const executingShellTool = toolCalls?.find(
@@ -423,6 +442,24 @@ export const useGeminiStream = (
     }
   }, [streamingState, config, history]);
 
+  // --- Flush accumulated tool displays as a single merged tool_group ---
+  const flushCompletedToolDisplays = useCallback(
+    (timestamp: number) => {
+      const accumulated = completedToolDisplaysForTurnRef.current;
+      if (accumulated.length > 0) {
+        addItem(
+          {
+            type: 'tool_group',
+            tools: [...accumulated],
+          } as HistoryItemToolGroup,
+          timestamp,
+        );
+        setCompletedToolDisplaysForTurn([]);
+      }
+    },
+    [addItem, completedToolDisplaysForTurnRef, setCompletedToolDisplaysForTurn],
+  );
+
   const cancelOngoingRequest = useCallback(() => {
     if (streamingState !== StreamingState.Responding) {
       return;
@@ -449,6 +486,7 @@ export const useGeminiStream = (
     );
     logApiCancel(config, cancellationEvent);
 
+    flushCompletedToolDisplays(Date.now());
     if (pendingHistoryItemRef.current) {
       addItem(pendingHistoryItemRef.current, Date.now());
     }
@@ -474,6 +512,7 @@ export const useGeminiStream = (
     clearRetryCountdown,
     config,
     getPromptCount,
+    flushCompletedToolDisplays,
   ]);
 
   const prepareQueryForGemini = useCallback(
@@ -611,6 +650,14 @@ export const useGeminiStream = (
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
+        // Flush accumulated tool displays BEFORE starting new text.
+        // This ensures tools appear before text in Static (correct
+        // chronological order). If this turn also schedules more tools,
+        // those will start a new accumulation cycle — which is correct
+        // because there IS text between them.
+        // Crucially, tool-only turns (no Content event) don't reach
+        // here, so consecutive tool batches still accumulate and merge.
+        flushCompletedToolDisplays(userMessageTimestamp);
         setPendingHistoryItem({ type: 'gemini', text: '' });
         newGeminiMessageBuffer = eventValue;
       }
@@ -648,7 +695,12 @@ export const useGeminiStream = (
       }
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      flushCompletedToolDisplays,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -694,6 +746,9 @@ export const useGeminiStream = (
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
+        // Do NOT flush tool displays on thought events. Thoughts are
+        // invisible in compact mode, so they should not break tool
+        // merging. Only user-visible Content events trigger flush.
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
 
@@ -744,6 +799,8 @@ export const useGeminiStream = (
       }
 
       lastPromptErroredRef.current = false;
+      // Flush accumulated completed tool displays before committing cancel
+      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -778,12 +835,14 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       setThought,
       clearRetryCountdown,
+      flushCompletedToolDisplays,
     ],
   );
 
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
       lastPromptErroredRef.current = true;
+      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -816,6 +875,7 @@ export const useGeminiStream = (
       config,
       setThought,
       clearRetryCountdown,
+      flushCompletedToolDisplays,
     ],
   );
 
@@ -825,13 +885,20 @@ export const useGeminiStream = (
         return;
       }
 
+      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem({ type: MessageType.INFO, text }, userMessageTimestamp);
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, settings],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      settings,
+      flushCompletedToolDisplays,
+    ],
   );
 
   const handleFinishedEvent = useCallback(
@@ -889,6 +956,7 @@ export const useGeminiStream = (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
+      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -905,7 +973,13 @@ export const useGeminiStream = (
         Date.now(),
       );
     },
-    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      addItem,
+      config,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      flushCompletedToolDisplays,
+    ],
   );
 
   const handleMaxSessionTurnsEvent = useCallback(
@@ -1070,6 +1144,7 @@ export const useGeminiStream = (
       }
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
+        return StreamProcessingStatus.CompletedWithToolCalls;
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1133,6 +1208,9 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
+        // Flush any leftover accumulated tool displays from the previous
+        // turn before starting a new user query.
+        flushCompletedToolDisplays(userMessageTimestamp);
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
@@ -1240,6 +1318,15 @@ export const useGeminiStream = (
             return;
           }
 
+          // Flush accumulated tool displays only when this turn did NOT
+          // schedule more tools. If tools were scheduled, the accumulated
+          // displays should stay in the pending area and merge with the
+          // new tools — they will be flushed when a text-only turn ends.
+          if (
+            processingStatus !== StreamProcessingStatus.CompletedWithToolCalls
+          ) {
+            flushCompletedToolDisplays(userMessageTimestamp);
+          }
           if (pendingHistoryItemRef.current) {
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
@@ -1280,21 +1367,21 @@ export const useGeminiStream = (
     [
       streamingState,
       setModelSwitchedFromQuotaError,
-      prepareQueryForGemini,
-      processGeminiStreamEvents,
-      pendingHistoryItemRef,
-      addItem,
-      setPendingHistoryItem,
-      setInitError,
-      geminiClient,
-      onAuthError,
-      config,
-      startNewPrompt,
-      getPromptCount,
-      handleLoopDetectedEvent,
-      clearRetryCountdown,
+      flushCompletedToolDisplays,
       pendingRetryCountdownItemRef,
       pendingRetryErrorItemRef,
+      clearRetryCountdown,
+      config,
+      getPromptCount,
+      prepareQueryForGemini,
+      addItem,
+      startNewPrompt,
+      geminiClient,
+      processGeminiStreamEvents,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      handleLoopDetectedEvent,
+      onAuthError,
       setPendingRetryErrorItem,
     ],
   );
