@@ -321,6 +321,9 @@ class ProtoAgent(BaseInstalledAgent):
         auth_flag = ""
         if env.get("ANTHROPIC_API_KEY"):
             auth_flag = "--auth-type anthropic"
+            # Proto requires ANTHROPIC_BASE_URL to be set
+            if "ANTHROPIC_BASE_URL" not in env:
+                env["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
 
         try:
             await self.exec_as_agent(

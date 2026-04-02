@@ -23,16 +23,16 @@ proto is a fork of [Qwen Code](https://github.com/QwenLM/qwen-code) (itself fork
 Requires Node.js 20+ and Rust toolchain (for beads_rust).
 
 ```bash
-# Clone and build
+# Install from npm (recommended)
+npm install -g @protolabsai/proto
+proto --version
+
+# Or install from source
 git clone https://github.com/protoLabsAI/protoCLI.git
 cd protoCLI
-npm install
-npm run build
+npm install && npm run build && npm link
 
-# Link globally
-npm link
-
-# Install beads_rust task manager (optional but recommended)
+# Optional: task manager for persistent task tracking
 cargo install beads_rust
 ```
 
