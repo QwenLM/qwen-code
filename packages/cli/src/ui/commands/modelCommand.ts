@@ -21,6 +21,17 @@ export const modelCommand: SlashCommand = {
     return t('Switch the model for this session');
   },
   kind: CommandKind.BUILT_IN,
+  completion: async (_context, partialArg) => {
+    if ('--fast'.startsWith(partialArg)) {
+      return [
+        {
+          value: '--fast',
+          description: t('Set fast model for background tasks'),
+        },
+      ];
+    }
+    return null;
+  },
   action: async (
     context: CommandContext,
   ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
