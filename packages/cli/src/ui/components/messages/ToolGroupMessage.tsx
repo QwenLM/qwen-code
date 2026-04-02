@@ -26,6 +26,7 @@ interface ToolGroupMessageProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
+  isUserInitiated?: boolean;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -36,6 +37,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
+  isUserInitiated,
 }) => {
   const isEmbeddedShellFocused =
     embeddedShellFocused &&
@@ -73,7 +75,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   const hasConfirmingTool = toolAwaitingApproval !== undefined;
   const showCompact =
-    !verboseMode && !hasConfirmingTool && !isEmbeddedShellFocused;
+    !verboseMode &&
+    !hasConfirmingTool &&
+    !isEmbeddedShellFocused &&
+    !isUserInitiated;
 
   if (showCompact) {
     return (
@@ -137,6 +142,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                forceShowResult={isUserInitiated}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&
