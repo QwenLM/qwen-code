@@ -158,7 +158,7 @@ async function generateViaForkedQuery(
   return null;
 }
 
-/** Fallback: generate via standalone BaseLlmClient.generateJson */
+/** Generate via direct ContentGenerator.generateContent (always reports usage) */
 async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
@@ -171,57 +171,38 @@ async function generateViaBaseLlm(
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
-  // Try function-calling JSON first
-  const result = await config.getBaseLlmClient().generateJson({
-    contents,
-    schema: SUGGESTION_SCHEMA,
-    model,
-    abortSignal,
-    promptId: 'prompt_suggestion',
-    maxAttempts: 2,
-  });
+  const generator = config.getContentGenerator();
+  const startTime = Date.now();
+  const response = await generator.generateContent(
+    {
+      model,
+      contents,
+      config: { abortSignal },
+    },
+    'prompt_suggestion',
+  );
+  const durationMs = Date.now() - startTime;
 
-  const raw = result['suggestion'];
-  if (typeof raw === 'string' && raw.trim()) {
-    return raw;
+  // Report usage to session stats so /stats tracks suggestion model tokens
+  const usage = response.usageMetadata;
+  if (usage) {
+    reportSuggestionUsage(model, usage, durationMs);
   }
 
-  // Fallback: some models (e.g., glm-5.1) don't support function calling.
-  // Send a direct text request and use the response as-is.
-  if (Object.keys(result).length === 0) {
-    const generator = config.getContentGenerator();
-    const startTime = Date.now();
-    const response = await generator.generateContent(
-      {
-        model,
-        contents,
-        config: { abortSignal },
-      },
-      'prompt_suggestion',
-    );
-    const durationMs = Date.now() - startTime;
-
-    // Report usage to session stats so /stats tracks suggestion model tokens
-    const usage = response.usageMetadata;
-    if (usage) {
-      reportSuggestionUsage(model, usage, durationMs);
+  const text = response.candidates?.[0]?.content?.parts
+    ?.map((p) => p.text ?? '')
+    .join('')
+    .trim();
+  if (text) {
+    // Try to parse as JSON first (model might return {"suggestion": "..."})
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const s = parsed['suggestion'];
+      if (typeof s === 'string') return s;
+    } catch {
+      // Not JSON — use raw text as the suggestion
     }
-
-    const text = response.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text ?? '')
-      .join('')
-      .trim();
-    if (text) {
-      // Try to parse as JSON first (model might return {"suggestion": "..."})
-      try {
-        const parsed = JSON.parse(text) as Record<string, unknown>;
-        const s = parsed['suggestion'];
-        if (typeof s === 'string') return s;
-      } catch {
-        // Not JSON — use raw text as the suggestion
-      }
-      return text;
-    }
+    return text;
   }
 
   return null;
