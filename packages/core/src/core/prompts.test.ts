@@ -113,6 +113,39 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('should include task_get and task_stop guidance in task management section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt().full;
+    expect(prompt).toContain('task_get');
+    expect(prompt).toContain('task_stop');
+  });
+
+  it('should include list_directory guidance in Tool Usage section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt().full;
+    expect(prompt).toContain('list_directory');
+  });
+
+  it('should include cron tool guidance in Tool Usage section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt().full;
+    expect(prompt).toContain('cron_create');
+    expect(prompt).toContain('cron_list');
+    expect(prompt).toContain('cron_delete');
+  });
+
+  it('should include lsp guidance in Tool Usage section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt().full;
+    expect(prompt).toContain('lsp');
+  });
+
+  it('should include web_fetch guidance in Tool Usage section', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt().full;
+    expect(prompt).toContain('web_fetch');
+  });
+
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
     vi.stubEnv('SANDBOX', 'true'); // Generic sandbox value
     const prompt = getCoreSystemPrompt().full;
