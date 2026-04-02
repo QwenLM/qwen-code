@@ -44,6 +44,8 @@ import {
   EVENT_ARENA_SESSION_STARTED,
   EVENT_ARENA_AGENT_COMPLETED,
   EVENT_ARENA_SESSION_ENDED,
+  EVENT_PROMPT_SUGGESTION,
+  EVENT_SPECULATION,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -101,6 +103,8 @@ import type {
   ArenaSessionStartedEvent,
   ArenaAgentCompletedEvent,
   ArenaSessionEndedEvent,
+  PromptSuggestionEvent,
+  SpeculationEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
@@ -1067,4 +1071,80 @@ export function logArenaSessionEnded(
     event.duration_ms,
     event.winner_model_id,
   );
+}
+
+export function logPromptSuggestion(
+  config: Config,
+  event: PromptSuggestionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_PROMPT_SUGGESTION,
+    'event.timestamp': event['event.timestamp'],
+    outcome: event.outcome,
+  };
+
+  if (event.prompt_id) {
+    attributes['prompt_id'] = event.prompt_id;
+  }
+  if (event.accept_method) {
+    attributes['accept_method'] = event.accept_method;
+  }
+  if (event.time_to_accept_ms !== undefined) {
+    attributes['time_to_accept_ms'] = event.time_to_accept_ms;
+  }
+  if (event.time_to_ignore_ms !== undefined) {
+    attributes['time_to_ignore_ms'] = event.time_to_ignore_ms;
+  }
+  if (event.time_to_first_keystroke_ms !== undefined) {
+    attributes['time_to_first_keystroke_ms'] = event.time_to_first_keystroke_ms;
+  }
+  if (event.suggestion_length !== undefined) {
+    attributes['suggestion_length'] = event.suggestion_length;
+  }
+  if (event.similarity !== undefined) {
+    attributes['similarity'] = event.similarity;
+  }
+  if (event.was_focused_when_shown !== undefined) {
+    attributes['was_focused_when_shown'] = event.was_focused_when_shown;
+  }
+  if (event.reason) {
+    attributes['reason'] = event.reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Prompt suggestion: ${event.outcome}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logSpeculation(config: Config, event: SpeculationEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_SPECULATION,
+    'event.timestamp': event['event.timestamp'],
+    outcome: event.outcome,
+    turns_used: event.turns_used,
+    files_written: event.files_written,
+    tool_use_count: event.tool_use_count,
+    duration_ms: event.duration_ms,
+    had_pipelined_suggestion: event.had_pipelined_suggestion,
+  };
+
+  if (event.boundary_type) {
+    attributes['boundary_type'] = event.boundary_type;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Speculation: ${event.outcome}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
 }

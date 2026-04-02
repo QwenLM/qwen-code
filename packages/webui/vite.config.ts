@@ -18,6 +18,10 @@ import { resolve } from 'path';
  * - UMD: dist/index.umd.js (for CDN usage)
  * - TypeScript declarations: dist/index.d.ts
  * - CSS: dist/styles.css (optional styles)
+ *
+ * The followup subpath (@qwen-code/webui/followup) is built separately
+ * via vite.config.followup.ts so that the root entry stays free of
+ * @qwen-code/qwen-code-core dependencies.
  */
 export default defineConfig({
   plugins: [

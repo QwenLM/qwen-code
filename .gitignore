@@ -83,3 +83,6 @@ integration-tests/terminal-capture/scenarios/screenshots/
 # storybook
 *storybook.log
 storybook-static
+
+# Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
+packages/core/src/skills/bundled/qc-helper/docs

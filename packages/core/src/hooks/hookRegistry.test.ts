@@ -28,7 +28,6 @@ describe('HookRegistry', () => {
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getHooks: vi.fn().mockReturnValue(undefined),
       getProjectHooks: vi.fn().mockReturnValue(undefined),
-      getDisabledHooks: vi.fn().mockReturnValue([]),
       getExtensions: vi.fn().mockReturnValue([]),
     };
     mockFeedbackEmitter = {
@@ -123,21 +122,20 @@ describe('HookRegistry', () => {
       expect(postHooks[0].config.name).toBe('post-hook');
     });
 
-    it('should filter out disabled hooks', async () => {
-      mockConfig.getDisabledHooks = vi.fn().mockReturnValue(['disabled-hook']);
+    it('should register all hooks as enabled by default', async () => {
       const hooksConfig = {
         [HookEventName.PreToolUse]: [
           {
             hooks: [
               {
                 type: HookType.Command,
-                command: 'echo enabled',
-                name: 'enabled-hook',
+                command: 'echo first',
+                name: 'first-hook',
               },
               {
                 type: HookType.Command,
-                command: 'echo disabled',
-                name: 'disabled-hook',
+                command: 'echo second',
+                name: 'second-hook',
               },
             ],
           },
@@ -149,8 +147,9 @@ describe('HookRegistry', () => {
       await registry.initialize();
 
       const hooks = registry.getHooksForEvent(HookEventName.PreToolUse);
-      expect(hooks).toHaveLength(1);
-      expect(hooks[0].config.name).toBe('enabled-hook');
+      expect(hooks).toHaveLength(2);
+      expect(hooks[0].enabled).toBe(true);
+      expect(hooks[1].enabled).toBe(true);
     });
 
     it('should sort hooks by source priority', async () => {
@@ -181,37 +180,6 @@ describe('HookRegistry', () => {
   });
 
   describe('setHookEnabled', () => {
-    it('should enable a disabled hook', async () => {
-      mockConfig.getDisabledHooks = vi.fn().mockReturnValue(['test-hook']);
-      const hooksConfig = {
-        [HookEventName.PreToolUse]: [
-          {
-            hooks: [
-              {
-                type: HookType.Command,
-                command: 'echo test',
-                name: 'test-hook',
-              },
-            ],
-          },
-        ],
-      };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
-
-      const registry = new HookRegistry(mockConfig);
-      await registry.initialize();
-
-      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
-        0,
-      );
-
-      registry.setHookEnabled('test-hook', true);
-
-      const hooks = registry.getHooksForEvent(HookEventName.PreToolUse);
-      expect(hooks).toHaveLength(1);
-      expect(hooks[0].enabled).toBe(true);
-    });
-
     it('should disable an enabled hook', async () => {
       const hooksConfig = {
         [HookEventName.PreToolUse]: [
@@ -237,8 +205,39 @@ describe('HookRegistry', () => {
 
       registry.setHookEnabled('test-hook', false);
 
+      const hooks = registry.getHooksForEvent(HookEventName.PreToolUse);
+      expect(hooks).toHaveLength(0);
+    });
+
+    it('should enable a disabled hook', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'test-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // First disable the hook
+      registry.setHookEnabled('test-hook', false);
       expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
         0,
+      );
+
+      // Then enable it again
+      registry.setHookEnabled('test-hook', true);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        1,
       );
     });
 

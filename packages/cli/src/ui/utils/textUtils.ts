@@ -214,3 +214,77 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
 
   return newObj !== null ? newObj : obj;
 }
+
+/**
+ * Patterns that may indicate sensitive information like API keys, tokens, passwords.
+ */
+const SENSITIVE_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  // API keys with common prefixes
+  {
+    pattern: /(sk-[a-zA-Z0-9]{20,})/g,
+    replacement: 'sk-***REDACTED***',
+  },
+  {
+    pattern: /(api[_-]?key[_-]?[=:]\s*)[a-zA-Z0-9_-]{20,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Bearer tokens
+  {
+    pattern: /(Bearer\s+)[a-zA-Z0-9._-]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Generic tokens
+  {
+    pattern: /(token[_-]?[=:]\s*)[a-zA-Z0-9._-]{10,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // Passwords in connection strings or assignments
+  {
+    pattern: /(password[_-]?[=:]\s*)[^\s]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  {
+    pattern: /(pwd[_-]?[=:]\s*)[^\s]+/gi,
+    replacement: '$1***REDACTED***',
+  },
+  // AWS keys
+  {
+    pattern: /(AKIA[A-Z0-9]{16})/g,
+    replacement: '***REDACTED***',
+  },
+  // Generic secret patterns
+  {
+    pattern: /(secret[_-]?[=:]\s*)[a-zA-Z0-9._-]{10,}/gi,
+    replacement: '$1***REDACTED***',
+  },
+];
+
+/**
+ * Sanitizes text by redacting potentially sensitive information like API keys,
+ * tokens, and passwords. Also truncates long text to a maximum length.
+ *
+ * @param text The text to sanitize
+ * @param maxLength Maximum length of the output text (default: 200)
+ * @returns Sanitized and truncated text
+ */
+export function sanitizeSensitiveText(
+  text: string,
+  maxLength: number = 200,
+): string {
+  let result = text;
+
+  // Apply each sensitive pattern replacement
+  for (const { pattern, replacement } of SENSITIVE_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+
+  // Truncate if too long
+  if (result.length > maxLength) {
+    if (maxLength <= 3) {
+      return result.slice(0, maxLength);
+    }
+    return result.slice(0, maxLength - 3) + '...';
+  }
+
+  return result;
+}

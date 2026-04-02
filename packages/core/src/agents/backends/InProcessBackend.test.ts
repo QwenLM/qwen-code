@@ -79,6 +79,9 @@ function createMockConfig() {
       baseUrl: 'https://parent.example.com',
     }),
     getAuthType: vi.fn().mockReturnValue('openai'),
+    getModelsConfig: vi.fn().mockReturnValue({
+      getResolvedModel: vi.fn().mockReturnValue(undefined),
+    }),
   } as never;
 }
 

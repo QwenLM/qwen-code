@@ -10,6 +10,8 @@ import {
   StandardFileSystemService,
   needsUtf8Bom,
   resetUtf8BomCache,
+  detectLineEnding,
+  ensureCrlfLineEndings,
 } from './fileSystemService.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
@@ -446,6 +448,146 @@ describe('StandardFileSystemService', () => {
       mockGetSystemEncoding.mockReturnValue(null);
 
       expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
+    });
+  });
+
+  describe('detectLineEnding', () => {
+    it('should detect CRLF line endings', () => {
+      expect(detectLineEnding('line1\r\nline2\r\n')).toBe('crlf');
+    });
+
+    it('should detect LF line endings', () => {
+      expect(detectLineEnding('line1\nline2\n')).toBe('lf');
+    });
+
+    it('should return lf for content with no line endings', () => {
+      expect(detectLineEnding('single line')).toBe('lf');
+    });
+
+    it('should return lf for empty content', () => {
+      expect(detectLineEnding('')).toBe('lf');
+    });
+
+    it('should detect CRLF even in mixed content', () => {
+      expect(detectLineEnding('line1\r\nline2\nline3')).toBe('crlf');
+    });
+  });
+
+  describe('ensureCrlfLineEndings', () => {
+    it('should convert LF to CRLF', () => {
+      expect(ensureCrlfLineEndings('line1\nline2\n')).toBe(
+        'line1\r\nline2\r\n',
+      );
+    });
+
+    it('should not double-convert existing CRLF', () => {
+      expect(ensureCrlfLineEndings('line1\r\nline2\r\n')).toBe(
+        'line1\r\nline2\r\n',
+      );
+    });
+
+    it('should handle mixed line endings', () => {
+      expect(ensureCrlfLineEndings('line1\r\nline2\nline3\r\n')).toBe(
+        'line1\r\nline2\r\nline3\r\n',
+      );
+    });
+
+    it('should handle content with no line endings', () => {
+      expect(ensureCrlfLineEndings('single line')).toBe('single line');
+    });
+  });
+
+  describe('writeTextFile with lineEnding preservation', () => {
+    it('should convert LF to CRLF when lineEnding is crlf', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/file.txt',
+        content: 'line1\nline2\n',
+        _meta: { lineEnding: 'crlf' },
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/file.txt',
+        'line1\r\nline2\r\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings when lineEnding is lf', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/file.txt',
+        content: 'line1\nline2\n',
+        _meta: { lineEnding: 'lf' },
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/file.txt',
+        'line1\nline2\n',
+        'utf-8',
+      );
+    });
+
+    it('should not convert line endings when lineEnding is not specified', async () => {
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/file.txt',
+        content: 'line1\nline2\n',
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/file.txt',
+        'line1\nline2\n',
+        'utf-8',
+      );
+    });
+
+    it('should preserve CRLF for non-bat files on non-Windows when lineEnding is crlf', async () => {
+      mockPlatform.mockReturnValue('linux');
+      vi.mocked(fs.writeFile).mockResolvedValue();
+
+      await fileSystem.writeTextFile({
+        path: '/test/file.cs',
+        content: 'using System;\nclass Foo {}\n',
+        _meta: { lineEnding: 'crlf' },
+      });
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/file.cs',
+        'using System;\r\nclass Foo {}\r\n',
+        'utf-8',
+      );
+    });
+  });
+
+  describe('readTextFile with lineEnding detection', () => {
+    it('should detect CRLF line ending in file content', async () => {
+      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+        content: 'line1\r\nline2\r\n',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 3,
+      });
+
+      const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
+
+      expect(result._meta?.lineEnding).toBe('crlf');
+    });
+
+    it('should detect LF line ending in file content', async () => {
+      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+        content: 'line1\nline2\n',
+        bom: false,
+        encoding: 'utf-8',
+        originalLineCount: 3,
+      });
+
+      const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
+
+      expect(result._meta?.lineEnding).toBe('lf');
     });
   });
 });

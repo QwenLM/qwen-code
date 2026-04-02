@@ -17,12 +17,43 @@
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  writeFileSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  symlinkSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
+
+// Ensure qc-helper bundled skill can find user docs in dev mode.
+// In dev, import.meta.url resolves to the source tree, so the bundled skill
+// directory is packages/core/src/skills/bundled/qc-helper/. We create a
+// symlink from there to docs/users/ so the skill can read docs at runtime.
+const qcHelperDocsLink = join(
+  root,
+  'packages',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+  'qc-helper',
+  'docs',
+);
+const userDocsTarget = join(root, 'docs', 'users');
+if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
+  mkdirSync(dirname(qcHelperDocsLink), { recursive: true });
+  try {
+    symlinkSync(userDocsTarget, qcHelperDocsLink);
+  } catch {
+    // Symlink may fail on some systems; non-critical for dev
+  }
+}
 
 // Entry point for the CLI
 const cliEntry = join(cliPackageDir, 'index.ts');

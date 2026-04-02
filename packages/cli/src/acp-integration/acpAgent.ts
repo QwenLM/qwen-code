@@ -65,6 +65,7 @@ import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { runExitCleanup } from '../utils/cleanup.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -107,6 +108,16 @@ export async function runAcpAgent(
     } catch {
       // stdout may already be closed
     }
+    // Clean up child processes (MCP servers, etc.) and force exit.
+    // Without this, orphan subprocesses keep the Node.js event loop alive
+    // and the CLI process never terminates after the IDE disconnects.
+    runExitCleanup()
+      .catch((err) => {
+        debugLogger.error('[ACP] Cleanup error:', err);
+      })
+      .finally(() => {
+        process.exit(0);
+      });
   };
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);

@@ -79,7 +79,7 @@ export const useAttentionNotifications = ({
       // Fire idle_prompt notification hook when entering idle state
       if (config && !idleNotificationSentRef.current) {
         const messageBus = config.getMessageBus();
-        const hooksEnabled = config.getEnableHooks();
+        const hooksEnabled = !config.getDisableAllHooks();
         if (hooksEnabled && messageBus) {
           fireNotificationHook(
             messageBus,

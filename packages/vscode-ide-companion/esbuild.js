@@ -175,6 +175,11 @@ async function main() {
     sourcesContent: false,
     platform: 'browser',
     outfile: 'dist/webview.js',
+    // @qwen-code/qwen-code-core is a peer dependency of @qwen-code/webui.
+    // Since @qwen-code/webui marks it as external in its own Vite build, the
+    // browser bundle must also mark it external to avoid bundling Node.js-only
+    // modules (undici, @grpc/grpc-js, fs, stream, etc.) into the webview.
+    external: ['@qwen-code/qwen-code-core'],
     logLevel: 'silent',
     plugins: [reactDedupPlugin, cssInjectPlugin, esbuildProblemMatcherPlugin],
     jsx: 'automatic', // Use new JSX transform (React 17+)

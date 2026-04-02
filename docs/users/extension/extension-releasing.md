@@ -1,11 +1,12 @@
 # Extension Releasing
 
-There are two primary ways of releasing extensions to users:
+There are three primary ways of releasing extensions to users:
 
 - [Git repository](#releasing-through-a-git-repository)
 - [Github Releases](#releasing-through-github-releases)
+- [npm Registry](#releasing-through-npm-registry)
 
-Git repository releases tend to be the simplest and most flexible approach, while GitHub releases can be more efficient on initial install as they are shipped as single archives instead of requiring a git clone which downloads each file individually. Github releases may also contain platform specific archives if you need to ship platform specific binary files.
+Git repository releases tend to be the simplest and most flexible approach, while GitHub releases can be more efficient on initial install as they are shipped as single archives instead of requiring a git clone which downloads each file individually. Github releases may also contain platform specific archives if you need to ship platform specific binary files. npm registry releases are ideal for teams that already use npm for package distribution, especially with private registries.
 
 ## Releasing through a git repository
 
@@ -119,3 +120,85 @@ jobs:
             release/linux.arm64.my-tool.tar.gz
             release/win32.arm64.my-tool.zip
 ```
+
+## Releasing through npm registry
+
+You can publish Qwen Code extensions as scoped npm packages (e.g. `@your-org/my-extension`). This is a good fit when:
+
+- Your team already uses npm for package distribution
+- You need private registry support with existing auth infrastructure
+- You want version resolution and access control handled by npm
+
+### Package requirements
+
+Your npm package must include a `qwen-extension.json` file at the package root. This is the same config file used by all Qwen Code extensions — the npm tarball is simply another delivery mechanism.
+
+A minimal package structure looks like:
+
+```
+my-extension/
+├── package.json
+├── qwen-extension.json
+├── QWEN.md              # optional context file
+├── commands/             # optional custom commands
+├── skills/               # optional custom skills
+└── agents/               # optional custom subagents
+```
+
+Make sure `qwen-extension.json` is included in your published package (i.e. not excluded by `.npmignore` or the `files` field in `package.json`).
+
+### Publishing
+
+Use standard npm publishing tools:
+
+```bash
+# Publish to the default registry
+npm publish
+
+# Publish to a private/custom registry
+npm publish --registry https://your-registry.com
+```
+
+### Installation
+
+Users install your extension using the scoped package name:
+
+```bash
+# Install latest version
+qwen extensions install @your-org/my-extension
+
+# Install a specific version
+qwen extensions install @your-org/my-extension@1.2.0
+
+# Install from a custom registry
+qwen extensions install @your-org/my-extension --registry https://your-registry.com
+```
+
+### Update behavior
+
+- Extensions installed without a version pin (e.g. `@scope/pkg`) track the `latest` dist-tag.
+- Extensions installed with a dist-tag (e.g. `@scope/pkg@beta`) track that specific tag.
+- Extensions pinned to an exact version (e.g. `@scope/pkg@1.2.0`) are always considered up-to-date and will not prompt for updates.
+
+### Authentication for private registries
+
+Qwen Code reads npm auth credentials automatically:
+
+1. **`NPM_TOKEN` environment variable** — highest priority
+2. **`.npmrc` file** — supports both host-level and path-scoped `_authToken` entries (e.g. `//your-registry.com/:_authToken=TOKEN` or `//pkgs.dev.azure.com/org/_packaging/feed/npm/registry/:_authToken=TOKEN`)
+
+`.npmrc` files are read from the current directory and the user's home directory.
+
+### Managing release channels
+
+You can use npm dist-tags to manage release channels:
+
+```bash
+# Publish a beta release
+npm publish --tag beta
+
+# Users install beta channel
+qwen extensions install @your-org/my-extension@beta
+```
+
+This works similarly to git branch-based release channels but uses npm's native dist-tag mechanism.

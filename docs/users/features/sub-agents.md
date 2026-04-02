@@ -98,6 +98,7 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 ---
 name: agent-name
 description: Brief description of when and how to use this agent
+model: inherit # Optional: inherit or model-id
 tools:
 	- tool1
 	- tool2
@@ -106,8 +107,16 @@ tools:
 
 System prompt content goes here.
 Multiple paragraphs are supported.
-You can use ${variable} templating for dynamic content.
 ```
+
+#### Model Selection
+
+Use the optional `model` frontmatter field to control which model a subagent uses:
+
+- `inherit`: Use the same model as the main conversation
+- Omit the field: Same as `inherit`
+- `glm-5`: Use that model ID with the main conversation's auth type
+- `openai:gpt-4o`: Use a different provider (resolves credentials from env vars)
 
 #### Example Usage
 
@@ -117,12 +126,7 @@ name: project-documenter
 description: Creates project documentation and README files
 ---
 
-You are a documentation specialist for the ${project_name} project.
-
-Your task: ${task_description}
-
-Working directory: ${current_directory}
-Generated on: ${timestamp}
+You are a documentation specialist.
 
 Focus on creating clear, comprehensive documentation that helps both
 new contributors and end users understand the project.
@@ -213,7 +217,7 @@ tools:
   - web_search
 ---
 
-You are a technical documentation specialist for ${project_name}.
+You are a technical documentation specialist.
 
 Your role is to create clear, comprehensive documentation that serves both
 developers and end users. Focus on:

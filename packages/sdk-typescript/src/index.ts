@@ -36,7 +36,6 @@ export type {
   ControlCancelRequest,
   SubagentConfig,
   SubagentLevel,
-  ModelConfig,
   RunConfig,
 } from './types/protocol.js';
 
