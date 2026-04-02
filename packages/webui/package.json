@@ -5,20 +5,20 @@
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./dist/src/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
     "./followup": {
-      "types": "./dist/followup.d.ts",
+      "types": "./dist/src/followup.d.ts",
       "import": "./dist/followup.js",
       "require": "./dist/followup.cjs"
     },
     "./icons": {
-      "types": "./dist/components/icons/index.d.ts",
+      "types": "./dist/src/components/icons/index.d.ts",
       "import": "./dist/components/icons/index.js",
       "require": "./dist/components/icons/index.cjs"
     },
@@ -59,6 +59,7 @@
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {
+    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@0.13.2-dataworks.7",
     "@chromatic-com/storybook": "^5.0.0",
     "@storybook/addon-a11y": "^10.1.11",
     "@storybook/addon-docs": "^10.1.11",
