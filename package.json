@@ -1,6 +1,9 @@
 {
-  "name": "@protolabs/proto",
+  "name": "@protolabsai/proto",
   "version": "0.14.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
