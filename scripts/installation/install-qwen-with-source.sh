@@ -466,15 +466,23 @@ clean_old_qwen_installations() {
                 if [[ -f "${node_dir}" ]]; then
                     local node_prefix
                     node_prefix=$(dirname "$(dirname "${node_dir}")")
-                    log_warning "Removing old qwen from nvm: ${node_dir}"
-                    npm uninstall -g @qwen-code/qwen-code --prefix "${node_prefix}" 2>/dev/null || true
-                    qwen_found=true
+                    if [[ -w "${node_prefix}" ]]; then
+                        log_warning "Removing old qwen from nvm: ${node_dir}"
+                        npm uninstall -g @qwen-code/qwen-code --prefix "${node_prefix}" 2>/dev/null || true
+                        qwen_found=true
+                    else
+                        log_warning "Skipping old qwen at ${node_dir} (no write permission, consider removing manually)"
+                    fi
                 fi
             done
         elif [[ -f "${prefix}/bin/qwen" ]]; then
-            log_warning "Removing old qwen from ${prefix}/bin/qwen"
-            npm uninstall -g @qwen-code/qwen-code --prefix "${prefix}" 2>/dev/null || true
-            qwen_found=true
+            if [[ -w "${prefix}" ]]; then
+                log_warning "Removing old qwen from ${prefix}/bin/qwen"
+                npm uninstall -g @qwen-code/qwen-code --prefix "${prefix}" 2>/dev/null || true
+                qwen_found=true
+            else
+                log_warning "Skipping old qwen at ${prefix}/bin/qwen (no write permission, consider removing manually)"
+            fi
         fi
     done
 
