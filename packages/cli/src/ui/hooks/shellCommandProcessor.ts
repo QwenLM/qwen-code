@@ -131,6 +131,7 @@ export const useShellCommandProcessor = (
         setPendingHistoryItem({
           type: 'tool_group',
           tools: [initialToolDisplay],
+          isUserInitiated: true,
         });
 
         let executionPid: number | undefined;
@@ -304,6 +305,7 @@ export const useShellCommandProcessor = (
                 {
                   type: 'tool_group',
                   tools: [finalToolDisplay],
+                  isUserInitiated: true,
                 } as HistoryItemWithoutId,
                 userMessageTimestamp,
               );
