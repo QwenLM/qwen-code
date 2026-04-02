@@ -132,11 +132,28 @@ async function generateViaForkedQuery(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
+  const model = modelOverride || config.getModel();
+  const startTime = Date.now();
   const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
     abortSignal,
     jsonSchema: SUGGESTION_SCHEMA,
     model: modelOverride,
   });
+  const durationMs = Date.now() - startTime;
+
+  // Report usage to session stats
+  if (result.usage) {
+    reportSuggestionUsage(
+      model,
+      {
+        promptTokenCount: result.usage.inputTokens,
+        candidatesTokenCount: result.usage.outputTokens,
+        totalTokenCount: result.usage.inputTokens + result.usage.outputTokens,
+        cachedContentTokenCount: result.usage.cacheHitTokens,
+      },
+      durationMs,
+    );
+  }
 
   if (result.jsonResult) {
     const raw = result.jsonResult['suggestion'];
