@@ -113,12 +113,6 @@ Settings are organized into categories. All settings should be placed within the
 | `ui.enableCacheSharing`                 | boolean          | Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).                                                                                                                                                                                                                                                                                     | `true`      |
 | `ui.enableSpeculation`                  | boolean          | Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).                                                                                                                                                                                                                                                                                              | `false`     |
 
-#### fastModel
-
-| Setting     | Type   | Description                                                                                                                                                                  | Default |
-| ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `fastModel` | string | Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., `qwen3.5-flash`) reduces latency and cost. | `""`    |
-
 #### ide
 
 | Setting            | Type    | Description                                          | Default |
@@ -193,6 +187,12 @@ The `extra_body` field allows you to add custom parameters to the request body s
 - `"~/qwen-logs"` - Logs to `~/qwen-logs` directory
 - `"./custom-logs"` - Logs to `./custom-logs` relative to current directory
 - `"/tmp/openai-logs"` - Logs to absolute path `/tmp/openai-logs`
+
+#### fastModel
+
+| Setting     | Type   | Description                                                                                                                                                                                                                                           | Default |
+| ----------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `fastModel` | string | Model for background tasks ([suggestion generation](../features/followup-suggestions), speculation). Leave empty to use the main model. A smaller/faster model (e.g., `qwen3.5-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
 #### context
 
