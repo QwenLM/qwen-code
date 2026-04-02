@@ -1149,7 +1149,6 @@ export default {
   // ============================================================================
   'Switch the model for this session': 'Switch the model for this session',
   'Set fast model for background tasks': 'Set fast model for background tasks',
-  'Fast model updated.': 'Fast model updated.',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',

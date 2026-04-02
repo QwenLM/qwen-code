@@ -1091,7 +1091,6 @@ export default {
   // ============================================================================
   'Switch the model for this session': '切换此会话的模型',
   'Set fast model for background tasks': '设置后台任务的快速模型',
-  'Fast model updated.': '快速模型已更新。',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':

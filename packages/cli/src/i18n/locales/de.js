@@ -988,7 +988,6 @@ export default {
   'Switch the model for this session': 'Modell für diese Sitzung wechseln',
   'Set fast model for background tasks':
     'Schnelles Modell für Hintergrundaufgaben festlegen',
-  'Fast model updated.': 'Schnelles Modell aktualisiert.',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
   'Authentication type not available.':

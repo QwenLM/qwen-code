@@ -996,7 +996,6 @@ export default {
   'Switch the model for this session': 'Переключение модели для этой сессии',
   'Set fast model for background tasks':
     'Установить быструю модель для фоновых задач',
-  'Fast model updated.': 'Быстрая модель обновлена.',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',
