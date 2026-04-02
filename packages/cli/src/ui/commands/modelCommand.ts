@@ -12,7 +12,6 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 export const modelCommand: SlashCommand = {
@@ -58,21 +57,23 @@ export const modelCommand: SlashCommand = {
         };
       }
       // Set fast model
-      if (settings) {
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'fastModel',
-          modelName,
-        );
-        context.ui.addItem(
-          {
-            type: MessageType.SUCCESS,
-            text: t('Fast Model') + ': ' + modelName,
-          },
-          Date.now(),
-        );
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
       }
-      return { type: 'message', messageType: 'info', content: '' };
+      settings.setValue(
+        getPersistScopeForModelSelection(settings),
+        'fastModel',
+        modelName,
+      );
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Fast Model') + ': ' + modelName,
+      };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();
