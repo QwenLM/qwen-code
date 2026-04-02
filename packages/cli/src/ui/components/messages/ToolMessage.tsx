@@ -16,6 +16,7 @@ import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
+  TaskUpdateDiffDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
@@ -24,6 +25,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
+import { TaskUpdateDiffDisplay as TaskUpdateDiffRenderer } from '../TaskUpdateDiffDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import {
   SHELL_COMMAND_NAME,
@@ -47,6 +49,7 @@ export type TextEmphasis = 'high' | 'medium' | 'low';
 type DisplayRendererResult =
   | { type: 'none' }
   | { type: 'todo'; data: TodoResultDisplay }
+  | { type: 'task_update_diff'; data: TaskUpdateDiffDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
@@ -62,6 +65,19 @@ const useResultDisplayRenderer = (
   React.useMemo(() => {
     if (!resultDisplay) {
       return { type: 'none' };
+    }
+
+    // Check for TaskUpdateDiffDisplay
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'task_update_diff'
+    ) {
+      return {
+        type: 'task_update_diff',
+        data: resultDisplay as TaskUpdateDiffDisplay,
+      };
     }
 
     // Check for TodoResultDisplay
@@ -349,6 +365,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           <Box flexDirection="column">
             {displayRenderer.type === 'todo' && (
               <TodoResultRenderer data={displayRenderer.data} />
+            )}
+            {displayRenderer.type === 'task_update_diff' && (
+              <TaskUpdateDiffRenderer data={displayRenderer.data} />
             )}
             {displayRenderer.type === 'plan' && (
               <PlanResultRenderer

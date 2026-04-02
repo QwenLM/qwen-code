@@ -28,7 +28,6 @@ import type { Content } from '@google/genai';
 
 import os from 'node:os';
 
-const GEMINI_DIR_NAME = '.qwen';
 const TMP_DIR_NAME = 'tmp';
 const LOG_FILE_NAME = 'logs.json';
 const CHECKPOINT_FILE_NAME = 'checkpoint.json';
@@ -47,7 +46,9 @@ let testLogFilePath: string;
 let testCheckpointFilePath: string;
 
 const setTestPaths = () => {
-  testGeminiDir = path.join(os.homedir(), GEMINI_DIR_NAME, TMP_DIR_NAME, hash);
+  // Use Storage.getRuntimeBaseDir() so this matches the actual path Storage writes to,
+  // regardless of which dir name the brand uses (.proto vs .qwen).
+  testGeminiDir = path.join(Storage.getRuntimeBaseDir(), TMP_DIR_NAME, hash);
   testLogFilePath = path.join(testGeminiDir, LOG_FILE_NAME);
   testCheckpointFilePath = path.join(testGeminiDir, CHECKPOINT_FILE_NAME);
 };

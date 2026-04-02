@@ -316,7 +316,7 @@ describe('loadServerHierarchicalMemory', () => {
 
   it('should load extension context file paths', async () => {
     const extensionFilePath = await createTestFile(
-      path.join(testRootDir, 'extensions/ext1/QWEN.md'),
+      path.join(testRootDir, 'extensions/ext1', DEFAULT_CONTEXT_FILENAME),
       'Extension memory content',
     );
 

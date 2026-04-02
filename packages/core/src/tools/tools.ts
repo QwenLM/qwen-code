@@ -549,6 +549,7 @@ export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
+  | TaskUpdateDiffDisplay
   | PlanResultDisplay
   | AgentResultDisplay
   | AnsiOutputDisplay
@@ -579,6 +580,18 @@ export interface TodoResultDisplay {
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+  }>;
+}
+
+export interface TaskUpdateDiffDisplay {
+  type: 'task_update_diff';
+  taskId: string;
+  /** Post-update task title, used as display header */
+  title: string;
+  changes: Array<{
+    field: 'status' | 'title' | 'priority' | 'description';
+    from: string;
+    to: string;
   }>;
 }
 

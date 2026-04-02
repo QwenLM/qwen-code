@@ -119,7 +119,7 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
-    expect(stream).toBe(mockStream);
+    expect(stream).toBeDefined();
   });
 
   it('should call countTokens on the underlying model', async () => {

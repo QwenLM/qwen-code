@@ -540,7 +540,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUseFailure,
-        { toolName: 'test-tool' },
+        { toolName: 'test-tool', toolInput: { param: 'value' } },
       );
       expect(result.success).toBe(true);
     });
@@ -638,7 +638,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUseFailure,
-        { toolName: 'special-tool' }, // Context with tool name
+        { toolName: 'special-tool', toolInput: { param: 'value' } }, // Context with tool name and input
       );
     });
 
@@ -773,7 +773,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreToolUse,
-        { toolName: 'test-tool' },
+        { toolName: 'test-tool', toolInput: { param: 'value' } },
       );
       expect(result.success).toBe(true);
     });
@@ -833,7 +833,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreToolUse,
-        { toolName: 'Bash' },
+        { toolName: 'Bash', toolInput: { command: 'npm test' } },
       );
     });
 
@@ -942,7 +942,7 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUse,
-        { toolName: 'test-tool' },
+        { toolName: 'test-tool', toolInput: { param: 'value' } },
       );
       expect(result.success).toBe(true);
     });
@@ -1006,7 +1006,10 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUse,
-        { toolName: 'Write' },
+        {
+          toolName: 'Write',
+          toolInput: { file_path: '/test.txt', content: 'hello' },
+        },
       );
     });
 

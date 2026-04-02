@@ -184,7 +184,11 @@ describe('useGeminiStream', () => {
       vertexai: false,
       contextFileName: undefined,
       getToolRegistry: vi.fn(
-        () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
+        () =>
+          ({
+            getToolSchemaList: vi.fn(() => []),
+            getTool: vi.fn(() => undefined),
+          }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
       getCheckpointingEnabled: vi.fn(() => false),
@@ -298,6 +302,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         );
       },
       {
@@ -463,6 +468,7 @@ describe('useGeminiStream', () => {
         () => {},
         80,
         24,
+        () => [],
       ),
     );
 
@@ -547,6 +553,7 @@ describe('useGeminiStream', () => {
         () => {},
         80,
         24,
+        () => [],
       ),
     );
 
@@ -659,6 +666,7 @@ describe('useGeminiStream', () => {
         () => {},
         80,
         24,
+        () => [],
       ),
     );
 
@@ -772,6 +780,7 @@ describe('useGeminiStream', () => {
         () => {},
         80,
         24,
+        () => [],
       ),
     );
 
@@ -888,6 +897,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -931,6 +941,7 @@ describe('useGeminiStream', () => {
           setShellInputFocusedSpy, // Pass the spy here
           80,
           24,
+          () => [],
         ),
       );
 
@@ -1258,6 +1269,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -1315,6 +1327,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -1808,6 +1821,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -1863,6 +1877,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -1919,6 +1934,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2015,6 +2031,7 @@ describe('useGeminiStream', () => {
             vi.fn(),
             80,
             24,
+            () => [],
           ),
         );
 
@@ -2142,6 +2159,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2233,6 +2251,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2297,6 +2316,7 @@ describe('useGeminiStream', () => {
             () => {},
             80,
             24,
+            () => [],
           ),
         );
 
@@ -2413,6 +2433,7 @@ describe('useGeminiStream', () => {
             () => {},
             80,
             24,
+            () => [],
           ),
         );
 
@@ -2486,6 +2507,7 @@ describe('useGeminiStream', () => {
           vi.fn(), // setShellInputFocused
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2556,6 +2578,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2614,6 +2637,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 
@@ -2669,6 +2693,7 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          () => [],
         ),
       );
 

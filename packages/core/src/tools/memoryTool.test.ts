@@ -31,7 +31,13 @@ vi.mock(import('node:fs/promises'), async (importOriginal) => {
 
 vi.mock('os');
 
-const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
+// Mock the memory store module
+const mockCreateMemory = vi.hoisted(() => vi.fn());
+vi.mock('../memory/memoryStore.js', () => ({
+  createMemory: mockCreateMemory,
+}));
+
+const MEMORY_SECTION_HEADER = '## Proto Added Memories';
 
 // Define a type for our fsAdapter to ensure consistency
 interface FsAdapter {
@@ -188,17 +194,25 @@ describe('MemoryTool', () => {
 
   describe('execute (instance method)', () => {
     let memoryTool: MemoryTool;
-    let performAddMemoryEntrySpy: Mock<typeof MemoryTool.performAddMemoryEntry>;
 
     beforeEach(() => {
       memoryTool = new MemoryTool();
-      // Spy on the static method for these tests
-      performAddMemoryEntrySpy = vi
-        .spyOn(MemoryTool, 'performAddMemoryEntry')
-        .mockResolvedValue(undefined) as Mock<
-        typeof MemoryTool.performAddMemoryEntry
-      >;
-      // Cast needed as spyOn returns MockInstance
+      // Setup mock createMemory to return a fake MemoryFile
+      mockCreateMemory.mockResolvedValue({
+        header: {
+          name: 'the sky is blue',
+          description: 'The sky is blue',
+          type: 'user',
+        },
+        content: 'The sky is blue',
+        filePath: path.join(
+          os.homedir(),
+          '.proto',
+          'memory',
+          'user_the-sky-is-blue.md',
+        ),
+        mtimeMs: Date.now(),
+      });
     });
 
     it('should have correct name, displayName, description, and schema', () => {
@@ -212,61 +226,53 @@ describe('MemoryTool', () => {
       expect(memoryTool.schema.parametersJsonSchema).toBeDefined();
     });
 
-    it('should call performAddMemoryEntry with correct parameters and return success for global scope', async () => {
+    it('should call createMemory and return success for global scope', async () => {
       const params = { fact: 'The sky is blue', scope: 'global' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      // Use getCurrentGeminiMdFilename for the default expectation before any setGeminiMdFilename calls in a test
-      const expectedFilePath = path.join(
-        os.homedir(),
-        '.qwen',
-        getCurrentGeminiMdFilename(), // This will be DEFAULT_CONTEXT_FILENAME unless changed by a test
+      expect(mockCreateMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: params.fact,
+          scope: 'global',
+          type: 'user',
+        }),
       );
-
-      // For this test, we expect the actual fs methods to be passed
-      const expectedFsArgument = {
-        readFile: fs.readFile,
-        writeFile: fs.writeFile,
-        mkdir: fs.mkdir,
-      };
-
-      expect(performAddMemoryEntrySpy).toHaveBeenCalledWith(
-        params.fact,
-        expectedFilePath,
-        expectedFsArgument,
-      );
-      const successMessage = `Okay, I've remembered that in global memory: "${params.fact}"`;
-      expect(result.llmContent).toBe(successMessage);
-      expect(result.returnDisplay).toBe(successMessage);
+      expect(result.llmContent).toContain('global memory');
+      expect(result.llmContent).toContain(params.fact);
     });
 
-    it('should call performAddMemoryEntry with correct parameters and return success for project scope', async () => {
+    it('should call createMemory and return success for project scope', async () => {
+      const projectFilePath = path.join(
+        process.cwd(),
+        '.proto',
+        'memory',
+        'user_the-sky-is-blue.md',
+      );
+      mockCreateMemory.mockResolvedValue({
+        header: {
+          name: 'the sky is blue',
+          description: 'The sky is blue',
+          type: 'user',
+        },
+        content: 'The sky is blue',
+        filePath: projectFilePath,
+        mtimeMs: Date.now(),
+      });
+
       const params = { fact: 'The sky is blue', scope: 'project' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      // For project scope, expect the file to be in current working directory
-      const expectedFilePath = path.join(
-        process.cwd(),
-        getCurrentGeminiMdFilename(),
+      expect(mockCreateMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: params.fact,
+          scope: 'project',
+          type: 'user',
+        }),
       );
-
-      // For this test, we expect the actual fs methods to be passed
-      const expectedFsArgument = {
-        readFile: fs.readFile,
-        writeFile: fs.writeFile,
-        mkdir: fs.mkdir,
-      };
-
-      expect(performAddMemoryEntrySpy).toHaveBeenCalledWith(
-        params.fact,
-        expectedFilePath,
-        expectedFsArgument,
-      );
-      const successMessage = `Okay, I've remembered that in project memory: "${params.fact}"`;
-      expect(result.llmContent).toBe(successMessage);
-      expect(result.returnDisplay).toBe(successMessage);
+      expect(result.llmContent).toContain('project memory');
+      expect(result.llmContent).toContain(params.fact);
     });
 
     it('should return an error if fact is empty', async () => {
@@ -279,12 +285,10 @@ describe('MemoryTool', () => {
       );
     });
 
-    it('should handle errors from performAddMemoryEntry', async () => {
+    it('should handle errors from createMemory', async () => {
       const params = { fact: 'This will fail', scope: 'global' as const };
-      const underlyingError = new Error(
-        '[MemoryTool] Failed to add memory entry: Disk full',
-      );
-      performAddMemoryEntrySpy.mockRejectedValue(underlyingError);
+      const underlyingError = new Error('Disk full');
+      mockCreateMemory.mockRejectedValue(underlyingError);
 
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -300,18 +304,30 @@ describe('MemoryTool', () => {
       );
     });
 
-    it('should return error when executing without scope parameter', async () => {
+    it('should default to project scope when scope is not specified', async () => {
+      const projectFilePath = path.join(
+        process.cwd(),
+        '.proto',
+        'memory',
+        'user_test-fact.md',
+      );
+      mockCreateMemory.mockResolvedValue({
+        header: { name: 'test fact', description: 'Test fact', type: 'user' },
+        content: 'Test fact',
+        filePath: projectFilePath,
+        mtimeMs: Date.now(),
+      });
+
       const params = { fact: 'Test fact' };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain(
-        'Please specify where to save this memory',
+      expect(mockCreateMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: 'project',
+        }),
       );
-      expect(result.llmContent).toContain('Global:');
-      expect(result.llmContent).toContain('Project:');
-      expect(result.returnDisplay).toContain('Global:');
-      expect(result.returnDisplay).toContain('Project:');
+      expect(result.llmContent).toContain('project memory');
     });
   });
 
@@ -343,17 +359,17 @@ describe('MemoryTool', () => {
       expect(result).toBeDefined();
 
       if (result.type === 'edit') {
-        const expectedPath = path.join('~', '.qwen', 'QWEN.md');
+        const expectedPath = path.join('~', '.proto', DEFAULT_CONTEXT_FILENAME);
         expect(result.title).toBe(
           `Confirm Memory Save: ${expectedPath} (global)`,
         );
-        expect(result.fileName).toContain(path.join('mock', 'home', '.qwen'));
-        expect(result.fileName).toContain('QWEN.md');
-        expect(result.fileDiff).toContain('Index: QWEN.md');
-        expect(result.fileDiff).toContain('+## Qwen Added Memories');
+        expect(result.fileName).toContain(path.join('mock', 'home', '.proto'));
+        expect(result.fileName).toContain(DEFAULT_CONTEXT_FILENAME);
+        expect(result.fileDiff).toContain(`Index: ${DEFAULT_CONTEXT_FILENAME}`);
+        expect(result.fileDiff).toContain('+## Proto Added Memories');
         expect(result.fileDiff).toContain('+- Test fact');
         expect(result.originalContent).toBe('');
-        expect(result.newContent).toContain('## Qwen Added Memories');
+        expect(result.newContent).toContain('## Proto Added Memories');
         expect(result.newContent).toContain('- Test fact');
       }
     });
@@ -369,16 +385,16 @@ describe('MemoryTool', () => {
       expect(result).toBeDefined();
 
       if (result.type === 'edit') {
-        const expectedPath = path.join(process.cwd(), 'QWEN.md');
+        const expectedPath = path.join(process.cwd(), DEFAULT_CONTEXT_FILENAME);
         expect(result.title).toBe(
           `Confirm Memory Save: ${expectedPath} (project)`,
         );
         expect(result.fileName).toBe(expectedPath);
-        expect(result.fileDiff).toContain('Index: QWEN.md');
-        expect(result.fileDiff).toContain('+## Qwen Added Memories');
+        expect(result.fileDiff).toContain(`Index: ${DEFAULT_CONTEXT_FILENAME}`);
+        expect(result.fileDiff).toContain('+## Proto Added Memories');
         expect(result.fileDiff).toContain('+- Test fact');
         expect(result.originalContent).toBe('');
-        expect(result.newContent).toContain('## Qwen Added Memories');
+        expect(result.newContent).toContain('## Proto Added Memories');
         expect(result.newContent).toContain('- Test fact');
       }
     });
@@ -405,7 +421,7 @@ describe('MemoryTool', () => {
     it('should handle existing memory file with content for global scope', async () => {
       const params = { fact: 'New fact', scope: 'global' as const };
       const existingContent =
-        'Some existing content.\n\n## Qwen Added Memories\n- Old fact\n';
+        'Some existing content.\n\n## Proto Added Memories\n- Old fact\n';
 
       // Mock fs.readFile to return existing content
       vi.mocked(fs.readFile).mockResolvedValue(existingContent);
@@ -419,11 +435,11 @@ describe('MemoryTool', () => {
       expect(result).toBeDefined();
 
       if (result.type === 'edit') {
-        const expectedPath = path.join('~', '.qwen', 'QWEN.md');
+        const expectedPath = path.join('~', '.proto', DEFAULT_CONTEXT_FILENAME);
         expect(result.title).toBe(
           `Confirm Memory Save: ${expectedPath} (global)`,
         );
-        expect(result.fileDiff).toContain('Index: QWEN.md');
+        expect(result.fileDiff).toContain(`Index: ${DEFAULT_CONTEXT_FILENAME}`);
         expect(result.fileDiff).toContain('+- New fact');
         expect(result.originalContent).toBe(existingContent);
         expect(result.newContent).toContain('- Old fact');
@@ -445,10 +461,10 @@ describe('MemoryTool', () => {
         expect(result.title).toContain('Choose Memory Location');
         expect(result.title).toContain('GLOBAL');
         expect(result.title).toContain('PROJECT');
-        expect(result.fileName).toBe('QWEN.md');
+        expect(result.fileName).toBe(DEFAULT_CONTEXT_FILENAME);
         expect(result.fileDiff).toContain('Test fact');
-        expect(result.fileDiff).toContain('--- QWEN.md');
-        expect(result.fileDiff).toContain('+++ QWEN.md');
+        expect(result.fileDiff).toContain(`--- ${DEFAULT_CONTEXT_FILENAME}`);
+        expect(result.fileDiff).toContain(`+++ ${DEFAULT_CONTEXT_FILENAME}`);
         expect(result.fileDiff).toContain('+- Test fact');
         expect(result.originalContent).toContain('scope: global');
         expect(result.originalContent).toContain('INSTRUCTIONS:');
@@ -463,8 +479,8 @@ describe('MemoryTool', () => {
       expect(result).toBeDefined();
 
       if (result.type === 'edit') {
-        const globalPath = path.join('~', '.qwen', 'QWEN.md');
-        const projectPath = path.join(process.cwd(), 'QWEN.md');
+        const globalPath = path.join('~', '.proto', DEFAULT_CONTEXT_FILENAME);
+        const projectPath = path.join(process.cwd(), DEFAULT_CONTEXT_FILENAME);
 
         expect(result.fileDiff).toContain(`Global: ${globalPath}`);
         expect(result.fileDiff).toContain(`Project: ${projectPath}`);
@@ -486,7 +502,7 @@ describe('MemoryTool', () => {
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
-      const expectedPath = path.join('~', '.qwen', 'QWEN.md');
+      const expectedPath = path.join('~', '.proto', DEFAULT_CONTEXT_FILENAME);
       expect(description).toBe(`${expectedPath} (global)`);
     });
 
@@ -495,7 +511,7 @@ describe('MemoryTool', () => {
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
-      const expectedPath = path.join(process.cwd(), 'QWEN.md');
+      const expectedPath = path.join(process.cwd(), DEFAULT_CONTEXT_FILENAME);
       expect(description).toBe(`${expectedPath} (project)`);
     });
 
@@ -504,8 +520,8 @@ describe('MemoryTool', () => {
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
-      const globalPath = path.join('~', '.qwen', 'QWEN.md');
-      const projectPath = path.join(process.cwd(), 'QWEN.md');
+      const globalPath = path.join('~', '.proto', DEFAULT_CONTEXT_FILENAME);
+      const projectPath = path.join(process.cwd(), DEFAULT_CONTEXT_FILENAME);
       expect(description).toBe(
         `CHOOSE: ${globalPath} (global) OR ${projectPath} (project)`,
       );

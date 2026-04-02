@@ -39,6 +39,10 @@ class TaskUpdateToolInvocation extends BaseToolInvocation<
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const store = this.config.getTaskStore();
+
+    // Snapshot state before update for diff computation
+    const before = store.get(this.params.taskId);
+
     const task = store.update(this.params.taskId, {
       status: this.params.status as TaskStatus | undefined,
       title: this.params.title,
@@ -57,18 +61,40 @@ class TaskUpdateToolInvocation extends BaseToolInvocation<
     }
 
     const taskJson = JSON.stringify(task, null, 2);
+
+    // Build diff: only include fields that actually changed
+    const changes: Array<{
+      field: 'status' | 'title' | 'priority' | 'description';
+      from: string;
+      to: string;
+    }> = [];
+
+    if (before) {
+      const checkField = (
+        field: 'status' | 'title' | 'priority' | 'description',
+        fromVal: string | undefined,
+        toVal: string | undefined,
+      ) => {
+        const from = fromVal ?? '';
+        const to = toVal ?? '';
+        if (from !== to) {
+          changes.push({ field, from, to });
+        }
+      };
+
+      checkField('status', before.status, task.status);
+      checkField('title', before.title, task.title);
+      checkField('priority', before.priority, task.priority);
+      checkField('description', before.description, task.description);
+    }
+
     return {
       llmContent: `Task updated successfully.\n\n<system-reminder>\nUpdated task: ${taskJson}\nContinue with your current work.\n</system-reminder>`,
       returnDisplay: {
-        type: 'todo_list' as const,
-        todos: store.list().map((t) => ({
-          id: t.id,
-          content: t.title,
-          status:
-            t.status === 'blocked' || t.status === 'cancelled'
-              ? ('pending' as const)
-              : t.status,
-        })),
+        type: 'task_update_diff' as const,
+        taskId: task.id,
+        title: task.title,
+        changes,
       },
     };
   }

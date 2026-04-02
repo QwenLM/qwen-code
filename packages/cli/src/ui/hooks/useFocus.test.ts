@@ -52,7 +52,10 @@ describe('useFocus', () => {
     const { result } = renderHook(() => useFocus(), { wrapper });
 
     expect(result.current).toBe(true);
-    expect(stdout.write).toHaveBeenCalledWith('\x1b[?1004h');
+    // useFocus wraps focus-reporting escapes in sync-output mode guards to prevent flicker
+    expect(stdout.write).toHaveBeenCalledWith(
+      '\x1b[?2026h\x1b[?1004h\x1b[?2026l',
+    );
   });
 
   it('should set isFocused to false when a focus-out event is received', () => {
@@ -97,8 +100,10 @@ describe('useFocus', () => {
 
     unmount();
 
-    // Assert that the cleanup function was called
-    expect(stdout.write).toHaveBeenCalledWith('\x1b[?1004l');
+    // Assert that the cleanup function was called (wrapped in sync-output mode guards)
+    expect(stdout.write).toHaveBeenCalledWith(
+      '\x1b[?2026h\x1b[?1004l\x1b[?2026l',
+    );
     // Ensure useFocus listener was removed (but KeypressProvider listeners may remain)
     expect(stdin.listenerCount('data')).toBeLessThan(listenerCountAfterMount);
   });

@@ -97,6 +97,7 @@ describe('AnthropicContentGenerator', () => {
     mockConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.2.3'),
       getProxy: vi.fn().mockReturnValue(undefined),
+      getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
   });
 

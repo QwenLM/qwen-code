@@ -41,7 +41,7 @@ describe('InstallationManager', () => {
   let tempHomeDir: string;
   let installationManager: InstallationManager;
   const installationIdFile = () =>
-    path.join(tempHomeDir, '.qwen', 'installation_id');
+    path.join(tempHomeDir, '.proto', 'installation_id');
 
   beforeEach(() => {
     tempHomeDir = fs.mkdtempSync(

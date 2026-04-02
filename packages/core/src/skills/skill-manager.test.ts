@@ -595,7 +595,10 @@ Skill 3 content`);
     it('should return all project-level base dirs', () => {
       const baseDirs = manager.getSkillsBaseDirs('project');
 
-      expect(baseDirs).toHaveLength(3);
+      expect(baseDirs).toHaveLength(4);
+      expect(baseDirs).toContain(
+        path.join('/test/project', '.proto', 'skills'),
+      );
       expect(baseDirs).toContain(path.join('/test/project', '.qwen', 'skills'));
       expect(baseDirs).toContain(
         path.join('/test/project', '.agents', 'skills'),
@@ -608,7 +611,8 @@ Skill 3 content`);
     it('should return all user-level base dirs', () => {
       const baseDirs = manager.getSkillsBaseDirs('user');
 
-      expect(baseDirs).toHaveLength(3);
+      expect(baseDirs).toHaveLength(4);
+      expect(baseDirs).toContain(path.join('/home/user', '.proto', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.agents', 'skills'));
       expect(baseDirs).toContain(path.join('/home/user', '.claude', 'skills'));

@@ -617,6 +617,7 @@ describe('startInteractiveUI', () => {
     expect(options).toEqual({
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
+      patchConsole: false,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)

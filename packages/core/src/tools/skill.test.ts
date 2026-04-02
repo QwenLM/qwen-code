@@ -320,7 +320,7 @@ describe('SkillTool', () => {
       );
 
       expect(result.returnDisplay).toBe(
-        'Specialized skill for reviewing code quality',
+        'Skill loaded: code-review — Specialized skill for reviewing code quality',
       );
     });
 
@@ -346,7 +346,9 @@ describe('SkillTool', () => {
       // Base description is omitted from llmContent; ensure body is present.
       expect(llmText).toContain('Help write comprehensive tests.');
 
-      expect(result.returnDisplay).toBe('Skill for writing and running tests');
+      expect(result.returnDisplay).toBe(
+        'Skill loaded: testing — Skill for writing and running tests',
+      );
     });
 
     it('should handle skill not found error', async () => {
@@ -428,7 +430,7 @@ describe('SkillTool', () => {
       expect(llmText).not.toContain('## Additional Files');
 
       expect(result.returnDisplay).toBe(
-        'Specialized skill for reviewing code quality',
+        'Skill loaded: code-review — Specialized skill for reviewing code quality',
       );
     });
   });

@@ -131,7 +131,7 @@ describe('IdeClient', () => {
       await ideClient.connect();
 
       expect(fs.promises.readFile).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen', 'ide', '8080.lock'),
+        path.join('/home/test', '.proto', 'ide', '8080.lock'),
         'utf8',
       );
       expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
@@ -273,10 +273,10 @@ describe('IdeClient', () => {
       vi.mocked(fs.promises.readFile).mockImplementation(
         async (filePath: fs.PathLike | FileHandle) => {
           const file = String(filePath);
-          if (file === path.join('/home/test', '.qwen', 'ide', '1111.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '1111.lock')) {
             return JSON.stringify(primaryConfig);
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '2222.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '2222.lock')) {
             return JSON.stringify(fallbackConfig);
           }
           throw new Error(`unexpected path: ${file}`);
@@ -425,7 +425,7 @@ describe('IdeClient', () => {
 
       expect(result).toEqual(config);
       expect(fs.promises.readFile).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen', 'ide', '1234.lock'),
+        path.join('/home/test', '.proto', 'ide', '1234.lock'),
         'utf8',
       );
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
@@ -545,7 +545,7 @@ describe('IdeClient', () => {
           if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
             throw new Error('not found');
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '1000.lock')) {
             return JSON.stringify(liveConfig);
           }
           throw new Error(`unexpected path: ${file}`);
@@ -588,10 +588,10 @@ describe('IdeClient', () => {
           if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
             throw new Error('not found');
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '1000.lock')) {
             return JSON.stringify({ port: '1000' });
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '2000.lock')) {
             return JSON.stringify(latestConfig);
           }
           throw new Error(`unexpected path: ${file}`);
@@ -639,13 +639,13 @@ describe('IdeClient', () => {
           if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
             throw new Error('not found');
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '1000.lock')) {
             return JSON.stringify({
               port: '1000',
               workspacePath: '/older/workspace',
             });
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '2000.lock')) {
             return JSON.stringify(latestConfig);
           }
           throw new Error(`unexpected path: ${file}`);
@@ -677,7 +677,7 @@ describe('IdeClient', () => {
 
       expect(result).toEqual(latestConfig);
       expect(fs.promises.readdir).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen', 'ide'),
+        path.join('/home/test', '.proto', 'ide'),
       );
     });
 
@@ -688,13 +688,13 @@ describe('IdeClient', () => {
           if (file === path.join('/tmp', 'qwen-code-ide-server-12345.json')) {
             throw new Error('not found');
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '1000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '1000.lock')) {
             return JSON.stringify({
               port: '1000',
               workspacePath: '/another/workspace',
             });
           }
-          if (file === path.join('/home/test', '.qwen', 'ide', '2000.lock')) {
+          if (file === path.join('/home/test', '.proto', 'ide', '2000.lock')) {
             return JSON.stringify({
               port: '2000',
               workspacePath: '/yet/another/workspace',
