@@ -45,7 +45,7 @@ describe('<CompressionMessage />', () => {
       const { lastFrame } = render(<CompressionMessage {...props} />);
       const output = lastFrame();
 
-      expect(output).toContain('✦');
+      expect(output).toContain('⟡');
       expect(output).toContain(
         'Chat history compressed from 100 to 50 tokens.',
       );
@@ -67,7 +67,7 @@ describe('<CompressionMessage />', () => {
         const { lastFrame } = render(<CompressionMessage {...props} />);
         const output = lastFrame();
 
-        expect(output).toContain('✦');
+        expect(output).toContain('⟡');
         expect(output).toContain(
           `compressed from ${original} to ${newTokens} tokens`,
         );
@@ -89,7 +89,7 @@ describe('<CompressionMessage />', () => {
       const { lastFrame } = render(<CompressionMessage {...props} />);
       const output = lastFrame();
 
-      expect(output).toContain('✦');
+      expect(output).toContain('⟡');
       expect(output).toContain(
         'Compression was not beneficial for this history size.',
       );

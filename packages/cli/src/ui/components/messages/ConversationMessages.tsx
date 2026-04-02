@@ -206,7 +206,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="✦"
+    prefix="⟡"
     prefixColor={theme.text.accent}
     ariaLabel={SCREEN_READER_MODEL_PREFIX}
     isPending={isPending}
@@ -223,7 +223,7 @@ export const AssistantMessageContent: React.FC<
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="✦"
+    basePrefix="⟡"
   />
 );
 
@@ -235,7 +235,7 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
 }) => (
   <PrefixedMarkdownMessage
     text={text}
-    prefix="✦"
+    prefix="⟡"
     prefixColor={theme.text.secondary}
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
@@ -255,7 +255,7 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
     isPending={isPending}
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
-    basePrefix="✦"
+    basePrefix="⟡"
     textColor={theme.text.secondary}
   />
 );

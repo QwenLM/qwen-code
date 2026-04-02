@@ -62,7 +62,7 @@ describe('cron interactive', () => {
       const afterPrompt = finalScreen.slice(
         finalScreen.lastIndexOf('> PONG7742'),
       );
-      expect(afterPrompt).toContain('✦');
+      expect(afterPrompt).toContain('⟡');
     },
     { timeout: 180_000 },
   );

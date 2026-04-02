@@ -620,7 +620,7 @@ export const useGeminiStream = (
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
         // Trim leading newlines from the first chunk — some models (especially
-        // local ones) emit a leading \n that creates an ugly blank line after ✦.
+        // local ones) emit a leading \n that creates an ugly blank line after ⟡.
         newGeminiMessageBuffer = eventValue.replace(/^\n+/, '');
       }
       // Split large messages for better rendering performance. Ideally,

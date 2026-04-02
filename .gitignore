@@ -69,6 +69,7 @@ patch_output.log
 
 # docs build
 docs-site/.next
+docs-site/out
 # content is a symlink to ../docs
 docs-site/content
 
