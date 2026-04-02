@@ -149,6 +149,11 @@ export function formatInterval(ms: number): string {
   if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
   if (ms >= 60_000) {
     const rounded = Math.round((ms / 60_000) * 10) / 10;
+    // Avoid misleading "1m" for 62s — fall back to seconds if rounding
+    // produces an integer that doesn't match the exact value
+    if (Number.isInteger(rounded) && ms % 60_000 !== 0) {
+      return `${ms / 1000}s`;
+    }
     return `${rounded}m`;
   }
   return `${ms / 1000}s`;

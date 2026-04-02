@@ -68,6 +68,7 @@ function isValidTask(t: unknown): t is PersistedLoopState {
   if (
     typeof c['maxIterations'] !== 'number' ||
     !Number.isFinite(c['maxIterations'] as number) ||
+    !Number.isInteger(c['maxIterations'] as number) ||
     (c['maxIterations'] as number) < 0
   )
     return false;

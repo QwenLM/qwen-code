@@ -77,8 +77,12 @@ describe('formatInterval', () => {
     expect(formatInterval(150_000)).toBe('2.5m');
   });
   it('rounds non-round minutes to one decimal', () => {
-    expect(formatInterval(62_000)).toBe('1m');
     expect(formatInterval(80_000)).toBe('1.3m');
+  });
+  it('falls back to seconds when rounding would mislead', () => {
+    // 62s rounds to 1m but is not 60s — show seconds to avoid confusion
+    expect(formatInterval(62_000)).toBe('62s');
+    expect(formatInterval(61_000)).toBe('61s');
   });
   it('uses seconds for values < 60s', () => {
     expect(formatInterval(45_000)).toBe('45s');

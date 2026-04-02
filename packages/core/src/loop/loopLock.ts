@@ -37,8 +37,12 @@ function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0); // signal 0 = check existence only
     return true;
-  } catch {
-    return false;
+  } catch (e: unknown) {
+    // EPERM = process exists but we lack permission to signal it → alive
+    if (e && typeof e === 'object' && 'code' in e && e.code === 'EPERM') {
+      return true;
+    }
+    return false; // ESRCH = no such process → dead
   }
 }
 

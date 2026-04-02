@@ -208,7 +208,7 @@ export const loopCommand: SlashCommand = {
       const lines: string[] = [];
       for (const [id, state] of states) {
         const label = state.config.label ? ` (${state.config.label})` : '';
-        const status = state.isPaused ? 'paused' : 'running';
+        const status = state.isPaused ? t('paused') : t('running');
         lines.push(
           `  ${id}${label} — ${state.config.prompt} [${formatInterval(state.config.intervalMs)}, ${status}, iter ${state.iteration}]`,
         );
