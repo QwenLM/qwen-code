@@ -78,7 +78,7 @@ export async function generatePromptSuggestion(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
-  options?: { enableCacheSharing?: boolean },
+  options?: { enableCacheSharing?: boolean; model?: string },
 ): Promise<{ suggestion: string | null; filterReason?: string }> {
   // Don't suggest in very early conversations
   const modelTurns = conversationHistory.filter(
@@ -91,9 +91,15 @@ export async function generatePromptSuggestion(
   try {
     // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
+    const modelOverride = options?.model;
     const raw = cacheSafe
-      ? await generateViaForkedQuery(config, abortSignal)
-      : await generateViaBaseLlm(config, conversationHistory, abortSignal);
+      ? await generateViaForkedQuery(config, abortSignal, modelOverride)
+      : await generateViaBaseLlm(
+          config,
+          conversationHistory,
+          abortSignal,
+          modelOverride,
+        );
 
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
@@ -119,10 +125,12 @@ export async function generatePromptSuggestion(
 async function generateViaForkedQuery(
   config: Config,
   abortSignal: AbortSignal,
+  modelOverride?: string,
 ): Promise<string | null> {
   const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
     abortSignal,
     jsonSchema: SUGGESTION_SCHEMA,
+    model: modelOverride,
   });
 
   if (result.jsonResult) {
@@ -150,7 +158,9 @@ async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
+  modelOverride?: string,
 ): Promise<string | null> {
+  const model = modelOverride || config.getModel();
   const contents: Content[] = [
     ...conversationHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
@@ -160,7 +170,7 @@ async function generateViaBaseLlm(
   const result = await config.getBaseLlmClient().generateJson({
     contents,
     schema: SUGGESTION_SCHEMA,
-    model: config.getModel(),
+    model,
     abortSignal,
     promptId: 'prompt_suggestion',
     maxAttempts: 2,
@@ -177,7 +187,7 @@ async function generateViaBaseLlm(
     const generator = config.getContentGenerator();
     const response = await generator.generateContent(
       {
-        model: config.getModel(),
+        model,
         contents,
         config: { abortSignal },
       },

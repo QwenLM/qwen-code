@@ -523,6 +523,16 @@ const SETTINGS_SCHEMA = {
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
       },
+      suggestionModel: {
+        type: 'string',
+        label: 'Suggestion Model',
+        category: 'UI',
+        requiresRestart: false,
+        default: '',
+        description:
+          'Model to use for prompt suggestion generation. Leave empty to use the main model. A smaller/faster model (e.g., qwen-turbo) reduces suggestion latency.',
+        showInDialog: false,
+      },
       enableCacheSharing: {
         type: 'boolean',
         label: 'Enable Cache Sharing for Suggestions',

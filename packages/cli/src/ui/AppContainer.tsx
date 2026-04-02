@@ -1144,6 +1144,7 @@ export const AppContainer = (props: AppContainerProps) => {
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        model: settings.merged.ui?.suggestionModel || undefined,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
