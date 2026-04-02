@@ -523,16 +523,6 @@ const SETTINGS_SCHEMA = {
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
       },
-      fastModel: {
-        type: 'string',
-        label: 'Fast Model',
-        category: 'UI',
-        requiresRestart: false,
-        default: '',
-        description:
-          'Model for background tasks (suggestion generation, speculation, pipelined suggestions). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
-        showInDialog: true,
-      },
       enableCacheSharing: {
         type: 'boolean',
         label: 'Enable Cache Sharing for Suggestions',
@@ -654,6 +644,17 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+  },
+
+  fastModel: {
+    type: 'string',
+    label: 'Fast Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
+    showInDialog: true,
   },
 
   model: {

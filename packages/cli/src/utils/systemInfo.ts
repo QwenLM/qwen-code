@@ -172,8 +172,7 @@ export async function getExtendedSystemInfo(
       : undefined;
 
   // Get fast model from settings
-  const fastModel =
-    context.services.settings?.merged?.ui?.fastModel || undefined;
+  const fastModel = context.services.settings?.merged?.fastModel || undefined;
 
   return {
     ...baseInfo,

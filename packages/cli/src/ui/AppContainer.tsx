@@ -1144,7 +1144,7 @@ export const AppContainer = (props: AppContainerProps) => {
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: settings.merged.ui?.fastModel || undefined,
+        model: settings.merged.fastModel || undefined,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1153,7 +1153,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal, {
-                model: settings.merged.ui?.fastModel || undefined,
+                model: settings.merged.fastModel || undefined,
               })
                 .then((state) => {
                   speculationRef.current = state;
