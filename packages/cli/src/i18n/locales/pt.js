@@ -604,6 +604,10 @@ export default {
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Pressione Escape, Ctrl+C ou Ctrl+D para cancelar',
+  'Press Space, Enter, or Escape to dismiss':
+    'Pressione Espaço, Enter ou Escape para dispensar',
   'No hook selected': 'Nenhum hook selecionado',
   // Hooks - List Step
   'No hook events found.': 'Nenhum evento de hook encontrado.',

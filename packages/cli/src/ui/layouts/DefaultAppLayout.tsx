@@ -70,10 +70,10 @@ export const DefaultAppLayout: React.FC = () => {
             ) : (
               <>
                 {uiState.btwItem && (
-                  <Box marginX={2} width={terminalWidth - 4}>
+                  <Box marginX={2} width={uiState.mainAreaWidth}>
                     <BtwMessage
                       btw={uiState.btwItem.btw}
-                      containerWidth={terminalWidth - 4}
+                      containerWidth={uiState.mainAreaWidth}
                     />
                   </Box>
                 )}

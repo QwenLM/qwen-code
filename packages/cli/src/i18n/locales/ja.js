@@ -385,6 +385,9 @@ export default {
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape、Ctrl+C、Ctrl+D でキャンセル',
+  'Press Space, Enter, or Escape to dismiss': 'Space、Enter、Escape で閉じる',
   'No hook selected': 'フックが選択されていません',
   // Hooks - List Step
   'No hook events found.': 'フックイベントが見つかりません。',

@@ -57,7 +57,8 @@ async function askBtw(
 ): Promise<string> {
   const history = trimHistory(geminiClient.getHistory(true));
 
-  // Enhanced system prompt inspired by Claude Code's side question design:
+  // Side-question guidance sent as a user message (not a system instruction).
+  // Inspired by Claude Code's design:
   // - Emphasizes direct answering without tools
   // - Clarifies the isolated nature of the side question
   // - Prevents the model from promising actions it can't take

@@ -1258,6 +1258,11 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
+        // Cancel in-flight btw even when buffer has text (Ctrl+D)
+        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+          cancelBtw();
+          return;
+        }
         if (buffer.text.length > 0) {
           return;
         }
