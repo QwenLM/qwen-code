@@ -49,39 +49,6 @@ function getActiveTool(
   );
 }
 
-function getStatusText(status: ToolCallStatus): string {
-  switch (status) {
-    case ToolCallStatus.Executing:
-    case ToolCallStatus.Confirming:
-      return '工具调用中';
-    case ToolCallStatus.Success:
-      return '工具调用完成';
-    case ToolCallStatus.Error:
-      return '工具调用失败';
-    case ToolCallStatus.Canceled:
-      return '工具调用已取消';
-    case ToolCallStatus.Pending:
-    default:
-      return '工具调用';
-  }
-}
-
-function getStatusColor(status: ToolCallStatus): string {
-  switch (status) {
-    case ToolCallStatus.Executing:
-    case ToolCallStatus.Confirming:
-    case ToolCallStatus.Canceled:
-      return theme.status.warning;
-    case ToolCallStatus.Success:
-      return theme.status.success;
-    case ToolCallStatus.Error:
-      return theme.status.error;
-    case ToolCallStatus.Pending:
-    default:
-      return theme.text.secondary;
-  }
-}
-
 const STATUS_INDICATOR_WIDTH = 3;
 
 export const CompactToolGroupDisplay: React.FC<
@@ -104,9 +71,6 @@ export const CompactToolGroupDisplay: React.FC<
     : hasPending
       ? theme.status.warning
       : theme.border.default;
-
-  const statusText = getStatusText(overallStatus);
-  const statusColor = getStatusColor(overallStatus);
 
   // Take only the first line of description to prevent multi-line shell scripts
   // from expanding the compact view (wrap="truncate-end" only handles width overflow,
@@ -158,13 +122,11 @@ export const CompactToolGroupDisplay: React.FC<
       borderColor={borderColor}
       gap={0}
     >
-      {/* Status line: icon + status text + active tool name + description */}
+      {/* Status line: icon + tool name + description */}
       <Box flexDirection="row">
         <Box minWidth={STATUS_INDICATOR_WIDTH}>{renderStatusIcon()}</Box>
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
-            <Text color={statusColor}>{statusText}</Text>
-            {'  '}
             <Text bold>{activeTool.name}</Text>
             {activeToolDescription ? (
               <Text color={theme.text.secondary}>
