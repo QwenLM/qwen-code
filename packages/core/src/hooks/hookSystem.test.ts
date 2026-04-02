@@ -169,7 +169,7 @@ describe('HookSystem', () => {
       const mockHooks = [
         {
           config: {
-            type: HookType.Command,
+            type: HookType.Command as const,
             command: 'echo test',
             source: HooksConfigSource.Project,
           },

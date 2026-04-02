@@ -601,7 +601,9 @@ describe('HookRegistry', () => {
       await registry.initialize();
 
       const hooks = registry.getAllHooks();
-      expect(hooks[0].config.source).toBe(HooksConfigSource.Project);
+      expect((hooks[0].config as { source?: unknown }).source).toBe(
+        HooksConfigSource.Project,
+      );
     });
   });
 

@@ -50,7 +50,7 @@ export enum HookEventName {
 export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
 
 /**
- * Hook configuration entry
+ * Hook configuration entry for command hooks
  */
 export interface CommandHookConfig {
   type: HookType.Command;
@@ -60,9 +60,52 @@ export interface CommandHookConfig {
   timeout?: number;
   source?: HooksConfigSource;
   env?: Record<string, string>;
+  async?: boolean; // New: async execution support
+  shell?: 'bash' | 'powershell';
 }
 
-export type HookConfig = CommandHookConfig;
+/**
+ * Hook configuration entry for HTTP hooks
+ */
+export interface HttpHookConfig {
+  type: HookType.Http;
+  url: string;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  timeout?: number;
+  if?: string;
+  name?: string;
+  description?: string;
+  statusMessage?: string;
+  once?: boolean;
+  source?: HooksConfigSource;
+}
+
+/**
+ * Function hook callback type
+ */
+export type FunctionHookCallback = (
+  input: HookInput,
+) => Promise<HookOutput | undefined>;
+
+/**
+ * Hook configuration entry for function hooks (Session Hook specific)
+ */
+export interface FunctionHookConfig {
+  type: HookType.Function;
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  callback: FunctionHookCallback;
+  errorMessage: string;
+  statusMessage?: string;
+}
+
+export type HookConfig =
+  | CommandHookConfig
+  | HttpHookConfig
+  | FunctionHookConfig;
 
 /**
  * Hook definition with matcher
@@ -78,6 +121,8 @@ export interface HookDefinition {
  */
 export enum HookType {
   Command = 'command',
+  Http = 'http',
+  Function = 'function',
 }
 
 /**
@@ -85,7 +130,18 @@ export enum HookType {
  */
 export function getHookKey(hook: HookConfig): string {
   const name = hook.name ?? '';
-  return name ? `${name}:${hook.command}` : hook.command;
+  switch (hook.type) {
+    case HookType.Command:
+      return name ? `${name}:${hook.command}` : hook.command;
+    case HookType.Http:
+      return name ? `${name}:${hook.url}` : hook.url;
+    case HookType.Function:
+      return name
+        ? `${name}:${hook.id ?? 'function'}`
+        : (hook.id ?? 'function');
+    default:
+      return name || 'unknown';
+  }
 }
 
 /**
@@ -737,6 +793,7 @@ export interface HookExecutionResult {
   exitCode?: number;
   duration: number;
   error?: Error;
+  isAsync?: boolean; // Indicates if this was an async hook execution
 }
 
 /**
@@ -746,4 +803,40 @@ export interface HookExecutionPlan {
   eventName: HookEventName;
   hookConfigs: HookConfig[];
   sequential: boolean;
+}
+
+/**
+ * Pending async hook information
+ */
+export interface PendingAsyncHook {
+  hookId: string;
+  hookName: string;
+  hookEvent: HookEventName;
+  sessionId: string;
+  startTime: number;
+  timeout: number;
+  stdout: string;
+  stderr: string;
+  status: 'running' | 'completed' | 'failed' | 'timeout';
+  output?: HookOutput;
+  error?: Error;
+}
+
+/**
+ * Async hook output message
+ */
+export interface AsyncHookOutputMessage {
+  type: 'system' | 'info' | 'warning' | 'error';
+  message: string;
+  hookName: string;
+  hookId: string;
+  timestamp: number;
+}
+
+/**
+ * Pending async output collection
+ */
+export interface PendingAsyncOutput {
+  messages: AsyncHookOutputMessage[];
+  contexts: string[];
 }

@@ -126,7 +126,15 @@ export class HookRegistry {
   private getHookName(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    return entry.config.name || entry.config.command || 'unknown-command';
+    const config = entry.config;
+    if (config.name) return config.name;
+    if (config.type === 'command')
+      return (config as { command?: string }).command || 'unknown-command';
+    if (config.type === 'http')
+      return (config as { url?: string }).url || 'unknown-url';
+    if (config.type === 'function')
+      return (config as { id?: string }).id || 'unknown-function';
+    return 'unknown-hook';
   }
 
   /**
@@ -273,8 +281,10 @@ please review the project settings (.qwen/settings.json) and remove them.`;
           continue;
         }
 
-        // Add source to hook config
-        hookConfig.source = source;
+        // Add source to hook config (only for command and http hooks)
+        if (hookConfig.type !== 'function') {
+          (hookConfig as { source?: HooksConfigSource }).source = source;
+        }
 
         this.entries.push({
           config: hookConfig,

@@ -83,7 +83,7 @@ describe('HookPlanner', () => {
     });
 
     it('should deduplicate hooks with same config', () => {
-      const config = { type: HookType.Command, command: 'echo test' };
+      const config = { type: HookType.Command as const, command: 'echo test' };
       const entry1: HookRegistryEntry = {
         config,
         source: HooksConfigSource.Project,

@@ -97,7 +97,15 @@ const listCommand: SlashCommand = {
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
       for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
+        const name =
+          hook.config.name ||
+          (hook.config.type === 'command'
+            ? (hook.config as { command?: string }).command
+            : undefined) ||
+          (hook.config.type === 'http'
+            ? (hook.config as { url?: string }).url
+            : undefined) ||
+          'unnamed';
         const source = formatHookSource(hook.source);
         const status = formatHookStatus(hook.enabled);
         const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
