@@ -27,7 +27,7 @@ const root = join(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
 
 // check build status, write warnings to file for app to display if needed
-execSync('node ./scripts/check-build-status.js', {
+execSync('bun ./scripts/check-build-status.js', {
   stdio: 'inherit',
   cwd: root,
 });
@@ -35,7 +35,7 @@ execSync('node ./scripts/check-build-status.js', {
 const nodeArgs = [];
 let sandboxCommand = undefined;
 try {
-  sandboxCommand = execSync('node scripts/sandbox_command.js', {
+  sandboxCommand = execSync('bun scripts/sandbox_command.js', {
     cwd: root,
   })
     .toString()
@@ -72,7 +72,7 @@ if (process.env.DEBUG) {
 // Use process.cwd() to inherit the working directory from launch.json cwd setting
 // This allows debugging from a specific directory (e.g., .todo)
 const workingDir = process.env.QWEN_WORKING_DIR || process.cwd();
-const child = spawn('node', nodeArgs, {
+const child = spawn('bun', nodeArgs, {
   stdio: 'inherit',
   env,
   cwd: workingDir,
