@@ -149,9 +149,9 @@ This enables Tab-Tab-Tab workflows where each acceptance immediately shows the n
 
 The pipelined suggestion reuses the exported `SUGGESTION_PROMPT` constant from `suggestionGenerator.ts` (not a local copy) to ensure consistent quality with initial suggestions.
 
-## Model Override
+## Fast Model
 
-`startSpeculation` accepts an optional `options.model` parameter, threaded through `runSpeculativeLoop` and `generatePipelinedSuggestion` to `runForkedQuery`. Configured via the `speculationModel` setting (empty = use main model). Allows using a cheaper/faster model (e.g., `qwen-turbo`) for speculation to reduce cost and latency.
+`startSpeculation` accepts an optional `options.model` parameter, threaded through `runSpeculativeLoop` and `generatePipelinedSuggestion` to `runForkedQuery`. Configured via the top-level `fastModel` setting (empty = use main model). The same `fastModel` is used for all background tasks: suggestion generation, speculation, and pipelined suggestions. Set via `/model --fast <name>` or `settings.json`.
 
 ## UI Rendering
 

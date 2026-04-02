@@ -190,9 +190,9 @@ The Tab handler uses `key.name === 'tab'` explicitly (not `ACCEPT_SUGGESTION` ma
 
 ## Feature Flags and Settings
 
-| Setting                     | Type    | Default | Description                                    |
-| --------------------------- | ------- | ------- | ---------------------------------------------- |
-| `enableFollowupSuggestions` | boolean | true    | Master toggle for prompt suggestions           |
-| `enableCacheSharing`        | boolean | true    | Use cache-aware forked queries                 |
-| `enableSpeculation`         | boolean | false   | Predictive execution engine                    |
-| `speculationModel`          | string  | ""      | Model for speculation (empty = use main model) |
+| Setting                     | Type    | Default | Description                                                                      |
+| --------------------------- | ------- | ------- | -------------------------------------------------------------------------------- |
+| `enableFollowupSuggestions` | boolean | true    | Master toggle for prompt suggestions                                             |
+| `enableCacheSharing`        | boolean | true    | Use cache-aware forked queries                                                   |
+| `enableSpeculation`         | boolean | false   | Predictive execution engine                                                      |
+| `fastModel` (top-level)     | string  | ""      | Model for all background tasks (empty = use main model). Set via `/model --fast` |

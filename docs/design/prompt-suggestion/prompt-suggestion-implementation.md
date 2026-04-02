@@ -22,7 +22,7 @@
 | `Composer.tsx`               | ✅ Done | Props threading                                            |
 | `UIStateContext.tsx`         | ✅ Done | promptSuggestion + dismissPromptSuggestion                 |
 | `useFollowupSuggestions.tsx` | ✅ Done | React hook with telemetry + keystroke tracking             |
-| `settingsSchema.ts`          | ✅ Done | 3 feature flags + speculationModel setting                 |
+| `settingsSchema.ts`          | ✅ Done | 3 feature flags + fastModel setting                        |
 | `settings.schema.json`       | ✅ Done | VSCode settings schema                                     |
 
 ## WebUI Integration (`packages/webui/`)
