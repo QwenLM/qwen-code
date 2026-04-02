@@ -34,6 +34,12 @@ import type {
 } from '../agents/runtime/agent-events.js';
 import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  loadStore,
+  saveStore,
+  upsertEntry,
+} from '../agents/background-store.js';
+import type { PersistedBackgroundAgent } from '../agents/background-store.js';
 import { PermissionMode } from '../hooks/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
 import {
@@ -136,12 +142,56 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       void this.refreshSubagents();
     });
 
+    // Restore persisted background agents on startup.
+    // Stale 'running' entries from before a restart are marked as error
+    // since we cannot resume them.
+    this.restorePersistedAgents();
+
     // Initialize the tool asynchronously
     this.refreshSubagents();
   }
 
   dispose(): void {
     this.removeChangeListener();
+  }
+
+  /**
+   * Restores persisted background agents from disk on startup.
+   * Any agent marked 'running' before a restart is marked as 'error'
+   * because it could not have completed without the process.
+   */
+  private restorePersistedAgents(): void {
+    const persisted = loadStore();
+    const now = Date.now();
+    const updated: PersistedBackgroundAgent[] = [];
+
+    for (const p of persisted) {
+      let entry = p;
+      if (p.status === 'running') {
+        entry = {
+          ...p,
+          status: 'error',
+          error: 'Agent did not complete before process restart',
+          completedTime: now,
+        };
+      }
+      updated.push(entry);
+
+      // Populate the in-memory map so callers (e.g. getBackgroundAgents) see them.
+      this.backgroundAgents.set(entry.agentId, {
+        agentId: entry.agentId,
+        agentName: entry.agentName,
+        description: entry.description,
+        startTime: entry.startTime,
+        completed: entry.status !== 'running',
+        result: entry.result,
+        error: entry.error,
+      });
+    }
+
+    if (updated.length > 0) {
+      saveStore(updated);
+    }
   }
 
   /**
@@ -672,6 +722,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         this.backgroundAgents.set(agentId, entry);
 
+        // Persist initial 'running' state.
+        saveStore(
+          upsertEntry(loadStore(), {
+            agentId: entry.agentId,
+            agentName: entry.agentName,
+            description: entry.description,
+            startTime: entry.startTime,
+            status: 'running',
+          }),
+        );
+
         // Fire and forget — execution runs independently.
         // The span covers the full async lifetime: it ends when the
         // background agent completes (or fails), not when execute() returns.
@@ -696,6 +757,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
             span.end();
 
+            // Persist completed state.
+            saveStore(
+              upsertEntry(loadStore(), {
+                agentId: entry.agentId,
+                agentName: entry.agentName,
+                description: entry.description,
+                startTime: entry.startTime,
+                completedTime: Date.now(),
+                status: 'completed',
+                result: entry.result,
+              }),
+            );
+
             this.onBackgroundComplete?.(entry);
           })
           .catch((err: unknown) => {
@@ -708,6 +782,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             });
             span.setStatus({ code: SpanStatusCode.ERROR });
             span.end();
+
+            // Persist error state.
+            saveStore(
+              upsertEntry(loadStore(), {
+                agentId: entry.agentId,
+                agentName: entry.agentName,
+                description: entry.description,
+                startTime: entry.startTime,
+                completedTime: Date.now(),
+                status: 'error',
+                error: entry.error,
+              }),
+            );
 
             this.onBackgroundComplete?.(entry);
           });
