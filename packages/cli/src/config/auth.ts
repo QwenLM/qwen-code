@@ -21,6 +21,7 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
+  [AuthType.NVIDIA_NIM]: 'NVIDIA_API_KEY',
 };
 
 /**
@@ -216,6 +217,14 @@ export function validateAuthMethod(
     }
 
     process.env['GOOGLE_GENAI_USE_VERTEXAI'] = 'true';
+    return null;
+  }
+
+  if (authMethod === AuthType.NVIDIA_NIM) {
+    const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
+    if (apiKeyError) {
+      return apiKeyError;
+    }
     return null;
   }
 

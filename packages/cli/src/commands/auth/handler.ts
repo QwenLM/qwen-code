@@ -277,6 +277,50 @@ async function handleCodePlanAuth(
 }
 
 /**
+ * Handles NVIDIA NIM authentication
+ */
+async function handleNvidiaNimAuth(): Promise<void> {
+  try {
+    const settings = loadSettings();
+
+    // Check if NVIDIA_API_KEY is already set
+    const existingKey = process.env['NVIDIA_API_KEY'];
+
+    if (!existingKey) {
+      // Prompt for API key
+      const apiKey = await promptForKey();
+      process.env['NVIDIA_API_KEY'] = apiKey;
+    }
+
+    // Get persist scope
+    const authTypeScope = getPersistScopeForModelSelection(settings);
+
+    // Backup settings file before modification
+    const settingsFile = settings.forScope(authTypeScope);
+    backupSettingsFile(settingsFile.path);
+
+    // Set the auth type
+    settings.setValue(
+      authTypeScope,
+      'security.auth.selectedType',
+      AuthType.NVIDIA_NIM,
+    );
+
+    writeStdoutLine(t('Successfully configured NVIDIA NIM authentication.'));
+    writeStdoutLine(t('Model: qwen/qwen2.5-coder-32b-instruct'));
+    writeStdoutLine(t('Base URL: https://integrate.api.nvidia.com/v1'));
+    process.exit(0);
+  } catch (error) {
+    writeStderrLine(
+      t('Failed to configure NVIDIA NIM: {{error}}', {
+        error: getErrorMessage(error),
+      }),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Prompts the user to select a region using an interactive selector
  */
 async function promptForRegion(): Promise<CodingPlanRegion> {
@@ -379,6 +423,11 @@ export async function runInteractiveAuth() {
           'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models',
         ),
       },
+      {
+        value: 'nvidia-nim' as const,
+        label: t('NVIDIA NIM'),
+        description: t('NVIDIA NIM API · qwen/qwen2.5-coder-32b-instruct'),
+      },
     ],
     t('Select authentication method:'),
   );
@@ -387,6 +436,8 @@ export async function runInteractiveAuth() {
 
   if (choice === 'coding-plan') {
     await handleQwenAuth('coding-plan', {});
+  } else if (choice === 'nvidia-nim') {
+    await handleNvidiaNimAuth();
   } else {
     await handleQwenAuth('qwen-oauth', {});
   }
@@ -480,6 +531,34 @@ export async function showAuthStatus(): Promise<void> {
           t('  Issue: API key not found in environment or settings\n'),
         );
         writeStdoutLine(t('  Run `qwen auth coding-plan` to re-configure.\n'));
+      }
+    } else if (selectedType === AuthType.NVIDIA_NIM) {
+      const hasApiKey = !!process.env['NVIDIA_API_KEY'];
+      const modelName = mergedSettings.model?.name;
+
+      if (hasApiKey) {
+        writeStdoutLine(t('✓ Authentication Method: NVIDIA NIM'));
+        writeStdoutLine(t('  Base URL: https://integrate.api.nvidia.com/v1'));
+
+        if (modelName) {
+          writeStdoutLine(
+            t('  Current Model: {{model}}', { model: modelName }),
+          );
+        } else {
+          writeStdoutLine(
+            t('  Default Model: qwen/qwen2.5-coder-32b-instruct'),
+          );
+        }
+
+        writeStdoutLine(t('  Status: API key configured\n'));
+      } else {
+        writeStdoutLine(
+          t('⚠️  Authentication Method: NVIDIA NIM (Incomplete)'),
+        );
+        writeStdoutLine(
+          t('  Issue: NVIDIA_API_KEY not found in environment\n'),
+        );
+        writeStdoutLine(t('  Run `qwen auth` to re-configure.\n'));
       }
     } else {
       writeStdoutLine(

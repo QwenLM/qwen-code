@@ -131,9 +131,10 @@ Choose **Qwen OAuth** and complete the browser flow. Your credentials are cached
 
 Use this if you want more flexibility over which provider and model to use. Supports multiple protocols:
 
-- **OpenAI-compatible**: Alibaba Cloud ModelStudio, ModelScope, OpenAI, OpenRouter, and other OpenAI-compatible providers
+- **OpenAI-compatible**: Alibaba Cloud ModelStudio, ModelScope, OpenAI, OpenRouter, NVIDIA NIM, and other OpenAI-compatible providers
 - **Anthropic**: Claude models
 - **Google GenAI**: Gemini models
+- **NVIDIA NIM**: NVIDIA NIM API with Qwen models
 
 The **recommended** way to configure models and providers is by editing `~/.qwen/settings.json` (create it if it doesn't exist). This file lets you define all available models, API keys, and default settings in one place.
 
@@ -354,6 +355,40 @@ Use the `/model` command at any time to switch between all configured models.
   }
 }
 ```
+
+</details>
+
+<details>
+<summary>NVIDIA NIM (qwen/qwen2.5-coder-32b-instruct)</summary>
+
+```json
+{
+  "modelProviders": {
+    "nvidia-nim": [
+      {
+        "id": "qwen/qwen2.5-coder-32b-instruct",
+        "name": "Qwen2.5-Coder-32B",
+        "envKey": "NVIDIA_API_KEY",
+        "baseUrl": "https://integrate.api.nvidia.com/v1",
+        "description": "Qwen2.5-Coder 32B via NVIDIA NIM API"
+      }
+    ]
+  },
+  "env": {
+    "NVIDIA_API_KEY": "nvapi-xxxxxxxxxxxxx"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "nvidia-nim"
+    }
+  },
+  "model": {
+    "name": "qwen/qwen2.5-coder-32b-instruct"
+  }
+}
+```
+
+Get your API key from [NVIDIA NIM](https://build.nvidia.com/).
 
 </details>
 

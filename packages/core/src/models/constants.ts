@@ -87,11 +87,17 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  'nvidia-nim': {
+    apiKey: ['NVIDIA_API_KEY'],
+    baseUrl: ['NVIDIA_BASE_URL'],
+    model: ['NVIDIA_MODEL'],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
+  'nvidia-nim': 'qwen/qwen2.5-coder-32b-instruct',
 } as Partial<Record<AuthType, string>>;
 
 /**

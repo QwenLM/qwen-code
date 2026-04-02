@@ -50,6 +50,8 @@ export class ModelRegistry {
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
       case AuthType.USE_OPENAI:
         return DEFAULT_OPENAI_BASE_URL;
+      case AuthType.NVIDIA_NIM:
+        return 'https://integrate.api.nvidia.com/v1';
       default:
         return '';
     }

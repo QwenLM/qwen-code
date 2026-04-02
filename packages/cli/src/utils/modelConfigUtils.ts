@@ -74,6 +74,10 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
     return AuthType.USE_ANTHROPIC;
   }
 
+  if (process.env['NVIDIA_API_KEY']) {
+    return AuthType.NVIDIA_NIM;
+  }
+
   return undefined;
 }
 
