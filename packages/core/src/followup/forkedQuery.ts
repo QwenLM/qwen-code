@@ -94,7 +94,9 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams;
+  return currentCacheSafeParams
+    ? structuredClone(currentCacheSafeParams)
+    : null;
 }
 
 /**

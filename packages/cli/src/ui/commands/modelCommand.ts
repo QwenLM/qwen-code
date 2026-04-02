@@ -13,7 +13,7 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
-import { SettingScope } from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 export const modelCommand: SlashCommand = {
   name: 'model',
@@ -59,7 +59,11 @@ export const modelCommand: SlashCommand = {
       }
       // Set fast model
       if (settings) {
-        settings.setValue(SettingScope.User, 'fastModel', modelName);
+        settings.setValue(
+          getPersistScopeForModelSelection(settings),
+          'fastModel',
+          modelName,
+        );
         context.ui.addItem(
           {
             type: MessageType.SUCCESS,
@@ -68,7 +72,11 @@ export const modelCommand: SlashCommand = {
           Date.now(),
         );
       }
-      return { type: 'message', messageType: 'info', content: '' };
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Fast model updated.'),
+      };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();

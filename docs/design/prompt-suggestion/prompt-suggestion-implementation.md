@@ -48,7 +48,7 @@
 
 | Test File                     | Tests | Description                                                     |
 | ----------------------------- | ----- | --------------------------------------------------------------- |
-| `followupState.test.ts`       | 15    | Controller timer, debounce, accept callback, onOutcome, clear   |
+| `followupState.test.ts`       | 14    | Controller timer, debounce, accept callback, onOutcome, clear   |
 | `suggestionGenerator.test.ts` | 16    | All 12 filter rules + edge cases + false positives              |
 | `overlayFs.test.ts`           | 15    | COW write, read resolution, apply, cleanup, path traversal      |
 | `speculationToolGate.test.ts` | 27    | Tool categories, approval mode, shell AST, path rewrite         |

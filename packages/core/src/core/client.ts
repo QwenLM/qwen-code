@@ -858,7 +858,7 @@ export class GeminiClient {
     if (!signal?.aborted && this.isInitialized()) {
       try {
         const chat = this.getChat();
-        // Truncate history before cloning to avoid full-session deep copy overhead
+        // Clone history then truncate to last 40 entries to avoid full-session deep copy overhead
         const fullHistory = chat.getHistory(true);
         const maxHistoryForCache = 40;
         const cachedHistory =

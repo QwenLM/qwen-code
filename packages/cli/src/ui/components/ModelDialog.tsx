@@ -300,10 +300,16 @@ export function ModelDialog({
 
       // Fast model mode: just save the model ID and close
       if (isFastModelMode) {
-        // Extract model ID from selection key (format: "authType::modelId" or "$runtime|...")
-        const modelId = selected.includes('::')
-          ? selected.split('::').slice(1).join('::')
-          : selected;
+        // Extract model ID from selection key (format: "authType::modelId" or "$runtime|authType|modelId")
+        let modelId: string;
+        if (selected.includes('::')) {
+          modelId = selected.split('::').slice(1).join('::');
+        } else if (selected.startsWith('$runtime|')) {
+          const parts = selected.split('|');
+          modelId = parts[2] ?? selected;
+        } else {
+          modelId = selected;
+        }
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'fastModel', modelId);
         uiState?.historyManager.addItem(
