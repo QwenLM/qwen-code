@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentParameters } from '@google/genai';
+import type { Span } from '@opentelemetry/api';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_ERROR');
@@ -16,6 +17,10 @@ export interface RequestContext {
   startTime: number;
   duration: number;
   isStreaming: boolean;
+  /** OTel span for the request — set for streaming so the generator can add token attributes. */
+  span?: Span;
+  /** When true, prompt/completion content should be logged as span events. */
+  logPrompts?: boolean;
 }
 
 export interface ErrorHandler {

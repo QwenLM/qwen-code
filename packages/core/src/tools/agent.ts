@@ -36,6 +36,13 @@ import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { PermissionMode } from '../hooks/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import {
+  trace,
+  SpanKind,
+  SpanStatusCode,
+  context as otelContext,
+} from '@opentelemetry/api';
+import { getActiveTurnContext } from '../telemetry/turnSpanContext.js';
 
 export interface AgentParams {
   description: string;
@@ -66,6 +73,7 @@ export type BackgroundAgentCompleteCallback = (
 ) => void;
 
 const debugLogger = createDebugLogger('AGENT');
+const agentTracer = trace.getTracer('proto.agents', '1.0.0');
 
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
@@ -558,6 +566,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Capture the parent OTel context before any async work so the span
+    // nests correctly under the active turn even if async context drifts.
+    const parentCtx = getActiveTurnContext() ?? otelContext.active();
+
     try {
       // Load the subagent configuration
       const subagentConfig = await this.subagentManager.loadSubagent(
@@ -633,6 +645,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       }
 
+      // Start the telemetry span for subagent execution
+      const isBackground = !!this.params.run_in_background;
+      const spanStartTime = Date.now();
+      const span = agentTracer.startSpan(
+        `agent/${subagentConfig.name}`,
+        {
+          kind: SpanKind.CLIENT,
+          attributes: {
+            'agent.name': subagentConfig.name,
+            'agent.model': subagentConfig.modelConfig?.model ?? '',
+            'agent.background': isBackground,
+          },
+        },
+        parentCtx,
+      );
+
       // Background execution: start agent and return immediately
       if (this.params.run_in_background) {
         const entry: BackgroundAgentEntry = {
@@ -644,17 +672,43 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         this.backgroundAgents.set(agentId, entry);
 
-        // Fire and forget — execution runs independently
+        // Fire and forget — execution runs independently.
+        // The span covers the full async lifetime: it ends when the
+        // background agent completes (or fails), not when execute() returns.
         subagent
           .execute(contextState, signal)
           .then(() => {
             entry.completed = true;
             entry.result = subagent.getFinalText();
+
+            const terminateMode = subagent.getTerminateMode();
+            const status =
+              terminateMode === AgentTerminateMode.GOAL
+                ? 'completed'
+                : 'failed';
+            span.setAttributes({
+              'agent.status': status,
+              'agent.duration_ms': Date.now() - spanStartTime,
+              'agent.terminate_reason': terminateMode ?? '',
+            });
+            if (status !== 'completed') {
+              span.setStatus({ code: SpanStatusCode.ERROR });
+            }
+            span.end();
+
             this.onBackgroundComplete?.(entry);
           })
           .catch((err: unknown) => {
             entry.completed = true;
             entry.error = err instanceof Error ? err.message : String(err);
+
+            span.setAttributes({
+              'agent.status': 'failed',
+              'agent.duration_ms': Date.now() - spanStartTime,
+            });
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            span.end();
+
             this.onBackgroundComplete?.(entry);
           });
 
@@ -667,104 +721,133 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Foreground execution: block until the subagent finishes
-      await subagent.execute(contextState, signal);
+      try {
+        await subagent.execute(contextState, signal);
 
-      // Fire SubagentStop hook after execution and handle block decisions
-      if (hookSystem && !signal?.aborted) {
-        const transcriptPath = this.config.getTranscriptPath();
-        let stopHookActive = false;
+        // Fire SubagentStop hook after execution and handle block decisions
+        if (hookSystem && !signal?.aborted) {
+          const transcriptPath = this.config.getTranscriptPath();
+          let stopHookActive = false;
 
-        // Loop to handle "block" decisions (prevent subagent from stopping)
-        let continueExecution = true;
-        let iterationCount = 0;
-        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
+          // Loop to handle "block" decisions (prevent subagent from stopping)
+          let continueExecution = true;
+          let iterationCount = 0;
+          const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
 
-        while (continueExecution) {
-          iterationCount++;
+          while (continueExecution) {
+            iterationCount++;
 
-          // Safety check to prevent infinite loops
-          if (iterationCount >= maxIterations) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
-            );
-            continueExecution = false;
-            break;
-          }
+            // Safety check to prevent infinite loops
+            if (iterationCount >= maxIterations) {
+              debugLogger.warn(
+                `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+              );
+              continueExecution = false;
+              break;
+            }
 
-          try {
-            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-              agentId,
-              agentType,
-              transcriptPath,
-              subagent.getFinalText(),
-              stopHookActive,
-              PermissionMode.Default,
-              signal,
-            );
+            try {
+              const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+                agentId,
+                agentType,
+                transcriptPath,
+                subagent.getFinalText(),
+                stopHookActive,
+                PermissionMode.Default,
+                signal,
+              );
 
-            const typedStopOutput = stopHookOutput as
-              | StopHookOutput
-              | undefined;
+              const typedStopOutput = stopHookOutput as
+                | StopHookOutput
+                | undefined;
 
-            if (
-              typedStopOutput?.isBlockingDecision() ||
-              typedStopOutput?.shouldStopExecution()
-            ) {
-              // Feed the reason back to the subagent and continue execution
-              const continueReason = typedStopOutput.getEffectiveReason();
-              stopHookActive = true;
+              if (
+                typedStopOutput?.isBlockingDecision() ||
+                typedStopOutput?.shouldStopExecution()
+              ) {
+                // Feed the reason back to the subagent and continue execution
+                const continueReason = typedStopOutput.getEffectiveReason();
+                stopHookActive = true;
 
-              const continueContext = new ContextState();
-              continueContext.set('task_prompt', continueReason);
-              await subagent.execute(continueContext, signal);
+                const continueContext = new ContextState();
+                continueContext.set('task_prompt', continueReason);
+                await subagent.execute(continueContext, signal);
 
-              if (signal?.aborted) {
+                if (signal?.aborted) {
+                  continueExecution = false;
+                }
+                // Loop continues to re-check SubagentStop hook
+              } else {
                 continueExecution = false;
               }
-              // Loop continues to re-check SubagentStop hook
-            } else {
+            } catch (hookError) {
+              debugLogger.warn(
+                `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+              );
               continueExecution = false;
             }
-          } catch (hookError) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
-            );
-            continueExecution = false;
           }
         }
+
+        // Get the results
+        const finalText = subagent.getFinalText();
+        const terminateMode = subagent.getTerminateMode();
+        const success = terminateMode === AgentTerminateMode.GOAL;
+        const executionSummary = subagent.getExecutionSummary();
+
+        // Determine status for span
+        const spanStatus = signal?.aborted
+          ? 'cancelled'
+          : success
+            ? 'completed'
+            : 'failed';
+        span.setAttributes({
+          'agent.status': spanStatus,
+          'agent.duration_ms': Date.now() - spanStartTime,
+          'agent.terminate_reason': signal?.aborted
+            ? 'cancelled'
+            : (terminateMode ?? ''),
+        });
+        if (spanStatus !== 'completed') {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        }
+
+        if (signal?.aborted) {
+          this.updateDisplay(
+            {
+              status: 'cancelled',
+              terminateReason: 'Agent was cancelled by user',
+              executionSummary,
+            },
+            updateOutput,
+          );
+        } else {
+          this.updateDisplay(
+            {
+              status: success ? 'completed' : 'failed',
+              terminateReason: terminateMode,
+              result: finalText,
+              executionSummary,
+            },
+            updateOutput,
+          );
+        }
+
+        return {
+          llmContent: [{ text: finalText }],
+          returnDisplay: this.currentDisplay!,
+        };
+      } catch (fgError) {
+        // Foreground execution threw — record on span and re-throw
+        span.setAttributes({
+          'agent.status': 'failed',
+          'agent.duration_ms': Date.now() - spanStartTime,
+        });
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        throw fgError;
+      } finally {
+        span.end();
       }
-
-      // Get the results
-      const finalText = subagent.getFinalText();
-      const terminateMode = subagent.getTerminateMode();
-      const success = terminateMode === AgentTerminateMode.GOAL;
-      const executionSummary = subagent.getExecutionSummary();
-
-      if (signal?.aborted) {
-        this.updateDisplay(
-          {
-            status: 'cancelled',
-            terminateReason: 'Agent was cancelled by user',
-            executionSummary,
-          },
-          updateOutput,
-        );
-      } else {
-        this.updateDisplay(
-          {
-            status: success ? 'completed' : 'failed',
-            terminateReason: terminateMode,
-            result: finalText,
-            executionSummary,
-          },
-          updateOutput,
-        );
-      }
-
-      return {
-        llmContent: [{ text: finalText }],
-        returnDisplay: this.currentDisplay!,
-      };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

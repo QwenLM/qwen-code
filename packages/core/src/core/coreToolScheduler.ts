@@ -30,8 +30,18 @@ import {
 } from './toolHookTriggers.js';
 import { NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  trace,
+  SpanKind,
+  SpanStatusCode,
+  context as otelContext,
+} from '@opentelemetry/api';
+import { getActiveTurnContext } from '../telemetry/turnSpanContext.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import { getDecisionFromOutcome } from '../telemetry/tool-call-decision.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
+const toolTracer = trace.getTracer('proto.tools', '1.0.0');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -1376,6 +1386,38 @@ export class CoreToolScheduler {
 
     const shellExecutionConfig = this.config.getShellExecutionConfig();
 
+    // ── OTel: create a child span for the tool execution ──────────────
+    const toolType =
+      scheduledCall.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native';
+    const outcomeSnapshot = scheduledCall.outcome;
+    const decision = outcomeSnapshot
+      ? getDecisionFromOutcome(outcomeSnapshot)
+      : undefined;
+
+    const spanAttributes: Record<string, string> = {
+      'tool.name': toolName,
+      'tool.type': toolType,
+    };
+    if (decision) {
+      spanAttributes['tool.decision'] = decision;
+    }
+    if (scheduledCall.request.prompt_id) {
+      spanAttributes['prompt.id'] = scheduledCall.request.prompt_id;
+    }
+
+    const turnCtx = getActiveTurnContext();
+    const spanOptions = {
+      kind: SpanKind.CLIENT,
+      attributes: spanAttributes,
+    };
+    const toolSpan = turnCtx
+      ? otelContext.with(turnCtx, () =>
+          toolTracer.startSpan(`tool/${toolName}`, spanOptions),
+        )
+      : toolTracer.startSpan(`tool/${toolName}`, spanOptions);
+    const execStartTime = Date.now();
+    // ──────────────────────────────────────────────────────────────────
+
     // TODO: Refactor to remove special casing for ShellToolInvocation.
     // Introduce a generic callbacks object for the execute method to handle
     // things like `onPid` and `onLiveOutput`. This will make the scheduler
@@ -1432,6 +1474,11 @@ export class CoreToolScheduler {
             'User cancelled tool execution.',
           );
         }
+        toolSpan.setStatus({ code: SpanStatusCode.ERROR });
+        toolSpan.setAttribute(
+          'error.message',
+          'User cancelled tool execution.',
+        );
         return; // Both code paths should return here
       }
 
@@ -1474,6 +1521,8 @@ export class CoreToolScheduler {
               ToolErrorType.EXECUTION_DENIED,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
+            toolSpan.setStatus({ code: SpanStatusCode.ERROR });
+            toolSpan.setAttribute('error.message', stopMessage);
             return;
           }
         }
@@ -1488,6 +1537,14 @@ export class CoreToolScheduler {
           contentLength,
         };
         this.setStatusInternal(callId, 'success', successResponse);
+
+        // OTel: record success attributes
+        const durationMs = Date.now() - execStartTime;
+        toolSpan.setAttribute('tool.duration_ms', durationMs);
+        if (contentLength !== undefined) {
+          toolSpan.setAttribute('tool.content_length', contentLength);
+        }
+        toolSpan.setStatus({ code: SpanStatusCode.OK });
       } else {
         // It is a failure
         // PostToolUseFailure Hook
@@ -1516,6 +1573,10 @@ export class CoreToolScheduler {
           toolResult.error.type,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
+
+        // OTel: record error
+        toolSpan.setStatus({ code: SpanStatusCode.ERROR });
+        toolSpan.setAttribute('error.message', errorMessage);
       }
     } catch (executionError: unknown) {
       const errorMessage =
@@ -1549,6 +1610,11 @@ export class CoreToolScheduler {
             'User cancelled tool execution.',
           );
         }
+        toolSpan.setStatus({ code: SpanStatusCode.ERROR });
+        toolSpan.setAttribute(
+          'error.message',
+          'User cancelled tool execution.',
+        );
         return;
       } else {
         // PostToolUseFailure Hook
@@ -1580,7 +1646,13 @@ export class CoreToolScheduler {
             ToolErrorType.UNHANDLED_EXCEPTION,
           ),
         );
+
+        // OTel: record exception error
+        toolSpan.setStatus({ code: SpanStatusCode.ERROR });
+        toolSpan.setAttribute('error.message', exceptionErrorMessage);
       }
+    } finally {
+      toolSpan.end();
     }
   }
 

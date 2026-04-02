@@ -128,6 +128,8 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
+    // Accumulate streamed response text for telemetry prompt logging
+    const completionParts: string[] = [];
 
     // Reset streaming tool calls to prevent data pollution from previous streams
     this.converter.resetStreamingToolCalls();
@@ -159,6 +161,11 @@ export class ContentGenerationPipeline {
               finish_reason: chunk.choices?.[0]?.finish_reason ?? null,
             }),
           );
+        }
+
+        // Collect streamed delta text for telemetry prompt logging
+        if (context.logPrompts && delta?.content) {
+          completionParts.push(delta.content);
         }
 
         // Detect API errors returned as stream content.
@@ -255,9 +262,51 @@ export class ContentGenerationPipeline {
             lastResponse?.usageMetadata?.cachedContentTokenCount ?? null,
         }),
       );
+
+      // Set token usage attributes on the OTel span now that the stream
+      // has been fully consumed and usage data is available.
+      if (context.span) {
+        context.span.setAttributes({
+          'llm.duration_ms': context.duration,
+        });
+        const usage = lastResponse?.usageMetadata;
+        if (usage) {
+          const inputTokens = usage.promptTokenCount ?? 0;
+          const outputTokens = usage.candidatesTokenCount ?? 0;
+          context.span.setAttributes({
+            'gen_ai.usage.input_tokens': inputTokens,
+            'gen_ai.usage.output_tokens': outputTokens,
+            'gen_ai.usage.total_tokens':
+              usage.totalTokenCount ?? inputTokens + outputTokens,
+          });
+        }
+        if (lastResponse?.modelVersion) {
+          context.span.setAttribute(
+            'gen_ai.response.model',
+            lastResponse.modelVersion,
+          );
+        }
+        // Log streamed completion content as a span event
+        if (context.logPrompts && completionParts.length > 0) {
+          const responseText = completionParts.join('');
+          context.span.addEvent('gen_ai.content.completion', {
+            'gen_ai.completion':
+              responseText.length > 10_000
+                ? responseText.slice(0, 10_000) + '...[truncated]'
+                : responseText,
+          });
+        }
+        context.span.end();
+      }
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
+
+      // End the OTel span on error if it was deferred for streaming
+      if (context.span) {
+        context.span.setStatus({ code: SpanStatusCode.ERROR });
+        context.span.end();
+      }
 
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
@@ -505,6 +554,9 @@ export class ContentGenerationPipeline {
       },
     });
 
+    const logPrompts =
+      this.config.cliConfig?.getTelemetryLogPromptsEnabled?.() ?? false;
+
     try {
       const openaiRequest = await this.buildRequest(
         request,
@@ -513,18 +565,90 @@ export class ContentGenerationPipeline {
         effectiveModel,
       );
 
+      // Add max_tokens to span if present in the built request
+      if (
+        openaiRequest.max_tokens !== undefined &&
+        openaiRequest.max_tokens !== null
+      ) {
+        span.setAttribute(
+          'gen_ai.request.max_tokens',
+          openaiRequest.max_tokens,
+        );
+      }
+
+      // Log prompt content as a span event when telemetry prompt logging is enabled
+      if (logPrompts) {
+        const promptJson = JSON.stringify(openaiRequest.messages);
+        span.addEvent('gen_ai.content.prompt', {
+          'gen_ai.prompt':
+            promptJson.length > 10_000
+              ? promptJson.slice(0, 10_000) + '...[truncated]'
+              : promptJson,
+        });
+      }
+
       const result = await executor(openaiRequest, context);
 
       context.duration = Date.now() - context.startTime;
       span.setAttributes({ 'llm.duration_ms': context.duration });
+
+      // For non-streaming calls, the result is a GenerateContentResponse
+      // with token usage data available immediately.
+      if (!isStreaming && result instanceof GenerateContentResponse) {
+        const usage = result.usageMetadata;
+        if (usage) {
+          const inputTokens = usage.promptTokenCount ?? 0;
+          const outputTokens = usage.candidatesTokenCount ?? 0;
+          span.setAttributes({
+            'gen_ai.usage.input_tokens': inputTokens,
+            'gen_ai.usage.output_tokens': outputTokens,
+            'gen_ai.usage.total_tokens':
+              usage.totalTokenCount ?? inputTokens + outputTokens,
+          });
+        }
+        if (result.modelVersion) {
+          span.setAttribute('gen_ai.response.model', result.modelVersion);
+        }
+      }
+
+      // Log completion content as a span event for non-streaming responses
+      if (
+        logPrompts &&
+        !isStreaming &&
+        result instanceof GenerateContentResponse
+      ) {
+        const responseText = (result.candidates?.[0]?.content?.parts ?? [])
+          .map((p) => (p as { text?: string }).text ?? '')
+          .join('');
+        if (responseText) {
+          span.addEvent('gen_ai.content.completion', {
+            'gen_ai.completion':
+              responseText.length > 10_000
+                ? responseText.slice(0, 10_000) + '...[truncated]'
+                : responseText,
+          });
+        }
+      }
+
       span.setStatus({ code: SpanStatusCode.OK });
+
+      // For streaming, pass the span via context so processStreamWithLogging
+      // can set token attributes and end the span when the stream completes.
+      if (isStreaming) {
+        context.span = span;
+        // Store logPrompts flag on context so processStreamWithLogging can add
+        // a completion event when the stream finishes.
+        context.logPrompts = logPrompts;
+      } else {
+        span.end();
+      }
+
       return result;
     } catch (error) {
       span.setStatus({ code: SpanStatusCode.ERROR });
+      span.end();
       // Use shared error handling logic
       return await this.handleError(error, context, request);
-    } finally {
-      span.end();
     }
   }
 

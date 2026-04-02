@@ -54,6 +54,7 @@ import {
   logNextSpeakerCheck,
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { startTurnSpan, endTurnSpan } from '../telemetry/turnSpanContext.js';
 
 // Utilities
 import {
@@ -473,6 +474,15 @@ export class GeminiClient {
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
 
+    // Start a turn root span for new user prompts. Recursive continuations
+    // (Hook, ToolResult, Retry) reuse the already-active span.
+    const ownsTurnSpan =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron;
+    if (ownsTurnSpan) {
+      startTurnSpan(this.config.getSessionId(), prompt_id);
+    }
+
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
     }
@@ -517,6 +527,7 @@ export class GeminiClient {
             ),
           },
         };
+        if (ownsTurnSpan) endTurnSpan('error');
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -549,6 +560,7 @@ export class GeminiClient {
         this.sessionTurnCount > this.config.getMaxSessionTurns()
       ) {
         yield { type: GeminiEventType.MaxSessionTurns };
+        if (ownsTurnSpan) endTurnSpan('ok');
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -556,6 +568,7 @@ export class GeminiClient {
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
+      if (ownsTurnSpan) endTurnSpan('ok');
       return new Turn(this.getChat(), prompt_id);
     }
 
@@ -581,6 +594,7 @@ export class GeminiClient {
               'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           },
         };
+        if (ownsTurnSpan) endTurnSpan('error');
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -621,6 +635,7 @@ export class GeminiClient {
           `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
         );
         await arenaAgentClient.reportCancelled();
+        if (ownsTurnSpan) endTurnSpan('ok');
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -681,6 +696,7 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportError('Loop detected');
           }
+          if (ownsTurnSpan) endTurnSpan('error');
           return turn;
         }
       }
@@ -699,6 +715,7 @@ export class GeminiClient {
               : 'Unknown error';
           await arenaAgentClient.reportError(errorMsg);
         }
+        if (ownsTurnSpan) endTurnSpan('error');
         return turn;
       }
     }
@@ -741,6 +758,7 @@ export class GeminiClient {
 
       // Check if aborted after hook execution
       if (signal.aborted) {
+        if (ownsTurnSpan) endTurnSpan('ok');
         return turn;
       }
 
@@ -765,18 +783,21 @@ export class GeminiClient {
       ) {
         // Check if aborted before continuing
         if (signal.aborted) {
+          if (ownsTurnSpan) endTurnSpan('ok');
           return turn;
         }
 
         const continueReason = stopOutput.getEffectiveReason();
         const continueRequest = [{ text: continueReason }];
-        return yield* this.sendMessageStream(
+        const hookResult = yield* this.sendMessageStream(
           continueRequest,
           signal,
           prompt_id,
           { type: SendMessageType.Hook },
           boundedTurns - 1,
         );
+        if (ownsTurnSpan) endTurnSpan('ok');
+        return hookResult;
       }
     }
 
@@ -813,13 +834,15 @@ export class GeminiClient {
         const issueText = checkResult.issues.map((i) => `- ${i}`).join('\n');
         const continueReason = `Completion check found unresolved issues:\n${issueText}\n\nPlease address these issues before finishing.`;
         const continueRequest = [{ text: continueReason }];
-        return yield* this.sendMessageStream(
+        const completionResult = yield* this.sendMessageStream(
           continueRequest,
           signal,
           prompt_id,
           { type: SendMessageType.Hook },
           boundedTurns - 1,
         );
+        if (ownsTurnSpan) endTurnSpan('ok');
+        return completionResult;
       }
     }
 
@@ -885,13 +908,15 @@ export class GeminiClient {
                     .join('\n');
                   const continueReason = `Verification agent found issues that must be addressed before completing:\n${issueList}\n\nPlease fix these issues now.`;
                   const continueRequest = [{ text: continueReason }];
-                  return yield* this.sendMessageStream(
+                  const verifyResult2 = yield* this.sendMessageStream(
                     continueRequest,
                     signal,
                     prompt_id,
                     { type: SendMessageType.Hook },
                     boundedTurns - 1,
                   );
+                  if (ownsTurnSpan) endTurnSpan('ok');
+                  return verifyResult2;
                 }
               }
             } catch {
@@ -914,6 +939,7 @@ export class GeminiClient {
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
         }
+        if (ownsTurnSpan) endTurnSpan('ok');
         return turn;
       }
 
@@ -935,13 +961,15 @@ export class GeminiClient {
         const nextRequest = [{ text: 'Please continue.' }];
         // This recursive call's events will be yielded out, and the final
         // turn object from the recursive call will be returned.
-        return yield* this.sendMessageStream(
+        const nextResult = yield* this.sendMessageStream(
           nextRequest,
           signal,
           prompt_id,
           options,
           boundedTurns - 1,
         );
+        if (ownsTurnSpan) endTurnSpan('ok');
+        return nextResult;
       } else if (arenaAgentClient) {
         // No continuation needed — agent completed its task
         await arenaAgentClient.reportCompleted();
@@ -953,6 +981,7 @@ export class GeminiClient {
       await arenaAgentClient.reportCancelled();
     }
 
+    if (ownsTurnSpan) endTurnSpan('ok');
     return turn;
   }
 

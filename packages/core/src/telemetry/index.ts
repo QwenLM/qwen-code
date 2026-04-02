@@ -126,3 +126,9 @@ export {
 } from './metrics.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { sanitizeHookName } from './sanitize.js';
+export {
+  startTurnSpan,
+  endTurnSpan,
+  getActiveTurnContext,
+  getActiveTurnSpan,
+} from './turnSpanContext.js';

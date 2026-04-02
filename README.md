@@ -159,6 +159,48 @@ Tools are exposed as `mcp__<server_name>__<tool_name>` and available to the agen
 
 proto auto-discovers Claude Code plugins installed at `~/.claude/plugins/`. Any plugin's `commands/` directory is automatically loaded as slash commands — no additional config needed.
 
+## Observability
+
+proto supports [Langfuse](https://langfuse.com) tracing out of the box. Set three environment variables and every session is fully traced — LLM calls (all providers), tool executions, subagent lifecycles, and turn hierarchy.
+
+### Setup
+
+Add to `~/.proto/.env` or export in your shell:
+
+```
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com  # optional, this is the default
+```
+
+### What gets traced
+
+| Span                  | Attributes                                                                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `turn`                | `session.id`, `turn.id` — root span per user prompt                                                  |
+| `gen_ai chat {model}` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.request.model` — one per LLM call |
+| `tool/{name}`         | `tool.name`, `tool.type`, `tool.duration_ms` — one per tool execution                                |
+| `agent/{name}`        | `agent.name`, `agent.status`, `agent.duration_ms` — one per subagent                                 |
+
+All three provider backends are covered: OpenAI-compatible, Anthropic, and Gemini.
+
+### Prompt content logging
+
+Full prompt messages and response text are included in traces by default. To disable:
+
+```json
+// ~/.proto/settings.json
+{
+  "telemetry": { "logPrompts": false }
+}
+```
+
+> **Privacy note:** `logPrompts` is enabled by default. When enabled, full prompt and response content is sent to your Langfuse instance. Set to `false` if you want traces without message content.
+
+### Langfuse activates independently
+
+Langfuse tracing activates from env vars alone — it does not require `telemetry.enabled: true` in settings. The general telemetry pipeline (OTLP/GCP) and Langfuse are independent.
+
 ## Task Management
 
 proto integrates [beads_rust](https://github.com/Dicklesworthstone/beads_rust) for persistent, SQLite-backed task tracking. When `br` is on PATH, the 6 task tools (`task_create`, `task_get`, `task_list`, `task_update`, `task_stop`, `task_output`) use it as the backend. Tasks persist across sessions in `.beads/` within the project directory.

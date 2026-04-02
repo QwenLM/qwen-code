@@ -165,4 +165,122 @@ describe('Telemetry SDK', () => {
     expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
+
+  describe('Langfuse BatchSpanProcessor', () => {
+    it('is added when LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are set', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+
+      initializeTelemetry(mockConfig);
+
+      // NodeSDK should be constructed with 2 span processors:
+      // one for the primary OTLP exporter and one for Langfuse
+      const sdkCalls = vi.mocked(NodeSDK).mock.calls;
+      expect(sdkCalls.length).toBe(1);
+      const spanProcessors = sdkCalls[0][0]?.spanProcessors;
+      expect(spanProcessors).toBeDefined();
+      expect(spanProcessors).toHaveLength(2);
+    });
+
+    it('is not added when env vars are absent', () => {
+      // Langfuse env vars are already cleared by beforeEach
+      initializeTelemetry(mockConfig);
+
+      const sdkCalls = vi.mocked(NodeSDK).mock.calls;
+      expect(sdkCalls.length).toBe(1);
+      const spanProcessors = sdkCalls[0][0]?.spanProcessors;
+      expect(spanProcessors).toBeDefined();
+      expect(spanProcessors).toHaveLength(1);
+    });
+
+    it('is not added when only LANGFUSE_PUBLIC_KEY is set', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+
+      initializeTelemetry(mockConfig);
+
+      const sdkCalls = vi.mocked(NodeSDK).mock.calls;
+      expect(sdkCalls.length).toBe(1);
+      const spanProcessors = sdkCalls[0][0]?.spanProcessors;
+      expect(spanProcessors).toHaveLength(1);
+    });
+
+    it('is not added when only LANGFUSE_SECRET_KEY is set', () => {
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+
+      initializeTelemetry(mockConfig);
+
+      const sdkCalls = vi.mocked(NodeSDK).mock.calls;
+      expect(sdkCalls.length).toBe(1);
+      const spanProcessors = sdkCalls[0][0]?.spanProcessors;
+      expect(spanProcessors).toHaveLength(1);
+    });
+
+    it('uses default cloud.langfuse.com URL when LANGFUSE_BASE_URL is not set', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+
+      initializeTelemetry(mockConfig);
+
+      // The Langfuse exporter is an OTLPTraceExporterHttp — find the call
+      // that targets the Langfuse OTLP endpoint (as opposed to the primary one).
+      const httpExporterCalls = vi.mocked(OTLPTraceExporterHttp).mock.calls;
+      const langfuseCall = httpExporterCalls.find((call) =>
+        (call[0] as { url?: string })?.url?.includes('langfuse'),
+      );
+      expect(langfuseCall).toBeDefined();
+      expect((langfuseCall![0] as { url: string }).url).toBe(
+        'https://cloud.langfuse.com/api/public/otel/v1/traces',
+      );
+    });
+
+    it('uses custom LANGFUSE_BASE_URL when set', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+      process.env['LANGFUSE_BASE_URL'] = 'https://my-langfuse.example.com';
+
+      initializeTelemetry(mockConfig);
+
+      const httpExporterCalls = vi.mocked(OTLPTraceExporterHttp).mock.calls;
+      const langfuseCall = httpExporterCalls.find((call) =>
+        (call[0] as { url?: string })?.url?.includes('langfuse'),
+      );
+      expect(langfuseCall).toBeDefined();
+      expect((langfuseCall![0] as { url: string }).url).toBe(
+        'https://my-langfuse.example.com/api/public/otel/v1/traces',
+      );
+    });
+
+    it('sends Basic auth header with base64-encoded credentials', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+
+      initializeTelemetry(mockConfig);
+
+      const httpExporterCalls = vi.mocked(OTLPTraceExporterHttp).mock.calls;
+      const langfuseCall = httpExporterCalls.find((call) =>
+        (call[0] as { url?: string })?.url?.includes('langfuse'),
+      );
+      expect(langfuseCall).toBeDefined();
+
+      const expectedCredentials = Buffer.from('pk-lf-test:sk-lf-test').toString(
+        'base64',
+      );
+      expect(
+        (langfuseCall![0] as { headers: Record<string, string> }).headers,
+      ).toEqual({
+        Authorization: `Basic ${expectedCredentials}`,
+      });
+    });
+
+    it('still initializes telemetry when only Langfuse is configured and primary telemetry is disabled', () => {
+      process.env['LANGFUSE_PUBLIC_KEY'] = 'pk-lf-test';
+      process.env['LANGFUSE_SECRET_KEY'] = 'sk-lf-test';
+      vi.spyOn(mockConfig, 'getTelemetryEnabled').mockReturnValue(false);
+
+      initializeTelemetry(mockConfig);
+
+      // Should still start the SDK because Langfuse processor is non-null
+      expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    });
+  });
 });

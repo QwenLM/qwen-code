@@ -47,6 +47,7 @@ export function createGeminiContentGenerator(
       httpOptions,
     },
     config,
+    gcConfig,
   );
 
   return geminiContentGenerator;

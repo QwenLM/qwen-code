@@ -25,6 +25,7 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
+import { trace, SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
@@ -38,6 +39,7 @@ import {
 } from '../tokenLimits.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
+const tracer = trace.getTracer('proto.anthropic', '1.0.0');
 
 type StreamingBlockState = {
   type: string;
@@ -90,33 +92,136 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
-    const anthropicRequest = await this.buildRequest(request);
-    const response = (await this.client.messages.create(anthropicRequest, {
-      signal: request.config?.abortSignal,
-    })) as Message;
+    const modelId = this.contentGeneratorConfig.model;
+    const span = tracer.startSpan(`gen_ai chat ${modelId}`, {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        'gen_ai.system': 'anthropic',
+        'gen_ai.operation.name': 'chat',
+        'gen_ai.request.model': modelId,
+        'llm.streaming': false,
+      },
+    });
+    const startTime = Date.now();
 
-    return this.converter.convertAnthropicResponseToGemini(response);
+    const logPrompts = this.cliConfig.getTelemetryLogPromptsEnabled();
+
+    try {
+      const anthropicRequest = await this.buildRequest(request);
+
+      // Log prompt content as a span event when telemetry prompt logging is enabled
+      if (logPrompts) {
+        const promptJson = JSON.stringify(anthropicRequest.messages);
+        span.addEvent('gen_ai.content.prompt', {
+          'gen_ai.prompt':
+            promptJson.length > 10_000
+              ? promptJson.slice(0, 10_000) + '...[truncated]'
+              : promptJson,
+        });
+      }
+
+      const response = (await this.client.messages.create(anthropicRequest, {
+        signal: request.config?.abortSignal,
+      })) as Message;
+
+      const inputTokens = response.usage?.input_tokens ?? 0;
+      const outputTokens = response.usage?.output_tokens ?? 0;
+      const durationMs = Date.now() - startTime;
+
+      span.setAttributes({
+        'gen_ai.usage.input_tokens': inputTokens,
+        'gen_ai.usage.output_tokens': outputTokens,
+        'gen_ai.usage.total_tokens': inputTokens + outputTokens,
+        'gen_ai.response.model': response.model || modelId,
+        'llm.duration_ms': durationMs,
+      });
+
+      // Log completion content as a span event
+      if (logPrompts) {
+        const responseText = response.content
+          .filter(
+            (block): block is Anthropic.TextBlock => block.type === 'text',
+          )
+          .map((block) => block.text)
+          .join('');
+        if (responseText) {
+          span.addEvent('gen_ai.content.completion', {
+            'gen_ai.completion':
+              responseText.length > 10_000
+                ? responseText.slice(0, 10_000) + '...[truncated]'
+                : responseText,
+          });
+        }
+      }
+
+      span.setStatus({ code: SpanStatusCode.OK });
+
+      return this.converter.convertAnthropicResponseToGemini(response);
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      throw error;
+    } finally {
+      span.end();
+    }
   }
 
   async generateContentStream(
     request: GenerateContentParameters,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const anthropicRequest = await this.buildRequest(request);
-    const streamingRequest: MessageCreateParamsStreaming & {
-      thinking?: { type: 'enabled'; budget_tokens: number };
-    } = {
-      ...anthropicRequest,
-      stream: true,
-    };
-
-    const stream = (await this.client.messages.create(
-      streamingRequest as MessageCreateParamsStreaming,
-      {
-        signal: request.config?.abortSignal,
+    const modelId = this.contentGeneratorConfig.model;
+    const span = tracer.startSpan(`gen_ai chat ${modelId}`, {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        'gen_ai.system': 'anthropic',
+        'gen_ai.operation.name': 'chat',
+        'gen_ai.request.model': modelId,
+        'llm.streaming': true,
       },
-    )) as AsyncIterable<RawMessageStreamEvent>;
+    });
+    const startTime = Date.now();
 
-    return this.processStream(stream);
+    const logPrompts = this.cliConfig.getTelemetryLogPromptsEnabled();
+
+    try {
+      const anthropicRequest = await this.buildRequest(request);
+
+      // Log prompt content as a span event when telemetry prompt logging is enabled
+      if (logPrompts) {
+        const promptJson = JSON.stringify(anthropicRequest.messages);
+        span.addEvent('gen_ai.content.prompt', {
+          'gen_ai.prompt':
+            promptJson.length > 10_000
+              ? promptJson.slice(0, 10_000) + '...[truncated]'
+              : promptJson,
+        });
+      }
+
+      const streamingRequest: MessageCreateParamsStreaming & {
+        thinking?: { type: 'enabled'; budget_tokens: number };
+      } = {
+        ...anthropicRequest,
+        stream: true,
+      };
+
+      const stream = (await this.client.messages.create(
+        streamingRequest as MessageCreateParamsStreaming,
+        {
+          signal: request.config?.abortSignal,
+        },
+      )) as AsyncIterable<RawMessageStreamEvent>;
+
+      return this.processStreamWithSpan(
+        stream,
+        span,
+        startTime,
+        modelId,
+        logPrompts,
+      );
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      span.end();
+      throw error;
+    }
   }
 
   async countTokens(
@@ -484,6 +589,74 @@ export class AnthropicContentGenerator implements ContentGenerator {
         default:
           break;
       }
+    }
+  }
+
+  private async *processStreamWithSpan(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+    span: Span,
+    startTime: number,
+    modelId: string,
+    logPrompts: boolean = false,
+  ): AsyncGenerator<GenerateContentResponse> {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let responseModel: string | undefined;
+    const completionParts: string[] = [];
+
+    try {
+      for await (const chunk of this.processStream(stream)) {
+        // Extract token usage and model from chunks that carry usageMetadata
+        if (chunk.usageMetadata) {
+          inputTokens = chunk.usageMetadata.promptTokenCount ?? inputTokens;
+          outputTokens =
+            chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+        }
+        if (chunk.modelVersion) {
+          responseModel = chunk.modelVersion;
+        }
+        // Collect streamed text for telemetry prompt logging
+        if (logPrompts) {
+          const text = (chunk.candidates?.[0]?.content?.parts ?? [])
+            .map((p) =>
+              (p as { text?: string; thought?: boolean }).thought
+                ? ''
+                : ((p as { text?: string }).text ?? ''),
+            )
+            .join('');
+          if (text) {
+            completionParts.push(text);
+          }
+        }
+        yield chunk;
+      }
+
+      const durationMs = Date.now() - startTime;
+      span.setAttributes({
+        'gen_ai.usage.input_tokens': inputTokens,
+        'gen_ai.usage.output_tokens': outputTokens,
+        'gen_ai.usage.total_tokens': inputTokens + outputTokens,
+        'gen_ai.response.model': responseModel || modelId,
+        'llm.duration_ms': durationMs,
+      });
+
+      // Log streamed completion content as a span event
+      if (logPrompts && completionParts.length > 0) {
+        const responseText = completionParts.join('');
+        span.addEvent('gen_ai.content.completion', {
+          'gen_ai.completion':
+            responseText.length > 10_000
+              ? responseText.slice(0, 10_000) + '...[truncated]'
+              : responseText,
+        });
+      }
+
+      span.setStatus({ code: SpanStatusCode.OK });
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      throw error;
+    } finally {
+      span.end();
     }
   }
 
