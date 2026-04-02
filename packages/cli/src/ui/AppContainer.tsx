@@ -43,6 +43,10 @@ import {
   SessionStartSource,
   getLoopManager,
   formatInterval,
+  loadPersistedLoopStates,
+  persistLoopStates,
+  clearPersistedLoopState,
+  releaseLock,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -67,7 +71,7 @@ import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { computeWindowTitle } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
@@ -945,30 +949,73 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     const loopManager = getLoopManager();
-    loopManager.setIterationCallback((prompt: string, iteration: number) => {
-      const state = loopManager.getState();
-      const interval = formatInterval(state?.config.intervalMs ?? 0);
-      const maxInfo = state?.config.maxIterations
-        ? `/${state.config.maxIterations}`
-        : '';
-      historyManagerRef.current.addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            '-- Loop iteration {{iteration}}{{maxInfo}} (every {{interval}}) --',
-            {
-              iteration: String(iteration),
-              maxInfo,
-              interval,
-            },
-          ),
-        },
-        Date.now(),
-      );
-      addMessageRef.current(prompt);
+    loopManager.setIterationCallback(
+      (prompt: string, iteration: number, loopId: string) => {
+        const state = loopManager.getState(loopId);
+        const interval = formatInterval(state?.config.intervalMs ?? 0);
+        const maxInfo = state?.config.maxIterations
+          ? `/${state.config.maxIterations}`
+          : '';
+        const label = state?.config.label ?? loopId;
+        historyManagerRef.current.addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              '-- Loop {{label}} iteration {{iteration}}{{maxInfo}} (every {{interval}}) --',
+              { label, iteration: String(iteration), maxInfo, interval },
+            ),
+          },
+          Date.now(),
+        );
+        addMessageRef.current(prompt);
+        loopManager.startSafetyTimer();
+      },
+    );
+
+    // Check for persisted loop state from a previous session
+    const qwenDir = join(process.cwd(), '.qwen');
+    void loadPersistedLoopStates(qwenDir).then((persisted) => {
+      if (!persisted || persisted.tasks.length === 0) return;
+
+      const missed = loopManager.getMissedTasks(persisted.tasks);
+      if (missed.length > 0) {
+        const lines = missed.map(
+          (t_) =>
+            `  - "${t_.config.prompt}" (overdue ${formatInterval(Date.now() - (t_.nextFireAt ?? 0))})`,
+        );
+        historyManagerRef.current.addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              '{{count}} missed loop task(s):\n{{tasks}}\nUse /loop restore to resume or /loop stop to dismiss.',
+              { count: String(missed.length), tasks: lines.join('\n') },
+            ),
+          },
+          Date.now(),
+        );
+      } else {
+        historyManagerRef.current.addItem(
+          {
+            type: MessageType.INFO,
+            text: t(
+              '{{count}} previous loop task(s) found. Use /loop restore to resume or /loop stop to dismiss.',
+              { count: String(persisted.tasks.length) },
+            ),
+          },
+          Date.now(),
+        );
+      }
     });
+
     return () => {
       const lm = getLoopManager();
+      if (lm.isActive()) {
+        void persistLoopStates(lm.toPersistedStates(), qwenDir);
+      } else {
+        void clearPersistedLoopState(qwenDir);
+      }
+      // Release lock on unmount so other sessions can take over
+      void releaseLock(qwenDir, `session-${process.pid}`);
       lm.stop();
       lm.setIterationCallback(() => {});
     };
@@ -977,7 +1024,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // Notify loop manager when streaming completes
   useEffect(() => {
     const loopManager = getLoopManager();
-    if (!loopManager.isActive() || streamingState !== StreamingState.Idle) {
+    if (!loopManager.isActive()) {
+      return;
+    }
+
+    // If streaming started (not Idle), clear the safety timer — the standard
+    // completion path will handle this iteration when streaming finishes.
+    if (streamingState !== StreamingState.Idle) {
+      loopManager.clearSafetyTimer();
       return;
     }
 
@@ -986,36 +1040,47 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
+    // Normal streaming completed — cancel the safety timer since the
+    // standard completion path is handling this iteration.
+    loopManager.clearSafetyTimer();
+
     // Check if the last response had errors
     const history = historyManager.history;
     const lastItem = history[history.length - 1];
     const hadError =
       lastItem && 'type' in lastItem && lastItem.type === MessageType.ERROR;
-    loopManager.onIterationComplete(!hadError);
+    const result = loopManager.onIterationComplete(!hadError);
 
-    // If loop finished or paused, notify user
-    const updatedState = loopManager.getState();
-    if (updatedState && !updatedState.isActive) {
+    if (result?.done) {
       historyManager.addItem(
         {
           type: MessageType.INFO,
-          text: t('Loop completed after {{count}} iteration(s).', {
-            count: String(updatedState.iteration),
+          text: t('Loop "{{id}}" completed after {{count}} iteration(s).', {
+            id: result.loopId,
+            count: String(result.iteration),
           }),
         },
         Date.now(),
       );
-    } else if (updatedState && updatedState.isPaused) {
+    } else if (result?.paused) {
       historyManager.addItem(
         {
           type: MessageType.INFO,
           text: t(
-            'Loop paused after {{failures}} consecutive failures. Use /loop stop to cancel.',
-            { failures: String(updatedState.consecutiveFailures) },
+            'Loop "{{id}}" paused after {{failures}} consecutive failures. Use /loop resume {{id}} to continue.',
+            { id: result.loopId, failures: String(result.consecutiveFailures) },
           ),
         },
         Date.now(),
       );
+    }
+
+    // Persist updated states after each iteration.
+    // When the last loop completes, toPersistedStates() returns [] which
+    // causes persistLoopStates to delete the file — auto-cleanup.
+    if (result) {
+      const qwenDir = join(process.cwd(), '.qwen');
+      void persistLoopStates(loopManager.toPersistedStates(), qwenDir);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on streamingState transitions
   }, [streamingState]);

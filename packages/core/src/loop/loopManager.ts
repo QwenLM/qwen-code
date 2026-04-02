@@ -6,8 +6,14 @@
  * Loop Manager
  *
  * Framework-agnostic state management for the /loop command.
- * Tracks active loop configuration and iteration state.
+ * Supports multiple concurrent loops, each identified by a unique ID.
  */
+
+import { computeJitter } from './loopJitter.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /** Minimum allowed interval in milliseconds (10 seconds) */
 export const MIN_INTERVAL_MS = 10_000;
@@ -18,69 +24,117 @@ export const MAX_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Default interval in milliseconds (10 minutes) */
 export const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 
-/** Default max consecutive failures before pausing */
+/** Default max concurrent loops */
+export const DEFAULT_MAX_LOOPS = 50;
+
+/** Default auto-expiry duration (7 days) */
+export const DEFAULT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Max consecutive failures before auto-pausing */
 const MAX_CONSECUTIVE_FAILURES = 3;
 
+/** Max backoff multiplier for consecutive failures */
+const MAX_BACKOFF_MULTIPLIER = 4;
+
 /**
- * Configuration for a loop
+ * Safety timer timeout (ms). If a loop prompt doesn't trigger AI streaming
+ * within this window, the loop auto-advances to prevent hanging.
  */
+const SAFETY_TIMEOUT_MS = 3_000;
+
+/** Threshold above which drift-protected scheduling is used */
+const MAX_SINGLE_TIMEOUT_MS = 60_000;
+
+/** Interval for checking auto-expiry across all loops (60 seconds) */
+const EXPIRY_CHECK_INTERVAL_MS = 60_000;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 export interface LoopConfig {
-  /** The prompt or command to execute each cycle */
   prompt: string;
-  /** Interval between iterations in milliseconds */
   intervalMs: number;
-  /** Maximum number of iterations (0 = unlimited) */
+  /** 0 = unlimited */
   maxIterations: number;
+  /** Caller-assigned ID. Auto-generated if omitted. */
+  id?: string;
+  /** Human-friendly label for status display */
+  label?: string;
+  /** Absolute timestamp for auto-expiry. Auto-set to now + 7 days if omitted. */
+  expiresAt?: number;
+  /** If true, loop fires once and is deleted. Equivalent to maxIterations=1. */
+  oneShot?: boolean;
+  /** If true, add deterministic jitter to the interval (default true). */
+  jitter?: boolean;
 }
 
-/**
- * Runtime state of an active loop
- */
-export interface LoopState {
-  /** Loop configuration */
-  config: LoopConfig;
-  /** Whether the loop is currently active */
-  isActive: boolean;
-  /** Whether the loop is paused (e.g., due to consecutive failures) */
-  isPaused: boolean;
-  /** Current iteration count (1-based) */
+export interface IterationResult {
+  done: boolean;
+  paused: boolean;
   iteration: number;
-  /** Consecutive failure count */
   consecutiveFailures: number;
-  /** Timestamp when the loop started */
-  startedAt: number;
-  /** Timestamp of the last iteration */
-  lastIterationAt: number;
-  /** Timer ID for the next scheduled iteration */
-  timerId: ReturnType<typeof setTimeout> | null;
-  /** Whether the loop is waiting for an AI response to complete */
-  waitingForResponse: boolean;
+  loopId: string;
 }
 
-/**
- * Callback invoked when a loop iteration should execute
- */
-export type LoopIterationCallback = (prompt: string, iteration: number) => void;
+export interface PersistedLoopState {
+  id: string;
+  config: LoopConfig;
+  iteration: number;
+  startedAt: number;
+  createdAt: number;
+  nextFireAt: number | null;
+}
+
+export interface PersistedLoopFile {
+  version: 2;
+  tasks: PersistedLoopState[];
+  lastUpdatedAt: number;
+}
+
+export interface LoopState {
+  id: string;
+  config: LoopConfig;
+  isActive: boolean;
+  isPaused: boolean;
+  iteration: number;
+  consecutiveFailures: number;
+  startedAt: number;
+  createdAt: number;
+  lastIterationAt: number;
+  timerId: ReturnType<typeof setTimeout> | null;
+  waitingForResponse: boolean;
+  nextFireAt: number | null;
+  jitterOffsetMs: number;
+}
+
+export type LoopIterationCallback = (
+  prompt: string,
+  iteration: number,
+  loopId: string,
+) => void;
+
+// ---------------------------------------------------------------------------
+// Utility functions
+// ---------------------------------------------------------------------------
 
 /**
- * Parse an interval string like "30s", "5m", "1h" into milliseconds.
- * Returns null if the string is not a valid interval.
+ * Parse an interval string like "30s", "5m", "1h", "1d" into milliseconds.
  */
 export function parseInterval(input: string): number | null {
-  const match = input.match(/^(\d+(?:\.\d+)?)(s|m|h)$/i);
+  const match = input.match(/^(\d+(?:\.\d+)?)(s|m|h|d)$/i);
   if (!match) return null;
-
   const value = parseFloat(match[1]);
   if (value <= 0 || !isFinite(value)) return null;
-
-  const unit = match[2].toLowerCase();
-  switch (unit) {
+  switch (match[2].toLowerCase()) {
     case 's':
       return Math.round(value * 1000);
     case 'm':
-      return Math.round(value * 60 * 1000);
+      return Math.round(value * 60_000);
     case 'h':
-      return Math.round(value * 60 * 60 * 1000);
+      return Math.round(value * 3_600_000);
+    case 'd':
+      return Math.round(value * 86_400_000);
     default:
       return null;
   }
@@ -88,173 +142,462 @@ export function parseInterval(input: string): number | null {
 
 /**
  * Format milliseconds into a human-readable string like "5m" or "30s".
- * Prefers the largest unit that gives a clean representation.
  */
 export function formatInterval(ms: number): string {
-  if (ms >= 3600_000 && ms % 3600_000 === 0) {
-    return `${ms / 3600_000}h`;
-  }
-  if (ms >= 60_000 && ms % 60_000 === 0) {
-    return `${ms / 60_000}m`;
-  }
+  if (ms >= 86_400_000 && ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
+  if (ms >= 3_600_000 && ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`;
   if (ms >= 60_000) {
-    // Non-round minutes (e.g., 90_000 → "1.5m")
     const rounded = Math.round((ms / 60_000) * 10) / 10;
     return `${rounded}m`;
   }
   return `${ms / 1000}s`;
 }
 
-/**
- * Manages a single active loop.
- */
+let idCounter = 0;
+function generateLoopId(): string {
+  const hex = (Date.now() & 0xffffff).toString(16).padStart(6, '0');
+  return `loop-${hex}-${(idCounter++).toString(16)}`;
+}
+
+// ---------------------------------------------------------------------------
+// LoopManager
+// ---------------------------------------------------------------------------
+
 export class LoopManager {
-  private state: LoopState | null = null;
+  private tasks = new Map<string, LoopState>();
   private onIteration: LoopIterationCallback | null = null;
+  private safetyTimerId: ReturnType<typeof setTimeout> | null = null;
+  private expiryTimerId: ReturnType<typeof setInterval> | null = null;
 
   /**
-   * Register the callback that will be invoked for each loop iteration.
-   * This should be called once during initialization (e.g., in AppContainer).
+   * ID of the "default" unnamed loop (for backward compatibility).
+   * When `start()` is called without an explicit `config.id`, the previous
+   * default loop is auto-stopped before the new one is created.
    */
+  private defaultLoopId: string | null = null;
+
+  /** Which loop currently owns the AI streaming slot. */
+  private activeResponseLoopId: string | null = null;
+
+  // -- Callback registration -----------------------------------------------
+
   setIterationCallback(callback: LoopIterationCallback): void {
     this.onIteration = callback;
   }
 
-  /**
-   * Start a new loop. Stops any existing loop first.
-   *
-   * @param config Loop configuration
-   * @param skipFirstIteration If true, don't execute immediately
-   *   (caller will handle the first submission, e.g., via submit_prompt)
-   */
-  start(config: LoopConfig, skipFirstIteration = false): void {
-    this.stop();
+  // -- Lifecycle ------------------------------------------------------------
 
-    this.state = {
-      config,
+  /**
+   * Start a new loop. Returns the assigned loop ID.
+   *
+   * If `config.id` is omitted, this is a "default" loop and any previous
+   * default loop is auto-stopped (backward compatible with single-loop usage).
+   * If `config.id` is provided, it coexists with other loops.
+   */
+  start(config: LoopConfig, skipFirstIteration = false): string {
+    const id = config.id ?? generateLoopId();
+
+    // Legacy (unnamed) path: replace the previous default loop
+    if (!config.id) {
+      if (this.defaultLoopId && this.tasks.has(this.defaultLoopId)) {
+        this.stopOne(this.defaultLoopId);
+      }
+      this.defaultLoopId = id;
+    } else if (this.tasks.has(id)) {
+      // Explicit ID that already exists: replace it
+      this.stopOne(id);
+    }
+
+    const now = Date.now();
+    const effectiveConfig: LoopConfig = {
+      ...config,
+      id,
+      maxIterations: config.oneShot ? 1 : config.maxIterations,
+      expiresAt:
+        config.expiresAt ??
+        (config.oneShot ? undefined : now + DEFAULT_EXPIRY_MS),
+    };
+
+    const jitterEnabled = config.jitter !== false;
+    const state: LoopState = {
+      id,
+      config: effectiveConfig,
       isActive: true,
       isPaused: false,
       iteration: skipFirstIteration ? 1 : 0,
       consecutiveFailures: 0,
-      startedAt: Date.now(),
-      lastIterationAt: skipFirstIteration ? Date.now() : 0,
+      startedAt: now,
+      createdAt: now,
+      lastIterationAt: skipFirstIteration ? now : 0,
       timerId: null,
       waitingForResponse: skipFirstIteration,
+      nextFireAt: null,
+      jitterOffsetMs: jitterEnabled
+        ? computeJitter(id, effectiveConfig.intervalMs)
+        : 0,
     };
 
+    this.tasks.set(id, state);
+
     if (!skipFirstIteration) {
-      this.executeIteration();
+      this.executeIteration(id);
+    } else if (!this.activeResponseLoopId) {
+      // This loop gets the streaming slot (caller will submit its prompt)
+      this.activeResponseLoopId = id;
+    } else {
+      // Another loop already owns the streaming slot. Don't mark this one as
+      // waiting — just schedule its first timer so it starts independently.
+      state.waitingForResponse = false;
+      state.iteration = 0;
+      this.scheduleNext(id);
     }
+
+    this.ensureExpiryTimer();
+    return id;
   }
 
-  /**
-   * Stop the active loop.
-   */
-  stop(): void {
-    if (this.state) {
-      if (this.state.timerId) {
-        clearTimeout(this.state.timerId);
-      }
-      this.state = null;
+  /** Stop a specific loop by ID. */
+  stopOne(loopId: string): void {
+    const state = this.tasks.get(loopId);
+    if (!state) return;
+    if (state.timerId) clearTimeout(state.timerId);
+    this.tasks.delete(loopId);
+    if (this.activeResponseLoopId === loopId) {
+      this.clearSafetyTimer();
+      this.activeResponseLoopId = null;
     }
+    if (this.defaultLoopId === loopId) this.defaultLoopId = null;
+    if (this.tasks.size === 0) this.clearExpiryTimer();
   }
 
-  /**
-   * Get the current loop state (null if no loop is active).
-   */
-  getState(): Readonly<LoopState> | null {
-    return this.state;
-  }
-
-  /**
-   * Check if a loop is currently active (running or paused).
-   */
-  isActive(): boolean {
-    return this.state !== null && this.state.isActive;
-  }
-
-  /**
-   * Check if a loop is waiting for an AI response.
-   */
-  isWaitingForResponse(): boolean {
-    return this.state !== null && this.state.waitingForResponse;
-  }
-
-  /**
-   * Called by the host (AppContainer) when a loop iteration's AI response
-   * has completed. Schedules the next iteration after the configured delay.
-   */
-  onIterationComplete(success: boolean): void {
-    if (!this.state || !this.state.isActive || !this.state.waitingForResponse) {
+  /** Stop all loops (or a specific one for backward compat). */
+  stop(loopId?: string): void {
+    if (loopId) {
+      this.stopOne(loopId);
       return;
     }
-    this.state.waitingForResponse = false;
+    // Stop ALL
+    this.clearSafetyTimer();
+    for (const state of this.tasks.values()) {
+      if (state.timerId) clearTimeout(state.timerId);
+    }
+    this.tasks.clear();
+    this.activeResponseLoopId = null;
+    this.defaultLoopId = null;
+    this.clearExpiryTimer();
+  }
+
+  // -- State queries --------------------------------------------------------
+
+  getState(loopId?: string): Readonly<LoopState> | null {
+    if (loopId) return this.tasks.get(loopId) ?? null;
+    // Legacy: return the default loop or the first active loop
+    if (this.defaultLoopId) return this.tasks.get(this.defaultLoopId) ?? null;
+    const first = this.tasks.values().next();
+    return first.done ? null : first.value;
+  }
+
+  getAllStates(): ReadonlyMap<string, Readonly<LoopState>> {
+    return this.tasks;
+  }
+
+  getActiveCount(): number {
+    return this.tasks.size;
+  }
+
+  isActive(loopId?: string): boolean {
+    if (loopId) {
+      const s = this.tasks.get(loopId);
+      return s !== null && s !== undefined && s.isActive;
+    }
+    return this.tasks.size > 0;
+  }
+
+  isWaitingForResponse(): boolean {
+    return this.activeResponseLoopId !== null;
+  }
+
+  getWaitingLoopId(): string | null {
+    return this.activeResponseLoopId;
+  }
+
+  // -- Iteration lifecycle --------------------------------------------------
+
+  onIterationComplete(success: boolean): IterationResult | null {
+    this.clearSafetyTimer();
+
+    const loopId = this.activeResponseLoopId;
+    if (!loopId) return null;
+
+    const state = this.tasks.get(loopId);
+    if (!state || !state.isActive || !state.waitingForResponse) {
+      this.activeResponseLoopId = null;
+      return null;
+    }
+
+    state.waitingForResponse = false;
+    this.activeResponseLoopId = null;
 
     if (success) {
-      this.state.consecutiveFailures = 0;
+      state.consecutiveFailures = 0;
     } else {
-      this.state.consecutiveFailures++;
-      if (this.state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        this.state.isPaused = true;
-        return;
+      state.consecutiveFailures++;
+      if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        state.isPaused = true;
+        return {
+          done: false,
+          paused: true,
+          iteration: state.iteration,
+          consecutiveFailures: state.consecutiveFailures,
+          loopId,
+        };
       }
     }
 
-    // Check if we've reached max iterations
+    // Max iterations reached?
     if (
-      this.state.config.maxIterations > 0 &&
-      this.state.iteration >= this.state.config.maxIterations
+      state.config.maxIterations > 0 &&
+      state.iteration >= state.config.maxIterations
     ) {
-      this.state.isActive = false;
-      if (this.state.timerId) {
-        clearTimeout(this.state.timerId);
-        this.state.timerId = null;
+      const iteration = state.iteration;
+      this.stopOne(loopId);
+      return {
+        done: true,
+        paused: false,
+        iteration,
+        consecutiveFailures: 0,
+        loopId,
+      };
+    }
+
+    this.scheduleNext(loopId, state.consecutiveFailures);
+    return {
+      done: false,
+      paused: false,
+      iteration: state.iteration,
+      consecutiveFailures: state.consecutiveFailures,
+      loopId,
+    };
+  }
+
+  // -- Pause / Resume -------------------------------------------------------
+
+  pause(loopId?: string): void {
+    if (loopId) {
+      this.pauseOne(loopId);
+    } else {
+      for (const id of this.tasks.keys()) this.pauseOne(id);
+    }
+  }
+
+  private pauseOne(loopId: string): void {
+    const state = this.tasks.get(loopId);
+    if (!state || !state.isActive || state.isPaused) return;
+    if (this.activeResponseLoopId === loopId) {
+      this.clearSafetyTimer();
+      this.activeResponseLoopId = null;
+      state.waitingForResponse = false;
+    }
+    state.isPaused = true;
+    if (state.timerId) {
+      clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+    state.nextFireAt = null;
+  }
+
+  resume(loopId?: string): void {
+    if (loopId) {
+      this.resumeOne(loopId);
+    } else {
+      for (const id of this.tasks.keys()) this.resumeOne(id);
+    }
+  }
+
+  private resumeOne(loopId: string): void {
+    const state = this.tasks.get(loopId);
+    if (!state || !state.isPaused) return;
+    state.isPaused = false;
+    state.consecutiveFailures = 0;
+    this.scheduleNext(loopId);
+  }
+
+  // -- Safety timer ---------------------------------------------------------
+
+  startSafetyTimer(): void {
+    this.clearSafetyTimer();
+    this.safetyTimerId = setTimeout(() => {
+      if (this.activeResponseLoopId) {
+        const state = this.tasks.get(this.activeResponseLoopId);
+        if (state && state.isActive && state.waitingForResponse) {
+          this.onIterationComplete(true);
+        }
       }
-      // Keep state accessible briefly so caller can read final iteration count
+    }, SAFETY_TIMEOUT_MS);
+  }
+
+  clearSafetyTimer(): void {
+    if (this.safetyTimerId) {
+      clearTimeout(this.safetyTimerId);
+      this.safetyTimerId = null;
+    }
+  }
+
+  // -- Auto-expiry ----------------------------------------------------------
+
+  /**
+   * Check all loops for expiry. Returns IDs of expired loops that were stopped.
+   */
+  checkExpired(): string[] {
+    const now = Date.now();
+    const expired: string[] = [];
+    for (const [id, state] of this.tasks) {
+      if (state.config.expiresAt && now >= state.config.expiresAt) {
+        expired.push(id);
+      }
+    }
+    for (const id of expired) this.stopOne(id);
+    return expired;
+  }
+
+  private ensureExpiryTimer(): void {
+    if (this.expiryTimerId) return;
+    this.expiryTimerId = setInterval(() => {
+      this.checkExpired();
+    }, EXPIRY_CHECK_INTERVAL_MS);
+    // Allow the process to exit even if the timer is running
+    if (
+      this.expiryTimerId &&
+      typeof this.expiryTimerId === 'object' &&
+      'unref' in this.expiryTimerId
+    ) {
+      this.expiryTimerId.unref();
+    }
+  }
+
+  private clearExpiryTimer(): void {
+    if (this.expiryTimerId) {
+      clearInterval(this.expiryTimerId);
+      this.expiryTimerId = null;
+    }
+  }
+
+  // -- Missed task detection ------------------------------------------------
+
+  /**
+   * Given persisted states from a previous session, return those whose
+   * nextFireAt is in the past and haven't expired.
+   */
+  getMissedTasks(persisted: PersistedLoopState[]): PersistedLoopState[] {
+    const now = Date.now();
+    return persisted.filter(
+      (t) =>
+        t.nextFireAt !== null &&
+        t.nextFireAt < now &&
+        (t.config.expiresAt === undefined || t.config.expiresAt > now),
+    );
+  }
+
+  // -- Persistence ----------------------------------------------------------
+
+  toPersistedStates(): PersistedLoopState[] {
+    const result: PersistedLoopState[] = [];
+    for (const state of this.tasks.values()) {
+      if (!state.isActive) continue;
+      result.push({
+        id: state.id,
+        config: { ...state.config },
+        iteration: state.iteration,
+        startedAt: state.startedAt,
+        createdAt: state.createdAt,
+        nextFireAt: state.nextFireAt,
+      });
+    }
+    return result;
+  }
+
+  /** Backward-compatible single-state accessor */
+  toPersistedState(): PersistedLoopState | null {
+    const states = this.toPersistedStates();
+    return states.length > 0 ? states[0] : null;
+  }
+
+  // -- Internal scheduling --------------------------------------------------
+
+  private executeIteration(loopId: string): void {
+    const state = this.tasks.get(loopId);
+    if (!state || !state.isActive || !this.onIteration) return;
+
+    // Another loop is currently using the streaming slot — retry shortly
+    if (this.activeResponseLoopId && this.activeResponseLoopId !== loopId) {
+      state.timerId = setTimeout(() => this.executeIteration(loopId), 1_000);
       return;
     }
 
-    // Schedule next iteration
-    this.scheduleNext();
+    state.iteration++;
+    state.lastIterationAt = Date.now();
+    state.waitingForResponse = true;
+    state.nextFireAt = null;
+    this.activeResponseLoopId = loopId;
+    this.onIteration(state.config.prompt, state.iteration, loopId);
   }
 
-  /**
-   * Resume a paused loop.
-   */
-  resume(): void {
-    if (this.state && this.state.isPaused) {
-      this.state.isPaused = false;
-      this.state.consecutiveFailures = 0;
-      this.scheduleNext();
-    }
-  }
+  private scheduleNext(loopId: string, failureCount = 0): void {
+    const state = this.tasks.get(loopId);
+    if (!state || !state.isActive || state.isPaused) return;
 
-  private executeIteration(): void {
-    if (!this.state || !this.state.isActive || !this.onIteration) return;
+    if (state.timerId) clearTimeout(state.timerId);
 
-    this.state.iteration++;
-    this.state.lastIterationAt = Date.now();
-    this.state.waitingForResponse = true;
-    this.onIteration(this.state.config.prompt, this.state.iteration);
-  }
-
-  private scheduleNext(): void {
-    if (!this.state || !this.state.isActive) return;
-
-    // Clear any existing timer
-    if (this.state.timerId) {
-      clearTimeout(this.state.timerId);
+    // Check expiry before scheduling
+    if (state.config.expiresAt && Date.now() >= state.config.expiresAt) {
+      this.stopOne(loopId);
+      return;
     }
 
-    this.state.timerId = setTimeout(() => {
-      this.executeIteration();
-    }, this.state.config.intervalMs);
+    // Backoff on consecutive failures
+    let intervalMs = state.config.intervalMs;
+    if (failureCount > 0) {
+      const multiplier = Math.min(
+        Math.pow(2, failureCount),
+        MAX_BACKOFF_MULTIPLIER,
+      );
+      intervalMs = Math.round(intervalMs * multiplier);
+    }
+
+    // Add jitter
+    intervalMs += state.jitterOffsetMs;
+
+    const targetTime = Date.now() + intervalMs;
+    state.nextFireAt = targetTime;
+
+    if (intervalMs <= MAX_SINGLE_TIMEOUT_MS) {
+      state.timerId = setTimeout(
+        () => this.executeIteration(loopId),
+        intervalMs,
+      );
+    } else {
+      const check = () => {
+        const s = this.tasks.get(loopId);
+        if (!s || !s.isActive) return;
+        const remaining = targetTime - Date.now();
+        if (remaining <= 0) {
+          s.nextFireAt = null;
+          this.executeIteration(loopId);
+        } else {
+          const nextCheck = Math.min(remaining, 30_000);
+          s.timerId = setTimeout(check, nextCheck);
+        }
+      };
+      state.timerId = setTimeout(check, Math.min(intervalMs, 30_000));
+    }
   }
 }
 
-/**
- * Singleton loop manager instance
- */
+// ---------------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------------
+
 let defaultLoopManager: LoopManager | null = null;
 
 export function getLoopManager(): LoopManager {

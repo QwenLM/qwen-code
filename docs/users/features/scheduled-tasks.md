@@ -1,24 +1,20 @@
 # Run Prompts on a Schedule
 
-> Use `/loop` and the cron scheduling tools to run prompts repeatedly, poll for status, or set one-time reminders within a Qwen Code session.
+> Use `/loop` to run prompts repeatedly on a recurring interval within Qwen Code.
 
-Scheduled tasks let Qwen Code re-run a prompt automatically on an interval. Use them to poll a deployment, babysit a PR, check back on a long-running build, or remind yourself to do something later in the session.
+Scheduled loops let Qwen Code re-run a prompt automatically. Use them to poll a deployment, babysit a PR, check back on a long-running build, or remind yourself to do something later.
 
-Tasks are session-scoped: they live in the current Qwen Code process and are gone when you exit. Nothing is written to disk.
+Loops are **persisted to disk** (`.qwen/loop-state.json`), so if your session exits unexpectedly you can restore them in the next session with `/loop restore`.
 
-> **Note:** Scheduled tasks are an experimental feature. Enable them with `experimental.cron: true` in your [settings](../configuration/settings.md), or set `QWEN_CODE_ENABLE_CRON=1` in your environment.
-
-## Schedule a recurring prompt with /loop
-
-The `/loop` [bundled skill](skills.md) is the quickest way to schedule a recurring prompt. Pass an optional interval and a prompt, and Qwen Code sets up a cron job that fires in the background while the session stays open.
+## Quick start
 
 ```text
 /loop 5m check if the deployment finished and tell me what happened
 ```
 
-Qwen Code parses the interval, converts it to a cron expression, schedules the job, and confirms the cadence and job ID. It then immediately executes the prompt once — you don't have to wait for the first cron fire.
+Qwen Code starts a loop that runs "check if the deployment finished..." every 5 minutes. The prompt executes immediately, then repeats on the interval.
 
-### Interval syntax
+## Interval syntax
 
 Intervals are optional. You can lead with them, trail with them, or leave them out entirely.
 
@@ -28,112 +24,122 @@ Intervals are optional. You can lead with them, trail with them, or leave them o
 | Trailing `every` clause | `/loop check the build every 2 hours` | every 2 hours                |
 | No interval             | `/loop check the build`               | defaults to every 10 minutes |
 
-Supported units are `s` for seconds, `m` for minutes, `h` for hours, and `d` for days. Seconds are rounded up to the nearest minute since cron has one-minute granularity. Intervals that don't divide evenly into their unit, such as `7m` or `90m`, are rounded to the nearest clean interval and Qwen Code tells you what it picked.
+Supported units: `s` (seconds, min 10s), `m` (minutes), `h` (hours), `d` (days, max 1d). Decimal values like `1.5h` are supported.
 
-### Loop over another command
+Trailing `every` also accepts full words: `every 5 minutes`, `every 2 hours`, `every 1 day`.
 
-The scheduled prompt can itself be a command or skill invocation. This is useful for re-running a workflow you've already packaged.
+## Named loops and multiple concurrent loops
+
+By default, starting a new loop replaces any existing unnamed loop. To run multiple loops concurrently, give each one a name with `--id`:
+
+```text
+/loop 5m --id ci check CI status
+/loop 10m --id deploy check deploy health
+```
+
+Up to 50 loops can run concurrently (configurable via `loopMaxConcurrent` setting).
+
+## Limit iterations
+
+Use `--max N` to automatically stop after N iterations:
+
+```text
+/loop 1h --max 5 summarize new commits
+```
+
+This runs 5 times (once immediately, then 4 more at 1-hour intervals) and stops.
+
+## Loop over another command
+
+The scheduled prompt can be a command or skill invocation:
 
 ```text
 /loop 20m /review-pr 1234
 ```
 
-Each time the job fires, Qwen Code runs `/review-pr 1234` as if you had typed it.
+Each time the loop fires, Qwen Code runs `/review-pr 1234` as if you had typed it.
 
-### Manage loops
+## Manage loops
 
-`/loop` also supports two subcommands for managing existing jobs:
+| Command               | Description                                                    |
+| :-------------------- | :------------------------------------------------------------- |
+| `/loop list`          | List all active loops with IDs, prompts, intervals, and status |
+| `/loop status [id]`   | Show detailed status of a specific loop (or the default)       |
+| `/loop stop [id]`     | Stop a specific loop (or the default if no ID given)           |
+| `/loop stop --all`    | Stop all loops                                                 |
+| `/loop pause [id]`    | Pause a loop — its timer stops but state is kept               |
+| `/loop pause --all`   | Pause all loops                                                |
+| `/loop resume [id]`   | Resume a paused loop                                           |
+| `/loop resume --all`  | Resume all paused loops                                        |
+| `/loop restore`       | Restore loops from a previous session                          |
+| `/loop restore --all` | Restore loops even if some are already active                  |
 
-```text
-/loop list
-```
+Tab completion is available for subcommands and loop IDs.
 
-Lists all scheduled jobs with their IDs and cron expressions.
+## Persistence and session restore
 
-```text
-/loop clear
-```
-
-Cancels all scheduled jobs at once.
-
-## Set a one-time reminder
-
-For one-shot reminders, describe what you want in natural language instead of using `/loop`. Qwen Code schedules a single-fire task that deletes itself after running.
-
-```text
-remind me at 3pm to push the release branch
-```
+Loop state is automatically saved to `.qwen/loop-state.json` in your project directory. When you start a new session, Qwen Code checks for saved loops and shows a notification:
 
 ```text
-in 45 minutes, check whether the integration tests passed
+2 previous loop task(s) found. Use /loop restore to resume or /loop stop to dismiss.
 ```
 
-Qwen Code pins the fire time to a specific minute and hour using a cron expression and confirms when it will fire.
+**Missed task detection**: If a saved loop was due to fire while no session was running, Qwen Code flags it as "missed" and tells you how overdue it is.
 
-## Manage scheduled tasks
+**Multi-session coordination**: A file lock (`.qwen/loop-lock.json`) prevents two sessions from restoring the same loops simultaneously. Only one session at a time can restore persisted loops for a given project.
 
-Ask Qwen Code in natural language to list or cancel tasks, or reference the underlying tools directly.
+## Failure handling
+
+If a loop iteration results in an error, Qwen Code applies **exponential backoff**: the next retry waits 2x the normal interval, then 4x (capped at 4x). After **3 consecutive failures**, the loop is automatically **paused**.
+
+A paused loop keeps its state and can be resumed:
 
 ```text
-what scheduled tasks do I have?
+/loop resume ci
 ```
 
-```text
-cancel the deploy check job
-```
+Resuming resets the failure counter and restores the normal interval.
 
-Under the hood, Qwen Code uses these tools:
+## Auto-expiry
 
-| Tool         | Purpose                                                                                                         |
-| :----------- | :-------------------------------------------------------------------------------------------------------------- |
-| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, the prompt to run, and whether it recurs or fires once. |
-| `CronList`   | List all scheduled tasks with their IDs, schedules, and prompts.                                                |
-| `CronDelete` | Cancel a task by ID.                                                                                            |
+Recurring loops automatically expire **7 days** after creation. The loop stops on the next iteration after the expiry time. This prevents forgotten loops from running indefinitely.
 
-Each scheduled task has an 8-character ID you can pass to `CronDelete`. A session can hold up to 50 scheduled tasks at once.
+Loops with `--max 1` complete after a single iteration, well before the expiry time.
 
-## How scheduled tasks run
+The expiry duration is configurable via the `loopExpiryDays` setting.
 
-The scheduler checks every second for due tasks and enqueues them when the session is idle. A scheduled prompt fires between your turns, not while Qwen Code is mid-response. If Qwen Code is busy when a task comes due, the prompt waits until the current turn ends.
+## Jitter
 
-All times are interpreted in your local timezone. A cron expression like `0 9 * * *` means 9am wherever you're running Qwen Code, not UTC.
+To avoid multiple loops firing at the exact same moment, each loop gets a small deterministic offset added to its interval:
 
-### Jitter
+- The offset is up to **10% of the interval**, capped at **30 seconds**.
+- The offset is derived from the loop ID, so the same loop always gets the same offset.
+- Jitter can be disabled globally via the `loopJitterEnabled` setting.
 
-To avoid every session hitting the API at the same wall-clock moment, the scheduler adds a small deterministic offset to fire times:
+## Settings
 
-- **Recurring tasks** fire up to 10% of their period late, capped at 15 minutes. An hourly job might fire anywhere from `:00` to `:06`.
-- **One-shot tasks** scheduled for the top or bottom of the hour (minute `:00` or `:30`) fire up to 90 seconds early.
+| Setting             | Type    | Default | Description                                            |
+| :------------------ | :------ | :------ | :----------------------------------------------------- |
+| `loopEnabled`       | boolean | `true`  | Enable or disable the `/loop` command entirely         |
+| `loopMaxConcurrent` | number  | `50`    | Maximum number of concurrent loops                     |
+| `loopExpiryDays`    | number  | `7`     | Days before recurring loops auto-expire (0 to disable) |
+| `loopJitterEnabled` | boolean | `true`  | Add deterministic jitter to loop intervals             |
 
-The offset is derived from the task ID, so the same task always gets the same offset. If exact timing matters, pick a minute that is not `:00` or `:30`, for example `3 9 * * *` instead of `0 9 * * *`, and the one-shot jitter will not apply.
+Settings can be configured in `.qwen/settings.json` or via `/settings`.
 
-### Three-day expiry
+## How loops run
 
-Recurring tasks automatically expire 3 days after creation. The task fires one final time, then deletes itself. This bounds how long a forgotten loop can run. If you need a recurring task to last longer, cancel and recreate it before it expires.
+The loop scheduler uses `setTimeout` with drift protection for accurate timing:
 
-One-shot tasks do not expire on a timer — they simply delete themselves after firing once.
+- **Short intervals (<=60s)**: A single `setTimeout` fires the next iteration.
+- **Long intervals (>60s)**: Periodic checks with a dynamically shrinking interval ensure the timer fires within 1 second of the target time, even after system sleep.
 
-## Cron expression reference
+Loops fire **one at a time** through a serial prompt queue. If multiple loops are due simultaneously, they execute in sequence — each waits for the previous one's AI response to complete before firing.
 
-`CronCreate` accepts standard 5-field cron expressions: `minute hour day-of-month month day-of-week`. All fields support wildcards (`*`), single values (`5`), steps (`*/15`), ranges (`1-5`), and comma-separated lists (`1,15,30`).
-
-| Example        | Meaning                      |
-| :------------- | :--------------------------- |
-| `*/5 * * * *`  | Every 5 minutes              |
-| `0 * * * *`    | Every hour on the hour       |
-| `7 * * * *`    | Every hour at 7 minutes past |
-| `0 9 * * *`    | Every day at 9am local       |
-| `0 9 * * 1-5`  | Weekdays at 9am local        |
-| `30 14 15 3 *` | March 15 at 2:30pm local     |
-
-Day-of-week uses `0` or `7` for Sunday through `6` for Saturday. When both day-of-month and day-of-week are constrained (neither is `*`), a date matches if either field matches — this follows standard vixie-cron semantics.
-
-Extended syntax like `L`, `W`, `?`, and name aliases such as `MON` or `JAN` is not supported.
+If a loop prompt is a UI-only command (like `/help`) that doesn't trigger AI streaming, a **3-second safety timer** automatically advances the loop to prevent hanging.
 
 ## Limitations
 
-Session-scoped scheduling has inherent constraints:
-
-- Tasks only fire while Qwen Code is running and idle. Closing the terminal or letting the session exit cancels everything.
-- No catch-up for missed fires. If a task's scheduled time passes while Qwen Code is busy on a long-running request, it fires once when Qwen Code becomes idle, not once per missed interval.
-- No persistence across restarts. Restarting Qwen Code clears all session-scoped tasks.
+- Loops fire only while Qwen Code is running and idle. If Qwen Code is busy with a long response, the loop waits.
+- With multiple loops, prompts are serialized — they don't run in parallel.
+- Persisted state is per-project (`.qwen/loop-state.json`). If two sessions write their own loops, the later write overwrites the earlier one. Use the file lock to coordinate.
