@@ -81,17 +81,18 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 
 **How It Works:**
 
-- The side question is sent as a separate API call alongside the main conversation history
-- The response is displayed in a dedicated area at the bottom of the UI
+- The side question is sent as a separate API call with recent conversation context (last 10 turns)
+- The response is displayed above the Composer — you can continue typing while waiting
 - The main conversation is **not blocked** — it continues independently
 - The side question response does **not** become part of the main conversation history
+- Answers are rendered with full Markdown support (code blocks, lists, tables, etc.)
 
 **Keyboard Shortcuts (Interactive Mode):**
 
 | Shortcut             | Action                                              |
 | -------------------- | --------------------------------------------------- |
 | `Escape`             | Cancel (while loading) or dismiss (after completed) |
-| `Space` or `Enter`   | Dismiss the answer                                  |
+| `Space` or `Enter`   | Dismiss the answer (when input is empty)            |
 | `Ctrl+C` or `Ctrl+D` | Cancel an in-flight side question                   |
 
 **Example:**
@@ -108,15 +109,30 @@ The `/btw` command allows you to ask quick side questions without interrupting o
   │ + Answering...                           │
   │ Press Escape to cancel                   │
   ╰──────────────────────────────────────────╯
+  > (Composer remains active — keep typing)
+
+(After the answer arrives)
+
+  ╭──────────────────────────────────────────╮
+  │ /btw What's the difference between let   │
+  │     and var in JavaScript?               │
+  │                                          │
+  │ `let` is block-scoped, while `var` is    │
+  │ function-scoped. `let` was introduced    │
+  │ in ES6 and doesn't hoist the same way.   │
+  │                                          │
+  │ Press Space, Enter, or Escape to dismiss │
+  ╰──────────────────────────────────────────╯
+  > (Composer still active)
 ```
 
 **Supported Execution Modes:**
 
-| Mode                 | Behavior                                       |
-| -------------------- | ---------------------------------------------- |
-| Interactive          | Shows in a dedicated bottom area, non-blocking |
-| Non-interactive      | Returns text result: `btw> question\nanswer`   |
-| ACP (Agent Protocol) | Returns stream_messages async generator        |
+| Mode                 | Behavior                                     |
+| -------------------- | -------------------------------------------- |
+| Interactive          | Shows above Composer with Markdown rendering |
+| Non-interactive      | Returns text result: `btw> question\nanswer` |
+| ACP (Agent Protocol) | Returns stream_messages async generator      |
 
 > [!tip]
 >
