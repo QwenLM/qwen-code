@@ -153,7 +153,7 @@ Commands for obtaining information and performing system settings.
 | `/copy`     | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
-### 1.8 Common Shortcuts
+### 1.7 Common Shortcuts
 
 | Shortcut           | Function                | Note                   |
 | ------------------ | ----------------------- | ---------------------- |
@@ -163,7 +163,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.9 CLI Auth Subcommands
+### 1.8 CLI Auth Subcommands
 
 In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
 

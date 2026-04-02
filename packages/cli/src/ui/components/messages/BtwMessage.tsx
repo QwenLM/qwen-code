@@ -28,7 +28,7 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
   const baseWidth = containerWidth ?? terminalWidth;
-  const contentWidth = Math.max(20, baseWidth - BTW_SELF_CHROME);
+  const contentWidth = Math.max(2, baseWidth - BTW_SELF_CHROME);
 
   return (
     <Box
