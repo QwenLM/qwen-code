@@ -136,7 +136,13 @@ export function createForkedChat(
   // so sharing is safe and avoids a redundant deep clone.
   return new GeminiChat(
     config,
-    { ...params.generationConfig }, // shallow copy to prevent mutation of the cached snapshot
+    {
+      ...params.generationConfig,
+      // Disable thinking for forked queries — suggestions/speculation don't need
+      // reasoning tokens and it wastes cost + latency on the fast model path.
+      // This doesn't affect cache prefix (system + tools + history).
+      thinkingConfig: { includeThoughts: false },
+    },
     [...history], // shallow copy — entries are read-only
     undefined, // no chatRecordingService
     undefined, // no telemetryService

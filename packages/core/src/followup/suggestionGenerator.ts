@@ -194,7 +194,11 @@ async function generateViaBaseLlm(
     {
       model,
       contents,
-      config: { abortSignal },
+      config: {
+        abortSignal,
+        // Disable thinking for suggestion generation — not needed and wastes tokens
+        thinkingConfig: { includeThoughts: false },
+      },
     },
     'prompt_suggestion',
   );
