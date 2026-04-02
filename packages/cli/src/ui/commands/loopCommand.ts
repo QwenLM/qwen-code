@@ -488,10 +488,17 @@ export const loopCommand: SlashCommand = {
       let firstPrompt: string | null = null;
       for (const task of persisted.tasks) {
         if (manager.getActiveCount() >= maxLoops) break;
-        manager.start({ ...task.config, id: task.id }, true);
+        // Restore with persisted iteration count so --max loops don't reset
+        manager.start(
+          { ...task.config, id: task.id, resumeIteration: task.iteration },
+          true,
+        );
         if (!firstPrompt) firstPrompt = task.config.prompt;
         restored++;
       }
+
+      // Release lock after restore — loops are now in-memory, lock is no longer needed
+      void releaseLock(qwenDir, sessionId);
 
       ui.addItem(
         {
@@ -504,7 +511,6 @@ export const loopCommand: SlashCommand = {
       );
 
       // Only submit the prompt if the first restored loop got the streaming slot.
-      // If the slot was busy (existing loop streaming), restored loops start via timers.
       const waitingId = manager.getWaitingLoopId();
       if (firstPrompt && waitingId) {
         return {

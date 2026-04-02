@@ -67,6 +67,8 @@ export interface LoopConfig {
   oneShot?: boolean;
   /** If true, add deterministic jitter to the interval (default true). */
   jitter?: boolean;
+  /** When restoring, resume from this iteration count instead of 0/1. */
+  resumeIteration?: number;
 }
 
 export interface IterationResult {
@@ -252,7 +254,7 @@ export class LoopManager {
       config: effectiveConfig,
       isActive: true,
       isPaused: false,
-      iteration: skipFirstIteration ? 1 : 0,
+      iteration: config.resumeIteration ?? (skipFirstIteration ? 1 : 0),
       consecutiveFailures: 0,
       startedAt: now,
       createdAt: now,
