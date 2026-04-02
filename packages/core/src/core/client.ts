@@ -552,7 +552,10 @@ export class GeminiClient {
 
     const compressed = await this.tryCompressChat(prompt_id, false, signal);
 
-    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+    if (
+      compressed.compressionStatus === CompressionStatus.COMPRESSED ||
+      compressed.compressionStatus === CompressionStatus.MICROCOMPACTED
+    ) {
       yield { type: GeminiEventType.ChatCompressed, value: compressed };
     }
 
@@ -926,7 +929,10 @@ export class GeminiClient {
     );
 
     // Handle compression result
-    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+    if (
+      info.compressionStatus === CompressionStatus.COMPRESSED ||
+      info.compressionStatus === CompressionStatus.MICROCOMPACTED
+    ) {
       // Success: update chat with new compressed history
       if (newHistory) {
         const chatRecordingService = this.config.getChatRecordingService();

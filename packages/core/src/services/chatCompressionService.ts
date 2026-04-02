@@ -16,6 +16,7 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import type { PermissionMode } from '../hooks/types.js';
 import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
+import { microcompact, estimateTokensSaved } from './microcompact.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -125,21 +126,59 @@ export class ChatCompressionService {
     const originalTokenCount = uiTelemetryService.getLastPromptTokenCount();
 
     // Don't compress if not forced and we are under the limit.
-    if (!force) {
-      const contextLimit =
-        config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
-      if (originalTokenCount < threshold * contextLimit) {
+    const contextLimit =
+      config.getContentGeneratorConfig()?.contextWindowSize ??
+      DEFAULT_TOKEN_LIMIT;
+    if (!force && originalTokenCount < threshold * contextLimit) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Microcompact — truncate old tool results (zero LLM cost)
+    // -----------------------------------------------------------------------
+    const charsSaved = microcompact(curatedHistory);
+
+    if (charsSaved > 0) {
+      const estimatedTokensSaved = estimateTokensSaved(charsSaved);
+      const postMicrocompactTokens = Math.max(
+        0,
+        originalTokenCount - estimatedTokensSaved,
+      );
+
+      // If microcompact alone brought us under the threshold, we're done —
+      // no need for the expensive LLM summarization call.
+      if (!force && postMicrocompactTokens < threshold * contextLimit) {
+        uiTelemetryService.setLastPromptTokenCount(postMicrocompactTokens);
+
+        logChatCompression(
+          config,
+          makeChatCompressionEvent({
+            tokens_before: originalTokenCount,
+            tokens_after: postMicrocompactTokens,
+          }),
+        );
+
         return {
-          newHistory: null,
+          newHistory: curatedHistory,
           info: {
             originalTokenCount,
-            newTokenCount: originalTokenCount,
-            compressionStatus: CompressionStatus.NOOP,
+            newTokenCount: postMicrocompactTokens,
+            compressionStatus: CompressionStatus.MICROCOMPACTED,
           },
         };
       }
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: LLM-based summarization (expensive, but thorough)
+    // -----------------------------------------------------------------------
 
     // Fire PreCompact hook before compression begins
     const hookSystem = config.getHookSystem();

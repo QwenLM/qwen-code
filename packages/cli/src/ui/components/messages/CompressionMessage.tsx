@@ -43,6 +43,14 @@ export function CompressionMessage({
             newTokens: String(newTokens),
           },
         );
+      case CompressionStatus.MICROCOMPACTED:
+        return t(
+          'Old tool results trimmed, freeing context from {{originalTokens}} to {{newTokens}} tokens.',
+          {
+            originalTokens: String(originalTokens),
+            newTokens: String(newTokens),
+          },
+        );
       case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:
         // For smaller histories (< 50k tokens), compression overhead likely exceeds benefits
         if (originalTokens < 50000) {

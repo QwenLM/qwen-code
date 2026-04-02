@@ -162,6 +162,9 @@ export enum CompressionStatus {
   /** The compression failed due to receiving an empty or null summary */
   COMPRESSION_FAILED_EMPTY_SUMMARY,
 
+  /** Old tool results were truncated without an LLM call (microcompact) */
+  MICROCOMPACTED,
+
   /** The compression was not necessary and no action was taken */
   NOOP,
 }
