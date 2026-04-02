@@ -1,6 +1,6 @@
 # .github/workflows/ci.yml
 
-name: 'Qwen Code CI'
+name: 'CI'
 
 on:
   push:

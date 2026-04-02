@@ -37,7 +37,7 @@ jobs:
   prepare:
     runs-on: 'ubuntu-latest'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'protoLabsAI/protoCLI' }}
     permissions:
       contents: 'read'
     outputs:
@@ -228,10 +228,10 @@ jobs:
         run: |-
           if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
             vsce package --no-dependencies --pre-release --target ${{ matrix.target }} \
-              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
+              --out ../../proto-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
           else
             vsce package --no-dependencies --target ${{ matrix.target }} \
-              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
+              --out ../../proto-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
           fi
         shell: 'bash'
 
@@ -241,10 +241,10 @@ jobs:
         run: |-
           if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
             vsce package --no-dependencies --pre-release \
-              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
+              --out ../../proto-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
           else
             vsce package --no-dependencies \
-              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
+              --out ../../proto-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
           fi
         shell: 'bash'
 
@@ -252,7 +252,7 @@ jobs:
         uses: 'actions/upload-artifact@v4'
         with:
           name: "vsix-${{ matrix.target || 'universal' }}"
-          path: 'qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
+          path: 'proto-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
           if-no-files-found: 'error'
 
   # Third job: Publish all VSIXes to marketplaces

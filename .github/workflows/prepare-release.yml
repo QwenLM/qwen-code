@@ -1,0 +1,77 @@
+name: 'Prepare Release'
+
+# Bumps version on main and commits it. When the commit lands, release.yml
+# picks it up automatically via commit message filter.
+#
+# Usage: Actions → Prepare Release → Run workflow → pick bump type
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: 'Dry run — show what would change without pushing'
+        type: boolean
+        default: false
+
+permissions: read-all
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    if: github.repository == 'protoLabsAI/protoCLI'
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        run: node scripts/version.js ${{ github.event.inputs.bump }}
+
+      - name: Get new version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Show diff (dry run)
+        if: inputs.dry_run == true
+        run: |
+          echo "DRY RUN — would commit:"
+          git diff --stat
+          echo ""
+          echo "New version: v${{ steps.version.outputs.version }}"
+
+      - name: Commit and push
+        if: inputs.dry_run != true
+        run: |
+          git add package.json package-lock.json packages/*/package.json
+          git commit -m "chore: release v${{ steps.version.outputs.version }}"
+          git push origin main
