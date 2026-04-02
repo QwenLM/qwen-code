@@ -38,6 +38,7 @@ function formatModalities(modalities?: InputModalities): string {
 
 interface ModelDialogProps {
   onClose: () => void;
+  isFastModelMode?: boolean;
 }
 
 function maskApiKey(apiKey: string | undefined): string {
@@ -130,7 +131,10 @@ function DetailRow({
   );
 }
 
-export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
+export function ModelDialog({
+  onClose,
+  isFastModelMode,
+}: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
   const settings = useSettings();
@@ -287,6 +291,25 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     async (selected: string) => {
       setErrorMessage(null);
 
+      // Fast model mode: just save the model ID and close
+      if (isFastModelMode) {
+        // Extract model ID from selection key (format: "authType::modelId" or "$runtime|...")
+        const modelId = selected.includes('::')
+          ? selected.split('::').slice(1).join('::')
+          : selected;
+        const scope = getPersistScopeForModelSelection(settings);
+        settings.setValue(scope, 'fastModel', modelId);
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Fast Model')}: ${modelId}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
       let after: ContentGeneratorConfig | undefined;
       let effectiveAuthType: AuthType | undefined;
       let effectiveModelId = selected;
@@ -362,7 +385,15 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       });
       onClose();
     },
-    [authType, config, onClose, settings, uiState, setErrorMessage],
+    [
+      authType,
+      config,
+      onClose,
+      settings,
+      uiState,
+      setErrorMessage,
+      isFastModelMode,
+    ],
   );
 
   const hasModels = MODEL_OPTIONS.length > 0;

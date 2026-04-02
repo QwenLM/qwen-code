@@ -40,16 +40,11 @@ export const modelCommand: SlashCommand = {
     if (args.startsWith('--fast')) {
       const modelName = args.replace('--fast', '').trim();
       if (!modelName) {
-        // Show current fast model
-        const current = settings?.merged?.fastModel || config.getModel();
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Fast Model') + ': ' + current,
-          },
-          Date.now(),
-        );
-        return { type: 'message', messageType: 'info', content: '' };
+        // Open model dialog in fast-model mode
+        return {
+          type: 'dialog',
+          dialog: 'fast-model',
+        };
       }
       // Set fast model
       if (settings) {
