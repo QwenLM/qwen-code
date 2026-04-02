@@ -31,4 +31,57 @@ describe('BtwMessage', () => {
     expect(output).toContain('side question');
     expect(output).toContain('side answer');
   });
+
+  it('renders pending state with cancel hint', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'pending question',
+          answer: '',
+          isPending: true,
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('/btw');
+    expect(output).toContain('pending question');
+    expect(output).toContain('Answering...');
+    expect(output).toContain('Ctrl+C');
+    expect(output).toContain('Ctrl+D');
+  });
+
+  it('accepts containerWidth prop for content width calculation', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: 'some answer text',
+          isPending: false,
+        }}
+        containerWidth={60}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('some answer text');
+  });
+
+  it('renders dismiss hint when answer is complete', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: 'a',
+          isPending: false,
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Space');
+    expect(output).toContain('Enter');
+    expect(output).toContain('Escape');
+    expect(output).toContain('dismiss');
+  });
 });

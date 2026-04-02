@@ -186,6 +186,55 @@ describe('btwCommand', () => {
       );
     });
 
+    it('should trim history to last 10 turns for long conversations', async () => {
+      // Build a history with 12 turns (24 entries) — exceeds the 10-turn limit
+      const longHistory = Array.from({ length: 12 }, (_, i) => [
+        { role: 'user', parts: [{ text: `Q${i}` }] },
+        { role: 'model', parts: [{ text: `A${i}` }] },
+      ]).flat();
+      mockGetHistory.mockReturnValue(longHistory);
+      mockGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      });
+
+      await btwCommand.action!(mockContext, 'test');
+      await flushPromises();
+
+      const calledContents = mockGenerateContent.mock.calls[0][0];
+      // 20 history entries (last 10 turns) + 1 btw question = 21
+      expect(calledContents).toHaveLength(21);
+      // First entry should be user (starts at turn 2 = Q2)
+      expect(calledContents[0].role).toBe('user');
+      expect(calledContents[0].parts[0].text).toBe('Q2');
+    });
+
+    it('should trim history and skip leading model entry to preserve alternation', async () => {
+      // Build 21 entries: 10 full turns + 1 trailing user message.
+      // slice(-20) yields [M0, U1, M1, ..., U9, M9, U10] — starts with model.
+      // trimHistory should drop that leading model entry.
+      const oddHistory = [
+        ...Array.from({ length: 11 }, (_, i) => [
+          { role: 'user', parts: [{ text: `Q${i}` }] },
+          { role: 'model', parts: [{ text: `A${i}` }] },
+        ]).flat(),
+      ].slice(0, 21); // [U0, M0, U1, M1, ..., U9, M9, U10]
+      expect(oddHistory).toHaveLength(21);
+
+      mockGetHistory.mockReturnValue(oddHistory);
+      mockGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'answer' }] } }],
+      });
+
+      await btwCommand.action!(mockContext, 'test');
+      await flushPromises();
+
+      const calledContents = mockGenerateContent.mock.calls[0][0];
+      // slice(-20) = 20 entries starting with M0 (model) → slice(1) = 19, + 1 btw = 20
+      expect(calledContents).toHaveLength(20);
+      expect(calledContents[0].role).toBe('user');
+      expect(calledContents[0].parts[0].text).toBe('Q1');
+    });
+
     it('should add error item on failure and clear btwItem', async () => {
       mockGenerateContent.mockRejectedValue(new Error('API error'));
 
