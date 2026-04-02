@@ -28,7 +28,8 @@ function formatBtwError(error: unknown): string {
 }
 
 // Keep only the most recent history messages to limit token usage for side
-// questions. MAX_BTW_HISTORY_MESSAGES caps the number of Content entries sent.
+// questions. MAX_BTW_HISTORY_MESSAGES caps the number of history Content
+// entries included as context before the /btw question is appended.
 const MAX_BTW_HISTORY_MESSAGES = 20;
 
 function trimHistory(history: Content[]): Content[] {
