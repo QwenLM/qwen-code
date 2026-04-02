@@ -37,7 +37,10 @@ export const ScreenReaderAppLayout: React.FC = () => {
         <>
           {uiState.btwItem && (
             <Box marginX={2} width={uiState.terminalWidth - 4}>
-              <BtwMessage btw={uiState.btwItem.btw} />
+              <BtwMessage
+                btw={uiState.btwItem.btw}
+                containerWidth={uiState.terminalWidth - 4}
+              />
             </Box>
           )}
           <Composer />

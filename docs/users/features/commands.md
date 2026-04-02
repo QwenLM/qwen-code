@@ -107,7 +107,7 @@ The `/btw` command allows you to ask quick side questions without interrupting o
   │     and var in JavaScript?               │
   │                                          │
   │ + Answering...                           │
-  │ Press Escape to cancel                   │
+  │ Press Escape, Ctrl+C, or Ctrl+D to cancel│
   ╰──────────────────────────────────────────╯
   > (Composer remains active — keep typing)
 

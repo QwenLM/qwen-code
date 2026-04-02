@@ -1197,13 +1197,19 @@ export const AppContainer = (props: AppContainerProps) => {
         return; // Dialog closed, end processing
       }
 
-      // 3. Cancel ongoing requests
+      // 3. Cancel in-flight btw side-question
+      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        cancelBtw();
+        return; // Btw cancelled, end processing
+      }
+
+      // 4. Cancel ongoing requests
       if (streamingState === StreamingState.Responding) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
       }
 
-      // 4. Clear input buffer (if has content)
+      // 5. Clear input buffer (if has content)
       if (buffer.text.length > 0) {
         buffer.setText('');
         return; // Input cleared, end processing
@@ -1219,6 +1225,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthDialogOpen,
       handleSlashCommand,
       closeAnyOpenDialog,
+      btwItem,
+      cancelBtw,
       streamingState,
       cancelOngoingRequest,
       buffer,
@@ -1260,6 +1268,11 @@ export const AppContainer = (props: AppContainerProps) => {
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
           cancelBtw();
+          return;
+        }
+
+        // Skip if shell is focused (to allow shell's own escape handling)
+        if (embeddedShellFocused) {
           return;
         }
 
@@ -1313,18 +1326,8 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
-      // Cancel in-flight btw side-question on Ctrl+C or Ctrl+D,
-      // but only when btw is actually visible (not hidden behind a dialog).
-      if (
-        btwItem &&
-        btwItem.btw.isPending &&
-        !dialogsVisibleRef.current &&
-        key.ctrl &&
-        (key.name === 'c' || key.name === 'd')
-      ) {
-        cancelBtw();
-        return;
-      }
+      // Note: Ctrl+C/D btw cancellation is handled inside handleExit
+      // (step 3), not here, because Command.QUIT/EXIT match first.
 
       let enteringConstrainHeightMode = false;
       if (!constrainHeight) {

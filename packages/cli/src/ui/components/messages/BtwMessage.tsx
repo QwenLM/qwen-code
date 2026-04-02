@@ -14,14 +14,21 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 export interface BtwDisplayProps {
   btw: BtwProps;
+  /** Width of the parent container. Used to compute Markdown content width.
+   *  Falls back to terminal width when not provided. */
+  containerWidth?: number;
 }
 
-// marginX(2)*2 + border(1)*2 + paddingX(1)*2 = 8
-const BTW_CHROME_WIDTH = 8;
+// border(1)*2 + paddingX(1)*2 = 4
+const BTW_SELF_CHROME = 4;
 
-const BtwMessageInternal: React.FC<BtwDisplayProps> = ({ btw }) => {
+const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
+  btw,
+  containerWidth,
+}) => {
   const { columns: terminalWidth } = useTerminalSize();
-  const contentWidth = Math.max(20, terminalWidth - BTW_CHROME_WIDTH);
+  const baseWidth = containerWidth ?? terminalWidth;
+  const contentWidth = Math.max(20, baseWidth - BTW_SELF_CHROME);
 
   return (
     <Box
@@ -46,7 +53,9 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({ btw }) => {
             <Text color={Colors.AccentYellow}>{t('Answering...')}</Text>
           </Box>
           <Box marginTop={1}>
-            <Text dimColor>{t('Press Escape to cancel')}</Text>
+            <Text dimColor>
+              {t('Press Escape, Ctrl+C, or Ctrl+D to cancel')}
+            </Text>
           </Box>
         </Box>
       ) : (
