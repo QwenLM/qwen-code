@@ -172,5 +172,67 @@ describe('FunctionHookRunner', () => {
       expect(result.success).toBe(true);
       expect(result.hookConfig).toEqual(config);
     });
+
+    it('should reject invalid callback', async () => {
+      const config = createMockConfig(
+        'not a function' as unknown as FunctionHookConfig['callback'],
+      );
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('Invalid callback');
+    });
+
+    it('should handle abort signal during execution', async () => {
+      const controller = new AbortController();
+      const mockCallback = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            // Abort after a short delay
+            setTimeout(() => {
+              controller.abort();
+            }, 10);
+            // Resolve after a longer delay
+            setTimeout(() => resolve({ continue: true }), 100);
+          }),
+      );
+
+      const config = createMockConfig(mockCallback, { timeout: 5000 });
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+        controller.signal,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('aborted');
+    });
+
+    it('should properly clean up resources on success', async () => {
+      const mockCallback = vi.fn().mockResolvedValue({ continue: true });
+
+      const config = createMockConfig(mockCallback, { timeout: 5000 });
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      // No timeout should fire after success
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(result.success).toBe(true);
+    });
   });
 });

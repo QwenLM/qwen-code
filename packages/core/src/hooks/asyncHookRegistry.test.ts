@@ -353,4 +353,165 @@ describe('AsyncHookRegistry', () => {
       expect(registry.hasPendingOutput()).toBe(true);
     });
   });
+
+  describe('concurrency limits', () => {
+    it('should respect maxConcurrentHooks limit', () => {
+      const limitedRegistry = new AsyncHookRegistry({ maxConcurrentHooks: 2 });
+
+      // Register first hook
+      const id1 = limitedRegistry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Hook 1',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+      expect(id1).toBe('test-hook-1');
+
+      // Register second hook
+      const id2 = limitedRegistry.register({
+        hookId: 'test-hook-2',
+        hookName: 'Hook 2',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+      expect(id2).toBe('test-hook-2');
+
+      // Third hook should be rejected
+      const id3 = limitedRegistry.register({
+        hookId: 'test-hook-3',
+        hookName: 'Hook 3',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+      expect(id3).toBeNull();
+    });
+
+    it('should allow registration after hook completes', () => {
+      const limitedRegistry = new AsyncHookRegistry({ maxConcurrentHooks: 1 });
+
+      // Register first hook
+      limitedRegistry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Hook 1',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+
+      // Second hook should be rejected
+      const id2Before = limitedRegistry.register({
+        hookId: 'test-hook-2',
+        hookName: 'Hook 2',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+      expect(id2Before).toBeNull();
+
+      // Complete first hook
+      limitedRegistry.complete('test-hook-1');
+
+      // Now second hook should be accepted
+      const id2After = limitedRegistry.register({
+        hookId: 'test-hook-2',
+        hookName: 'Hook 2',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+      expect(id2After).toBe('test-hook-2');
+    });
+
+    it('should report correct running count', () => {
+      const limitedRegistry = new AsyncHookRegistry({ maxConcurrentHooks: 5 });
+
+      expect(limitedRegistry.getRunningCount()).toBe(0);
+      expect(limitedRegistry.canAcceptMore()).toBe(true);
+
+      limitedRegistry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Hook 1',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+
+      expect(limitedRegistry.getRunningCount()).toBe(1);
+      expect(limitedRegistry.canAcceptMore()).toBe(true);
+
+      limitedRegistry.fail('test-hook-1', new Error('test'));
+
+      expect(limitedRegistry.getRunningCount()).toBe(0);
+    });
+  });
+
+  describe('auto timeout checker', () => {
+    it('should start and stop timeout checker', () => {
+      const autoRegistry = new AsyncHookRegistry({
+        enableAutoTimeoutCheck: true,
+        timeoutCheckInterval: 100,
+      });
+
+      // Register an expired hook
+      const pastTime = Date.now() - 70000;
+      autoRegistry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Test Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: pastTime,
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+
+      // Stop the checker to prevent interference with other tests
+      autoRegistry.stopTimeoutChecker();
+
+      // Manually check - hook should still be there since we stopped the checker
+      // before it could run
+      expect(autoRegistry.hasRunningHooks()).toBe(true);
+
+      // Now manually trigger timeout check
+      autoRegistry.checkTimeouts();
+      expect(autoRegistry.hasRunningHooks()).toBe(false);
+    });
+
+    it('should stop timeout checker on stopTimeoutChecker call', () => {
+      const autoRegistry = new AsyncHookRegistry({
+        enableAutoTimeoutCheck: true,
+        timeoutCheckInterval: 50,
+      });
+
+      // Stop immediately
+      autoRegistry.stopTimeoutChecker();
+
+      // Should not throw or cause issues
+      expect(() => autoRegistry.stopTimeoutChecker()).not.toThrow();
+    });
+  });
 });

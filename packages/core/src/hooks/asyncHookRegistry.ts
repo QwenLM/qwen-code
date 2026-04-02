@@ -15,6 +15,16 @@ import type {
 const debugLogger = createDebugLogger('ASYNC_HOOK_REGISTRY');
 
 /**
+ * Default maximum concurrent async hooks
+ */
+const DEFAULT_MAX_CONCURRENT_HOOKS = 10;
+
+/**
+ * Default timeout check interval (5 seconds)
+ */
+const DEFAULT_TIMEOUT_CHECK_INTERVAL = 5000;
+
+/**
  * Generate a unique hook ID
  */
 export function generateHookId(): string {
@@ -22,17 +32,88 @@ export function generateHookId(): string {
 }
 
 /**
+ * Configuration options for AsyncHookRegistry
+ */
+export interface AsyncHookRegistryOptions {
+  maxConcurrentHooks?: number;
+  enableAutoTimeoutCheck?: boolean;
+  timeoutCheckInterval?: number;
+}
+
+/**
  * Async Hook Registry - tracks and manages asynchronously executing hooks
+ * with concurrency limits and automatic timeout checking
  */
 export class AsyncHookRegistry {
   private readonly pendingHooks: Map<string, PendingAsyncHook> = new Map();
   private readonly completedOutputs: AsyncHookOutputMessage[] = [];
   private readonly completedContexts: string[] = [];
+  private readonly maxConcurrentHooks: number;
+  private timeoutCheckTimer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(options: AsyncHookRegistryOptions = {}) {
+    this.maxConcurrentHooks =
+      options.maxConcurrentHooks ?? DEFAULT_MAX_CONCURRENT_HOOKS;
+
+    // Start automatic timeout checking if enabled
+    if (options.enableAutoTimeoutCheck) {
+      const interval =
+        options.timeoutCheckInterval ?? DEFAULT_TIMEOUT_CHECK_INTERVAL;
+      this.startTimeoutChecker(interval);
+    }
+  }
+
+  /**
+   * Start automatic timeout checking
+   */
+  private startTimeoutChecker(interval: number): void {
+    if (this.timeoutCheckTimer) {
+      clearInterval(this.timeoutCheckTimer);
+    }
+    this.timeoutCheckTimer = setInterval(() => {
+      this.checkTimeouts();
+    }, interval);
+  }
+
+  /**
+   * Stop automatic timeout checking
+   */
+  stopTimeoutChecker(): void {
+    if (this.timeoutCheckTimer) {
+      clearInterval(this.timeoutCheckTimer);
+      this.timeoutCheckTimer = undefined;
+    }
+  }
+
+  /**
+   * Get current number of running hooks
+   */
+  getRunningCount(): number {
+    return Array.from(this.pendingHooks.values()).filter(
+      (hook) => hook.status === 'running',
+    ).length;
+  }
+
+  /**
+   * Check if we can accept more async hooks
+   */
+  canAcceptMore(): boolean {
+    return this.getRunningCount() < this.maxConcurrentHooks;
+  }
 
   /**
    * Register a new async hook execution
+   * @returns hookId if registered, null if rejected due to concurrency limit
    */
-  register(hook: Omit<PendingAsyncHook, 'status'>): string {
+  register(hook: Omit<PendingAsyncHook, 'status'>): string | null {
+    // Check concurrency limit
+    if (!this.canAcceptMore()) {
+      debugLogger.warn(
+        `Async hook registration rejected: concurrency limit reached (${this.maxConcurrentHooks})`,
+      );
+      return null;
+    }
+
     const hookId = hook.hookId;
     const pendingHook: PendingAsyncHook = {
       ...hook,
@@ -41,7 +122,7 @@ export class AsyncHookRegistry {
 
     this.pendingHooks.set(hookId, pendingHook);
     debugLogger.debug(
-      `Registered async hook: ${hookId} (${hook.hookName}) for event ${hook.hookEvent}`,
+      `Registered async hook: ${hookId} (${hook.hookName}) for event ${hook.hookEvent} [${this.getRunningCount()}/${this.maxConcurrentHooks}]`,
     );
 
     return hookId;

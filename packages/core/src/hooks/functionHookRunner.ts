@@ -103,7 +103,7 @@ export class FunctionHookRunner {
   }
 
   /**
-   * Execute callback with timeout support
+   * Execute callback with timeout support using Promise.race for proper race condition handling
    */
   private async executeWithTimeout(
     callback: FunctionHookConfig['callback'],
@@ -111,52 +111,64 @@ export class FunctionHookRunner {
     timeout: number,
     signal?: AbortSignal,
   ): Promise<HookOutput | undefined> {
-    return new Promise((resolve, reject) => {
-      let aborted = false;
+    // Validate callback
+    if (typeof callback !== 'function') {
+      throw new Error('Invalid callback: expected a function');
+    }
 
-      // Set up timeout
-      const timeoutId = setTimeout(() => {
-        aborted = true;
-        reject(new Error(`Function hook timed out after ${timeout}ms`));
-      }, timeout);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
 
-      // Set up abort handler
-      const abortHandler = () => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+    // Cleanup function to ensure all resources are released
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+      if (signal && abortHandler) {
+        signal.removeEventListener('abort', abortHandler);
+        abortHandler = undefined;
+      }
+    };
+
+    try {
+      // Create timeout promise
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Function hook timed out after ${timeout}ms`));
+        }, timeout);
+      });
+
+      // Create abort promise
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (signal) {
+          if (signal.aborted) {
+            reject(new Error('Function hook execution aborted'));
+            return;
+          }
+          abortHandler = () => {
+            reject(new Error('Function hook execution aborted'));
+          };
+          signal.addEventListener('abort', abortHandler);
         }
-        aborted = true;
-        reject(new Error('Function hook execution aborted'));
-      };
+      });
+
+      // Race between callback execution, timeout, and abort
+      const promises: Array<Promise<HookOutput | undefined | never>> = [
+        callback(input),
+        timeoutPromise,
+      ];
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler);
+        promises.push(abortPromise);
       }
 
-      // Execute callback
-      callback(input)
-        .then((result) => {
-          if (!aborted) {
-            if (timeoutId) {
-              clearTimeout(timeoutId);
-            }
-            if (signal) {
-              signal.removeEventListener('abort', abortHandler);
-            }
-            resolve(result);
-          }
-        })
-        .catch((error) => {
-          if (!aborted) {
-            if (timeoutId) {
-              clearTimeout(timeoutId);
-            }
-            if (signal) {
-              signal.removeEventListener('abort', abortHandler);
-            }
-            reject(error);
-          }
-        });
-    });
+      const result = await Promise.race(promises);
+      cleanup();
+      return result;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
   }
 }

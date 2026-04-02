@@ -193,8 +193,26 @@ export class HookRunner {
     const hookId = generateHookId();
     const hookName = hookConfig.name || hookConfig.command || 'async-hook';
 
+    // Check concurrency limit before registering
+    if (!this.asyncRegistry.canAcceptMore()) {
+      debugLogger.warn(
+        `Async hook rejected due to concurrency limit: ${hookName}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        duration: 0,
+        isAsync: true,
+        error: new Error(
+          'Async hook rejected: too many concurrent async hooks running',
+        ),
+        output: { continue: true }, // Non-blocking, continue execution
+      };
+    }
+
     // Register in async registry
-    this.asyncRegistry.register({
+    const registeredId = this.asyncRegistry.register({
       hookId,
       hookName,
       hookEvent: eventName,
@@ -205,14 +223,51 @@ export class HookRunner {
       stderr: '',
     });
 
-    // Execute in background (don't await)
+    // Double-check registration succeeded (race condition protection)
+    if (!registeredId) {
+      debugLogger.warn(
+        `Async hook registration failed due to concurrency limit: ${hookName}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        duration: 0,
+        isAsync: true,
+        error: new Error(
+          'Async hook rejected: too many concurrent async hooks running',
+        ),
+        output: { continue: true },
+      };
+    }
+
+    // Execute in background with proper error handling
     this.executeCommandHookInBackground(
       hookConfig,
       eventName,
       input,
       hookId,
       signal,
-    );
+    ).catch((error) => {
+      // This catch handles any unexpected errors that escape the try-catch in executeCommandHookInBackground
+      debugLogger.error(
+        `Unexpected error in async hook background execution: ${hookId} (${hookName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      // Ensure the hook is marked as failed in the registry
+      try {
+        this.asyncRegistry.fail(
+          hookId,
+          error instanceof Error
+            ? error
+            : new Error(`Unexpected error: ${String(error)}`),
+        );
+      } catch (registryError) {
+        // Registry operation failed, log but don't throw
+        debugLogger.error(
+          `Failed to update async registry for hook ${hookId}: ${registryError}`,
+        );
+      }
+    });
 
     // Return immediately with success
     debugLogger.debug(`Started async hook: ${hookId} (${hookName})`);
@@ -236,7 +291,11 @@ export class HookRunner {
     hookId: string,
     signal?: AbortSignal,
   ): Promise<void> {
+    const hookName = hookConfig.name || hookConfig.command || 'async-hook';
+
     try {
+      debugLogger.debug(`Executing async hook in background: ${hookId}`);
+
       const result = await this.executeCommandHook(
         hookConfig,
         eventName,
@@ -249,17 +308,25 @@ export class HookRunner {
       if (result.success) {
         this.asyncRegistry.updateOutput(hookId, result.stdout, result.stderr);
         this.asyncRegistry.complete(hookId, result.output);
+        debugLogger.debug(
+          `Async hook completed successfully: ${hookId} (${hookName})`,
+        );
       } else {
-        this.asyncRegistry.fail(
-          hookId,
-          result.error || new Error('Unknown error'),
+        const error = result.error || new Error('Unknown error');
+        this.asyncRegistry.fail(hookId, error);
+        debugLogger.warn(
+          `Async hook failed: ${hookId} (${hookName}): ${error.message}`,
         );
       }
     } catch (error) {
-      this.asyncRegistry.fail(
-        hookId,
-        error instanceof Error ? error : new Error(String(error)),
+      const errorObj =
+        error instanceof Error ? error : new Error(String(error));
+      this.asyncRegistry.fail(hookId, errorObj);
+      debugLogger.error(
+        `Async hook threw exception: ${hookId} (${hookName}): ${errorObj.message}`,
       );
+      // Re-throw to be caught by the .catch() in executeAsyncHook
+      throw error;
     }
   }
 
