@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.13.2-dataworks.5",
+  "version": "0.13.2-dataworks.6",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -43,8 +43,8 @@
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@^0.13.2-dataworks.5",
-    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@^0.13.2-dataworks.5",
+    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@^0.13.2-dataworks.6",
+    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@^0.13.2-dataworks.6",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
     "command-exists": "^1.2.9",
