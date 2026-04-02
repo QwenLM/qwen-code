@@ -167,7 +167,7 @@ clean_npmrc_conflict() {
     if [[ -f "${npmrc}" ]]; then
         # Check if a user-configured prefix already exists
         local existing_prefix
-        existing_prefix=$(grep -E '^prefix *= *' "${npmrc}" 2>/dev/null | head -1 | sed 's/^prefix *= *//' | sed 's/[[:space:]]*$//')
+        existing_prefix=$(grep -E '^prefix *= *' "${npmrc}" 2>/dev/null | head -1 | sed 's/^prefix *= *//' | sed 's/[[:space:]]*$//' || true)
         if [[ -n "${existing_prefix}" ]]; then
             # User has already configured a prefix — respect it, don't overwrite
             log_info "User-configured npm prefix found in .npmrc: ${existing_prefix}, skipping cleanup"
@@ -443,8 +443,15 @@ fix_npm_permissions() {
 # Clean old qwen installations from known paths
 # ============================================
 clean_old_qwen_installations() {
+    # Use the npm prefix where we're about to install as the target
     local target_prefix
-    target_prefix=$(npm config get prefix 2>/dev/null)
+    target_prefix=$(npm config get prefix 2>/dev/null) || true
+
+    if [[ -z "${target_prefix}" ]]; then
+        log_warning "Cannot determine npm prefix, skipping old installation cleanup"
+        return 0
+    fi
+
     local qwen_found=false
 
     # Check all known npm global prefixes for old qwen installations
@@ -453,7 +460,6 @@ clean_old_qwen_installations() {
         # Skip the target prefix (that's where we're installing)
         [[ "${prefix}" == "${target_prefix}" ]] && continue
 
-        local old_bin="${prefix}/bin/qwen"
         # For nvm, the path includes the node version subdirectory
         if [[ "${prefix}" == *".nvm/versions" ]]; then
             for node_dir in "${prefix}"/v*/bin/qwen; do
@@ -465,8 +471,8 @@ clean_old_qwen_installations() {
                     qwen_found=true
                 fi
             done
-        elif [[ -f "${old_bin}" ]]; then
-            log_warning "Removing old qwen from ${old_bin}"
+        elif [[ -f "${prefix}/bin/qwen" ]]; then
+            log_warning "Removing old qwen from ${prefix}/bin/qwen"
             npm uninstall -g @qwen-code/qwen-code --prefix "${prefix}" 2>/dev/null || true
             qwen_found=true
         fi
@@ -497,15 +503,16 @@ install_qwen_code() {
     # Fix npm permissions if needed (may change prefix to ~/.npm-global)
     fix_npm_permissions
 
-    # Clean old qwen installations from other npm prefixes
-    clean_old_qwen_installations
-
-    # Set PATH with the correct npm global bin AFTER fixing permissions
+    # Set PATH with the correct npm global bin AFTER fixing permissions,
+    # before cleaning old installations so target_prefix detection works
     local NPM_GLOBAL_BIN
     NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
     if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
         export PATH="${NPM_GLOBAL_BIN}:${PATH}"
     fi
+
+    # Clean old qwen installations from other npm prefixes
+    clean_old_qwen_installations
 
     # Install Qwen Code
     log_info "Installing Qwen Code..."
