@@ -45,7 +45,7 @@ const STATUS_TO_BR: Record<TaskStatus, string> = {
   pending: 'open',
   in_progress: 'in_progress',
   completed: 'closed',
-  blocked: 'deferred',
+  blocked: 'blocked',
   cancelled: 'closed',
 };
 
@@ -53,7 +53,8 @@ const BR_TO_STATUS: Record<string, TaskStatus> = {
   open: 'pending',
   in_progress: 'in_progress',
   closed: 'completed',
-  deferred: 'blocked',
+  blocked: 'blocked',
+  deferred: 'blocked', // deferred = can't work on it now, treat same as blocked
 };
 
 // Maps between our TaskPriority and beads_rust numeric priority (0=critical..4=low).
@@ -72,6 +73,11 @@ const BR_PRIORITY_TO_OURS: Record<number, TaskPriority> = {
   4: 'low',
 };
 
+interface BrComment {
+  text: string;
+  created_at?: string;
+}
+
 interface BrIssue {
   id: string;
   title: string;
@@ -84,6 +90,8 @@ interface BrIssue {
   created_at?: string;
   updated_at?: string;
   closed_at?: string;
+  close_reason?: string;
+  comments?: BrComment[];
 }
 
 /**
@@ -170,11 +178,23 @@ export class TaskStore {
   }
 
   private brIssueToTask(issue: BrIssue): Task {
+    // Distinguish completed vs cancelled via close_reason
+    let status = BR_TO_STATUS[issue.status] ?? 'pending';
+    if (issue.status === 'closed' && issue.close_reason === 'cancelled') {
+      status = 'cancelled';
+    }
+
+    // Reconstruct output from comments (most recent comment wins)
+    const output =
+      issue.comments && issue.comments.length > 0
+        ? issue.comments[issue.comments.length - 1].text
+        : undefined;
+
     return {
       id: issue.id,
       title: issue.title,
       description: issue.description,
-      status: BR_TO_STATUS[issue.status] ?? 'pending',
+      status,
       priority: BR_PRIORITY_TO_OURS[issue.priority] ?? 'medium',
       createdBy: issue.assignee ?? 'agent',
       // Assignee encoded as label: "assignee:<agentId>"
@@ -192,6 +212,7 @@ export class TaskStore {
       parentTaskId: issue.labels
         ?.find((l) => l.startsWith('parent:'))
         ?.slice(7),
+      output,
     };
   }
 
@@ -211,6 +232,10 @@ export class TaskStore {
     if (params.priority) {
       args.push('--priority', String(PRIORITY_TO_BR[params.priority]));
     }
+    // Register native parent-child dep edge so br epic/dep tree/ready --parent work
+    if (params.parentTaskId) {
+      args.push('--parent', params.parentTaskId);
+    }
 
     // br create --json returns a flat issue object: {id, title, status, ...}
     const result = this.br(args) as BrIssue;
@@ -220,7 +245,7 @@ export class TaskStore {
       throw new Error('Failed to create task: no ID returned');
     }
 
-    // Encode parent relationship as a label
+    // Also encode parent as a label for client-side filtering in list()
     if (params.parentTaskId) {
       try {
         this.brRaw(['label', 'add', id, `parent:${params.parentTaskId}`]);

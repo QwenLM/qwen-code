@@ -73,7 +73,7 @@ rules:
 
   quoted-strings:
     quote-type: 'single'
-    required: true
+    required: false
     allow-quoted-quotes: true
 
   trailing-spaces: {}

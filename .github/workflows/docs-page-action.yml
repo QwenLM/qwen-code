@@ -1,2 +1,0 @@
-# This workflow is retired. Docs are now deployed to Cloudflare Pages via docs-deploy.yml.
-# See docs-deploy.yml for the current deployment workflow targeting docs.protolabs.sh.

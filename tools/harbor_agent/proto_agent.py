@@ -110,6 +110,18 @@ class ProtoAgent(BaseInstalledAgent):
                 ")"
             ),
         )
+        # Install beads_rust (br) — persistent SQLite-backed task tracking for proto.
+        # Version pinned to avoid GitHub API call overhead (saves ~2s during setup).
+        # Uses pre-built linux_amd64 binary; no Rust toolchain required.
+        await self.exec_as_root(
+            environment,
+            command=(
+                "BR_VERSION=v0.1.35 && "
+                "curl -fsSL https://github.com/Dicklesworthstone/beads_rust/releases/download/${BR_VERSION}/"
+                "br-${BR_VERSION}-linux_amd64.tar.gz | tar -xz -C /usr/local/bin && "
+                "chmod +x /usr/local/bin/br && br --version || echo 'beads_rust install failed (non-fatal)'"
+            ),
+        )
 
     def _find_session_jsonl(self) -> Path | None:
         sessions_dir = self.logs_dir / "proto-sessions"
@@ -322,8 +334,44 @@ class ProtoAgent(BaseInstalledAgent):
         # ANTHROPIC_API_KEY in its environment (which would otherwise bleed through and cause
         # Anthropic's API to 404 on gateway model names like "cli/claude-opus-4-6").
         auth_flag = ""
+        setup_cmd = ""
         openai_base = env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "")
-        if not openai_base:
+        openai_key = env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        if openai_base:
+            # OpenAI-compat / gateway mode. Write ~/.proto/settings.json so proto registers
+            # the model against the correct base URL — more reliable than env vars alone.
+            import json as _json
+            import time as _time
+            settings = _json.dumps({
+                "modelProviders": {
+                    "openai": [{"id": model, "name": model, "baseUrl": openai_base, "envKey": "OPENAI_API_KEY"}]
+                },
+                "security": {"auth": {"selectedType": "openai"}},
+                "model": {"name": model},
+            })
+            now_ms = int(_time.time() * 1000)
+            # 3-member protoLabs team: explorer (read-only analysis) + implementer (coding) +
+            # verifier (test/validate). Written into the task working dir so proto can spawn
+            # them via the dispatching-parallel-agents skill.
+            team = _json.dumps({
+                "name": "protolabs",
+                "createdAt": now_ms,
+                "updatedAt": now_ms,
+                "status": "active",
+                "members": [
+                    {"name": "explorer", "agentId": f"explorer-{now_ms}", "agentType": "Explore", "status": "idle"},
+                    {"name": "implementer", "agentId": f"implementer-{now_ms}", "agentType": "general-purpose", "status": "idle"},
+                    {"name": "verifier", "agentId": f"verifier-{now_ms}", "agentType": "general-purpose", "status": "idle"},
+                ],
+            })
+            safe_settings = settings.replace("'", "'\\''")
+            safe_team = team.replace("'", "'\\''")
+            setup_cmd = (
+                f"mkdir -p ~/.proto && printf '%s' '{safe_settings}' > ~/.proto/settings.json && "
+                f"mkdir -p /app/.proto/teams/protolabs && printf '%s' '{safe_team}' > /app/.proto/teams/protolabs/config.json && "
+            )
+            auth_flag = "--auth-type openai"
+        else:
             # No explicit gateway — fall back to direct Anthropic auth if key is available
             anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
             if anthropic_key:
@@ -342,6 +390,7 @@ class ProtoAgent(BaseInstalledAgent):
                 environment,
                 command=(
                     ". ~/.nvm/nvm.sh; "
+                    f"{setup_cmd}"
                     f"proto --yolo {auth_flag} {model_flag} --prompt={escaped_instruction} "
                     f"2>&1 | tee /logs/agent/proto.txt"
                 ),

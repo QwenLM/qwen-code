@@ -64,6 +64,7 @@ import { TaskListTool } from '../tools/task-list.js';
 import { TaskUpdateTool } from '../tools/task-update.js';
 import { TaskStopTool } from '../tools/task-stop.js';
 import { TaskOutputTool } from '../tools/task-output.js';
+import { TaskReadyTool } from '../tools/task-ready.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
@@ -2363,6 +2364,7 @@ export class Config {
     await registerCoreTool(TaskUpdateTool, this);
     await registerCoreTool(TaskStopTool, this);
     await registerCoreTool(TaskOutputTool, this);
+    await registerCoreTool(TaskReadyTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
     await registerCoreTool(WebFetchTool, this);
