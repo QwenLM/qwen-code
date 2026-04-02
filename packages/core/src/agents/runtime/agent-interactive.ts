@@ -19,6 +19,8 @@ import type {
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
   AgentApprovalRequestEvent,
+  AgentTurnStartEvent,
+  AgentTurnEndEvent,
 } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
@@ -37,6 +39,7 @@ import {
   isTerminalStatus,
   type AgentInteractiveConfig,
   type AgentMessage,
+  type SessionResult,
 } from './agent-types.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
@@ -66,6 +69,30 @@ export class AgentInteractive {
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
   private roundCancelledByUser = false;
+
+  // ─── Multi-turn session state (used by execute()) ──────────
+
+  /**
+   * Resolver for the pending `waitForNextMessage()` promise.
+   * Set when `execute()` is waiting for the next user turn;
+   * called by `sendMessage()` to inject the next prompt.
+   */
+  private resolveNextMessage: ((msg: string) => void) | undefined;
+
+  /**
+   * Pre-queued message sent via sendMessage() before execute()
+   * reaches its wait point for the next turn.
+   */
+  private pendingNextMessage: string | undefined;
+
+  /** Session-level turn counter for execute() calls. */
+  private sessionTurnCount = 0;
+
+  /** Session start time in ms, set when execute() begins. */
+  private sessionStartTimeMs = 0;
+
+  /** The final terminate mode for a completed execute() session. */
+  private sessionTerminateMode: AgentTerminateMode = AgentTerminateMode.GOAL;
 
   // Pending tool approval requests. Keyed by callId.
   // Populated by TOOL_WAITING_APPROVAL, removed by TOOL_RESULT or when
@@ -268,6 +295,196 @@ export class AgentInteractive {
     if (!this.processing) {
       this.executionPromise = this.runLoop();
     }
+  }
+
+  // ─── Multi-turn Session API ─────────────────────────────────
+
+  /**
+   * Inject the next user message into a running execute() session.
+   *
+   * If execute() is already waiting for a message (via waitForNextMessage),
+   * the promise is resolved immediately. Otherwise the message is buffered
+   * and consumed when execute() reaches its next wait point.
+   *
+   * This is the external API for feeding user turns into the session.
+   */
+  sendMessage(text: string): void {
+    if (this.resolveNextMessage) {
+      const resolve = this.resolveNextMessage;
+      this.resolveNextMessage = undefined;
+      resolve(text);
+    } else {
+      // Buffer for consumption at the next waitForNextMessage() call.
+      this.pendingNextMessage = text;
+    }
+  }
+
+  /**
+   * Run the multi-turn persistent execution loop.
+   *
+   * Starts a chat session, processes the initial prompt, then alternates
+   * between:
+   *   1. Running AgentCore for one turn (runOneRound).
+   *   2. Waiting for the next user message (waitForNextMessage / sendMessage).
+   *
+   * Session-level `max_turns` and `max_time_minutes` (from AgentInteractiveConfig)
+   * are enforced across all turns, not per-turn.
+   *
+   * Returns a SessionResult with the full message history and the reason the
+   * session ended.
+   *
+   * @param initialPrompt - The first user message to kick off the session.
+   * @param context - Runtime context state (forwarded to createChat).
+   * @param maxTurns - Session-wide turn limit (overrides config if set).
+   * @param maxTimeMinutes - Session-wide time limit in minutes (overrides config if set).
+   */
+  async execute(
+    initialPrompt: string,
+    context: ContextState,
+    maxTurns?: number,
+    maxTimeMinutes?: number,
+  ): Promise<SessionResult> {
+    this.sessionStartTimeMs = Date.now();
+    this.sessionTurnCount = 0;
+    this.sessionTerminateMode = AgentTerminateMode.GOAL;
+
+    // Allow explicit args to override per-session config.
+    const turnLimit = maxTurns ?? this.config.maxTurnsPerMessage;
+    const timeLimit = maxTimeMinutes ?? this.config.maxTimeMinutesPerMessage;
+
+    // Initialize chat + tools if not already done.
+    // We do NOT call start() here to avoid triggering the initialTask runLoop.
+    if (!this.chat) {
+      this.setStatus(AgentStatus.INITIALIZING);
+      this.chat = await this.core.createChat(context, {
+        interactive: true,
+        extraHistory: this.config.chatHistory,
+      });
+      if (!this.chat) {
+        this.error = 'Failed to create chat session';
+        this.setStatus(AgentStatus.FAILED);
+        return {
+          messageHistory: [...this.messages],
+          terminateMode: AgentTerminateMode.ERROR,
+        };
+      }
+      this.toolsList = this.core.prepareTools();
+      this.core.stats.start(Date.now());
+
+      if (this.config.chatHistory?.length) {
+        this.addMessage(
+          'info',
+          `History context from parent session included (${this.config.chatHistory.length} messages)`,
+        );
+      }
+    }
+
+    let currentPrompt = initialPrompt;
+
+    while (!this.masterAbortController.signal.aborted) {
+      // ── Pre-turn: check session turn limit ──────────────────
+      if (turnLimit !== undefined && this.sessionTurnCount >= turnLimit) {
+        this.sessionTerminateMode = AgentTerminateMode.MAX_TURNS;
+        break;
+      }
+
+      // ── Emit TURN_START ─────────────────────────────────────
+      this.core.eventEmitter?.emit(AgentEventType.TURN_START, {
+        agentId: this.config.agentId,
+        turn: this.sessionTurnCount,
+        prompt: currentPrompt,
+        timestamp: Date.now(),
+      } as AgentTurnStartEvent);
+
+      // ── Run one reasoning round ─────────────────────────────
+      this.addMessage('user', currentPrompt);
+      await this.runOneRound(currentPrompt);
+      const hadError = !!this.lastRoundError;
+      this.sessionTurnCount++;
+
+      // ── Emit TURN_END ───────────────────────────────────────
+      this.core.eventEmitter?.emit(AgentEventType.TURN_END, {
+        agentId: this.config.agentId,
+        turn: this.sessionTurnCount - 1,
+        terminateMode: hadError ? AgentTerminateMode.ERROR : null,
+        timestamp: Date.now(),
+      } as AgentTurnEndEvent);
+
+      // ── Post-turn: check abort / status / session limits ────
+      if (this.masterAbortController.signal.aborted) {
+        this.sessionTerminateMode = AgentTerminateMode.CANCELLED;
+        break;
+      }
+
+      if (
+        this.status === AgentStatus.FAILED ||
+        this.status === AgentStatus.CANCELLED
+      ) {
+        this.sessionTerminateMode =
+          this.status === AgentStatus.CANCELLED
+            ? AgentTerminateMode.CANCELLED
+            : AgentTerminateMode.ERROR;
+        break;
+      }
+
+      if (turnLimit !== undefined && this.sessionTurnCount >= turnLimit) {
+        this.sessionTerminateMode = AgentTerminateMode.MAX_TURNS;
+        break;
+      }
+
+      const elapsedMin = (Date.now() - this.sessionStartTimeMs) / (1000 * 60);
+      if (timeLimit !== undefined && elapsedMin >= timeLimit) {
+        this.sessionTerminateMode = AgentTerminateMode.TIMEOUT;
+        break;
+      }
+
+      // ── Wait for next user message ──────────────────────────
+      try {
+        currentPrompt = await this.waitForNextMessage();
+      } catch {
+        // Thrown when the session is terminated while waiting (e.g., abort).
+        if (this.masterAbortController.signal.aborted) {
+          this.sessionTerminateMode = AgentTerminateMode.CANCELLED;
+        }
+        break;
+      }
+    }
+
+    if (this.masterAbortController.signal.aborted) {
+      this.sessionTerminateMode = AgentTerminateMode.CANCELLED;
+    }
+
+    return {
+      messageHistory: [...this.messages],
+      terminateMode: this.sessionTerminateMode,
+    };
+  }
+
+  /**
+   * Await the next message injected by sendMessage().
+   * Returns a Promise that resolves when sendMessage() is called.
+   * Rejects if the master abort fires while waiting.
+   */
+  private waitForNextMessage(): Promise<string> {
+    // Fast path: a message was buffered before we got here.
+    if (this.pendingNextMessage !== undefined) {
+      const msg = this.pendingNextMessage;
+      this.pendingNextMessage = undefined;
+      return Promise.resolve(msg);
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.resolveNextMessage = resolve;
+
+      // Abort cleans up and rejects so execute() can exit cleanly.
+      const onAbort = () => {
+        this.resolveNextMessage = undefined;
+        reject(new Error('Session aborted while waiting for next message'));
+      };
+      this.masterAbortController.signal.addEventListener('abort', onAbort, {
+        once: true,
+      });
+    });
   }
 
   // ─── State Accessors ───────────────────────────────────────

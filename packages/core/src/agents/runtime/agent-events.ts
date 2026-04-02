@@ -37,7 +37,9 @@ export type AgentEvent =
   | 'usage_metadata'
   | 'finish'
   | 'error'
-  | 'status_change';
+  | 'status_change'
+  | 'turn_start'
+  | 'turn_end';
 
 export enum AgentEventType {
   START = 'start',
@@ -54,6 +56,10 @@ export enum AgentEventType {
   FINISH = 'finish',
   ERROR = 'error',
   STATUS_CHANGE = 'status_change',
+  /** Emitted by AgentInteractive at the start of each user-turn cycle. */
+  TURN_START = 'turn_start',
+  /** Emitted by AgentInteractive after each user-turn cycle completes. */
+  TURN_END = 'turn_end',
 }
 
 // ─── Event Payloads ─────────────────────────────────────────
@@ -181,6 +187,24 @@ export interface AgentStatusChangeEvent {
   timestamp: number;
 }
 
+/** Emitted by AgentInteractive when a new user-turn cycle begins. */
+export interface AgentTurnStartEvent {
+  agentId: string;
+  /** Zero-based turn index (0 = first turn). */
+  turn: number;
+  prompt: string;
+  timestamp: number;
+}
+
+/** Emitted by AgentInteractive after a user-turn cycle completes. */
+export interface AgentTurnEndEvent {
+  agentId: string;
+  /** Zero-based turn index. */
+  turn: number;
+  terminateMode: string | null;
+  timestamp: number;
+}
+
 // ─── Event Map ──────────────────────────────────────────────
 
 /**
@@ -200,6 +224,8 @@ export interface AgentEventMap {
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
+  [AgentEventType.TURN_START]: AgentTurnStartEvent;
+  [AgentEventType.TURN_END]: AgentTurnEndEvent;
 }
 
 // ─── Event Emitter ──────────────────────────────────────────

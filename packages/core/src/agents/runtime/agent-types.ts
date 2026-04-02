@@ -198,6 +198,16 @@ export interface AgentMessage {
 }
 
 /**
+ * Result returned by AgentInteractive.execute() after the session ends.
+ */
+export interface SessionResult {
+  /** All messages accumulated across all turns of the session. */
+  messageHistory: AgentMessage[];
+  /** Why the session ended. */
+  terminateMode: AgentTerminateMode;
+}
+
+/**
  * Snapshot of in-progress streaming state for UI mid-switch handoff.
  * Returned by AgentInteractive.getInProgressStream().
  */
