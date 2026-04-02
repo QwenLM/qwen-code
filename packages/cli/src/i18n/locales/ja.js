@@ -1131,8 +1131,8 @@ export default {
   'to toggle tool descriptions on/off': 'ツール説明の表示/非表示を切り替え',
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "MCPサーバー '{{name}}' のOAuth認証を開始中...",
-  // Startup Tips
-  'Tips:': 'ヒント：',
+  // Startup Examples
+  'Example: ': '例：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '会話が長くなったら /compress で履歴を要約し、コンテキストを解放できます。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':

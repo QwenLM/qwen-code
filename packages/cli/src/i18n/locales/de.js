@@ -1464,9 +1464,9 @@ export default {
   'Restarting MCP servers...': 'MCP-Server werden neu gestartet...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips for getting started:': 'Tipps zum Einstieg:',
+  'Example: ': 'Beispiel: ',
   '1. Ask questions, edit files, or run commands.':
     '1. Stellen Sie Fragen, bearbeiten Sie Dateien oder führen Sie Befehle aus.',
   '2. Be specific for the best results.':

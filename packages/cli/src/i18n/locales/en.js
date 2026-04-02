@@ -1510,9 +1510,9 @@ export default {
   'Restarting MCP servers...': 'Restarting MCP servers...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': 'Tips:',
+  'Example: ': 'Example: ',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress when the conversation gets long to summarize history and free up context.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':

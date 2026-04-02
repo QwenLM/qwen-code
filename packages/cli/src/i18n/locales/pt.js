@@ -1468,9 +1468,9 @@ export default {
   'Restarting MCP servers...': 'Reiniciando servidores MCP...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': 'Dicas:',
+  'Example: ': 'Exemplo: ',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress quando a conversa ficar longa para resumir o histórico e liberar contexto.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':

@@ -1431,9 +1431,9 @@ export default {
   'Restarting MCP servers...': '正在重启 MCP 服务器...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': '提示：',
+  'Example: ': '示例：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '对话变长时用 /compress，总结历史并释放上下文。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
