@@ -317,13 +317,16 @@ class ProtoAgent(BaseInstalledAgent):
         model = self.model_name or os.environ.get("OPENAI_MODEL", "claude-sonnet-4-6")
         env["OPENAI_MODEL"] = model
 
-        # Detect auth mode: if ANTHROPIC_API_KEY is set, use anthropic auth type
+        # Detect auth mode: check both resolved env vars and os.environ for Anthropic key
         auth_flag = ""
-        if env.get("ANTHROPIC_API_KEY"):
+        anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if anthropic_key:
             auth_flag = "--auth-type anthropic"
-            # Proto requires ANTHROPIC_BASE_URL to be set
+            env["ANTHROPIC_API_KEY"] = anthropic_key
             if "ANTHROPIC_BASE_URL" not in env:
-                env["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
+                env["ANTHROPIC_BASE_URL"] = os.environ.get(
+                    "ANTHROPIC_BASE_URL", "https://api.anthropic.com"
+                )
 
         # Build model flag — pass explicitly to avoid env var confusion between auth types
         model_flag = f"--model {model}" if model else ""
@@ -334,7 +337,7 @@ class ProtoAgent(BaseInstalledAgent):
                 command=(
                     ". ~/.nvm/nvm.sh; "
                     f"proto --yolo {auth_flag} {model_flag} --prompt={escaped_instruction} "
-                    f"2>&1 | stdbuf -oL tee /logs/agent/proto.txt"
+                    f"2>&1 | tee /logs/agent/proto.txt"
                 ),
                 env=env,
             )
