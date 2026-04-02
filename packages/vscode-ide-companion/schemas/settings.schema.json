@@ -266,6 +266,26 @@
           "type": "boolean",
           "default": true
         },
+        "loopEnabled": {
+          "description": "Enable or disable the /loop command system.",
+          "type": "boolean",
+          "default": true
+        },
+        "loopMaxConcurrent": {
+          "description": "Maximum number of concurrent loops (1-50).",
+          "type": "number",
+          "default": 50
+        },
+        "loopExpiryDays": {
+          "description": "Number of days before recurring loops auto-expire. Set to 0 to disable.",
+          "type": "number",
+          "default": 7
+        },
+        "loopJitterEnabled": {
+          "description": "Add deterministic jitter to loop intervals to spread load.",
+          "type": "boolean",
+          "default": true
+        },
         "skipStartupContext": {
           "description": "Avoid sending the workspace startup context at the beginning of each session.",
           "type": "boolean",
