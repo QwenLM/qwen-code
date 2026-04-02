@@ -2480,6 +2480,70 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     }
   });
 
+  it('should allow info confirmation tools in plan mode after approval', async () => {
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const infoTool = new MockTool({
+      name: 'web_fetch',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'info' as const,
+        title: 'Confirm Web Fetch',
+        prompt: 'Fetch https://example.com/docs',
+        urls: ['https://example.com/docs'],
+        onConfirm: onConfirmSpy,
+      }),
+      execute: async () => ({
+        llmContent: 'Fetched docs',
+        returnDisplay: 'Fetched docs',
+      }),
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      infoTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    );
+
+    const abortController = new AbortController();
+    const request = {
+      callId: '1',
+      name: 'web_fetch',
+      args: {
+        url: 'https://example.com/docs',
+        prompt: 'Summarize the API docs',
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-plan-info',
+    };
+
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    expect(awaitingCall.confirmationDetails.type).toBe('info');
+
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(onConfirmSpy).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+  });
+
   it('should handle user cancellation of ask_user_question in plan mode', async () => {
     const mockTool = createAskUserQuestionMockTool();
     const onAllToolCallsComplete = vi.fn();
