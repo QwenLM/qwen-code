@@ -24,8 +24,6 @@ import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 // Constants
 // ---------------------------------------------------------------------------
 
-const __filename_ = resolveModuleFilePath(fileURLToPath(import.meta.url));
-
 function resolveModuleFilePath(moduleFilePath: string): string {
   try {
     const resolved = fs.realpathSync(moduleFilePath);
