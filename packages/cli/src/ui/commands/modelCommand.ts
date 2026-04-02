@@ -12,6 +12,8 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { MessageType } from '../types.js';
+import { SettingScope } from '../../config/settings.js';
 
 export const modelCommand: SlashCommand = {
   name: 'model',
@@ -23,7 +25,7 @@ export const modelCommand: SlashCommand = {
     context: CommandContext,
   ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
     const { services } = context;
-    const { config } = services;
+    const { config, settings } = services;
 
     if (!config) {
       return {
@@ -31,6 +33,36 @@ export const modelCommand: SlashCommand = {
         messageType: 'error',
         content: t('Configuration not available.'),
       };
+    }
+
+    // Handle --fast flag: /model --fast <modelName>
+    const args = context.invocation?.args?.trim() ?? '';
+    if (args.startsWith('--fast')) {
+      const modelName = args.replace('--fast', '').trim();
+      if (!modelName) {
+        // Show current fast model
+        const current = settings?.merged?.fastModel || config.getModel();
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Fast Model') + ': ' + current,
+          },
+          Date.now(),
+        );
+        return { type: 'message', messageType: 'info', content: '' };
+      }
+      // Set fast model
+      if (settings) {
+        settings.setValue(SettingScope.User, 'fastModel', modelName);
+        context.ui.addItem(
+          {
+            type: MessageType.SUCCESS,
+            text: t('Fast Model') + ': ' + modelName,
+          },
+          Date.now(),
+        );
+      }
+      return { type: 'message', messageType: 'info', content: '' };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();
