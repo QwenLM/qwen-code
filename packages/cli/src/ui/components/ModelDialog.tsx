@@ -247,10 +247,17 @@ export function ModelDialog({
     [availableModelEntries],
   );
 
-  const preferredModelId = config?.getModel() || MAINLINE_CODER_MODEL;
+  // In fast model mode, default to the currently configured fast model
+  const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const preferredModelId =
+    isFastModelMode && fastModelSetting
+      ? fastModelSetting
+      : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot = config?.getActiveRuntimeModelSnapshot?.();
+  const activeRuntimeSnapshot = isFastModelMode
+    ? undefined // fast model is never a runtime model
+    : config?.getActiveRuntimeModelSnapshot?.();
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : authType
