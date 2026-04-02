@@ -41,6 +41,7 @@ export interface ExtendedSystemInfo extends SystemInfo {
   apiKeyEnvKey?: string;
   gitCommit?: string;
   proxy?: string;
+  suggestionModel?: string;
 }
 
 /**
@@ -170,6 +171,10 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
+  // Get suggestion model from settings
+  const suggestionModel =
+    context.services.settings?.merged?.ui?.suggestionModel || undefined;
+
   return {
     ...baseInfo,
     sandboxEnv,
@@ -177,5 +182,6 @@ export async function getExtendedSystemInfo(
     baseUrl,
     apiKeyEnvKey,
     gitCommit,
+    suggestionModel,
   };
 }

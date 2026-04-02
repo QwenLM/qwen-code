@@ -12,6 +12,11 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
+import {
+  uiTelemetryService,
+  EVENT_API_RESPONSE,
+} from '../telemetry/uiTelemetry.js';
+import type { ApiResponseEvent } from '../telemetry/types.js';
 
 /**
  * Prompt for suggestion generation.
@@ -185,6 +190,7 @@ async function generateViaBaseLlm(
   // Send a direct text request and use the response as-is.
   if (Object.keys(result).length === 0) {
     const generator = config.getContentGenerator();
+    const startTime = Date.now();
     const response = await generator.generateContent(
       {
         model,
@@ -193,6 +199,14 @@ async function generateViaBaseLlm(
       },
       'prompt_suggestion',
     );
+    const durationMs = Date.now() - startTime;
+
+    // Report usage to session stats so /stats tracks suggestion model tokens
+    const usage = response.usageMetadata;
+    if (usage) {
+      reportSuggestionUsage(model, usage, durationMs);
+    }
+
     const text = response.candidates?.[0]?.content?.parts
       ?.map((p) => p.text ?? '')
       .join('')
@@ -313,4 +327,34 @@ export function getFilterReason(suggestion: string): string | null {
  */
 export function shouldFilterSuggestion(suggestion: string): boolean {
   return getFilterReason(suggestion) !== null;
+}
+
+/**
+ * Report suggestion API usage to the UI telemetry service so it appears in /stats.
+ */
+function reportSuggestionUsage(
+  model: string,
+  usage: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+    cachedContentTokenCount?: number;
+    thoughtsTokenCount?: number;
+  },
+  durationMs: number,
+): void {
+  const event = {
+    'event.name': EVENT_API_RESPONSE,
+    'event.timestamp': new Date().toISOString(),
+    model,
+    prompt_id: 'prompt_suggestion',
+    duration_ms: durationMs,
+    input_token_count: usage.promptTokenCount ?? 0,
+    output_token_count: usage.candidatesTokenCount ?? 0,
+    total_token_count: usage.totalTokenCount ?? 0,
+    cached_content_token_count: usage.cachedContentTokenCount ?? 0,
+    thoughts_token_count: usage.thoughtsTokenCount ?? 0,
+    tool_token_count: 0,
+  } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+  uiTelemetryService.addEvent(event);
 }
