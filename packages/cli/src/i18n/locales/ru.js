@@ -99,7 +99,7 @@ export default {
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
-  'Suggestion Model': 'Модель предложений',
+  'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'OS Platform': 'Платформа ОС',
   'OS Arch': 'Архитектура ОС',

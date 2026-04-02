@@ -523,15 +523,15 @@ const SETTINGS_SCHEMA = {
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
       },
-      suggestionModel: {
+      fastModel: {
         type: 'string',
-        label: 'Suggestion Model',
+        label: 'Fast Model',
         category: 'UI',
         requiresRestart: false,
         default: '',
         description:
-          'Model to use for prompt suggestion generation. Leave empty to use the main model. A smaller/faster model (e.g., qwen-turbo) reduces suggestion latency.',
-        showInDialog: false,
+          'Model for background tasks (suggestion generation, speculation, pipelined suggestions). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
+        showInDialog: true,
       },
       enableCacheSharing: {
         type: 'boolean',
@@ -551,16 +551,6 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
-        showInDialog: false,
-      },
-      speculationModel: {
-        type: 'string',
-        label: 'Speculation Model',
-        category: 'UI',
-        requiresRestart: false,
-        default: '',
-        description:
-          'Model to use for speculation and pipelined suggestion generation. Leave empty to use the main model. A smaller/faster model reduces cost and latency.',
         showInDialog: false,
       },
       accessibility: {

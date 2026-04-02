@@ -79,7 +79,7 @@ export default {
   'CLI Version': 'CLI-Version',
   'Git Commit': 'Git-Commit',
   Model: 'Modell',
-  'Suggestion Model': 'Vorschlagsmodell',
+  'Fast Model': 'Schnelles Modell',
   Sandbox: 'Sandbox',
   'OS Platform': 'Betriebssystem',
   'OS Arch': 'OS-Architektur',

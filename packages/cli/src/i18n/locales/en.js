@@ -98,7 +98,7 @@ export default {
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
-  'Suggestion Model': 'Suggestion Model',
+  'Fast Model': 'Fast Model',
   Sandbox: 'Sandbox',
   'OS Platform': 'OS Platform',
   'OS Arch': 'OS Arch',

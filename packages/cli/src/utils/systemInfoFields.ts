@@ -33,11 +33,7 @@ export function getSystemInfoFields(
   addField(fields, t('Auth'), formatAuth(info));
   addField(fields, t('Base URL'), formatBaseUrl(info));
   addField(fields, t('Model'), info.modelVersion);
-  addField(
-    fields,
-    t('Suggestion Model'),
-    info.suggestionModel || info.modelVersion,
-  );
+  addField(fields, t('Fast Model'), info.fastModel || info.modelVersion);
   addField(fields, t('Session ID'), info.sessionId);
   addField(fields, t('Sandbox'), info.sandboxEnv);
   addField(fields, t('Proxy'), formatProxy(info.proxy));
