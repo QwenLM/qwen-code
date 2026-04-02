@@ -35,6 +35,9 @@ export class BlockStreamer {
   /** Number of blocks emitted so far. */
   blockCount = 0;
 
+  /** The most recent send error, or null if the last send succeeded. */
+  lastSendError: unknown = null;
+
   constructor(opts: BlockStreamerOptions) {
     this.opts = opts;
   }
@@ -96,7 +99,12 @@ export class BlockStreamer {
     this.blockCount++;
     this.sending = this.sending
       .then(() => this.opts.send(trimmed))
-      .catch(() => {});
+      .then(() => {
+        this.lastSendError = null;
+      })
+      .catch((err: unknown) => {
+        this.lastSendError = err;
+      });
   }
 
   /**
