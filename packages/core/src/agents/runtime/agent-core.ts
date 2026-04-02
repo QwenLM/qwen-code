@@ -57,6 +57,8 @@ import type {
   AgentHooks,
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
+import type { AgentContextCompactedEvent } from './agent-events.js';
+import { estimateTokens, compactMessages } from './compaction.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { AgentTool } from '../../tools/agent.js';
 import { ToolNames } from '../../tools/tool-names.js';
@@ -409,6 +411,31 @@ export class AgentCore {
       if (abortController.signal.aborted) {
         roundAbortController.abort();
       }
+
+      // ── Context compaction ──────────────────────────────────
+      // When max_context_tokens is set and the tracked token count exceeds
+      // 90% of the limit, compact the chat history before the next API call.
+      if (this.runConfig.max_context_tokens && this.lastPromptTokenCount > 0) {
+        const maxTokens = this.runConfig.max_context_tokens;
+        if (this.lastPromptTokenCount > maxTokens * 0.9) {
+          const historyBefore = chat.getHistory();
+          const tokensBefore = estimateTokens(historyBefore);
+          const targetTokens = Math.floor(maxTokens * 0.7);
+          const compacted = compactMessages(historyBefore, targetTokens);
+          if (compacted.length < historyBefore.length) {
+            chat.setHistory(compacted);
+            const tokensAfter = estimateTokens(compacted);
+            this.eventEmitter?.emit(AgentEventType.CONTEXT_COMPACTED, {
+              subagentId: this.subagentId,
+              tokensBefore,
+              tokensAfter,
+              messagesRemoved: historyBefore.length - compacted.length,
+              timestamp: Date.now(),
+            } as AgentContextCompactedEvent);
+          }
+        }
+      }
+      // ───────────────────────────────────────────────────────
 
       const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
 

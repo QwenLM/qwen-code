@@ -39,7 +39,8 @@ export type AgentEvent =
   | 'error'
   | 'status_change'
   | 'turn_start'
-  | 'turn_end';
+  | 'turn_end'
+  | 'context_compacted';
 
 export enum AgentEventType {
   START = 'start',
@@ -60,6 +61,8 @@ export enum AgentEventType {
   TURN_START = 'turn_start',
   /** Emitted by AgentInteractive after each user-turn cycle completes. */
   TURN_END = 'turn_end',
+  /** Emitted when the chat history is compacted to stay within token limits. */
+  CONTEXT_COMPACTED = 'context_compacted',
 }
 
 // ─── Event Payloads ─────────────────────────────────────────
@@ -187,6 +190,17 @@ export interface AgentStatusChangeEvent {
   timestamp: number;
 }
 
+export interface AgentContextCompactedEvent {
+  subagentId: string;
+  /** Estimated token count before compaction. */
+  tokensBefore: number;
+  /** Estimated token count after compaction. */
+  tokensAfter: number;
+  /** Number of Content entries removed from the history. */
+  messagesRemoved: number;
+  timestamp: number;
+}
+
 /** Emitted by AgentInteractive when a new user-turn cycle begins. */
 export interface AgentTurnStartEvent {
   agentId: string;
@@ -226,6 +240,7 @@ export interface AgentEventMap {
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
   [AgentEventType.TURN_START]: AgentTurnStartEvent;
   [AgentEventType.TURN_END]: AgentTurnEndEvent;
+  [AgentEventType.CONTEXT_COMPACTED]: AgentContextCompactedEvent;
 }
 
 // ─── Event Emitter ──────────────────────────────────────────
