@@ -1130,12 +1130,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Only trigger when transitioning from Responding to Idle (and enabled)
     // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
+    const isTransitionToIdle =
+      prevStreamingStateRef.current === StreamingState.Responding &&
+      streamingState === StreamingState.Idle;
     if (
       followupSuggestionsEnabled &&
       config.isInteractive() &&
       !config.getSdkMode() &&
-      prevStreamingStateRef.current === StreamingState.Responding &&
-      streamingState === StreamingState.Idle &&
+      isTransitionToIdle &&
       // Check both committed history and pending items for errors
       // (API errors go to pendingGeminiHistoryItems, not historyManager.history)
       historyManager.history[historyManager.history.length - 1]?.type !==
@@ -1155,9 +1157,12 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      const enableCacheSharing =
+        settings.merged.ui?.enableCacheSharing === true;
+      const fastModel = settings.merged.fastModel || undefined;
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: settings.merged.fastModel || undefined,
+        enableCacheSharing,
+        model: fastModel,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1166,7 +1171,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal, {
-                model: settings.merged.fastModel || undefined,
+                model: fastModel,
               })
                 .then((state) => {
                   speculationRef.current = state;
@@ -1239,9 +1244,9 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-      !config.getIdeMode() &&
-      !settings.merged.ide?.hasSeenNudge &&
-      !idePromptAnswered,
+    !config.getIdeMode() &&
+    !settings.merged.ide?.hasSeenNudge &&
+    !idePromptAnswered,
   );
 
   // Command migration nudge
