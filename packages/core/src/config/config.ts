@@ -67,6 +67,7 @@ import { LspTool } from '../tools/lsp.js';
 import { CronCreateTool } from '../tools/cron-create.js';
 import { CronListTool } from '../tools/cron-list.js';
 import { CronDeleteTool } from '../tools/cron-delete.js';
+import { NotebookEditTool } from '../tools/notebook-edit.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -2207,6 +2208,7 @@ export class Config {
 
     await registerCoreTool(GlobTool, this);
     await registerCoreTool(EditTool, this);
+    await registerCoreTool(NotebookEditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
     await registerCoreTool(MemoryTool);

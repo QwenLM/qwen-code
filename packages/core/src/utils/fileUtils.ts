@@ -20,6 +20,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import { readNotebook, formatNotebookForLLM } from './notebookUtils.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -453,8 +454,15 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
  */
 export async function detectFileType(
   filePath: string,
-): Promise<'text' | 'image' | 'pdf' | 'audio' | 'video' | 'binary' | 'svg'> {
+): Promise<
+  'text' | 'image' | 'pdf' | 'audio' | 'video' | 'binary' | 'svg' | 'notebook'
+> {
   const ext = path.extname(filePath).toLowerCase();
+
+  // Jupyter notebooks get special cell-aware rendering
+  if (ext === '.ipynb') {
+    return 'notebook';
+  }
 
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
   // MPEG transport stream (a video format), but we want to assume these are
@@ -513,7 +521,15 @@ export interface ProcessedFileReadResult {
  * Returns undefined for non-media types (text, binary, svg) which are always supported.
  */
 function mediaModalityKey(
-  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+  fileType:
+    | 'image'
+    | 'pdf'
+    | 'audio'
+    | 'video'
+    | 'text'
+    | 'binary'
+    | 'svg'
+    | 'notebook',
 ): keyof InputModalities | undefined {
   if (
     fileType === 'image' ||
@@ -638,6 +654,28 @@ export async function processSingleFileContent(
           llmContent: content,
           returnDisplay: `Read SVG as text: ${relativePathForDisplay}`,
         };
+      }
+      case 'notebook': {
+        try {
+          const cells = await readNotebook(filePath);
+          const llmContent = formatNotebookForLLM(cells);
+          const cellCount = cells.length;
+          return {
+            llmContent,
+            returnDisplay: `Read notebook: ${relativePathForDisplay} (${cellCount} cell${cellCount !== 1 ? 's' : ''})`,
+          };
+        } catch (notebookError) {
+          // Fall back to raw text if notebook parsing fails
+          debugLogger.warn(
+            `Failed to parse notebook ${filePath}, falling back to text: ${notebookError instanceof Error ? notebookError.message : String(notebookError)}`,
+          );
+          // Fall through to text case by reading as plain text
+          const rawContent = await readFileWithEncoding(filePath);
+          return {
+            llmContent: rawContent,
+            returnDisplay: `Read notebook as raw JSON: ${relativePathForDisplay}`,
+          };
+        }
       }
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently

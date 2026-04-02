@@ -67,6 +67,11 @@ export enum ToolErrorType {
   // WebSearch-specific Errors
   WEB_SEARCH_FAILED = 'web_search_failed',
 
+  // Notebook-specific Errors
+  NOTEBOOK_EDIT_FAILURE = 'notebook_edit_failure',
+  NOTEBOOK_INVALID_JSON = 'notebook_invalid_json',
+  NOTEBOOK_CELL_NOT_FOUND = 'notebook_cell_not_found',
+
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',
 }
