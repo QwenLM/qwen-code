@@ -72,11 +72,7 @@ export const modelCommand: SlashCommand = {
           Date.now(),
         );
       }
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('Fast model updated.'),
-      };
+      return { type: 'message', messageType: 'info', content: '' };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();

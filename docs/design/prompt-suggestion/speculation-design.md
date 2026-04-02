@@ -76,7 +76,7 @@ User sees suggestion "commit this"
 │                                                              │
 │  1. abortController.abort() — cancel LLM call               │
 │  2. overlayFs.cleanup() — delete temp directory              │
-│  3. Log SpeculationEvent                                     │
+│  3. Update speculation state (no telemetry on abort)         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
