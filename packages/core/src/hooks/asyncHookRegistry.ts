@@ -113,13 +113,31 @@ export class AsyncHookRegistry {
   }
 
   /**
-   * Mark a hook as timed out
+   * Mark a hook as timed out and terminate the process if running
    */
   timeout(hookId: string): void {
     const hook = this.pendingHooks.get(hookId);
     if (!hook) {
       debugLogger.warn(`Attempted to timeout unknown hook: ${hookId}`);
       return;
+    }
+
+    // Terminate the process if it's still running
+    if (hook.process && !hook.process.killed) {
+      debugLogger.debug(`Terminating process for timed out hook: ${hookId}`);
+      // First try graceful termination with SIGTERM
+      hook.process.kill('SIGTERM');
+      // Force kill with SIGKILL after 2 seconds if still running
+      const forceKillTimeout = setTimeout(() => {
+        if (hook.process && !hook.process.killed) {
+          debugLogger.debug(`Force killing process for hook: ${hookId}`);
+          hook.process.kill('SIGKILL');
+        }
+      }, 2000);
+      // Clean up the timeout if process exits
+      hook.process.once('exit', () => {
+        clearTimeout(forceKillTimeout);
+      });
     }
 
     hook.status = 'timeout';

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import { HookEventName } from './types.js';
 
@@ -162,6 +162,58 @@ describe('AsyncHookRegistry', () => {
       expect(output.messages.length).toBe(1);
       expect(output.messages[0].type).toBe('warning');
       expect(output.messages[0].message).toContain('timed out');
+    });
+
+    it('should terminate process on timeout', () => {
+      const mockProcess = {
+        killed: false,
+        kill: vi.fn(),
+        once: vi.fn(),
+      };
+
+      registry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Test Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 1000,
+        stdout: '',
+        stderr: '',
+        process: mockProcess as unknown as import('child_process').ChildProcess,
+      });
+
+      registry.timeout('test-hook-1');
+
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(mockProcess.once).toHaveBeenCalledWith(
+        'exit',
+        expect.any(Function),
+      );
+    });
+
+    it('should not call kill if process is already killed', () => {
+      const mockProcess = {
+        killed: true,
+        kill: vi.fn(),
+        once: vi.fn(),
+      };
+
+      registry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Test Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 1000,
+        stdout: '',
+        stderr: '',
+        process: mockProcess as unknown as import('child_process').ChildProcess,
+      });
+
+      registry.timeout('test-hook-1');
+
+      expect(mockProcess.kill).not.toHaveBeenCalled();
     });
   });
 

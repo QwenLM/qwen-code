@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ChildProcess } from 'child_process';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -820,6 +821,11 @@ export interface PendingAsyncHook {
   status: 'running' | 'completed' | 'failed' | 'timeout';
   output?: HookOutput;
   error?: Error;
+  /**
+   * Reference to the child process for async command hooks.
+   * Used to terminate the process on timeout or cancellation.
+   */
+  process?: ChildProcess;
 }
 
 /**

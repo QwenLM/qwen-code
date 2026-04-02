@@ -26,7 +26,7 @@ const DEFAULT_HTTP_TIMEOUT = 30000;
  * HTTP Hook Runner - executes HTTP hooks by sending POST requests
  */
 export class HttpHookRunner {
-  private readonly urlValidator: UrlValidator;
+  private urlValidator: UrlValidator;
   private readonly executedOnceHooks: Set<string> = new Set();
 
   constructor(allowedUrls?: string[]) {
@@ -288,6 +288,6 @@ export class HttpHookRunner {
    */
   updateAllowedUrls(allowedUrls: string[]): void {
     // Create new validator with updated patterns
-    Object.assign(this, { urlValidator: new UrlValidator(allowedUrls) });
+    this.urlValidator = new UrlValidator(allowedUrls);
   }
 }

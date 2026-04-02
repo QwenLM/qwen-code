@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isIPv4, isIPv6 } from 'net';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('URL_VALIDATOR');
@@ -52,13 +53,24 @@ export class UrlValidator {
   }
 
   /**
-   * Compile a URL pattern with wildcards into a RegExp
+   * Compile a URL pattern with wildcards into a RegExp.
+   * Supports both pre-escaped patterns (e.g., 'https://api\\.example\\.com/*')
+   * and unescaped patterns (e.g., 'https://api.example.com/*').
    */
   private compilePattern(pattern: string): RegExp {
-    // Escape special regex characters except *
-    const escaped = pattern
-      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*');
+    // Check if pattern is already escaped (contains \. sequence)
+    const isPreEscaped = pattern.includes('\\.');
+
+    let escaped: string;
+    if (isPreEscaped) {
+      // Pattern is already escaped, only convert * to .*
+      escaped = pattern.replace(/\*/g, '.*');
+    } else {
+      // Escape special regex characters except *
+      escaped = pattern
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*');
+    }
     return new RegExp(`^${escaped}$`, 'i');
   }
 
@@ -140,15 +152,14 @@ export class UrlValidator {
   }
 
   /**
-   * Check if a string is an IP address
+   * Check if a string is an IP address (IPv4 or IPv6)
+   * Uses Node.js net module for accurate validation of all IP formats
+   * including ::1, ::ffff:192.168.1.1, 2001:db8::1, etc.
    */
   private isIpAddress(hostname: string): boolean {
-    // IPv4 pattern
-    const ipv4Pattern = /^(\d{1,3}\.){3}\d{1,3}$/;
-    // IPv6 pattern (simplified)
-    const ipv6Pattern = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
-
-    return ipv4Pattern.test(hostname) || ipv6Pattern.test(hostname);
+    // Remove brackets from IPv6 addresses (e.g., [::1] -> ::1)
+    const cleanHostname = hostname.replace(/^\[|\]$/g, '');
+    return isIPv4(cleanHostname) || isIPv6(cleanHostname);
   }
 
   /**
@@ -192,6 +203,109 @@ export class UrlValidator {
     }
 
     return result;
+  }
+
+  /**
+   * Validate that a hostname's resolved IP addresses are not private.
+   * This provides protection against DNS rebinding attacks where a domain
+   * initially resolves to a public IP but later resolves to a private IP.
+   *
+   * @param hostname - The hostname to validate
+   * @returns Promise that resolves to true if all resolved IPs are safe, false otherwise
+   */
+  async validateResolvedIp(hostname: string): Promise<boolean> {
+    // Skip validation for IP addresses (already checked in isBlocked)
+    if (this.isIpAddress(hostname)) {
+      return true;
+    }
+
+    try {
+      const dns = await import('dns');
+      const dnsPromises = dns.promises;
+
+      // Check IPv4 addresses
+      const ipv4Addresses = await dnsPromises
+        .resolve4(hostname)
+        .catch(() => []);
+      for (const ip of ipv4Addresses) {
+        if (this.isPrivateIp(ip)) {
+          debugLogger.debug(
+            `DNS rebinding protection: ${hostname} resolves to private IPv4 ${ip}`,
+          );
+          return false;
+        }
+      }
+
+      // Check IPv6 addresses
+      const ipv6Addresses = await dnsPromises
+        .resolve6(hostname)
+        .catch(() => []);
+      for (const ip of ipv6Addresses) {
+        // Check for IPv6 private addresses
+        const cleanIp = ip.replace(/^\[|\]$/g, '').toLowerCase();
+        if (
+          cleanIp === '::1' ||
+          cleanIp.startsWith('fe8') ||
+          cleanIp.startsWith('fe9') ||
+          cleanIp.startsWith('fea') ||
+          cleanIp.startsWith('feb') ||
+          cleanIp.startsWith('fc') ||
+          cleanIp.startsWith('fd')
+        ) {
+          debugLogger.debug(
+            `DNS rebinding protection: ${hostname} resolves to private IPv6 ${ip}`,
+          );
+          return false;
+        }
+      }
+
+      return true;
+    } catch {
+      // If DNS resolution fails, allow the request to proceed
+      // The actual HTTP request will fail if the hostname is invalid
+      debugLogger.debug(
+        `DNS resolution failed for ${hostname}, allowing request to proceed`,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * Validate a URL for use in HTTP hooks with DNS rebinding protection.
+   * This is an async version of validate() that also checks resolved IPs.
+   *
+   * @param url - The URL to validate
+   * @returns Promise with validation result including allowed status and reason
+   */
+  async validateWithDnsCheck(
+    url: string,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    // First perform standard validation
+    const basicResult = this.validate(url);
+    if (!basicResult.allowed) {
+      return basicResult;
+    }
+
+    // Then check DNS resolution for rebinding attacks
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname;
+
+      const dnsValid = await this.validateResolvedIp(hostname);
+      if (!dnsValid) {
+        return {
+          allowed: false,
+          reason: `DNS rebinding protection: ${hostname} resolves to a private IP address`,
+        };
+      }
+
+      return { allowed: true };
+    } catch {
+      return {
+        allowed: false,
+        reason: 'Invalid URL format',
+      };
+    }
   }
 }
 

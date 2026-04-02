@@ -20,6 +20,26 @@
  * @param allowedVars - List of allowed environment variable names
  * @returns The interpolated string
  */
+/**
+ * Dangerous variable names that could be used for prototype pollution attacks
+ */
+const DANGEROUS_VAR_NAMES = [
+  '__proto__',
+  'constructor',
+  'prototype',
+  '__defineGetter__',
+  '__defineSetter__',
+  '__lookupGetter__',
+  '__lookupSetter__',
+];
+
+/**
+ * Check if a variable name is safe (not a prototype pollution vector)
+ */
+function isSafeVarName(varName: string): boolean {
+  return !DANGEROUS_VAR_NAMES.includes(varName);
+}
+
 export function interpolateEnvVars(
   value: string,
   allowedVars: string[],
@@ -28,6 +48,10 @@ export function interpolateEnvVars(
   return value.replace(
     /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
     (match, varName: string) => {
+      // Block dangerous variable names to prevent prototype pollution
+      if (!isSafeVarName(varName)) {
+        return '';
+      }
       if (allowedVars.includes(varName)) {
         return process.env[varName] || '';
       }
