@@ -16,7 +16,7 @@ import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
 } from '../telemetry/uiTelemetry.js';
-import type { ApiResponseEvent } from '../telemetry/types.js';
+import { ApiResponseEvent } from '../telemetry/types.js';
 
 /**
  * Prompt for suggestion generation.
@@ -324,18 +324,23 @@ function reportSuggestionUsage(
   },
   durationMs: number,
 ): void {
-  const event = {
-    'event.name': EVENT_API_RESPONSE,
-    'event.timestamp': new Date().toISOString(),
+  const event = new ApiResponseEvent(
+    'suggestion-' + Date.now(),
     model,
-    prompt_id: 'prompt_suggestion',
-    duration_ms: durationMs,
-    input_token_count: usage.promptTokenCount ?? 0,
-    output_token_count: usage.candidatesTokenCount ?? 0,
-    total_token_count: usage.totalTokenCount ?? 0,
-    cached_content_token_count: usage.cachedContentTokenCount ?? 0,
-    thoughts_token_count: usage.thoughtsTokenCount ?? 0,
-    tool_token_count: 0,
-  } as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
-  uiTelemetryService.addEvent(event);
+    durationMs,
+    'prompt_suggestion',
+    undefined,
+    {
+      promptTokenCount: usage.promptTokenCount ?? 0,
+      candidatesTokenCount: usage.candidatesTokenCount ?? 0,
+      totalTokenCount: usage.totalTokenCount ?? 0,
+      cachedContentTokenCount: usage.cachedContentTokenCount ?? 0,
+      thoughtsTokenCount: usage.thoughtsTokenCount ?? 0,
+    },
+  );
+  // Override event.name to match UiEvent type (UiTelemetryService switch)
+  const uiEvent = Object.assign(event, {
+    'event.name': EVENT_API_RESPONSE as typeof EVENT_API_RESPONSE,
+  });
+  uiTelemetryService.addEvent(uiEvent);
 }
