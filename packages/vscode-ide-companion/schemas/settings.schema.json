@@ -254,6 +254,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "fastModel": {
+      "description": "Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.",
+      "type": "string",
+      "default": ""
+    },
     "model": {
       "description": "Settings related to the generative model.",
       "type": "object",
