@@ -156,6 +156,7 @@ async function generateViaBaseLlm(
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
+  // Try function-calling JSON first
   const result = await config.getBaseLlmClient().generateJson({
     contents,
     schema: SUGGESTION_SCHEMA,
@@ -166,7 +167,40 @@ async function generateViaBaseLlm(
   });
 
   const raw = result['suggestion'];
-  return typeof raw === 'string' ? raw : null;
+  if (typeof raw === 'string' && raw.trim()) {
+    return raw;
+  }
+
+  // Fallback: some models (e.g., glm-5.1) don't support function calling.
+  // Send a direct text request and use the response as-is.
+  if (Object.keys(result).length === 0) {
+    const generator = config.getContentGenerator();
+    const response = await generator.generateContent(
+      {
+        model: config.getModel(),
+        contents,
+        config: { abortSignal },
+      },
+      'prompt_suggestion',
+    );
+    const text = response.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text ?? '')
+      .join('')
+      .trim();
+    if (text) {
+      // Try to parse as JSON first (model might return {"suggestion": "..."})
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const s = parsed['suggestion'];
+        if (typeof s === 'string') return s;
+      } catch {
+        // Not JSON — use raw text as the suggestion
+      }
+      return text;
+    }
+  }
+
+  return null;
 }
 
 /** Single-word suggestions allowed through the too_few_words filter */
@@ -224,12 +258,22 @@ export function getFilterReason(suggestion: string): string | null {
 
   if (/^\w+:\s/.test(suggestion)) return 'prefixed_label';
 
-  if (wordCount < 2) {
-    if (suggestion.startsWith('/')) return null; // slash commands ok
-    if (!ALLOWED_SINGLE_WORDS.has(lower)) return 'too_few_words';
+  // CJK text has no spaces — skip whitespace-based word count checks
+  // and use character count instead
+  const hasCJK = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(
+    suggestion,
+  );
+  if (!hasCJK) {
+    if (wordCount < 2) {
+      if (suggestion.startsWith('/')) return null; // slash commands ok
+      if (!ALLOWED_SINGLE_WORDS.has(lower)) return 'too_few_words';
+    }
+    if (wordCount > 12) return 'too_many_words';
+  } else {
+    // For CJK: filter if too short (< 2 chars) or too long (> 30 chars)
+    if (suggestion.length < 2) return 'too_few_words';
+    if (suggestion.length > 30) return 'too_many_words';
   }
-
-  if (wordCount > 12) return 'too_many_words';
   if (suggestion.length >= 100) return 'too_long';
   if (/[.!?]\s+[A-Z]/.test(suggestion)) return 'multiple_sentences';
   if (/[\n*]|\*\*/.test(suggestion)) return 'has_formatting';
