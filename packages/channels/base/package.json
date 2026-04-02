@@ -1,7 +1,11 @@
 {
-  "name": "@qwen-code/channel-base",
-  "version": "0.14.0",
+  "name": "@alife/dataworks-qwen-code-channel-base",
+  "version": "0.13.2-dataworks.7",
   "description": "Base channel infrastructure for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,6 +18,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
+  },
   "scripts": {
     "build": "tsc --build"
   },
