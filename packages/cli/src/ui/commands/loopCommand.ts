@@ -177,10 +177,11 @@ export const loopCommand: SlashCommand = {
     const manager = getLoopManager();
     const parsed = parseLoopArgs(args);
 
-    // Feature gate — settings are top-level: loopEnabled, loopMaxConcurrent, etc.
-    const settings = (context.services.settings as Record<string, unknown>)
-      ?.merged as Record<string, unknown> | undefined;
-    if (settings?.loopEnabled === false) {
+    // Feature gate — read from merged settings using bracket notation
+    const settings = (
+      context.services.settings as unknown as Record<string, unknown>
+    )?.['merged'] as Record<string, unknown> | undefined;
+    if (settings?.['loopEnabled'] === false) {
       ui.addItem(
         {
           type: MessageType.ERROR,
@@ -482,7 +483,7 @@ export const loopCommand: SlashCommand = {
       }
 
       const maxLoops =
-        (settings?.loopMaxConcurrent as number) ?? DEFAULT_MAX_LOOPS;
+        (settings?.['loopMaxConcurrent'] as number) ?? DEFAULT_MAX_LOOPS;
       let restored = 0;
       let firstPrompt: string | null = null;
       for (const task of persisted.tasks) {
@@ -562,7 +563,7 @@ export const loopCommand: SlashCommand = {
     }
 
     const maxLoops =
-      (settings?.loopMaxConcurrent as number) ?? DEFAULT_MAX_LOOPS;
+      (settings?.['loopMaxConcurrent'] as number) ?? DEFAULT_MAX_LOOPS;
     // Allow if this replaces an existing loop (same named ID); block otherwise
     const replacing = parsed.loopId && manager.isActive(parsed.loopId);
     if (manager.getActiveCount() >= maxLoops && !replacing) {
@@ -596,8 +597,8 @@ export const loopCommand: SlashCommand = {
     }
 
     // Wire up settings for expiry and jitter
-    const expiryDays = (settings?.loopExpiryDays as number) ?? 7;
-    const jitterEnabled = settings?.loopJitterEnabled !== false;
+    const expiryDays = (settings?.['loopExpiryDays'] as number) ?? 7;
+    const jitterEnabled = settings?.['loopJitterEnabled'] !== false;
 
     const config = {
       prompt: parsed.prompt,
@@ -644,6 +645,7 @@ export const loopCommand: SlashCommand = {
         content: [{ text: parsed.prompt }],
       };
     }
+    return;
   },
 
   completion: async (_context, partialArg) => {
