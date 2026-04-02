@@ -1479,6 +1479,22 @@
         }
       }
     },
+    "voice": {
+      "description": "Voice input settings (push-to-talk via ctrl+space).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable push-to-talk voice input. Hold ctrl+space to record, release to transcribe.",
+          "type": "boolean",
+          "default": false
+        },
+        "sttEndpoint": {
+          "description": "OpenAI-compatible speech-to-text endpoint URL (e.g. a local faster-whisper server).",
+          "type": "string",
+          "default": "http://localhost:8000/v1/audio/transcriptions"
+        }
+      }
+    },
     "experimental": {
       "description": "Settings to enable experimental features.",
       "type": "object",

@@ -42,6 +42,31 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     temporaryCloseFeedbackDialog: vi.fn(),
   })),
 }));
+vi.mock('../hooks/useVoice.js', () => ({
+  useVoice: vi.fn(() => ({
+    voiceState: 'idle' as const,
+    error: null,
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(''),
+    reset: vi.fn(),
+    backendAvailable: false,
+  })),
+}));
+vi.mock('../contexts/SettingsContext.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../contexts/SettingsContext.js')>();
+  return {
+    ...actual,
+    useSettings: vi.fn(() => ({
+      merged: {
+        voice: {
+          enabled: false,
+          sttEndpoint: 'http://localhost:8000/v1/audio/transcriptions',
+        },
+      },
+    })),
+  };
+});
 
 const mockSlashCommands: SlashCommand[] = [
   {

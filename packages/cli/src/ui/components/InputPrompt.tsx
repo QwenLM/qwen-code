@@ -49,6 +49,8 @@ import {
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { useVoice } from '../hooks/useVoice.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -115,6 +117,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { pasteWorkaround } = useKeypressContext();
+  const settings = useSettings();
+  const voiceEnabled = settings.merged.voice?.enabled ?? false;
+  const sttEndpoint =
+    settings.merged.voice?.sttEndpoint ??
+    'http://localhost:8000/v1/audio/transcriptions';
+  const voice = useVoice(sttEndpoint);
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
   const hasAgents = agents.size > 0;
@@ -908,6 +916,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Fall through to BaseTextInput's default CLEAR_INPUT handler
       }
 
+      // ctrl+space — push-to-talk voice input
+      if (voiceEnabled && key.ctrl && key.name === 'space') {
+        if (voice.backendAvailable) {
+          if (voice.voiceState === 'idle') {
+            void voice.start();
+          } else if (voice.voiceState === 'recording') {
+            void voice.stop().then((transcript) => {
+              if (transcript) {
+                buffer.insert(transcript, { paste: false });
+              }
+            });
+          } else if (voice.voiceState === 'error') {
+            voice.reset();
+          }
+        }
+        return true;
+      }
+
       // All remaining keys (readline shortcuts, text input) handled by BaseTextInput
       return false;
     },
@@ -950,6 +976,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       agentTabBarFocused,
       hasAgents,
       setAgentTabBarFocused,
+      voiceEnabled,
+      voice,
     ],
   );
 
@@ -1110,6 +1138,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               [{att.filename}]{idx < attachments.length - 1 ? ' ' : ''}
             </Text>
           ))}
+        </Box>
+      )}
+      {voiceEnabled && voice.voiceState !== 'idle' && (
+        <Box marginLeft={2} marginBottom={0}>
+          <Text
+            color={
+              voice.voiceState === 'recording'
+                ? theme.status.error
+                : voice.voiceState === 'error'
+                  ? theme.status.errorDim
+                  : theme.text.secondary
+            }
+          >
+            {voice.voiceState === 'recording'
+              ? '[● REC]'
+              : voice.voiceState === 'transcribing'
+                ? '[◌ STT...]'
+                : `[Voice error: ${voice.error ?? 'unknown'}]`}
+          </Text>
         </Box>
       )}
       <BaseTextInput

@@ -1662,6 +1662,40 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  voice: {
+    type: 'object',
+    label: 'Voice',
+    category: 'Voice',
+    requiresRestart: false,
+    default: {},
+    description: 'Voice input settings (push-to-talk via ctrl+space).',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Voice Input Enabled',
+        category: 'Voice',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable push-to-talk voice input. Hold ctrl+space to record, release to transcribe.',
+        showInDialog: true,
+      },
+      sttEndpoint: {
+        type: 'string',
+        label: 'STT Endpoint',
+        category: 'Voice',
+        requiresRestart: false,
+        default: 'http://localhost:8000/v1/audio/transcriptions' as
+          | string
+          | undefined,
+        description:
+          'OpenAI-compatible speech-to-text endpoint URL (e.g. a local faster-whisper server).',
+        showInDialog: true,
+      },
+    },
+  },
+
   experimental: {
     type: 'object',
     label: 'Experimental',
