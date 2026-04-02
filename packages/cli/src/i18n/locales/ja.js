@@ -66,6 +66,7 @@ export default {
   'CLI Version': 'CLIバージョン',
   'Git Commit': 'Gitコミット',
   Model: 'モデル',
+  'Suggestion Model': '提案モデル',
   Sandbox: 'サンドボックス',
   'OS Platform': 'OSプラットフォーム',
   'OS Arch': 'OSアーキテクチャ',
