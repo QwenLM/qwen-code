@@ -439,6 +439,10 @@ export class HookRunner {
       // Handle process errors
       child.on('error', (error) => {
         clearTimeout(timeoutHandle);
+        // Clean up abort listener
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
         const duration = Date.now() - startTime;
 
         resolve({
