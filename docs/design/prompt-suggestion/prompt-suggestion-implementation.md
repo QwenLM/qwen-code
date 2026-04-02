@@ -46,11 +46,16 @@
 
 ## Test Coverage
 
-| Test File                     | Tests | Description                                                 |
-| ----------------------------- | ----- | ----------------------------------------------------------- |
-| `followupState.test.ts`       | 7     | Controller timer, debounce, accept callback, error recovery |
-| `suggestionGenerator.test.ts` | 16    | All 12 filter rules + edge cases + false positives          |
-| `InputPrompt.test.tsx`        | 4     | Tab, Enter+submit, Right Arrow, completion guard            |
+| Test File                     | Tests | Description                                                     |
+| ----------------------------- | ----- | --------------------------------------------------------------- |
+| `followupState.test.ts`       | 15    | Controller timer, debounce, accept callback, onOutcome, clear   |
+| `suggestionGenerator.test.ts` | 16    | All 12 filter rules + edge cases + false positives              |
+| `overlayFs.test.ts`           | 15    | COW write, read resolution, apply, cleanup, path traversal      |
+| `speculationToolGate.test.ts` | 27    | Tool categories, approval mode, shell AST, path rewrite         |
+| `forkedQuery.test.ts`         | 6     | Cache params save/get/clear, deep clone, version detection      |
+| `speculation.test.ts`         | 7     | ensureToolResultPairing edge cases                              |
+| `smoke.test.ts`               | 21    | Cross-module E2E: filter + overlay + toolGate + cache + pairing |
+| `InputPrompt.test.tsx`        | 4     | Tab, Enter+submit, Right Arrow, completion guard                |
 
 ## Audit History
 

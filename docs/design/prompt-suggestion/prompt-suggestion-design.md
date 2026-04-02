@@ -193,6 +193,6 @@ The Tab handler uses `key.name === 'tab'` explicitly (not `ACCEPT_SUGGESTION` ma
 | Setting                     | Type    | Default | Description                                    |
 | --------------------------- | ------- | ------- | ---------------------------------------------- |
 | `enableFollowupSuggestions` | boolean | true    | Master toggle for prompt suggestions           |
-| `enableCacheSharing`        | boolean | false   | Use cache-aware forked queries                 |
+| `enableCacheSharing`        | boolean | true    | Use cache-aware forked queries                 |
 | `enableSpeculation`         | boolean | false   | Predictive execution engine                    |
 | `speculationModel`          | string  | ""      | Model for speculation (empty = use main model) |

@@ -98,14 +98,23 @@ export async function startSpeculation(
 
   const abortController = new AbortController();
 
-  // If parent was already aborted, skip starting speculation entirely
+  // If parent was already aborted, return aborted state without starting loop
   if (parentSignal?.aborted) {
-    abortController.abort();
+    return {
+      id: Math.random().toString(36).slice(2, 10),
+      status: 'aborted' as const,
+      suggestion,
+      overlayFs: null,
+      abortController,
+      messages: [],
+      startTime: Date.now(),
+      toolUseCount: 0,
+    };
   }
 
   // Link to parent signal with cleanup to prevent memory leak (#20)
   let parentAbortHandler: (() => void) | undefined;
-  if (parentSignal && !parentSignal.aborted) {
+  if (parentSignal) {
     parentAbortHandler = () => abortController.abort();
     parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
   }
@@ -397,32 +406,35 @@ export async function acceptSpeculation(
     ? Math.max(0, state.boundary.completedAt - state.startTime)
     : Math.max(0, Date.now() - state.startTime);
 
-  // Copy overlay files to real filesystem
-  const filesApplied = state.overlayFs
-    ? await state.overlayFs.applyToReal()
-    : [];
+  try {
+    // Copy overlay files to real filesystem
+    const filesApplied = state.overlayFs
+      ? await state.overlayFs.applyToReal()
+      : [];
 
-  // Ensure tool result pairing is complete before injection
-  const cleanMessages = ensureToolResultPairing(state.messages);
+    // Ensure tool result pairing is complete before injection
+    const cleanMessages = ensureToolResultPairing(state.messages);
 
-  // Inject into main conversation
-  for (const msg of cleanMessages) {
-    await geminiClient.addHistory(msg);
+    // Inject into main conversation
+    for (const msg of cleanMessages) {
+      await geminiClient.addHistory(msg);
+    }
+
+    state.status = 'completed';
+
+    return {
+      filesApplied,
+      messages: cleanMessages,
+      boundary: state.boundary,
+      timeSavedMs,
+      nextSuggestion: state.pipelinedSuggestion,
+    };
+  } finally {
+    // Always cleanup overlay, even if applyToReal or addHistory throws
+    if (state.overlayFs) {
+      await state.overlayFs.cleanup();
+    }
   }
-
-  // Cleanup
-  if (state.overlayFs) {
-    await state.overlayFs.cleanup();
-  }
-  state.status = 'completed';
-
-  return {
-    filesApplied,
-    messages: cleanMessages,
-    boundary: state.boundary,
-    timeSavedMs,
-    nextSuggestion: state.pipelinedSuggestion,
-  };
 }
 
 // ---------------------------------------------------------------------------
