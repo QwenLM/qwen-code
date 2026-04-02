@@ -196,3 +196,16 @@ The Tab handler uses `key.name === 'tab'` explicitly (not `ACCEPT_SUGGESTION` ma
 | `enableCacheSharing`        | boolean | true    | Use cache-aware forked queries                                                   |
 | `enableSpeculation`         | boolean | false   | Predictive execution engine                                                      |
 | `fastModel` (top-level)     | string  | ""      | Model for all background tasks (empty = use main model). Set via `/model --fast` |
+
+### Thinking Mode
+
+Thinking/reasoning is explicitly disabled (`thinkingConfig: { includeThoughts: false }`) for all background task paths:
+
+- **Forked query path** (`createForkedChat`) — overrides `thinkingConfig` in the cloned `generationConfig`, covering both suggestion generation and speculation
+- **BaseLlm fallback path** (`generateViaBaseLlm`) — per-request config overrides base content generator's thinking settings
+
+This is safe because:
+
+- Cache prefix is determined by systemInstruction + tools + history, not `thinkingConfig` — cache hits are unaffected
+- All backends (Gemini, OpenAI-compatible, Anthropic) handle `includeThoughts: false` by omitting the thinking field — no API errors on models without thinking support
+- Suggestion generation and speculation don't benefit from reasoning tokens

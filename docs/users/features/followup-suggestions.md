@@ -64,6 +64,8 @@ Or use `/model --fast` (without a model name) to open a selection dialog.
 
 The fast model is used for background tasks like suggestion generation. When not configured, the main conversation model is used as fallback.
 
+Thinking/reasoning mode is automatically disabled for all background tasks (suggestion generation and speculation), regardless of your main model's thinking configuration. This avoids wasting tokens on internal reasoning that isn't needed for these tasks.
+
 ## Configuration
 
 These settings can be configured in `settings.json`:

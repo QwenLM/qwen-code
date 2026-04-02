@@ -179,6 +179,7 @@ interface CacheSafeParams {
 - Saved after each successful main turn in `GeminiClient.sendMessageStream()`
 - Cleared on `startChat()` / `resetChat()` to prevent cross-session leakage
 - History truncated to 40 entries; `createForkedChat` uses shallow copies (params are already deep-cloned snapshots)
+- Thinking mode explicitly disabled (`thinkingConfig: { includeThoughts: false }`) — reasoning tokens are not needed for speculation and would waste cost/latency. This does not affect cache prefix matching (determined by systemInstruction + tools + history only)
 - Version detection via `JSON.stringify` comparison of systemInstruction + tools
 
 ### Cache Mechanism
