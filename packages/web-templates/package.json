@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-templates",
-  "version": "0.14.0",
+  "version": "0.14.0-nightly.20260402.a5f17ee39",
   "description": "Web templates bundled as embeddable JS/CSS strings",
   "repository": {
     "type": "git",
