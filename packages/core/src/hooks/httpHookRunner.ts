@@ -23,14 +23,32 @@ const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
 const DEFAULT_HTTP_TIMEOUT = 30000;
 
 /**
+ * Maximum output length (10,000 characters as per Claude Code spec)
+ */
+const MAX_OUTPUT_LENGTH = 10000;
+
+/**
+ * Callback for displaying status messages during hook execution
+ */
+export type StatusMessageCallback = (message: string) => void;
+
+/**
  * HTTP Hook Runner - executes HTTP hooks by sending POST requests
  */
 export class HttpHookRunner {
   private urlValidator: UrlValidator;
   private readonly executedOnceHooks: Set<string> = new Set();
+  private statusMessageCallback?: StatusMessageCallback;
 
   constructor(allowedUrls?: string[]) {
     this.urlValidator = new UrlValidator(allowedUrls);
+  }
+
+  /**
+   * Set callback for displaying status messages
+   */
+  setStatusMessageCallback(callback: StatusMessageCallback): void {
+    this.statusMessageCallback = callback;
   }
 
   /**
@@ -78,6 +96,11 @@ export class HttpHookRunner {
       this.executedOnceHooks.add(onceKey);
     }
 
+    // Display status message if configured
+    if (hookConfig.statusMessage && this.statusMessageCallback) {
+      this.statusMessageCallback(hookConfig.statusMessage);
+    }
+
     try {
       // Interpolate URL with allowed env vars
       const url = interpolateUrl(
@@ -85,8 +108,8 @@ export class HttpHookRunner {
         hookConfig.allowedEnvVars || [],
       );
 
-      // Validate URL
-      const validation = this.urlValidator.validate(url);
+      // Validate URL with DNS rebinding protection
+      const validation = await this.urlValidator.validateWithDnsCheck(url);
       if (!validation.allowed) {
         return {
           hookConfig,
@@ -138,17 +161,18 @@ export class HttpHookRunner {
 
         const duration = Date.now() - startTime;
 
+        // Per Claude Code spec: Non-2xx status is a non-blocking error
+        // Execution continues, but we log a warning
         if (!response.ok) {
           debugLogger.warn(
-            `HTTP hook ${hookId} returned status ${response.status}`,
+            `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
+          // Return success: true with continue: true for non-blocking error
           return {
             hookConfig,
             eventName,
-            success: false,
-            error: new Error(
-              `HTTP hook returned status ${response.status}: ${response.statusText}`,
-            ),
+            success: true,
+            output: { continue: true },
             duration,
           };
         }
@@ -170,19 +194,33 @@ export class HttpHookRunner {
       } catch (fetchError) {
         clearTimeout(timeoutId);
 
+        const duration = Date.now() - startTime;
+
         if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+          // Timeout is a non-blocking error per Claude Code spec
+          debugLogger.warn(
+            `HTTP hook ${hookId} timed out after ${timeout}ms (non-blocking)`,
+          );
           return {
             hookConfig,
             eventName,
-            success: false,
-            error: new Error(
-              `HTTP hook ${hookId} timed out after ${timeout}ms`,
-            ),
-            duration: Date.now() - startTime,
+            success: true,
+            output: { continue: true },
+            duration,
           };
         }
 
-        throw fetchError;
+        // Connection failure is a non-blocking error per Claude Code spec
+        debugLogger.warn(
+          `HTTP hook ${hookId} connection failed (non-blocking): ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`,
+        );
+        return {
+          hookConfig,
+          eventName,
+          success: true,
+          output: { continue: true },
+          duration,
+        };
       }
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -221,8 +259,32 @@ export class HttpHookRunner {
       }
     }
 
-    // For non-JSON responses, return success with continue
+    // For plain text responses, add as context (truncated if needed)
+    const text = await response.text();
+    if (text.trim()) {
+      return {
+        continue: true,
+        systemMessage: this.truncateOutput(text.trim()),
+      };
+    }
+
+    // For empty responses, return success with continue
     return { continue: true };
+  }
+
+  /**
+   * Truncate output to MAX_OUTPUT_LENGTH characters
+   * Per Claude Code spec: output is capped at 10,000 characters
+   */
+  private truncateOutput(output: string): string {
+    if (output.length <= MAX_OUTPUT_LENGTH) {
+      return output;
+    }
+    const truncated = output.substring(0, MAX_OUTPUT_LENGTH);
+    debugLogger.debug(
+      `Output truncated from ${output.length} to ${MAX_OUTPUT_LENGTH} characters`,
+    );
+    return `${truncated}\n... [truncated, ${output.length - MAX_OUTPUT_LENGTH} more characters]`;
   }
 
   /**
@@ -239,7 +301,7 @@ export class HttpHookRunner {
       output.continue = json['continue'];
     }
     if ('stopReason' in json && typeof json['stopReason'] === 'string') {
-      output.stopReason = json['stopReason'];
+      output.stopReason = this.truncateOutput(json['stopReason']);
     }
     if (
       'suppressOutput' in json &&
@@ -248,13 +310,14 @@ export class HttpHookRunner {
       output.suppressOutput = json['suppressOutput'];
     }
     if ('systemMessage' in json && typeof json['systemMessage'] === 'string') {
-      output.systemMessage = json['systemMessage'];
+      // Apply output length limit per Claude Code spec
+      output.systemMessage = this.truncateOutput(json['systemMessage']);
     }
     if ('decision' in json && typeof json['decision'] === 'string') {
       output.decision = json['decision'] as HookOutput['decision'];
     }
     if ('reason' in json && typeof json['reason'] === 'string') {
-      output.reason = json['reason'];
+      output.reason = this.truncateOutput(json['reason']);
     }
 
     // Handle hookSpecificOutput
@@ -263,10 +326,17 @@ export class HttpHookRunner {
       typeof json['hookSpecificOutput'] === 'object' &&
       json['hookSpecificOutput'] !== null
     ) {
-      output.hookSpecificOutput = json['hookSpecificOutput'] as Record<
-        string,
-        unknown
-      >;
+      const hookOutput = json['hookSpecificOutput'] as Record<string, unknown>;
+      // Truncate additionalContext if present
+      if (
+        'additionalContext' in hookOutput &&
+        typeof hookOutput['additionalContext'] === 'string'
+      ) {
+        hookOutput['additionalContext'] = this.truncateOutput(
+          hookOutput['additionalContext'],
+        );
+      }
+      output.hookSpecificOutput = hookOutput;
       // Ensure hookEventName is set
       if (!('hookEventName' in output.hookSpecificOutput)) {
         output.hookSpecificOutput['hookEventName'] = eventName;

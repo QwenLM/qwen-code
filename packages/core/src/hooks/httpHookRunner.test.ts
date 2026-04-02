@@ -139,7 +139,9 @@ describe('HttpHookRunner', () => {
       );
     });
 
-    it('should handle HTTP error response', async () => {
+    it('should handle HTTP error response as non-blocking error', async () => {
+      // Per Claude Code spec: Non-2xx status is a non-blocking error
+      // Execution continues with success: true
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -155,11 +157,14 @@ describe('HttpHookRunner', () => {
         input,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('500');
+      // Non-2xx is a non-blocking error, so success should be true
+      expect(result.success).toBe(true);
+      expect(result.output?.continue).toBe(true);
     });
 
-    it('should handle timeout', async () => {
+    it('should handle timeout as non-blocking error', async () => {
+      // Per Claude Code spec: Timeout is a non-blocking error
+      // Execution continues with success: true
       mockFetch.mockImplementationOnce(
         () =>
           new Promise((_, reject) => {
@@ -178,8 +183,9 @@ describe('HttpHookRunner', () => {
         input,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('timed out');
+      // Timeout is a non-blocking error, so success should be true
+      expect(result.success).toBe(true);
+      expect(result.output?.continue).toBe(true);
     });
 
     it('should skip once hook on second execution', async () => {
